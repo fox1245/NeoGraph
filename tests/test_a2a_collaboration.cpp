@@ -2,10 +2,11 @@
 
 #ifdef NEOGRAPH_A2A_PROGRAM
 #include <neograph/a2a/client.h>
-#include <neograph/a2a/server.h>
 #include <neograph/a2a/program_adapter.h>
+#include <neograph/a2a/server.h>
 #include <neograph/graph/node.h>
 #include <neograph/program/program.h>
+#include <neograph/program/store.h>
 #endif
 
 #include <gtest/gtest.h>

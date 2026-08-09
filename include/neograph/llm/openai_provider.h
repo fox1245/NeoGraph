@@ -9,14 +9,18 @@
 
 #include <neograph/api.h>
 #include <neograph/provider.h>
+
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
+
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>
 
-namespace neograph::async { class ConnPool; }
+namespace neograph::async {
+class ConnPool;
+}
 
 namespace neograph::llm {
 
@@ -24,7 +28,10 @@ namespace neograph::llm {
  * @brief LLM provider for OpenAI-compatible APIs.
  *
  * Connects to any endpoint following the OpenAI chat completions API
- * format (`/v1/chat/completions`). Configure via Config struct.
+ * format (`/v1/chat/completions`). Configure via Config struct. For an
+ * OpenRouter endpoint, a per-call `CompletionParams::extra_fields.provider`
+ * object is forwarded as its documented provider-routing object; other
+ * `extra_fields` keys are intentionally ignored by this native provider.
  *
  * @code
  * auto provider = OpenAIProvider::create({
@@ -36,14 +43,14 @@ namespace neograph::llm {
  * @see SchemaProvider for multi-vendor support (Claude, Gemini).
  */
 class NEOGRAPH_API OpenAIProvider : public Provider {
-  public:
+public:
     /// Configuration for OpenAI-compatible API connections.
     struct Config {
-        std::string api_key;                              ///< API key for authentication.
+        std::string api_key;  ///< API key for authentication.
         /// Base URL of the API endpoint. Both unversioned URLs and URLs ending
         /// in `/v1` are accepted; the provider adds the missing version path.
-        std::string base_url = "https://api.openai.com";
-        std::string default_model = "gpt-4o-mini";        ///< Default model name.
+        std::string base_url      = "https://api.openai.com";
+        std::string default_model = "gpt-4o-mini";  ///< Default model name.
         /// HTTP request timeout in seconds. Note: NeoGraph's public
         /// surface currently uses a mix of `int seconds` (here, in
         /// SchemaProvider, A2AClient default), `std::chrono::milliseconds`
@@ -84,37 +91,36 @@ class NEOGRAPH_API OpenAIProvider : public Provider {
     /// pool is bound to a long-lived background io_context owned
     /// by this provider, so `run_sync` per-call destruction no
     /// longer affects pool lifetime.
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override;
+    asio::awaitable<ChatCompletion> complete_async(const CompletionParams& params) override;
 
     /// Sync completion is inherited from `Provider::complete()`, which
     /// drives `complete_async` via `neograph::async::run_sync`.
 
     ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override;
+                                   const StreamCallback&   on_chunk) override;
 
     /// Callback-selected compatibility override used by existing engine
     /// code. It routes through the stable complete* methods above so the
     /// async connection pool and streaming worker-thread bridge retain
     /// their existing behavior.
-    asio::awaitable<ChatCompletion>
-    invoke(const CompletionParams& params, StreamCallback on_chunk) override;
+    asio::awaitable<ChatCompletion> invoke(const CompletionParams& params,
+                                           StreamCallback          on_chunk) override;
 
     std::string get_name() const override { return "openai"; }
 
-  private:
+private:
     explicit OpenAIProvider(Config config);
-    json build_body(const CompletionParams& params) const;
+    json   build_body(const CompletionParams& params) const;
     Config config_;
 
     // Long-lived HTTP loop + ConnPool. Same shape as SchemaProvider —
     // see commit 6da4810 / feedback_schema_provider_no_pool. ConnPool
     // can't live inside Provider::complete()'s run_sync io_context
     // (one-shot), so the provider owns its own io_context + worker.
-    std::unique_ptr<asio::io_context> http_io_;
+    std::unique_ptr<asio::io_context>                                         http_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> http_work_;
-    std::thread http_thread_;
-    std::unique_ptr<async::ConnPool> conn_pool_;
+    std::thread                                                               http_thread_;
+    std::unique_ptr<async::ConnPool>                                          conn_pool_;
 };
 
-} // namespace neograph::llm
+}  // namespace neograph::llm

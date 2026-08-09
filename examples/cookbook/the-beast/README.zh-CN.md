@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=aa9675ba1cbeeb80c64724416d97b82171a94f2261f16551966e181ee742405d -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=737ef3eca8ce61e6c56b52473e9a4369b3c1ee2a54dae21dae71873452355232 -->
 # 野兽 — 生成·进化·回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -115,10 +115,22 @@ JSON**，因此后代在结构上是有效的*通过构造* - 这是
 真正的自我修复循环。
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
+
+`the_beast_live.cpp` 将 `deepseek/deepseek-v4-flash-0731` 固定为
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`。
+验证时，OpenRouter 将 Morph 的数据中心列为 US，并将该模型/提供商端点
+列为支持 ZDR。这是严格的提供商选择，而不是 OpenRouter 的区域内数据
+驻留保证；其目前文档化的区域内保证是企业级 EU 路由。如果 Morph 的合格
+端点不可用，请求会失败，而不会将提示发送给其他提供商。
+
+实时 cookbook 将提供商超时设为 180 秒：该推理模型的 4,000-token
+生成预算可以正当地超过通用的 60 秒默认值。
+
+
 
 ```
 ── Attempt #1: asking the model to write a harness ──
@@ -145,6 +157,38 @@ lint：他们标记了菱形 (E9) 上缺少障碍且无法到达
 这里的节点是确定性的 `beast_node` 工作人员，因此实时运行成本
 一次LLM通话（创作）并免费执行；将它们交换为
 `llm_call`，每个节点也成为实时呼叫。
+
+## Copy Ninja — 将经验证的本地 capability 变为图节点
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) 将一条狭窄的
+capability-to-harness 路径做成了可执行示例；它不会把 A2A Card 变成代码。
+
+1. 合成 loopback 服务器公开一个 well-known Agent Card。collector 只执行
+   这一次 GET，绝不会跟随 Card 声明的 RPC URL。
+2. `AgentCardCandidateCompiler` 生成不可变的 **unadmitted** descriptor，
+   排除 free-form Card text、endpoint、credential 和可执行 source。
+3. 独立提供的 digest-pinned behavioral profile 验证唯一的
+   `copy-ninja.hello-world-echo.v1` template，然后将它 materialize 为
+   本地 `CopyNinjaNode`。
+4. live Beast 只能编写两个 channel、一个 node 的 topology。常规的
+   elaborate → compile/round-trip → validate 门控之后，第四个 local-binding
+   gate 要求 `__start__` 与 `__end__` 之间恰好有一个
+   `copy_ninja_local`。
+
+调用者的 prompt 被刻意排除在 LLM message 之外：模型只编写 topology，
+只有 local graph 消费 prompt。只要合成 source server 观察到一次 RPC，
+运行就会失败。这只是一个固定 local behavior 的证据，**不是** source-code
+transfer、delegation、admission 或一般 behavioral equivalence 的证据。
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+在 2026-08-08 的实际运行中，authoring model 第一次尝试即通过全部四个
+gate。graph 以 1 次 discovery GET、0 次 source-agent RPC 返回
+`Hello, World! I have received your request (Grace)`。
 
 ## Apex — 执行框架吞噬了工具
 

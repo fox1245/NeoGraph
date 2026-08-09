@@ -115,10 +115,25 @@ are fed straight back into the conversation and the model rewrites — a
 genuine self-repair loop.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
+
+`the_beast_live.cpp` pins `deepseek/deepseek-v4-flash-0731` to
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`.
+At the time of verification, OpenRouter listed Morph's datacenters as US and
+listed that model/provider endpoint as ZDR-capable. This is a strict provider
+selection, not OpenRouter's in-region residency guarantee: its documented
+in-region guarantee is currently the enterprise EU route. If Morph's eligible
+endpoint is unavailable, the request fails rather than sending the prompt to a
+different provider.
+
+The live cookbook sets its provider timeout to 180 seconds: this reasoning
+model's 4,000-token generation budget can legitimately outlast the generic
+60-second default.
+
+
 
 ```
 ── Attempt #1: asking the model to write a harness ──
@@ -146,6 +161,42 @@ past the compiler** — creativity is unbounded, coherence is proven.
 The nodes here are deterministic `beast_node` workers so a live run costs
 one LLM call (the authoring) and executes for free; swap them for
 `llm_call` and each node becomes a live call too.
+
+## Copy Ninja — a verified local capability becomes a graph node
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) makes one narrow
+capability-to-harness path executable. It does **not** turn an A2A card
+into code:
+
+1. a synthetic loopback server exposes one well-known Agent Card; collection
+   performs exactly that GET and never follows the card's advertised RPC URL;
+2. `AgentCardCandidateCompiler` produces an immutable, **unadmitted**
+   descriptor, excluding free-form card text, endpoint, credentials, and
+   executable source;
+3. an independently supplied, digest-pinned behavioral profile verifies the
+   sole `copy-ninja.hello-world-echo.v1` template, then materializes it as a
+   local `CopyNinjaNode`; and
+4. the live Beast authors only a two-channel, one-node topology. The normal
+   elaborate → compile/round-trip → validate gates run first; a fourth local
+   binding gate then requires exactly `copy_ninja_local` between `__start__`
+   and `__end__`.
+
+The caller's prompt is deliberately absent from the LLM messages: the model
+authors topology, while the local graph alone consumes the prompt. The run
+also fails if the synthetic source server observes any RPC. This is evidence
+for one fixed local behavior, **not** source-code transfer, delegation,
+admission, or general behavioral equivalence.
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+Observed live result on 2026-08-08: the authoring model passed all four gates
+on its first attempt; the graph returned
+`Hello, World! I have received your request (Grace)` with one discovery GET
+and zero source-agent RPCs.
 
 ## Apex — the harness devours the tools
 

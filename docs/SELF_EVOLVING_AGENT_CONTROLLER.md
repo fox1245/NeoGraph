@@ -413,6 +413,35 @@ The synthesized Harness may use a different internal topology and may outperform
 or underperform the remote agent. Compatibility claims therefore name the exact
 observed contract and evaluation set rather than saying "identical agent."
 
+#### 6.4.1 Guarded A2A Card Copy Ninja PoC
+
+The optional `NEOGRAPH_BUILD_A2A` build contains a deliberately narrow,
+independently runnable precursor to [#31](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/31):
+[`AgentCardCollector`](../include/neograph/a2a/agent_card_candidate.h),
+`AgentCardCandidateCompiler`, and `CopyNinjaHarness`. It is **not** the C2
+capability compiler and does not change C2's `not_started` delivery status.
+
+Its evidence boundary is intentionally small:
+
+- collection makes exactly one explicit well-known-card GET, permits HTTP only
+  for an opted-in loopback test origin, sends no authorization header, and
+  never invokes the discovered endpoint;
+- the immutable compatibility candidate is digest-pinned and retains only
+  bounded protocol facts, skill identifiers, reviewed provenance, and explicit
+  no-authority state; source identity, endpoint, credentials, executable text,
+  and free-form skill text are excluded;
+- one fixed local `copy-ninja.hello-world-echo.v1` template materializes only
+  when separately supplied, digest-pinned development probes match; and
+- the loopback conformance test exposes that local template through a fresh
+  A2A server and proves its response without a source-agent RPC.
+
+It does not normalize the protocol-neutral `CapabilityDescriptor`, resolve
+references, infer or grant authority, generate sealed JavaScript or Core source,
+perform normal admission, persist a `BehavioralFingerprint`, detect descriptor
+drift, or support OpenAPI, MCP, or JSON Schema. Those remain C2 requirements;
+the PoC exists solely to lock the no-implicit-authority and no-remote-dispatch
+boundary before the full pipeline is built.
+
 ### 6.5 Capability virtualization and composition
 
 NeoGraph can present different implementations behind one typed capability:

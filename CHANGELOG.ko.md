@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=3c51395bfc76deaba2f427652bb1d97856ee5e96f29897b1819cf6f267f1e344 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=fe44de5a1daaa7973fe032ec711d496702f2576bed6ce0431e64250b63eb676e -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,23 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 ## [Unreleased]
 
 ### 추가
+- **OpenRouter 공급자 라우팅.** `OpenAIProvider`는
+  `CompletionParams::extra_fields.provider`로 전달한 객체를 Chat Completions
+  요청 본문의 `provider`로 전달한다. 객체가 아닌 값은 HTTP 요청 전에
+  실패한다. 이는 OpenRouter가 문서화한 호출별 라우팅 선호도를 노출하며,
+  다른 네이티브 `extra_fields` 키는 계속 무시한다. 라이브 Beast cookbook은
+  공급자를 고정하고 4,000토큰 생성 예산을 위해 명시적으로 180초 타임아웃을 쓴다.
+
+- **Copy Ninja 로컬 graph-node 브리지.** 별도로 materialize한 Copy Ninja
+  harness를 감싸 `prompt`를 읽고 `response`를 overwrite하는 transport 없는
+  `a2a::CopyNinjaNode`를 추가했다. `cookbook_the_beast_copy_ninja` 라이브
+  cookbook도 추가했다. 이 LLM은 이 고정 로컬 노드만 작성할 수 있고 일반 Core
+  게이트 뒤의 네 번째 local-binding 게이트를 통과해야 하며, 합성 source agent가
+  RPC를 관찰하면 실패한다. 카드 텍스트, endpoint, credential, source는 계속
+  unadmitted candidate에서 제외되고 호출자 prompt는 authoring LLM 요청에 들어가지
+  않는다.
+
+
 
 - **선택적 Program 컴포넌트 경계.** 선택형 `NEOGRAPH_BUILD_PROGRAM`
   스위치, 내보내는 `neograph::program` 타깃, 그리고

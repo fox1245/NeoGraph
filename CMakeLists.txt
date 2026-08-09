@@ -871,6 +871,7 @@ if(NEOGRAPH_BUILD_A2A)
         src/a2a/client.cpp
         src/a2a/server.cpp
         src/a2a/a2a_caller_node.cpp
+        src/a2a/agent_card_candidate.cpp
     )
 
     if(NEOGRAPH_BUILD_PROGRAM)
@@ -1346,6 +1347,20 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/the-beast/the_beast_live.cpp)
             target_link_libraries(cookbook_the_beast_live PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Copy Ninja bridge: a live Beast authors a topology that is
+            # constrained to one digest-pinned, behaviorally verified local
+            # A2A compatibility node. The source card is collected only; its
+            # endpoint and text never become executable graph behavior.
+            if(NEOGRAPH_BUILD_A2A)
+                add_executable(cookbook_the_beast_copy_ninja
+                    examples/cookbook/the-beast/the_beast_copy_ninja.cpp)
+                target_compile_definitions(cookbook_the_beast_copy_ninja PRIVATE
+                    CPPHTTPLIB_OPENSSL_SUPPORT)
+                target_link_libraries(cookbook_the_beast_copy_ninja PRIVATE
+                    neograph::core neograph::llm neograph::a2a cppdotenv httplib
+                    OpenSSL::SSL OpenSSL::Crypto)
+            endif()
 
             # Apex variant: the model devours a tool catalog and authors a
             # ReAct tool-calling agent (llm_call <-> tool_dispatch). Gated

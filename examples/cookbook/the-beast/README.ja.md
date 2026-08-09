@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=aa9675ba1cbeeb80c64724416d97b82171a94f2261f16551966e181ee742405d -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=737ef3eca8ce61e6c56b52473e9a4369b3c1ee2a54dae21dae71873452355232 -->
 # ビースト — 生成、進化、ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -116,10 +116,25 @@ JSON** であるため、子孫は *構造上* 構造的に有効です。つま
 本物の自己修復ループ。
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
+
+`the_beast_live.cpp` は `deepseek/deepseek-v4-flash-0731` を
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}` に
+固定します。検証時点で OpenRouter は Morph のデータセンターを US、その
+モデル/プロバイダー エンドポイントを ZDR 対応として表示していました。
+これは厳格なプロバイダー選択であり、OpenRouter のリージョン内データ
+レジデンシー保証ではありません。文書化されたリージョン内保証は現在
+エンタープライズ EU ルートです。Morph の適格なエンドポイントを利用
+できない場合、プロンプトを別プロバイダーへ送らずリクエストは失敗します。
+
+ライブ cookbook はプロバイダーのタイムアウトを 180 秒に設定します。
+この推論モデルの 4,000 トークン生成予算は、一般的な 60 秒の既定値を
+正当に超過する可能性があります。
+
+
 
 ```
 ── Attempt #1: asking the model to write a harness ──
@@ -147,6 +162,42 @@ lint: ダイヤモンド (E9) のバリアが失われており、到達不能�
 ここのノードは決定論的な `beast_node` ワーカーであるため、ライブ実行にはコストがかかります
 1 回の LLM 呼び出し (オーサリング) は無料で実行されます。それらを交換してください
 `llm_call` と各ノードもライブ コールになります。
+
+## Copy Ninja — 検証済みローカル capability をグラフノードにする経路
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) は、一つの狭い
+capability-to-harness 経路を実行可能にする。A2A Card をコードへ変換
+するものではない。
+
+1. 合成 loopback サーバーが一つの well-known Agent Card を公開する。
+   collector はその GET だけを行い、Card が広告する RPC URL には決して
+   接続しない。
+2. `AgentCardCandidateCompiler` は free-form Card text、endpoint、
+   credential、実行可能な source を除外した不変の **unadmitted**
+   descriptor を作る。
+3. 独立に与える digest-pinned behavioral profile が唯一の
+   `copy-ninja.hello-world-echo.v1` template を検証してから、ローカル
+   `CopyNinjaNode` として materialize する。
+4. live Beast が書けるのは二つの channel と一つの node の topology
+   だけである。通常の elaborate → compile/round-trip → validate の後、
+   第四の local-binding gate が `__start__` と `__end__` の間に
+   `copy_ninja_local` が一つだけあることを要求する。
+
+呼び出し元の prompt は意図的に LLM message に含めない。モデルは
+topology だけを書き、prompt を消費するのは local graph だけである。
+合成 source server が RPC を一件でも観測すれば実行は失敗する。これは
+一つの固定された local behavior の証拠にすぎず、source-code transfer、
+delegation、admission、一般的な behavioral equivalence の証拠ではない。
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+2026-08-08 の実行では authoring model が最初の試行で四つの gate を通過
+した。graph は discovery GET 1 回、source-agent RPC 0 回で
+`Hello, World! I have received your request (Grace)` を返した。
 
 ## Apex — ハーネスがツールを食い荒らす
 

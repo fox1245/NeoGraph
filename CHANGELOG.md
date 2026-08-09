@@ -12,6 +12,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OpenRouter provider routing.** `OpenAIProvider` now forwards an object
+  passed at `CompletionParams::extra_fields.provider` into the Chat Completions
+  request body as `provider`; non-object values fail before an HTTP request.
+  This exposes OpenRouter's documented per-call routing preferences while
+  leaving other native `extra_fields` keys ignored. The live Beast cookbook
+  pins its provider and uses an explicit 180-second timeout for its
+  4,000-token generation budget.
+
+- **Copy Ninja local graph-node bridge.** Added transport-free
+  `a2a::CopyNinjaNode`, which wraps a separately materialized Copy Ninja
+  harness, reads `prompt`, and overwrites `response`. Added the
+  `cookbook_the_beast_copy_ninja` live cookbook: its LLM may author only this
+  fixed local node, must pass a fourth local-binding gate after the normal
+  Core gates, and fails if the synthetic source agent observes an RPC. Card
+  text, endpoint, credentials, and source remain excluded from the unadmitted
+  candidate and the caller prompt never enters the authoring LLM request.
+
 
 - **Optional Program component boundary.** Added the opt-in
   `NEOGRAPH_BUILD_PROGRAM` switch, exported `neograph::program` target, and

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3c51395bfc76deaba2f427652bb1d97856ee5e96f29897b1819cf6f267f1e344 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fe44de5a1daaa7973fe032ec711d496702f2576bed6ce0431e64250b63eb676e -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,7 +12,23 @@ NeoGraph 的所有显著变更均记录于本文件。
 
 ## [未发布]
 
+
 ### 新增
+- **OpenRouter 提供商路由。** `OpenAIProvider` 现在会将
+  `CompletionParams::extra_fields.provider` 中传入的对象作为 `provider`
+  转发到 Chat Completions 请求体；非对象值会在发出 HTTP 请求前失败。
+  这公开了 OpenRouter 已文档化的逐调用路由偏好，同时仍会忽略其他原生
+  `extra_fields` 键。实时 Beast cookbook 会固定提供商，并为 4,000-token
+  生成预算使用显式的 180 秒超时。
+
+- **Copy Ninja 本地图节点桥接。** 新增无 transport 的 `a2a::CopyNinjaNode`：
+  它包装独立 materialize 的 Copy Ninja harness，读取 `prompt` 并 overwrite
+  `response`。同时新增 live cookbook `cookbook_the_beast_copy_ninja`：其 LLM
+  只能编写该固定 local node，须在常规 Core gate 之后通过第四个 local-binding
+  gate；若合成 source agent 观察到 RPC，运行即失败。Card text、endpoint、
+  credential 和 source 仍被排除在 unadmitted candidate 之外，caller prompt
+  不会进入 authoring LLM request。
+
 
 - **可选 Program 组件边界。** 新增了选择启用的
   `NEOGRAPH_BUILD_PROGRAM` 开关、导出的 `neograph::program` 目标以及

@@ -178,6 +178,22 @@ if(NEOGRAPH_BUILD_ACP)
     )
 endif()
 
+# The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote
+# agent dependency. Keep its end-to-end loopback test independently runnable
+# in the minimal A2A configuration.
+if(NEOGRAPH_BUILD_A2A)
+    add_executable(neograph_a2a_agent_card_candidate_tests
+        test_a2a_agent_card_candidate.cpp
+    )
+    target_link_libraries(neograph_a2a_agent_card_candidate_tests PRIVATE
+        neograph::a2a
+        httplib
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        GTest::gtest_main
+    )
+endif()
+
 # Keep the protocol-neutral invocation and ACP adapter contract independently
 # buildable.  The aggregate neograph_tests target also contains HTTP/schema
 # tests that require OpenSSL headers; ACP itself depends only on Core and must
@@ -311,6 +327,9 @@ set_tests_properties(CrossRepositoryCompatibility.Metadata
 
 if(TARGET neograph_program_tests)
     gtest_discover_tests(neograph_program_tests)
+endif()
+if(TARGET neograph_a2a_agent_card_candidate_tests)
+    gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
 endif()
 if(TARGET neograph_acp_tests)
     gtest_discover_tests(neograph_acp_tests)

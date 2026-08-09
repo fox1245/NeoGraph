@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=aa9675ba1cbeeb80c64724416d97b82171a94f2261f16551966e181ee742405d -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=737ef3eca8ce61e6c56b52473e9a4369b3c1ee2a54dae21dae71873452355232 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # The Beast — 생성 · 진화 · 롤백
@@ -117,10 +117,23 @@ DSL 표면에서 하네스를 제작하도록 요청했습니다. 그것이 무�
 진정한 자가 수리 루프.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
+
+`the_beast_live.cpp`는 `deepseek/deepseek-v4-flash-0731`을
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`로
+고정한다. 검증 시점에 OpenRouter는 Morph의 데이터 센터를 US로, 해당
+모델/프로바이더 엔드포인트를 ZDR 지원으로 표시했다. 이것은 엄격한 공급자
+선택이지 OpenRouter의 리전 내 데이터 상주 보장은 아니다. 문서상 리전 내
+보장은 현재 엔터프라이즈 EU 경로다. Morph의 적격 엔드포인트를 사용할 수
+없으면 프롬프트를 다른 공급자에게 보내는 대신 요청이 실패한다.
+
+라이브 cookbook은 공급자 타임아웃을 180초로 설정한다. 이 추론 모델의
+4,000토큰 생성 예산은 일반적인 60초 기본값을 정당하게 초과할 수 있다.
+
+
 
 ```
 ── Attempt #1: asking the model to write a harness ──
@@ -148,6 +161,39 @@ The model wrote it. The compiler proved it. The Beast ran it.
 여기의 노드는 결정적 `beast_node` 작업자이므로 실시간 실행 비용이 듭니다.
 하나의 LLM 호출(저작)이 무료로 실행됩니다. 그것들을 교환해 보세요
 `llm_call` 및 각 노드도 실시간 호출이 됩니다.
+
+## Copy Ninja — 검증된 로컬 capability가 그래프 노드가 되는 경로
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp)는 하나의 좁은
+capability-to-harness 경로를 실행 가능하게 만든다. A2A 카드를 코드로
+바꾸지는 않는다.
+
+1. 합성 loopback 서버가 하나의 well-known Agent Card를 노출한다. 수집기는
+   그 GET만 수행하고 카드가 광고한 RPC URL은 절대로 따라가지 않는다.
+2. `AgentCardCandidateCompiler`는 free-form 카드 텍스트, endpoint,
+   credential, 실행 소스를 제외한 불변의 **unadmitted** descriptor를 만든다.
+3. 독립적으로 제공한 digest-pinned behavioral profile이 유일한
+   `copy-ninja.hello-world-echo.v1` 템플릿을 검증한 뒤 로컬
+   `CopyNinjaNode`로 materialize한다.
+4. 라이브 Beast는 두 채널·한 노드 토폴로지만 작성한다. 일반적인
+   elaborate → compile/round-trip → validate 게이트 뒤에 네 번째 local
+   binding 게이트가 `__start__`와 `__end__` 사이의 정확히 하나인
+   `copy_ninja_local`을 요구한다.
+
+호출자의 prompt는 LLM 메시지에 의도적으로 넣지 않는다. 모델은 topology만
+작성하고 로컬 그래프만 prompt를 소비한다. 합성 source 서버가 RPC를 하나라도
+관찰하면 실행도 실패한다. 이는 하나의 고정된 로컬 행동에 대한 증거일 뿐,
+source-code 전송, delegation, admission, 일반 행동 등가성의 증거는 아니다.
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+2026-08-08 실제 실행에서는 authoring 모델이 첫 시도에 네 게이트를 모두
+통과했다. 그래프는 discovery GET 1회와 source-agent RPC 0회로
+`Hello, World! I have received your request (Grace)`를 반환했다.
 
 ## Apex — 하네스가 도구를 삼켜 버립니다.
 

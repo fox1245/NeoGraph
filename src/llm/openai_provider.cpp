@@ -1,32 +1,29 @@
-#include <neograph/llm/openai_provider.h>
+#include <neograph/async/conn_pool.h>
+#include <neograph/async/endpoint.h>
+#include <neograph/async/http_client.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/llm/openai_provider.h>
+
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/post.hpp>
 #include <asio/use_awaitable.hpp>
 
-#include <neograph/async/conn_pool.h>
-#include <neograph/async/endpoint.h>
-#include <neograph/async/http_client.h>
-
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include <httplib.h>
-
 #include <asio/this_coro.hpp>
+#include <httplib.h>
 
 #include <charconv>
 #include <exception>
 #include <iostream>
-#include <stdexcept>
 #include <sstream>
+#include <stdexcept>
 
 namespace neograph::llm {
 
 // --- OpenAIProvider ---
 
-OpenAIProvider::OpenAIProvider(Config config)
-  : config_(std::move(config))
-{
+OpenAIProvider::OpenAIProvider(Config config) : config_(std::move(config)) {
     // Long-lived HTTP loop + ConnPool. Same pattern as SchemaProvider
     // (commit 6da4810): Provider::complete()'s run_sync builds a
     // throw-away io_context per call, so the pool can't live there.
@@ -35,37 +32,30 @@ OpenAIProvider::OpenAIProvider(Config config)
     conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
     // Start the thread only after every other constructor step succeeds.
     // A joinable std::thread aborts the process if a later step throws.
-    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
+    http_thread_ = std::thread([io = http_io_.get()] { io->run(); });
 }
 
-OpenAIProvider::~OpenAIProvider()
-{
+OpenAIProvider::~OpenAIProvider() {
     if (http_work_) http_work_.reset();
     if (http_io_) http_io_->stop();
     if (http_thread_.joinable()) http_thread_.join();
 }
 
-std::unique_ptr<OpenAIProvider>
-OpenAIProvider::create(const Config& config)
-{
+std::unique_ptr<OpenAIProvider> OpenAIProvider::create(const Config& config) {
     return std::unique_ptr<OpenAIProvider>(new OpenAIProvider(config));
 }
 
-std::shared_ptr<Provider>
-OpenAIProvider::create_shared(const Config& config)
-{
+std::shared_ptr<Provider> OpenAIProvider::create_shared(const Config& config) {
     return std::shared_ptr<Provider>(new OpenAIProvider(config));
 }
 
-json
-OpenAIProvider::build_body(const CompletionParams& params) const
-{
+json OpenAIProvider::build_body(const CompletionParams& params) const {
     json body;
-    body["model"] = params.model.empty() ? config_.default_model : params.model;
+    body["model"]    = params.model.empty() ? config_.default_model : params.model;
     body["messages"] = messages_to_json(params.messages);
 
     if (!params.tools.empty()) {
-        body["tools"] = tools_to_json(params.tools);
+        body["tools"]       = tools_to_json(params.tools);
         body["tool_choice"] = "auto";
     }
 
@@ -77,6 +67,22 @@ OpenAIProvider::build_body(const CompletionParams& params) const
         body["max_completion_tokens"] = params.max_tokens;
     }
 
+    // OpenRouter's Chat Completions API accepts routing preferences only as
+    // a top-level object named "provider". Preserve that object verbatim so
+    // its documented fields can evolve without a NeoGraph release.
+    // Source: https://openrouter.ai/docs/guides/routing/provider-selection
+    // (verified 2026-08-08).
+    if (params.extra_fields.is_object()) {
+        const auto provider = params.extra_fields.find("provider");
+        if (provider != params.extra_fields.end()) {
+            auto routing = provider.value();
+            if (!routing.is_object()) {
+                throw std::invalid_argument(
+                    "OpenAIProvider extra_fields.provider must be an object");
+            }
+            body["provider"] = std::move(routing);
+        }
+    }
     return body;
 }
 
@@ -87,12 +93,12 @@ OpenAIProvider::build_body(const CompletionParams& params) const
 static std::pair<std::string, std::string> parse_url(const std::string& base_url) {
     std::string host = base_url;
     std::string prefix;
-    auto scheme_end = host.find("://");
+    auto        scheme_end = host.find("://");
     if (scheme_end != std::string::npos) {
         auto path_start = host.find('/', scheme_end + 3);
         if (path_start != std::string::npos) {
             prefix = host.substr(path_start);
-            host = host.substr(0, path_start);
+            host   = host.substr(0, path_start);
         }
     }
     return {host, prefix};
@@ -101,7 +107,8 @@ static std::pair<std::string, std::string> parse_url(const std::string& base_url
 namespace {
 
 std::string chat_completions_path(std::string prefix) {
-    while (!prefix.empty() && prefix.back() == '/') prefix.pop_back();
+    while (!prefix.empty() && prefix.back() == '/')
+        prefix.pop_back();
     // OpenRouter documents an OpenAI-compatible base URL ending in /api/v1.
     // Source: https://openrouter.ai/docs/quickstart (fetched 2026-07-23).
     if (prefix.size() >= 3 && prefix.compare(prefix.size() - 3, 3, "/v1") == 0) {
@@ -115,9 +122,9 @@ std::string chat_completions_path(std::string prefix) {
 // SchemaProvider's behavior). Returns -1 when missing or unparsable.
 int parse_retry_after_seconds(std::string_view raw) {
     if (raw.empty()) return -1;
-    int seconds = 0;
-    auto begin = raw.data();
-    auto end = raw.data() + raw.size();
+    int  seconds   = 0;
+    auto begin     = raw.data();
+    auto end       = raw.data() + raw.size();
     auto [ptr, ec] = std::from_chars(begin, end, seconds);
     if (ec != std::errc{} || ptr != end || seconds < 0) return -1;
     return seconds;
@@ -135,18 +142,16 @@ std::string normalize_finish_reason(const json& choice) {
     return "unknown";
 }
 
-} // namespace
+}  // namespace
 
-asio::awaitable<ChatCompletion>
-OpenAIProvider::complete_async(const CompletionParams& params)
-{
+asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionParams& params) {
     auto body_json = build_body(params);
-    auto body_str = body_json.dump();
-    auto endpoint = async::split_async_endpoint(config_.base_url);
+    auto body_str  = body_json.dump();
+    auto endpoint  = async::split_async_endpoint(config_.base_url);
 
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Authorization", "Bearer " + config_.api_key},
-        {"Content-Type",  "application/json"},
+        {"Content-Type", "application/json"},
     };
 
     async::RequestOptions opts;
@@ -154,23 +159,17 @@ OpenAIProvider::complete_async(const CompletionParams& params)
         opts.timeout = std::chrono::seconds(config_.timeout_seconds);
     }
 
-    auto request = conn_pool_->async_post(
-        endpoint.host,
-        endpoint.port,
-        chat_completions_path(endpoint.prefix),
-        body_str,
-        std::move(headers),
-        endpoint.tls,
-        opts);
-    auto executor = co_await asio::this_coro::executor;
-    auto operation = params.cancel_token
-        ? params.cancel_token->fork()
-        : std::shared_ptr<neograph::graph::CancelToken>{};
-    async::HttpResponse res;
+    auto request =
+        conn_pool_->async_post(endpoint.host, endpoint.port, chat_completions_path(endpoint.prefix),
+                               body_str, std::move(headers), endpoint.tls, opts);
+    auto executor                      = co_await asio::this_coro::executor;
+    auto                     operation = params.cancel_token ? params.cancel_token->fork()
+                                                             : std::shared_ptr<neograph::graph::CancelToken>{};
+    async::HttpResponse      res;
     if (operation) {
-        const auto operation_executor = operation->bind_executor(executor);
+        const auto                 operation_executor = operation->bind_executor(executor);
         graph::CancelExecutorLease operation_lease(operation);
-        co_await asio::post(operation_executor, asio::use_awaitable);
+        co_await                   asio::post(operation_executor, asio::use_awaitable);
         operation->throw_if_cancelled("OpenAIProvider completion entry");
         res = co_await asio::co_spawn(
             operation_executor, std::move(request),
@@ -180,41 +179,38 @@ OpenAIProvider::complete_async(const CompletionParams& params)
     }
 
     if (res.status == 429) {
-        throw RateLimitError(
-            "API error (HTTP 429): " + res.body,
-            parse_retry_after_seconds(res.retry_after));
+        throw RateLimitError("API error (HTTP 429): " + res.body,
+                             parse_retry_after_seconds(res.retry_after));
     }
 
     if (res.status != 200) {
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(res.status) + "): " + res.body);
+        throw std::runtime_error("API error (HTTP " + std::to_string(res.status) +
+                                 "): " + res.body);
     }
 
     auto resp_json = json::parse(res.body);
-    auto choice = resp_json.at("choices").at(0);
+    auto choice    = resp_json.at("choices").at(0);
 
     ChatCompletion completion;
-    completion.message = parse_response_message(choice);
+    completion.message     = parse_response_message(choice);
     completion.stop_reason = normalize_finish_reason(choice);
     if (completion.stop_reason.empty()) {
         completion.stop_reason = completion.message.tool_calls.empty() ? "end_turn" : "tool_use";
     }
 
     if (resp_json.contains("usage")) {
-        auto u = resp_json["usage"];
-        completion.usage.prompt_tokens = u.value("prompt_tokens", 0);
+        auto u                             = resp_json["usage"];
+        completion.usage.prompt_tokens     = u.value("prompt_tokens", 0);
         completion.usage.completion_tokens = u.value("completion_tokens", 0);
-        completion.usage.total_tokens = u.value("total_tokens", 0);
+        completion.usage.total_tokens      = u.value("total_tokens", 0);
     }
 
     co_return completion;
 }
 
-ChatCompletion
-OpenAIProvider::complete_stream(const CompletionParams& params,
-                                const StreamCallback& on_chunk)
-{
-    auto body = build_body(params);
+ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
+                                               const StreamCallback&   on_chunk) {
+    auto body      = build_body(params);
     body["stream"] = true;
     // OpenAI omits usage from streamed responses unless this flag is set
     // — without it, completion.usage stays zero after streaming. Users
@@ -229,9 +225,7 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     cli.set_read_timeout(config_.timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
-    httplib::Headers headers = {
-        {"Authorization", "Bearer " + config_.api_key}
-    };
+    httplib::Headers headers = {{"Authorization", "Bearer " + config_.api_key}};
 
     // Accumulate the full response from streamed chunks
     ChatCompletion completion;
@@ -242,120 +236,115 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     std::map<int, ToolCall> tc_map;
 
     // Buffer for partial SSE lines across chunk boundaries
-    std::string line_buffer;
+    std::string        line_buffer;
     std::exception_ptr stream_error;
-    std::string observed_stop_reason;
+    std::string        observed_stop_reason;
 
-    int response_status = 0;
-    std::string error_body;
+    int              response_status = 0;
+    std::string      error_body;
     httplib::Request request;
-    request.method = "POST";
-    request.path = chat_completions_path(prefix);
+    request.method  = "POST";
+    request.path    = chat_completions_path(prefix);
     request.headers = headers;
-    request.body = body.dump();
+    request.body    = body.dump();
     request.set_header("Content-Type", "application/json");
     request.response_handler = [&](const httplib::Response& response) {
         response_status = response.status;
         return true;
     };
-    request.content_receiver =
-        [&](const char* data, size_t len, size_t, size_t) -> bool {
-            if (response_status != 200) {
-                error_body.append(data, len);
-                return true;
-            }
-            try {
-                line_buffer.append(data, len);
+    request.content_receiver = [&](const char* data, size_t len, size_t, size_t) -> bool {
+        if (response_status != 200) {
+            error_body.append(data, len);
+            return true;
+        }
+        try {
+            line_buffer.append(data, len);
 
-                // Process complete lines only
-                size_t pos;
-                while ((pos = line_buffer.find('\n')) != std::string::npos) {
-                    std::string line = line_buffer.substr(0, pos);
-                    line_buffer.erase(0, pos + 1);
+            // Process complete lines only
+            size_t pos;
+            while ((pos = line_buffer.find('\n')) != std::string::npos) {
+                std::string line = line_buffer.substr(0, pos);
+                line_buffer.erase(0, pos + 1);
 
-                    // Remove \r
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                // Remove \r
+                if (!line.empty() && line.back() == '\r') line.pop_back();
 
-                    if (line.rfind("data:", 0) != 0) continue;
-                    std::string payload = line.substr(5);
-                    if (!payload.empty() && payload.front() == ' ') {
-                        payload.erase(0, 1);
-                    }
-                    if (payload.empty() || payload == "[DONE]") continue;
+                if (line.rfind("data:", 0) != 0) continue;
+                std::string payload = line.substr(5);
+                if (!payload.empty() && payload.front() == ' ') {
+                    payload.erase(0, 1);
+                }
+                if (payload.empty() || payload == "[DONE]") continue;
 
-                    json j;
-                    try {
-                        j = json::parse(payload);
-                    } catch (const json::parse_error& error) {
-                        throw std::runtime_error(
-                            "Malformed SSE data JSON: " + payload +
-                            " (" + error.what() + ")");
-                    }
+                json j;
+                try {
+                    j = json::parse(payload);
+                } catch (const json::parse_error& error) {
+                    throw std::runtime_error("Malformed SSE data JSON: " + payload + " (" +
+                                             error.what() + ")");
+                }
 
-                    if (j.is_object() && j.contains("error")) {
-                        throw std::runtime_error("API stream error: " + payload);
-                    }
+                if (j.is_object() && j.contains("error")) {
+                    throw std::runtime_error("API stream error: " + payload);
+                }
 
-                    // The final chunk (after include_usage=true) has
-                    // usage populated but an empty choices array. Capture
-                    // it before falling through to per-choice delta
-                    // handling.
-                    if (j.contains("usage") && !j["usage"].is_null()) {
-                        auto u = j["usage"];
-                        completion.usage.prompt_tokens =
-                            u.value("prompt_tokens", 0);
-                        completion.usage.completion_tokens =
-                            u.value("completion_tokens", 0);
-                        completion.usage.total_tokens =
-                            u.value("total_tokens",
-                                    completion.usage.prompt_tokens +
-                                    completion.usage.completion_tokens);
-                    }
+                // The final chunk (after include_usage=true) has
+                // usage populated but an empty choices array. Capture
+                // it before falling through to per-choice delta
+                // handling.
+                if (j.contains("usage") && !j["usage"].is_null()) {
+                    auto u                             = j["usage"];
+                    completion.usage.prompt_tokens     = u.value("prompt_tokens", 0);
+                    completion.usage.completion_tokens = u.value("completion_tokens", 0);
+                    completion.usage.total_tokens =
+                        u.value("total_tokens", completion.usage.prompt_tokens +
+                                                    completion.usage.completion_tokens);
+                }
 
-                    if (!j.contains("choices") || !j["choices"].is_array()
-                        || j["choices"].empty()) continue;
-                    if (const auto reason = normalize_finish_reason(j["choices"][0]);
-                        !reason.empty()) {
-                        observed_stop_reason = reason;
-                    }
-                    auto delta = j["choices"][0]["delta"];
+                if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
+                    continue;
+                if (const auto reason = normalize_finish_reason(j["choices"][0]); !reason.empty()) {
+                    observed_stop_reason = reason;
+                }
+                auto delta = j["choices"][0]["delta"];
 
-                    // Content token
-                    if (delta.contains("content") && !delta["content"].is_null()) {
-                        std::string token = delta["content"].get<std::string>();
-                        full_content += token;
-                        if (on_chunk) on_chunk(token);
-                    }
+                // Content token
+                if (delta.contains("content") && !delta["content"].is_null()) {
+                    std::string token = delta["content"].get<std::string>();
+                    full_content += token;
+                    if (on_chunk) on_chunk(token);
+                }
 
-                    // Tool calls (streamed incrementally)
-                    if (delta.contains("tool_calls")) {
-                        for (const auto& tc : delta["tool_calls"]) {
-                            int idx = tc.value("index", 0);
-                            if (tc.contains("id")) {
-                                tc_map[idx].id = tc["id"].template get<std::string>();
-                            }
-                            if (tc.contains("function")) {
-                                if (tc["function"].contains("name"))
-                                    tc_map[idx].name += tc["function"]["name"].template get<std::string>();
-                                if (tc["function"].contains("arguments"))
-                                    tc_map[idx].arguments += tc["function"]["arguments"].template get<std::string>();
-                            }
+                // Tool calls (streamed incrementally)
+                if (delta.contains("tool_calls")) {
+                    for (const auto& tc : delta["tool_calls"]) {
+                        int idx = tc.value("index", 0);
+                        if (tc.contains("id")) {
+                            tc_map[idx].id = tc["id"].template get<std::string>();
+                        }
+                        if (tc.contains("function")) {
+                            if (tc["function"].contains("name"))
+                                tc_map[idx].name +=
+                                    tc["function"]["name"].template get<std::string>();
+                            if (tc["function"].contains("arguments"))
+                                tc_map[idx].arguments +=
+                                    tc["function"]["arguments"].template get<std::string>();
                         }
                     }
                 }
-            } catch (...) {
-                stream_error = std::current_exception();
-                return false;
             }
-            return true; // continue receiving
-        };
+        } catch (...) {
+            stream_error = std::current_exception();
+            return false;
+        }
+        return true;  // continue receiving
+    };
 
     auto res = cli.send(request);
 
     if (response_status != 0 && response_status != 200) {
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(response_status) + "): " +
-            error_body);
+        throw std::runtime_error("API error (HTTP " + std::to_string(response_status) +
+                                 "): " + error_body);
     }
 
     // Returning false from httplib's receiver becomes Error::Canceled.
@@ -367,13 +356,12 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     }
 
     if (!line_buffer.empty()) {
-        throw std::runtime_error(
-            "Malformed SSE stream: unterminated line: " + line_buffer);
+        throw std::runtime_error("Malformed SSE stream: unterminated line: " + line_buffer);
     }
 
     if (res->status != 200) {
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
+        throw std::runtime_error("API error (HTTP " + std::to_string(res->status) +
+                                 "): " + res->body);
     }
 
     completion.message.content = full_content;
@@ -381,8 +369,8 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
         completion.message.tool_calls.push_back(tc);
     }
     completion.stop_reason = observed_stop_reason.empty()
-        ? (completion.message.tool_calls.empty() ? "end_turn" : "tool_use")
-        : observed_stop_reason;
+                                 ? (completion.message.tool_calls.empty() ? "end_turn" : "tool_use")
+                                 : observed_stop_reason;
 
     return completion;
 }
@@ -399,12 +387,12 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 // default spawns a worker thread and dispatches tokens onto the
 // awaiter's executor, which is the issue #4 fix. Skipping that
 // bridge would re-introduce the engine io_context blocker.
-asio::awaitable<ChatCompletion>
-OpenAIProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
+asio::awaitable<ChatCompletion> OpenAIProvider::invoke(const CompletionParams& params,
+                                                       StreamCallback          on_chunk) {
     if (on_chunk) {
         co_return co_await complete_stream_async(params, on_chunk);
     }
     co_return co_await complete_async(params);
 }
 
-} // namespace neograph::llm
+}  // namespace neograph::llm
