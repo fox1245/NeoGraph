@@ -145,6 +145,21 @@ void validate_join_arguments(const json& arguments) {
     for (const auto& member : members) (void)JavaScriptCommand::from_json(member);
 }
 
+std::uint32_t builtin_slot(JavaScriptCommandKind kind) {
+    switch (kind) {
+        case JavaScriptCommandKind::CallCore: return JAVASCRIPT_IMPORT_SLOT_CALL_CORE;
+        case JavaScriptCommandKind::Spawn: return JAVASCRIPT_IMPORT_SLOT_SPAWN;
+        case JavaScriptCommandKind::Await: return JAVASCRIPT_IMPORT_SLOT_AWAIT;
+        case JavaScriptCommandKind::Join: return JAVASCRIPT_IMPORT_SLOT_JOIN;
+        case JavaScriptCommandKind::Emit: return JAVASCRIPT_IMPORT_SLOT_EMIT;
+        case JavaScriptCommandKind::Checkpoint: return JAVASCRIPT_IMPORT_SLOT_CHECKPOINT;
+        case JavaScriptCommandKind::CancelScope: return JAVASCRIPT_IMPORT_SLOT_CANCEL_SCOPE;
+        case JavaScriptCommandKind::HostCapability:
+            throw std::invalid_argument("Host capabilities require an admitted import slot");
+    }
+    throw std::invalid_argument("Unknown JavaScript command kind");
+}
+
 json command_json(std::uint32_t         protocol_version,
                   JavaScriptCommandKind kind,
                   std::uint32_t         import_slot,
@@ -190,6 +205,8 @@ JavaScriptCommand JavaScriptCommand::make(std::uint32_t         protocol_version
     if (protocol_version != PROTOCOL_VERSION)
         throw std::invalid_argument("JavaScript command protocol_version is unsupported");
     if (to_string(kind) == "unknown") throw std::invalid_argument("Unknown JavaScript command kind");
+    if (kind != JavaScriptCommandKind::HostCapability && import_slot != builtin_slot(kind))
+        throw std::invalid_argument("JavaScript command import_slot does not match its kind");
     validate_site(source_site);
     if (!arguments.is_object())
         throw std::invalid_argument("JavaScript command arguments must be an object");
