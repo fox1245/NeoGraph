@@ -1646,6 +1646,279 @@ TEST(ProgramRuntimeTest, JavaScriptControlRejectsUnknownCommandFieldsBeforeDispa
     EXPECT_EQ(result.failure()->code, "P_JS_CONTROL_COMMAND");
     EXPECT_EQ(completed_calls.load(), 0U);
 }
+
+std::string javascript_runtime_source(std::string node_type, std::string body) {
+    return "export function define() {\n"
+           "  const graph = ng.graph(\"main\");\n"
+           "  graph.channel(\"value\", {reducer: \"runtime-overwrite\", initial: \"\"});\n"
+           "  graph.node(\"work\", {type: \"" + std::move(node_type) + "\"});\n"
+           "  graph.entry(\"work\");\n"
+           "  graph.exit(\"work\");\n"
+           "  return graph;\n"
+           "}\n\n"
+           "export function* main(input) {\n" + std::move(body) + "\n}\n";
+}
+
+RunBudget javascript_budget(std::uint64_t max_concurrency = 2,
+                            std::uint64_t max_program_operations = 32,
+                            std::uint64_t max_child_depth = 0,
+                            std::uint64_t max_total_children = 0) {
+    return RunBudget{10000,
+                     1000,
+                     1000,
+                     static_cast<std::uint32_t>(max_concurrency),
+                     max_program_operations,
+                     20,
+                     0,
+                     static_cast<std::uint32_t>(max_child_depth),
+                     max_total_children};
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAllJoinsActuallyOverlapCoreCommands) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-short-blocking",
+        R"JS(
+    const result = yield ng.all([
+        ng.callCore("main", {}, "first"),
+        ng.callCore("main", {}, "second")
+    ], {max_in_flight: 2}, "all");
+    return result;
+)JS"));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-overlap", {}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                              : "no failure detail");
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+    EXPECT_LT(elapsed, std::chrono::milliseconds(900));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinEnforcesMaxInFlightCap) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-short-blocking",
+        R"JS(
+    const result = yield ng.all([
+        ng.callCore("main", {}, "first"),
+        ng.callCore("main", {}, "second"),
+        ng.callCore("main", {}, "third")
+    ], {max_in_flight: 2}, "all");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(3), "trace-js-cap", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 3U);
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinValidatesEveryMemberBeforeDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        R"JS(
+    yield ng.all([
+        ng.callCore("main", {}, "valid:first"),
+        ng.callCore("not-admitted", {}, "invalid:second")
+    ], {max_in_flight: 2}, "validate");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-validate", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_JS_CONTROL_COMMAND");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinReservesAggregateOperationBudgetBeforeDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        R"JS(
+    yield ng.all([
+        ng.callCore("main", {}, "budget:first"),
+        ng.callCore("main", {}, "budget:second")
+    ], {max_in_flight: 2}, "budget");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2, 2), "trace-js-budget", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_PROGRAM_OPERATION_BUDGET");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinUsesDeclarationOrderForResultsAndReadyRaceTies) {
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        R"JS(
+    const all_result = yield ng.all([
+        ng.emit({id: 1}, "all:first"),
+        ng.emit({id: 2}, "all:second")
+    ], {max_in_flight: 2, collect: true}, "all");
+    const race_result = yield ng.race([
+        ng.emit({id: 1}, "race:first"),
+        ng.emit({id: 2}, "race:second")
+    ], "race");
+    return {all: all_result, race: race_result};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-order", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                              : "no failure detail");
+    EXPECT_EQ(result.output(),
+              (json{{"all", json::array({json{{"id", 1}}, json{{"id", 2}}})},
+                    {"race", json{{"id", 1}}}}));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-failing",
+        R"JS(
+    const result = yield ng.all([
+        ng.emit({id: "ok"}, "collect:ok"),
+        ng.callCore("main", {}, "collect:failure")
+    ], {max_in_flight: 2, collect: true}, "collect");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-collect", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.output(), json::array({json{{"id", "ok"}}, nullptr}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitTimeoutCancelsDirectCoreWork) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-blocking",
+        R"JS(
+    const result = yield ng.await(ng.callCore("main", {}, "await:core"), 10, "await");
+    return result;
+)JS"));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-await-timeout", {}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - started);
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_LT(elapsed.count(), 2);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptQuorumRunsMembersConcurrentlyAndOrdersSuccesses) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-short-blocking",
+        R"JS(
+    const result = yield ng.quorum([
+        ng.emit({id: 1}, "quorum:first"),
+        ng.emit({id: 2}, "quorum:second"),
+        ng.callCore("main", {}, "quorum:third")
+    ], {required_successes: 2, max_in_flight: 2}, "quorum");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-quorum", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({json{{"id", 1}}, json{{"id", 2}}}));
+    EXPECT_EQ(blocking_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCancelScopeCancelsTheOwningRun) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        R"JS(
+    yield ng.cancelScope("current", "stop", "scope stopped");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-cancel-scope", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CANCELLED");
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceCancelsLoserChildrenWithoutOrphans) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto parent_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        R"JS(
+    const winner = yield ng.race([
+        ng.await(ng.spawn("child", {}, "spawn"), 5000, "await"),
+        ng.emit({winner: true}, "winner")
+    ], {max_in_flight: 2}, "race");
+    return winner;
+)JS"));
+    const auto child_version = fixture.admit("runtime-blocking");
+    const auto linked = link_child_versions(
+        fixture, parent_version, child_version,
+        BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), javascript_budget(2, 32, 1, 1),
+                           "trace-js-cancel-child", {}});
+    const auto result = parent.wait();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), (json{{"winner", true}}));
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 1U);
+    EXPECT_EQ(children.front().state, ProgramChildState::Cancelled);
+}
 #endif
 
 TEST(ProgramRuntimeTest, ProgramInterruptAndExactResumePreserveDirectCoreBehavior) {
