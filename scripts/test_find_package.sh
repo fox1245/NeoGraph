@@ -78,6 +78,7 @@ major=${version%%.*}
 # under `set -u` raises "unbound variable".
 platform_cmake_args=(-DNEOGRAPH_INSTALL_HEADERS=ON)
 consumer_exe="$work/consumer/consumer"
+native_abi_consumer_exe="$work/consumer/native_abi_consumer"
 case "$platform" in
     MINGW*|MSYS*|CYGWIN*)
         platform_cmake_args+=(
@@ -89,6 +90,7 @@ case "$platform" in
             platform_cmake_args+=("-DOPENSSL_ROOT_DIR=$openssl_root")
         fi
         consumer_exe="$work/consumer/Release/consumer.exe"
+        native_abi_consumer_exe="$work/consumer/Release/native_abi_consumer.exe"
         ;;
 esac
 
@@ -174,6 +176,22 @@ run_consumer() {
             ;;
         *)
             "$consumer_exe"
+            ;;
+    esac
+    case "$platform" in
+        Linux)
+            LD_LIBRARY_PATH="$library_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+                "$native_abi_consumer_exe"
+            ;;
+        Darwin)
+            DYLD_LIBRARY_PATH="$library_prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+                "$native_abi_consumer_exe"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            PATH="$library_prefix/bin:$PATH" "$native_abi_consumer_exe"
+            ;;
+        *)
+            "$native_abi_consumer_exe"
             ;;
     esac
 }
