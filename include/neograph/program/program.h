@@ -15,6 +15,7 @@
 #include <neograph/program/bundle.h>
 #include <neograph/program/catalog.h>
 #include <neograph/program/command.h>
+#include <neograph/program/command_journal.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/diagnostic.h>
 #include <neograph/program/event.h>

@@ -2,6 +2,8 @@
 
 #include <sqlite3.h>
 
+#include "canonical_json.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -240,6 +242,59 @@ bool valid_effect_outbox_binding(const ProgramRunRecord& run,
            effects.front().effect() == *pending;
 }
 
+bool same_command_coordinate(const ProgramJavaScriptCommandJournalEntry& lhs,
+                             const ProgramJavaScriptCommandJournalEntry& rhs) {
+    return lhs.bundle_id() == rhs.bundle_id() &&
+           lhs.command_ordinal() == rhs.command_ordinal() &&
+           lhs.coordinate_id() == rhs.coordinate_id() &&
+           detail::canonical_json_bytes(lhs.command().to_json()) ==
+               detail::canonical_json_bytes(rhs.command().to_json()) &&
+           lhs.effect_identity() == rhs.effect_identity();
+}
+
+bool valid_command_history_append(
+    const ProgramRunRecord&                                  run,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& new_commands) {
+    if (new_commands.empty()) return true;
+    auto prior = old_commands;
+    std::uint64_t expected_sequence = 0;
+    std::uint64_t highest_ordinal = 0;
+    for (const auto& existing : prior) {
+        if (existing.bundle_id() != run.bundle_id() ||
+            existing.sequence() != expected_sequence + 1)
+            return false;
+        ++expected_sequence;
+        highest_ordinal = std::max(highest_ordinal, existing.command_ordinal());
+    }
+    for (const auto& entry : new_commands) {
+        if (entry.bundle_id() != run.bundle_id() ||
+            entry.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+        const auto found = std::find_if(
+            prior.rbegin(), prior.rend(), [&](const auto& previous) {
+                return previous.command_ordinal() == entry.command_ordinal();
+            });
+        if (found == prior.rend()) {
+            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
+                std::any_of(prior.begin(), prior.end(),
+                            [](const auto& previous) { return previous.pending(); }))
+                return false;
+            highest_ordinal = entry.command_ordinal();
+            prior.push_back(entry);
+            continue;
+        }
+        if (!found->pending() || !entry.completed() ||
+            !same_command_coordinate(*found, entry)) {
+            return false;
+        }
+        prior.push_back(entry);
+    }
+    return true;
+}
+
 bool valid_initial_publication(const ProgramTransitionPublication& publication) {
     const auto& journal = publication.journal_record;
     const auto  terminal = publication.run_record.terminal_result();
@@ -251,6 +306,7 @@ bool valid_initial_publication(const ProgramTransitionPublication& publication) 
            publication.run_record.effect_sequence() == publication.effects.size() &&
            publication.events.front().sequence == 1 &&
            (publication.effects.empty() || publication.effects.front().sequence() == 1) &&
+           valid_command_history_append(publication.run_record, {}, publication.commands) &&
            (!terminal || terminal_event) &&
            (!publication.run_record.fork_receipt() || publication.migration_plan.has_value());
 }
@@ -291,6 +347,23 @@ bool valid_increment(sqlite3* db, std::string_view owner_scope,
         return false;
     if (!effect_ids_are_new(db, owner_scope, old_run.run_id(), next_publication.effects))
         return false;
+    std::vector<ProgramJavaScriptCommandJournalEntry> old_commands;
+    {
+        Statement statement(
+            db, "SELECT coordinate_id, canonical_bytes FROM "
+                "program_transition_javascript_command_log_v2 "
+                "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence ASC");
+        statement.bind_text(1, owner_scope);
+        statement.bind_text(2, old_run.run_id());
+        while (statement.step_row()) {
+            auto entry = ProgramJavaScriptCommandJournalEntry::parse(
+                column_blob(statement.get(), 1));
+            if (column_text(statement.get(), 0) != entry.coordinate_id()) return false;
+            old_commands.push_back(std::move(entry));
+        }
+    }
+    if (!valid_command_history_append(old_run, old_commands, next_publication.commands))
+        return false;
     if (next_publication.migration_plan &&
         (!old_head.migration_plan ||
          next_publication.migration_plan->id() != old_head.migration_plan->id()))
@@ -313,6 +386,12 @@ void create_v2_schema(sqlite3* db) {
              "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
              "effect_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
              "PRIMARY KEY(owner_scope, run_id, sequence), UNIQUE(owner_scope, run_id, effect_id), "
+             "FOREIGN KEY(owner_scope, run_id) REFERENCES "
+             "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_transition_javascript_command_log_v2 ("
+             "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+             "coordinate_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, run_id, sequence), "
              "FOREIGN KEY(owner_scope, run_id) REFERENCES "
              "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
 }
@@ -385,6 +464,25 @@ void append_effects(sqlite3* db, std::string_view owner_scope, std::string_view 
         statement.bind_uint64(3, effect.sequence());
         statement.bind_text(4, effect.effect().effect_id());
         statement.bind_blob(5, effect.serialize_canonical());
+        statement.step_done();
+        statement.reset();
+    }
+}
+
+void append_javascript_commands(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& commands) {
+    if (commands.empty()) return;
+    Statement statement(
+        db, "INSERT INTO program_transition_javascript_command_log_v2"
+            "(owner_scope, run_id, sequence, coordinate_id, canonical_bytes) "
+            "VALUES(?1, ?2, ?3, ?4, ?5)");
+    for (const auto& command : commands) {
+        statement.bind_text(1, owner_scope);
+        statement.bind_text(2, run_id);
+        statement.bind_uint64(3, command.sequence());
+        statement.bind_text(4, command.coordinate_id());
+        statement.bind_blob(5, command.serialize_canonical());
         statement.step_done();
         statement.reset();
     }
@@ -540,6 +638,31 @@ std::vector<ProgramEffectOutboxEntry> SQLiteProgramTransitionStore::load_effects
     return result;
 }
 
+std::vector<ProgramJavaScriptCommandJournalEntry>
+SQLiteProgramTransitionStore::load_javascript_commands(std::string_view owner_scope,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    after_sequence) const {
+    std::lock_guard lock(impl_->mutex);
+    Statement statement(
+        impl_->db, "SELECT coordinate_id, canonical_bytes FROM "
+                   "program_transition_javascript_command_log_v2 "
+                   "WHERE owner_scope = ?1 AND run_id = ?2 AND sequence > ?3 "
+                   "ORDER BY sequence ASC");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    statement.bind_uint64(3, after_sequence);
+    std::vector<ProgramJavaScriptCommandJournalEntry> result;
+    while (statement.step_row()) {
+        auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 1));
+        if (column_text(statement.get(), 0) != entry.coordinate_id()) {
+            throw std::invalid_argument(
+                "Stored JavaScript command journal coordinate column mismatch");
+        }
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
 std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
@@ -595,6 +718,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
                     migration_plan, publication_bytes);
     append_events(impl_->db, owner_scope, run_id, publication.events);
     append_effects(impl_->db, owner_scope, run_id, publication.effects);
+    append_javascript_commands(impl_->db, owner_scope, run_id, publication.commands);
     transaction.commit();
     return ProgramTransitionPublishResult::Published;
 }

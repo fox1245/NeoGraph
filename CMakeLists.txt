@@ -535,6 +535,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/authoring.cpp
         src/program/canonical_json.cpp
         src/program/command.cpp
+        src/program/command_journal.cpp
         src/program/contract.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp

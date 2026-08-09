@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/program/command_journal.h>
 #include <neograph/program/event.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/run_record.h>
@@ -44,6 +45,7 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     /// Present only on a migration/fork publication; subsequent transitions
     /// inherit it from the durable run publication.
     std::optional<MigrationPlan>            migration_plan;
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
 
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
@@ -81,6 +83,13 @@ public:
     load_effects(std::string_view owner_scope,
                  std::string_view run_id,
                  std::uint64_t after_sequence = 0) const = 0;
+    /** Durable yielded-command journal, ordered by append sequence. */
+    virtual std::vector<ProgramJavaScriptCommandJournalEntry>
+    load_javascript_commands(std::string_view /*owner_scope*/,
+                             std::string_view /*run_id*/,
+                             std::uint64_t /*after_sequence*/ = 0) const {
+        return {};
+    }
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>
     load_migration_plan(std::string_view /*owner_scope*/, std::string_view /*run_id*/) const {
@@ -118,6 +127,10 @@ public:
     load_effects(std::string_view owner_scope,
                  std::string_view run_id,
                  std::uint64_t after_sequence = 0) const override;
+    std::vector<ProgramJavaScriptCommandJournalEntry>
+    load_javascript_commands(std::string_view owner_scope,
+                             std::string_view run_id,
+                             std::uint64_t after_sequence = 0) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
     ProgramTransitionPublishResult

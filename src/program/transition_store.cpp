@@ -211,6 +211,64 @@ bool effect_ids_are_unique(const std::vector<ProgramEffectOutboxEntry>& old_effe
     return true;
 }
 
+bool same_command_coordinate(const ProgramJavaScriptCommandJournalEntry& lhs,
+                             const ProgramJavaScriptCommandJournalEntry& rhs) {
+    return lhs.bundle_id() == rhs.bundle_id() &&
+           lhs.command_ordinal() == rhs.command_ordinal() &&
+           lhs.coordinate_id() == rhs.coordinate_id() &&
+           detail::canonical_json_bytes(lhs.command().to_json()) ==
+               detail::canonical_json_bytes(rhs.command().to_json()) &&
+           lhs.effect_identity() == rhs.effect_identity();
+}
+
+bool valid_command_history_append(
+    const ProgramRunRecord&                                  run,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& new_commands) {
+    if (new_commands.empty()) return true;
+
+    auto prior = old_commands;
+    std::uint64_t expected_sequence = 0;
+    std::uint64_t highest_ordinal = 0;
+    for (const auto& existing : prior) {
+        if (existing.bundle_id() != run.bundle_id() || existing.sequence() != expected_sequence + 1)
+            return false;
+        ++expected_sequence;
+        highest_ordinal = std::max(highest_ordinal, existing.command_ordinal());
+    }
+    for (const auto& entry : new_commands) {
+        if (entry.bundle_id() != run.bundle_id() ||
+            entry.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+
+        const auto found = std::find_if(
+            prior.rbegin(), prior.rend(), [&](const auto& previous) {
+                return previous.command_ordinal() == entry.command_ordinal();
+            });
+        if (found == prior.rend()) {
+            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
+                std::any_of(prior.begin(), prior.end(),
+                            [](const auto& previous) { return previous.pending(); }))
+                return false;
+            highest_ordinal = entry.command_ordinal();
+            prior.push_back(entry);
+            continue;
+        }
+
+        // A command coordinate can only move once, from a durable pending
+        // head to one authoritative terminal result.  Conflicting command
+        // payloads or a second completion are rejected fail-closed.
+        if (!found->pending() || !entry.completed() ||
+            !same_command_coordinate(*found, entry)) {
+            return false;
+        }
+        prior.push_back(entry);
+    }
+    return true;
+}
+
 std::string rs(const json& v, std::string_view key) {
     std::string k(key);
     if (!v.contains(k) || !v[k].is_string())
@@ -306,6 +364,15 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         publication.effects.back().sequence() != run.effect_sequence()) {
         throw std::invalid_argument("Program effect sequence mismatch");
     }
+    previous_sequence = 0;
+    for (const auto& command : publication.commands) {
+        if (command.bundle_id() != run.bundle_id() ||
+            command.sequence() <= previous_sequence) {
+            throw std::invalid_argument(
+                "JavaScript command journal entry does not bind snapshot");
+        }
+        previous_sequence = command.sequence();
+    }
     if (run.terminal_result() && !publication.events.empty() &&
         publication.events.back().kind == ProgramEventKind::Terminal &&
         std::get<ProgramTerminalEvent>(publication.events.back().payload).status !=
@@ -337,7 +404,13 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     std::string bytes;
     bytes.reserve(4096);
 
-    append_publication_bytes(bytes, "{\"effects\":[");
+    append_publication_bytes(bytes, "{\"commands\":[");
+    for (std::size_t index = 0; index < publication.commands.size(); ++index) {
+        if (index != 0) append_publication_bytes(bytes, ",");
+        append_publication_bytes(bytes, publication.commands[index].serialize_canonical());
+    }
+
+    append_publication_bytes(bytes, "],\"effects\":[");
     for (std::size_t index = 0; index < publication.effects.size(); ++index) {
         if (index != 0) append_publication_bytes(bytes, ",");
         append_publication_bytes(bytes, publication.effects[index].serialize_canonical());
@@ -431,7 +504,7 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     detail::reject_unknown_fields(
         v, "Stored Program publication",
         {"format", "storage_schema_version", "run_record", "journal_record", "events", "effects",
-         "migration_plan"});
+         "commands", "migration_plan"});
     if (r32(v, "storage_schema_version") != 1)
         throw std::invalid_argument("Stored Program publication schema unsupported");
     auto run = ProgramRunRecord::parse(detail::canonical_json_bytes(rv(v, "run_record")));
@@ -447,13 +520,24 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     if (!fx.is_array()) throw std::invalid_argument("Program effects must be array");
     for (const auto& e : fx)
         effects.push_back(ProgramEffectOutboxEntry::parse(detail::canonical_json_bytes(e)));
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
+    if (v.contains("commands")) {
+        const auto& encoded_commands = rv(v, "commands");
+        if (!encoded_commands.is_array())
+            throw std::invalid_argument("Program command journal must be array");
+        for (const auto& entry : encoded_commands) {
+            commands.push_back(ProgramJavaScriptCommandJournalEntry::parse(
+                detail::canonical_json_bytes(entry)));
+        }
+    }
     std::optional<MigrationPlan> migration_plan;
     if (v.contains("migration_plan")) {
         const auto& plan = rv(v, "migration_plan");
         if (!plan.is_null()) migration_plan = MigrationPlan::parse(detail::canonical_json_bytes(plan));
     }
     ProgramTransitionPublication out{std::move(run), std::move(journal), std::move(events),
-                                     std::move(effects), std::move(migration_plan)};
+                                     std::move(effects), std::move(migration_plan),
+                                     std::move(commands)};
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
@@ -463,6 +547,7 @@ struct InMemoryProgramTransitionStore::Impl {
         ProgramJournalRecord                     journal;
         std::vector<ProgramEvent>                events;
         std::vector<ProgramEffectOutboxEntry>    effects;
+        std::vector<ProgramJavaScriptCommandJournalEntry> commands;
         ProgramTransitionHistoryPtr              history;
         std::optional<MigrationPlan>             migration_plan;
         std::string                              bytes;
@@ -534,7 +619,23 @@ std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effec
     if (snapshot->history) return effect_entries_after(snapshot->history, a);
     return entries_after(snapshot->effects, a,
                          [](const ProgramEffectOutboxEntry& effect) {
-                             return effect.sequence();
+                         return effect.sequence();
+                         });
+}
+std::vector<ProgramJavaScriptCommandJournalEntry>
+InMemoryProgramTransitionStore::load_javascript_commands(std::string_view o,
+                                                         std::string_view r,
+                                                         std::uint64_t    a) const {
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return {};
+        snapshot = found->second;
+    }
+    return entries_after(snapshot->commands, a,
+                         [](const ProgramJavaScriptCommandJournalEntry& command) {
+                             return command.sequence();
                          });
 }
 std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan(
@@ -630,6 +731,14 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             !effect_ids_are_unique(old.effects, old.history, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
         }
+        if (!valid_command_history_append(old.run, old.commands, publication.commands)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
+
+    if (current == impl_->runs.end() &&
+        !valid_command_history_append(publication.run_record, {}, publication.commands)) {
+        return ProgramTransitionPublishResult::Conflict;
     }
 
     const auto maybe_fail = [&](ProgramTransitionFaultPoint point) {
@@ -647,13 +756,16 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     maybe_fail(ProgramTransitionFaultPoint::AfterEventSnapshot);
     auto appended_effects = std::move(publication.effects);
     maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
+    auto appended_commands = std::move(publication.commands);
 
     std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
     ProgramTransitionHistoryPtr           history;
     if (current == impl_->runs.end()) {
         events  = std::move(appended_events);
         effects = std::move(appended_effects);
+        commands = std::move(appended_commands);
     } else {
         const auto& old = *current->second;
         if (old.history) {
@@ -666,6 +778,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             history = begin_history(old.events, old.effects, std::move(appended_events),
                                     std::move(appended_effects));
         }
+        commands = append_entries(old.commands, std::move(appended_commands));
     }
 
     auto migration_plan = current == impl_->runs.end()
@@ -673,7 +786,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                               : current->second->migration_plan;
     auto candidate = std::make_shared<const Impl::Stored>(
         Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                     std::move(effects), std::move(history), std::move(migration_plan),
+                     std::move(effects), std::move(commands), std::move(history),
+                     std::move(migration_plan),
                      std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (current == impl_->runs.end()) {

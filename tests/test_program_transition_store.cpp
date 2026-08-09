@@ -61,6 +61,93 @@ ProgramTransitionPublication start_publication() {
     return {start_run(journal), journal,
             {event(1, ProgramEventKind::Started, ProgramStartedEvent{budget()})}, {}};
 }
+
+ProgramJavaScriptCommandJournalEntry javascript_command_entry(std::uint64_t sequence,
+                                                              bool            completed,
+                                                              std::uint64_t ordinal = 1) {
+    return ProgramJavaScriptCommandJournalEntry(
+        ProgramJavaScriptCommandJournalEntryData{
+            sequence,
+            digest('2'),
+            ordinal,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}),
+            digest('8'),
+            completed ? std::optional<json>{json{{"status", "completed"}}} : std::nullopt});
+}
+
+ProgramTransitionPublication javascript_command_publication(
+    const ProgramTransitionPublication& previous,
+    ProgramJavaScriptCommandJournalEntry command,
+    std::int64_t                         time) {
+    const auto old_run = previous.run_record;
+    auto       journal = ProgramJournalRecord::create(
+        {previous.journal_record.id,
+         old_run.run_id(),
+         old_run.program_version_id(),
+         old_run.bundle_id(),
+         previous.journal_record.sequence + 1,
+         old_run.continuation(),
+         old_run.remaining_budget(),
+         {},
+         old_run.exact_checkpoint(),
+         time});
+    ProgramRunRecordData data;
+    data.owner_scope                      = old_run.owner_scope();
+    data.run_id                           = old_run.run_id();
+    data.program_version_id               = old_run.program_version_id();
+    data.bundle_id                        = old_run.bundle_id();
+    data.binding_fingerprint              = old_run.binding_fingerprint();
+    data.invocation                       = old_run.invocation();
+    data.child_depth                      = old_run.child_depth();
+    data.children                         = old_run.children();
+    data.continuation                     = journal.continuation;
+    data.remaining_budget                 = journal.remaining_budget;
+    data.exact_checkpoint                 = old_run.exact_checkpoint();
+    data.pending_input                    = old_run.pending_input();
+    data.pending_effect                   = old_run.pending_effect();
+    data.terminal_result                  = old_run.terminal_result();
+    data.fork_receipt                     = old_run.fork_receipt();
+    data.fork_source_run_id               = old_run.fork_source_run_id();
+    data.fork_source_program_version_id   = old_run.fork_source_program_version_id();
+    data.fork_source_checkpoint_id        = old_run.fork_source_checkpoint_id();
+    data.recorded_binding_set_fingerprint = old_run.recorded_binding_set_fingerprint();
+    data.journal_head                     = journal.id;
+    data.event_sequence                   = old_run.event_sequence();
+    data.effect_sequence                  = old_run.effect_sequence();
+    data.created_at_ms                    = old_run.created_at_ms();
+    data.updated_at_ms                    = time;
+    return {ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}, std::nullopt,
+            {std::move(command)}};
+}
+
+void exercise_javascript_command_history(ProgramTransitionStore& store) {
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+    const auto pending = javascript_command_publication(
+        start, javascript_command_entry(1, false), 20);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
+              ProgramTransitionPublishResult::Published);
+    const auto out_of_order = javascript_command_publication(
+        pending, javascript_command_entry(2, false, 2), 25);
+    EXPECT_EQ(store.compare_publish("owner-a", pending.journal_record.id, out_of_order),
+              ProgramTransitionPublishResult::Conflict);
+    const auto completed = javascript_command_publication(
+        pending, javascript_command_entry(2, true), 30);
+    ASSERT_EQ(store.compare_publish("owner-a", pending.journal_record.id, completed),
+              ProgramTransitionPublishResult::Published);
+    const auto duplicate = javascript_command_publication(
+        completed, javascript_command_entry(3, true), 40);
+    EXPECT_EQ(store.compare_publish("owner-a", completed.journal_record.id, duplicate),
+              ProgramTransitionPublishResult::Conflict);
+
+    const auto commands = store.load_javascript_commands("owner-a", "run-1", 0);
+    ASSERT_EQ(commands.size(), 2U);
+    EXPECT_TRUE(commands.front().pending());
+    EXPECT_TRUE(commands.back().completed());
+    EXPECT_EQ(commands.front().coordinate_id(), commands.back().coordinate_id());
+}
+
 ProgramTransitionPublication terminal_publication(const ProgramTransitionPublication& start,
                                                   ProgramTerminalStatus status,
                                                   ContinuationState state,
@@ -266,6 +353,7 @@ json publication_reference_body(const ProgramTransitionPublication& publication)
              detail::parse_json_strict(publication.journal_record.serialize_canonical())},
             {"events", std::move(events)},
             {"effects", std::move(effects)},
+            {"commands", json::array()},
             {"migration_plan",
              publication.migration_plan
                  ? detail::parse_json_strict(publication.migration_plan->serialize_canonical())
@@ -377,6 +465,11 @@ TEST(ProgramTransitionStoreTest, PublicationCanonicalWireMatchesReferenceTree) {
 
     EXPECT_EQ(publication.serialize_canonical(),
               detail::canonical_json_bytes(publication_reference_body(publication)));
+}
+
+TEST(ProgramTransitionStoreTest, InMemoryJavaScriptCommandHistoryIsAppendOnly) {
+    InMemoryProgramTransitionStore store;
+    exercise_javascript_command_history(store);
 }
 
 TEST(ProgramTransitionStoreTest, FirstPublishRetryAndOwnerIsolation) {
@@ -730,6 +823,29 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation
         EXPECT_EQ(store.load_events("owner-a", "run-1", 1).size(), 1U);
     }
 
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteJavaScriptCommandHistorySurvivesReopen) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-javascript-command-" +
+          std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+        SQLiteProgramTransitionStore store(path);
+        exercise_javascript_command_history(store);
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto commands = store.load_javascript_commands("owner-a", "run-1", 0);
+        ASSERT_EQ(commands.size(), 2U);
+        EXPECT_TRUE(commands.front().pending());
+        EXPECT_TRUE(commands.back().completed());
+        EXPECT_EQ(commands.front().coordinate_id(), commands.back().coordinate_id());
+    }
     std::filesystem::remove(path);
 }
 

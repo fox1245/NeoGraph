@@ -42,6 +42,10 @@ public:
     load_effects(std::string_view owner_scope,
                  std::string_view run_id,
                  std::uint64_t after_sequence = 0) const override;
+    std::vector<ProgramJavaScriptCommandJournalEntry>
+    load_javascript_commands(std::string_view owner_scope,
+                             std::string_view run_id,
+                             std::uint64_t after_sequence = 0) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
     ProgramTransitionPublishResult
