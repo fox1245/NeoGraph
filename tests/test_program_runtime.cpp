@@ -1534,6 +1534,40 @@ TEST(ProgramRuntimeTest, JavaScriptNgExposesClosedConstructorSet) {
     EXPECT_EQ(done.value, json::object());
 }
 
+TEST(ProgramRuntimeTest, JavaScriptControlCancellationInterruptsBeforeAnyLateDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main() {
+                while (true) {}
+            }
+        )JS");
+
+    auto handle = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-javascript-cancel", {}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(handle.cancel());
+    const auto result = handle.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Cancelled)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message
+                             : "no failure detail");
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CANCELLED");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
 TEST(ProgramRuntimeTest, JavaScriptGeneratorExecutesYieldedCoreCommand) {
     completed_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);

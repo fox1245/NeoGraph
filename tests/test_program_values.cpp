@@ -252,6 +252,18 @@ TEST(ProgramSourceTest, CppBuilderDetachesProxyJsonInput) {
     EXPECT_FALSE(source.document()["nodes"].contains("late"));
 }
 
+TEST(ProgramSourceTest, CppBuilderRejectsOversizedNativeDocumentsWithStableCode) {
+    json document{{"program_schema_version", 1},
+                  {"payload", std::string(16u * 1024u * 1024u, 'x')}};
+    try {
+        (void)ProgramSource::from_cpp_builder("oversized-native-builder", 1,
+                                              std::move(document));
+        FAIL() << "expected ProgramDiagnosticError";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_SOURCE_SIZE");
+    }
+}
+
 TEST(ProgramDiagnosticTest, RoundTripsValidEscapedJsonPointers) {
     auto value = diagnostic();
     json encoded;

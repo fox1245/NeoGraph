@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -440,6 +441,89 @@ TEST(ProgramCompilerTest, JavaScriptSourceCannotOutrunItsInterruptBudget) {
     }
 }
 
+TEST(ProgramCompilerTest, JavaScriptStrictProfileDeniesAmbientCapabilitiesDeterministically) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const std::vector<std::string> denied_sources = {
+        "export function define() { Date.now(); }",
+        "export function define() { eval('1 + 1'); }",
+        "export function define() { Function('return 1')(); }",
+    };
+    for (std::size_t index = 0; index < denied_sources.size(); ++index) {
+        const auto source = ProgramSource::from_javascript(
+            "ambient-denied-" + std::to_string(index) + ".js", denied_sources[index]);
+        try {
+            (void)compiler.compile(source);
+            FAIL() << "expected ambient capability denial for source " << index;
+        } catch (const ProgramCompileError& error) {
+            EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_AMBIENT_DENIED"))
+                << "source " << index;
+        }
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptStrictProfileReplacesRandomAndHidesWorkerFacilities) {
+    const auto source = ProgramSource::from_javascript(
+        "strict-profile.js",
+        R"JS(
+            export function define() {
+                if (Math.random() !== 0 || typeof Worker !== "undefined" ||
+                    typeof SharedWorker !== "undefined" || typeof SharedArrayBuffer !== "undefined" ||
+                    typeof Atomics !== "undefined" || typeof require !== "undefined" ||
+                    typeof fetch !== "undefined") {
+                    throw new Error("strict profile leaked a nondeterministic facility");
+                }
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    EXPECT_EQ(compiler.compile(source).source_kind(), SourceKind::JavaScript);
+}
+
+TEST(ProgramCompilerTest, JavaScriptSourceStopsAtItsWallTimeCeiling) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id              = "program-compiler-test/javascript-wall-time/v1";
+    config.javascript.max_interrupt_polls = std::numeric_limits<std::uint64_t>::max();
+    config.javascript.max_wall_time_ms    = 1;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "wall-time.js", "export function define() { while (true) { } }");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_TIMEOUT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptGraphBuilderAccountsNativeDocumentBytes) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id                  = "program-compiler-test/javascript-bytes/v1";
+    config.javascript.max_generated_document_bytes = 256;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "native-bytes.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.node("work", {type: "local-node", padding: "x".repeat(512)});
+                return graph;
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_GRAPH_LIMIT"));
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptHostExposesOnlyItsFrozenVersionedGraphBinding) {
     const auto source = ProgramSource::from_javascript(
         "sandbox.js",
@@ -481,7 +565,7 @@ TEST(ProgramCompilerTest, JavaScriptGraphBuilderRejectsUnknownObjectsBeforeCoreA
         (void)compiler.compile(source);
         FAIL() << "expected ProgramCompileError";
     } catch (const ProgramCompileError& error) {
-        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_GRAPH_VALUE"));
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_AMBIENT_DENIED"));
     }
 }
 #endif
@@ -490,6 +574,16 @@ TEST(ProgramCompilerTest, RejectsInvalidJavaScriptCompilerLimits) {
     ProgramCompilerConfig zero_interrupts{"program-compiler-test/javascript-limits/v1"};
     zero_interrupts.javascript.max_interrupt_polls = 0;
     EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_interrupts)),
+                 std::invalid_argument);
+
+    ProgramCompilerConfig zero_wall_time{"program-compiler-test/javascript-limits/v1"};
+    zero_wall_time.javascript.max_wall_time_ms = 0;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_wall_time)),
+                 std::invalid_argument);
+
+    ProgramCompilerConfig zero_document_bytes{"program-compiler-test/javascript-limits/v1"};
+    zero_document_bytes.javascript.max_generated_document_bytes = 0;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_document_bytes)),
                  std::invalid_argument);
 
     ProgramCompilerConfig oversized_stack{"program-compiler-test/javascript-limits/v1"};
