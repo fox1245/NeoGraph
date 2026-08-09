@@ -1441,6 +1441,99 @@ TEST(ProgramRuntimeTest, JavaScriptGeneratorExposesOnlyControlCommandBinding) {
               (json{{"graph", "undefined"}, {"callCore", "function"}, {"frozen", true}}));
 }
 
+TEST(ProgramRuntimeTest, JavaScriptGeneratorProducesSealedTypedCommandEnvelope) {
+    const auto source = ProgramSource::from_javascript(
+        "test:typed-command.js",
+        R"JS(
+            export function* main() {
+                const call = ng.callCore("main", {requested: "draft"}, "main:12");
+                if (!Object.isFrozen(call)) {
+                    throw new Error("command was not sealed");
+                }
+                yield call;
+                return {};
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    ASSERT_FALSE(step.done);
+    ASSERT_TRUE(step.command.has_value());
+    EXPECT_EQ(step.command->kind(), JavaScriptCommandKind::CallCore);
+    EXPECT_EQ(step.command->import_slot(), JAVASCRIPT_IMPORT_SLOT_CALL_CORE);
+    EXPECT_EQ(step.command->source_site(), "main:12");
+    EXPECT_EQ(step.value, step.command->to_json());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptGeneratorRejectsForgedCommandEnvelope) {
+    const auto source = ProgramSource::from_javascript(
+        "test:forged-command.js",
+        R"JS(
+            export function* main() {
+                yield {
+                    protocol_version: 1,
+                    kind: "call_core",
+                    import_slot: 0,
+                    source_site: "main:1",
+                    arguments: {name: "main", input: {}}
+                };
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    EXPECT_FALSE(step.done);
+    EXPECT_FALSE(step.command.has_value());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptNgExposesClosedConstructorSet) {
+    const auto source = ProgramSource::from_javascript(
+        "test:command-constructors.js",
+        R"JS(
+            export function* main() {
+                const call = ng.callCore("main", {x: 1}, "call:1");
+                const spawn = ng.spawn("child", {x: 2}, "spawn:1");
+                yield call;
+                yield spawn;
+                yield ng.await(spawn, 50, "await:1");
+                yield ng.join([call, spawn], "all", undefined, "join:1");
+                yield ng.all([call, spawn], "all:1");
+                yield ng.race([call, spawn], "race:1");
+                yield ng.quorum([call, spawn], 1, "quorum:1");
+                yield ng.emit({kind: "event"}, "emit:1");
+                yield ng.checkpoint({checkpoint: true}, "checkpoint:1");
+                yield ng.cancelScope("run", "stop", "cancel:1");
+                yield ng.hostCapability(42, {request: "approved"}, "host:1");
+                return {};
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const std::vector<JavaScriptCommandKind> expected = {
+        JavaScriptCommandKind::CallCore,       JavaScriptCommandKind::Spawn,
+        JavaScriptCommandKind::Await,          JavaScriptCommandKind::Join,
+        JavaScriptCommandKind::Join,           JavaScriptCommandKind::Join,
+        JavaScriptCommandKind::Join,           JavaScriptCommandKind::Emit,
+        JavaScriptCommandKind::Checkpoint,     JavaScriptCommandKind::CancelScope,
+        JavaScriptCommandKind::HostCapability};
+    for (const auto kind : expected) {
+        const auto step = generator->next(json::object());
+        ASSERT_FALSE(step.done);
+        ASSERT_TRUE(step.command.has_value());
+        EXPECT_EQ(step.command->kind(), kind);
+        EXPECT_EQ(step.value, step.command->to_json());
+    }
+    const auto done = generator->next(json::object());
+    EXPECT_TRUE(done.done);
+    EXPECT_EQ(done.value, json::object());
+}
+
 TEST(ProgramRuntimeTest, JavaScriptGeneratorExecutesYieldedCoreCommand) {
     completed_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);

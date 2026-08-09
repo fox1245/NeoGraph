@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neograph/json.h>
+#include <neograph/program/command.h>
 #include <neograph/program/source.h>
 
 #include <memory>
@@ -39,6 +40,8 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
 struct JavaScriptGeneratorStep {
     bool done = false;
     json value;
+    /** Present only when the yielded value is a host-sealed command object. */
+    std::optional<JavaScriptCommand> command;
 };
 
 /**

@@ -208,40 +208,31 @@ struct JavaScriptCallCoreCommand {
     json        input;
 };
 
-JavaScriptCallCoreCommand parse_javascript_call_core_command(const json& command) {
-    if (!command.is_object()) {
-        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
-                                 "JavaScript control yield must be a command object");
-    }
-    for (const auto& [key, ignored] : command.items()) {
-        (void)ignored;
-        if (key != "protocol_version" && key != "op" && key != "name" && key != "input") {
-            throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
-                                     "JavaScript control command has an unknown field",
-                                     json{{"field", key}});
-        }
-    }
-    if (!command.contains("protocol_version") ||
-        !command.at("protocol_version").is_number_unsigned() ||
-        command.at("protocol_version").get<std::uint64_t>() != 1) {
+JavaScriptCallCoreCommand parse_javascript_call_core_command(const JavaScriptCommand& command) {
+    if (command.protocol_version() != JavaScriptCommand::PROTOCOL_VERSION) {
         throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
                                  "JavaScript control command protocol_version must be 1");
     }
-    if (!command.contains("op") || !command.at("op").is_string() ||
-        command.at("op").get<std::string>() != "call_core") {
+    if (command.kind() != JavaScriptCommandKind::CallCore) {
         throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
-                                 "JavaScript control command op must be call_core");
+                                 "JavaScript control command kind is not admitted by this Program");
     }
-    if (!command.contains("name") || !command.at("name").is_string() ||
-        command.at("name").get<std::string>().empty()) {
+    if (command.import_slot() != JAVASCRIPT_IMPORT_SLOT_CALL_CORE) {
+        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                 "JavaScript control command import_slot is not admitted");
+    }
+    const auto arguments = command.arguments();
+    if (!arguments.contains("name") || !arguments.at("name").is_string() ||
+        arguments.at("name").get<std::string>().empty()) {
         throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
                                  "JavaScript control call_core command requires a nonempty name");
     }
-    if (!command.contains("input")) {
+    if (!arguments.contains("input")) {
         throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
                                  "JavaScript control call_core command requires input");
     }
-    return JavaScriptCallCoreCommand{command.at("name").get<std::string>(), command.at("input")};
+    return JavaScriptCallCoreCommand{arguments.at("name").get<std::string>(),
+                                     arguments.at("input")};
 }
 
 json javascript_control_response(json output) {
@@ -1320,7 +1311,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     result.returned = true;
                     co_return result;
                 }
-                auto command = parse_javascript_call_core_command(step.value);
+                if (!step.command) {
+                    throw_runtime_diagnostic(
+                        "P_JS_CONTROL_COMMAND",
+                        "JavaScript control yield must be a sealed ng command value",
+                        json{{"source_site", "unknown"}});
+                }
+                auto command = parse_javascript_call_core_command(*step.command);
                 if (command.name != control->materialized->root->core_name) {
                     throw_runtime_diagnostic(
                         "P_JS_CONTROL_COMMAND",

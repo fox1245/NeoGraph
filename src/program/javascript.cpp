@@ -169,6 +169,8 @@ struct GraphBuilder {
 
 JSClassID      graph_builder_class_id = JS_INVALID_CLASS_ID;
 std::once_flag graph_builder_class_once;
+JSClassID      command_value_class_id = JS_INVALID_CLASS_ID;
+std::once_flag command_value_class_once;
 
 void graph_builder_finalizer(JSRuntime*, JSValue value) {
     delete static_cast<GraphBuilder*>(JS_GetOpaque(value, graph_builder_class_id));
@@ -183,6 +185,28 @@ void ensure_graph_builder_class(JSRuntime* runtime) {
     if (JS_NewClass(runtime, graph_builder_class_id, &definition) < 0) {
         throw JavaScriptCompileError("P_JS_RUNTIME",
                                      "QuickJS could not register the NeoGraph graph builder class");
+    }
+}
+
+struct CommandValue {
+    DefinitionCapture* capture = nullptr;
+    JSContext*         context = nullptr;
+    JavaScriptCommand  command;
+};
+
+void command_value_finalizer(JSRuntime*, JSValue value) {
+    delete static_cast<CommandValue*>(JS_GetOpaque(value, command_value_class_id));
+}
+
+void ensure_command_value_class(JSRuntime* runtime) {
+    std::call_once(command_value_class_once, [] { JS_NewClassID(&command_value_class_id); });
+    if (JS_IsRegisteredClass(runtime, command_value_class_id)) return;
+    static const JSClassDef definition{
+        "NeoGraphJavaScriptCommand", command_value_finalizer, nullptr, nullptr, nullptr,
+    };
+    if (JS_NewClass(runtime, command_value_class_id, &definition) < 0) {
+        throw JavaScriptCompileError(
+            "P_JS_RUNTIME", "QuickJS could not register the NeoGraph command value class");
     }
 }
 
@@ -360,6 +384,16 @@ bool js_to_json(JSContext*      context,
     }
     if (!JS_IsObject(value)) {
         state.error = "graph configuration contains an unsupported JavaScript value";
+        return false;
+    }
+    if (command_value_class_id != JS_INVALID_CLASS_ID &&
+        JS_GetOpaque(value, command_value_class_id) != nullptr) {
+        state.error = "graph configuration cannot contain a sealed host command";
+        return false;
+    }
+    if (graph_builder_class_id != JS_INVALID_CLASS_ID &&
+        JS_GetOpaque(value, graph_builder_class_id) != nullptr) {
+        state.error = "graph configuration cannot contain a live graph builder";
         return false;
     }
     if (JS_IsFunction(context, value)) {
@@ -869,54 +903,461 @@ JSValue create_graph(JSContext* context, JSValueConst this_value, int argc, JSVa
     }
 }
 
-JSValue create_call_core_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
-    if (argc != 1 && argc != 2) {
-        return graph_error(context, "P_JS_CONTROL_COMMAND",
-                           "ng.callCore expects a Core name and optional JSON input");
-    }
-    std::string name;
-    if (!read_string(context, argv[0], name, "callCore name")) return JS_EXCEPTION;
-    if (name.empty()) {
-        return graph_error(context, "P_JS_CONTROL_COMMAND",
-                           "ng.callCore Core name must not be empty");
-    }
+JSValue json_to_js_value(JSContext* context, const json& value);
 
-    json input = json::object();
-    if (argc == 2 && !read_json(context, argv[1], input, "callCore input")) return JS_EXCEPTION;
-    const auto canonical_input = detail::canonical_json_bytes(input);
-    JSValue    input_value =
-        JS_ParseJSON(context, canonical_input.c_str(), canonical_input.size(), "<call-core-input>");
-    if (JS_IsException(input_value)) return input_value;
+constexpr std::string_view kDefaultCommandSourceSite = "<program-control>";
 
-    JSValue command = JS_NewObject(context);
-    if (JS_IsException(command)) {
-        JS_FreeValue(context, input_value);
-        return command;
+bool read_command_source_site(JSContext*       context,
+                              int              argc,
+                              JSValueConst*    argv,
+                              int              index,
+                              std::string&     output) {
+    output = std::string(kDefaultCommandSourceSite);
+    if (index >= argc || JS_IsUndefined(argv[index])) return true;
+    return read_string(context, argv[index], output, "command source_site");
+}
+
+bool read_command_uint64(JSContext*       context,
+                         JSValueConst     value,
+                         std::uint64_t&   output,
+                         std::string_view argument_name,
+                         bool             require_positive = false) {
+    json converted;
+    if (!read_json(context, value, converted, argument_name)) return false;
+    if (!converted.is_number_unsigned() ||
+        (require_positive && converted.get<std::uint64_t>() == 0)) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph command " + std::string(argument_name) +
+                        " must be an unsigned integer" +
+                        (require_positive ? " greater than zero" : ""));
+        return false;
     }
-    const auto define = [&](const char* key, JSValue value) {
-        return JS_DefinePropertyValueStr(context, command, key, value, JS_PROP_ENUMERABLE) >= 0;
-    };
-    if (!define("protocol_version", JS_NewUint32(context, 1)) ||
-        !define("op", JS_NewString(context, "call_core")) ||
-        !define("name", JS_NewStringLen(context, name.data(), name.size())) ||
-        !define("input", input_value) || JS_PreventExtensions(context, command) < 0) {
-        JS_FreeValue(context, command);
-        return graph_internal_error(context, "QuickJS could not construct a call_core command");
+    output = converted.get<std::uint64_t>();
+    return true;
+}
+
+CommandValue* require_sealed_command(JSContext* context, JSValueConst value) {
+    if (!JS_IsObject(value)) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph command arguments must be sealed ng command values");
+        return nullptr;
+    }
+    auto* command = static_cast<CommandValue*>(JS_GetOpaque(value, command_value_class_id));
+    if (!command || command->context != context ||
+        command->capture != JS_GetContextOpaque(context)) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph command value is forged or belongs to another control context");
+        return nullptr;
     }
     return command;
 }
 
-JSValue create_call_core(JSContext*    context,
-                         JSValueConst  this_value,
-                         int           argc,
-                         JSValueConst* argv) {
+bool read_sealed_command(JSContext* context, JSValueConst value, JavaScriptCommand& output) {
+    auto* command = require_sealed_command(context, value);
+    if (!command) return false;
+    output = command->command;
+    return true;
+}
+
+bool read_sealed_command_array(JSContext*       context,
+                               JSValueConst     value,
+                               std::vector<JavaScriptCommand>& output) {
+    std::string array_error;
+    if (!JS_IsArray(context, value) || !is_plain_array(context, value, array_error)) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph command members must be an ordinary array of sealed commands");
+        return false;
+    }
+    JSValue length_value = JS_GetPropertyStr(context, value, "length");
+    if (JS_IsException(length_value)) return false;
+    std::uint64_t length = 0;
+    if (JS_ToIndex(context, &length, length_value) < 0) {
+        JS_FreeValue(context, length_value);
+        return false;
+    }
+    JS_FreeValue(context, length_value);
+    if (length == 0 || length > kMaxGraphValueElements ||
+        length > std::numeric_limits<std::uint32_t>::max()) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph command members must be nonempty and bounded");
+        return false;
+    }
+    output.clear();
+    output.reserve(static_cast<std::size_t>(length));
+    for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(length); ++index) {
+        JSValue member = JS_GetPropertyUint32(context, value, index);
+        if (JS_IsException(member)) return false;
+        std::optional<JavaScriptCommand> command;
+        const bool valid = [&] {
+            JavaScriptCommand decoded = JavaScriptCommand::call_core(
+                std::string(kDefaultCommandSourceSite), "__placeholder__", json::object());
+            if (!read_sealed_command(context, member, decoded)) return false;
+            command = std::move(decoded);
+            return true;
+        }();
+        JS_FreeValue(context, member);
+        if (!valid) return false;
+        output.push_back(std::move(*command));
+    }
+    return true;
+}
+
+JSValue make_command_value(JSContext*          context,
+                           DefinitionCapture*  capture,
+                           JavaScriptCommand   command) {
+    ensure_command_value_class(JS_GetRuntime(context));
+    JSValue object = JS_NewObjectClass(context, command_value_class_id);
+    if (JS_IsException(object)) return object;
+    JS_SetOpaque(object, new CommandValue{capture, context, std::move(command)});
+    const auto encoded = static_cast<CommandValue*>(JS_GetOpaque(object, command_value_class_id))
+                             ->command
+                             .to_json();
+    for (const auto& [key, value] : encoded.items()) {
+        JSValue property = json_to_js_value(context, value);
+        if (JS_IsException(property) ||
+            JS_DefinePropertyValueStr(context, object, key.c_str(), property,
+                                      JS_PROP_ENUMERABLE) < 0) {
+            if (!JS_IsException(property)) JS_FreeValue(context, property);
+            JS_FreeValue(context, object);
+            return JS_EXCEPTION;
+        }
+    }
+    if (JS_PreventExtensions(context, object) < 0) {
+        JS_FreeValue(context, object);
+        return JS_EXCEPTION;
+    }
+    return object;
+}
+
+JSValue create_call_core_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 3)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.callCore expects a Core name, optional JSON input, and source_site");
+    std::string name;
+    if (!read_string(context, argv[0], name, "callCore name")) return JS_EXCEPTION;
+    json input = json::object();
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) &&
+        !read_json(context, argv[1], input, "callCore input"))
+        return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 2, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::call_core(std::move(source_site), std::move(name),
+                                                           std::move(input)));
+}
+
+JSValue create_call_core(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
     try {
         return create_call_core_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
     } catch (const std::exception& error) {
         return graph_internal_error(
             context, "NeoGraph call_core construction failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph call_core construction failed unexpectedly");
+    }
+}
+
+JSValue create_spawn_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 3)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.spawn expects a child binding, optional JSON input, and source_site");
+    std::string binding;
+    if (!read_string(context, argv[0], binding, "spawn child_binding")) return JS_EXCEPTION;
+    json input = json::object();
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) &&
+        !read_json(context, argv[1], input, "spawn input"))
+        return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 2, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::spawn(std::move(source_site), std::move(binding),
+                                                       std::move(input)));
+}
+
+JSValue create_spawn(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_spawn_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(context,
+                                    "NeoGraph spawn construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph spawn construction failed unexpectedly");
+    }
+}
+
+JSValue create_await_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 3)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.await expects a sealed command, optional timeout, and source_site");
+    auto child = JavaScriptCommand::call_core(std::string(kDefaultCommandSourceSite),
+                                               "__placeholder__", json::object());
+    if (!read_sealed_command(context, argv[0], child)) return JS_EXCEPTION;
+    std::uint64_t timeout = 0;
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) &&
+        !read_command_uint64(context, argv[1], timeout, "await timeout_ms", true))
+        return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 2, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::await(std::move(source_site), std::move(child),
+                                                       timeout));
+}
+
+JSValue create_await(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_await_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph await construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph await construction failed unexpectedly");
+    }
+}
+
+JSValue create_join_impl(JSContext* context,
+                         JSValueConst,
+                         int argc,
+                         JSValueConst* argv,
+                         std::string_view fixed_mode = {}) {
+    const int minimum = fixed_mode.empty() ? 1 : (fixed_mode == "quorum" ? 2 : 1);
+    if (argc < minimum || argc > (fixed_mode.empty() ? 4 : (fixed_mode == "quorum" ? 3 : 2)))
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph join constructor arity is invalid");
+    std::vector<JavaScriptCommand> members;
+    if (!read_sealed_command_array(context, argv[0], members)) return JS_EXCEPTION;
+    std::string mode = fixed_mode.empty() ? "all" : std::string(fixed_mode);
+    int         next = 1;
+    if (fixed_mode.empty() && argc > next) {
+        if (!read_string(context, argv[next], mode, "join mode")) return JS_EXCEPTION;
+        ++next;
+    }
+    std::uint64_t required = 0;
+    if (mode == "quorum") {
+        if (fixed_mode.empty() && argc <= next)
+            return graph_error(context, "P_JS_CONTROL_COMMAND",
+                               "ng.join quorum requires required_successes");
+        if (!read_command_uint64(context, argv[next], required, "join required_successes", true))
+            return JS_EXCEPTION;
+        ++next;
+    } else if (fixed_mode.empty() && argc > next) {
+        // Generic all/race joins use the next argument as source_site.  A
+        // literal undefined is accepted as a positional placeholder when a
+        // caller wants to provide a later site argument.
+        if (argc > next + 1) {
+            if (!JS_IsUndefined(argv[next]))
+                return graph_error(context, "P_JS_CONTROL_COMMAND",
+                                   "ng.join has too many arguments for all/race mode");
+            ++next;
+        }
+    }
+    std::string source_site;
+    if (next < argc && !read_command_source_site(context, argc, argv, next, source_site))
+        return JS_EXCEPTION;
+    if (next >= argc) source_site = std::string(kDefaultCommandSourceSite);
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::join(std::move(source_site), std::move(mode),
+                                                      std::move(members), required));
+}
+
+JSValue create_join(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_join_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph join construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph join construction failed unexpectedly");
+    }
+}
+
+JSValue create_all(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_join_impl(context, this_value, argc, argv, "all");
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(context,
+                                    "NeoGraph all construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph all construction failed unexpectedly");
+    }
+}
+
+JSValue create_race(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_join_impl(context, this_value, argc, argv, "race");
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph race construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph race construction failed unexpectedly");
+    }
+}
+
+JSValue create_quorum(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_join_impl(context, this_value, argc, argv, "quorum");
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph quorum construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph quorum construction failed unexpectedly");
+    }
+}
+
+JSValue create_emit_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 2)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.emit expects a JSON value and optional source_site");
+    json value;
+    if (!read_json(context, argv[0], value, "emit value")) return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 1, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::emit(std::move(source_site), std::move(value)));
+}
+
+JSValue create_emit(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_emit_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph emit construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph emit construction failed unexpectedly");
+    }
+}
+
+JSValue create_checkpoint_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 2)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.checkpoint expects a JSON value and optional source_site");
+    json value;
+    if (!read_json(context, argv[0], value, "checkpoint value")) return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 1, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::checkpoint(std::move(source_site), std::move(value)));
+}
+
+JSValue create_checkpoint(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return create_checkpoint_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph checkpoint construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph checkpoint construction failed unexpectedly");
+    }
+}
+
+JSValue create_cancel_scope_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 3)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.cancelScope expects a scope, optional reason, and source_site");
+    std::string scope;
+    if (!read_string(context, argv[0], scope, "cancelScope scope")) return JS_EXCEPTION;
+    std::string reason;
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) &&
+        !read_string(context, argv[1], reason, "cancelScope reason"))
+        return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 2, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(context, capture,
+                              JavaScriptCommand::cancel_scope(std::move(source_site), std::move(scope),
+                                                              std::move(reason)));
+}
+
+JSValue create_cancel_scope(JSContext* context,
+                            JSValueConst this_value,
+                            int argc,
+                            JSValueConst* argv) {
+    try {
+        return create_cancel_scope_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph cancelScope construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context,
+                                    "NeoGraph cancelScope construction failed unexpectedly");
+    }
+}
+
+JSValue create_host_capability_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || argc > 3)
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.hostCapability expects an import slot, optional JSON input, and source_site");
+    std::uint64_t slot = 0;
+    if (!read_command_uint64(context, argv[0], slot, "hostCapability import_slot")) return JS_EXCEPTION;
+    if (slot > std::numeric_limits<std::uint32_t>::max())
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "hostCapability import_slot exceeds uint32 range");
+    json input = json::object();
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) &&
+        !read_json(context, argv[1], input, "hostCapability input"))
+        return JS_EXCEPTION;
+    std::string source_site;
+    if (!read_command_source_site(context, argc, argv, 2, source_site)) return JS_EXCEPTION;
+    auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
+    if (!capture)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
+    return make_command_value(
+        context, capture,
+        JavaScriptCommand::host_capability(std::move(source_site), static_cast<std::uint32_t>(slot),
+                                           std::move(input)));
+}
+
+JSValue create_host_capability(JSContext* context,
+                               JSValueConst this_value,
+                               int argc,
+                               JSValueConst* argv) {
+    try {
+        return create_host_capability_impl(context, this_value, argc, argv);
+    } catch (const std::invalid_argument& error) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND", bounded_utf8(error.what()));
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph hostCapability construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context,
+                                    "NeoGraph hostCapability construction failed unexpectedly");
     }
 }
 
@@ -957,10 +1398,21 @@ void install_host(JSContext* context, HostContext profile) {
             fail();
         }
     } else {
-        const int call_core_status = JS_DefinePropertyValueStr(
-            context, host, "callCore", JS_NewCFunction(context, create_call_core, "callCore", 2),
-            JS_PROP_ENUMERABLE);
-        if (call_core_status < 0) {
+        ensure_command_value_class(JS_GetRuntime(context));
+        const bool installed =
+            define_method(context, host, "callCore", create_call_core, 3) &&
+            define_method(context, host, "spawn", create_spawn, 3) &&
+            define_method(context, host, "await", create_await, 3) &&
+            define_method(context, host, "join", create_join, 4) &&
+            define_method(context, host, "all", create_all, 2) &&
+            define_method(context, host, "parallel", create_all, 2) &&
+            define_method(context, host, "race", create_race, 2) &&
+            define_method(context, host, "quorum", create_quorum, 3) &&
+            define_method(context, host, "emit", create_emit, 2) &&
+            define_method(context, host, "checkpoint", create_checkpoint, 2) &&
+            define_method(context, host, "cancelScope", create_cancel_scope, 3) &&
+            define_method(context, host, "hostCapability", create_host_capability, 3);
+        if (!installed) {
             JS_FreeValue(context, host);
             fail();
         }
@@ -1254,9 +1706,24 @@ JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     imp
             "JavaScript control iterator result.value must be canonical JSON, not undefined");
     }
 
-    json           converted;
-    JsonConversion conversion;
-    const bool     converted_ok = js_to_json(context, value, converted, conversion, 0);
+    json                              converted;
+    JsonConversion                    conversion;
+    std::optional<JavaScriptCommand> sealed_command;
+    auto* command_value = static_cast<CommandValue*>(
+        JS_IsObject(value) ? JS_GetOpaque(value, command_value_class_id) : nullptr);
+    bool converted_ok = false;
+    if (command_value) {
+        if (command_value->context != context || command_value->capture != JS_GetContextOpaque(context)) {
+            JS_FreeValue(context, value);
+            JS_FreeValue(context, result);
+            throw_control_value_error("JavaScript control yielded a forged command value");
+        }
+        converted = command_value->command.to_json();
+        if (!is_done) sealed_command = command_value->command;
+        converted_ok = true;
+    } else {
+        converted_ok = js_to_json(context, value, converted, conversion, 0);
+    }
     JS_FreeValue(context, value);
     JS_FreeValue(context, result);
     if (!converted_ok) {
@@ -1266,7 +1733,7 @@ JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     imp
         throw_control_value_error(
             "JavaScript control iterator result.value is not canonical JSON: " + conversion.error);
     }
-    return JavaScriptGeneratorStep{is_done, std::move(converted)};
+    return JavaScriptGeneratorStep{is_done, std::move(converted), std::move(sealed_command)};
 }
 
 }  // namespace
