@@ -39,6 +39,77 @@ binding; an optional generator `main()` owns ordinary control flow and yields
 the existing typed Program commands. JavaScript does not dispatch Core nodes,
 select providers/tools, or bypass admission, budgets, journals, or replay.
 
+#### Control-flow migration example
+
+Move authoring-time expansion into ordinary JavaScript functions and keep every
+runtime effect behind a yielded typed command. The module below uses a loop,
+branching, and bounded parallelism; retry limits remain part of the admitted
+Core node configuration built by `define()`:
+
+```javascript
+function workerConfig(workerId) {
+  return {
+    type: "neograph_harness_worker",
+    worker_id: workerId,
+    instructions: "Return structured findings",
+    tool_ids: [],
+    tool_descriptions: {},
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_ms: 30000,
+    max_output_tokens: 512,
+    input_token_ceiling: 16384,
+    max_retries: 2,
+    max_provider_tool_rounds: 8,
+    evidence_required: [],
+    read_only: true
+  };
+}
+
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("task", {reducer: "overwrite", initial: {}});
+  graph.channel("worker_results", {reducer: "append", initial: []});
+  graph.channel("final_result", {reducer: "overwrite", initial: null});
+  graph.node("reviewer", workerConfig("reviewer"));
+  graph.node("judge", {
+    type: "neograph_harness_judge",
+    barrier: {wait_for: ["reviewer"]}
+  });
+  graph.edge("__start__", "reviewer");
+  graph.edge("reviewer", "judge");
+  graph.edge("judge", "__end__");
+  return graph;
+}
+
+export function* main(input) {
+  const reviewed = [];
+  for (let offset = 0; offset < input.items.length; offset += 4) {
+    const batch = input.items.slice(offset, offset + 4);
+    const results = yield ng.all(
+      batch.map((item, index) =>
+        ng.callCore("review", {task: item}, `batch:${offset}:${index}`)),
+      {max_in_flight: 4},
+      `batch:${offset}`
+    );
+    reviewed.push(...results);
+  }
+
+  if (!input.require_final_review) {
+    return {reviewed};
+  }
+  const finalReview = yield ng.callCore(
+    "review", {task: {reviewed}}, "final-review");
+  return {reviewed, finalReview};
+}
+```
+
+Stable source-site strings are part of the durable command coordinate. Keep
+them deterministic across retries and restarts. Use `ng.any(...)` when the
+first required successes should win and `ng.race(...)` when the first terminal
+member should win; both cancel outstanding siblings through structured
+concurrency. Ambient I/O, timers, dynamic loading, `eval`, and native handles
+remain unavailable.
+
 `harness.mode` must be explicit. `dsl` returns `H_MIGRATION_CORE_DSL`, `core`
 returns `H_MIGRATION_CORE_JSON`, and `program`/`program_json` return
 `H_MIGRATION_PROGRAM_JSON`; all point at `/harness/mode` and are never selected
