@@ -1471,7 +1471,8 @@ ProgramCompiler::ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfi
             "Program compiler_build_id must not contain control characters");
     const auto& limits = impl_->config.javascript;
     if (limits.memory_limit_bytes == 0 || limits.max_stack_bytes == 0 ||
-        limits.max_interrupt_polls == 0) {
+        limits.max_interrupt_polls == 0 || limits.max_wall_time_ms == 0 ||
+        limits.max_generated_document_bytes == 0) {
         throw std::invalid_argument("JavaScript compiler limits must be positive");
     }
     if (limits.max_stack_bytes > limits.memory_limit_bytes) {

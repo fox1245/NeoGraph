@@ -5,6 +5,8 @@
 #include <neograph/program/source.h>
 
 #include <memory>
+#include <chrono>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -52,7 +54,10 @@ class JavaScriptGenerator final {
 public:
     static std::optional<JavaScriptGenerator> open(const ProgramSource&           source,
                                                    json                           input,
-                                                   const JavaScriptCompileLimits& limits);
+                                                   const JavaScriptCompileLimits& limits,
+                                                   std::function<bool()>          cancellation_requested = {},
+                                                   std::optional<std::chrono::steady_clock::time_point>
+                                                       deadline = std::nullopt);
 
     JavaScriptGenerator(JavaScriptGenerator&&) noexcept;
     JavaScriptGenerator& operator=(JavaScriptGenerator&&) noexcept;
