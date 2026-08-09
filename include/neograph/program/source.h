@@ -30,6 +30,22 @@ struct SourceMapEntry {
     bool operator==(const SourceMapEntry&) const = default;
 };
 
+/**
+ * Exact identity of the private JavaScript frontend.  The release alone is
+ * not sufficient to identify JavaScript semantics: the vendored archive and
+ * the compile-time feature set are part of the durable boundary as well.
+ */
+struct JavaScriptRuntimeIdentity {
+    std::string  quickjs_release;
+    std::string  quickjs_archive_digest;
+    std::string  quickjs_build_options;
+    std::string  profile;
+    std::uint32_t profile_version = 0;
+    std::uint32_t ng_api_version  = 0;
+
+    bool operator==(const JavaScriptRuntimeIdentity&) const = default;
+};
+
 NEOGRAPH_PROGRAM_API std::string_view to_string(SourceKind kind) noexcept;
 NEOGRAPH_PROGRAM_API SourceKind       source_kind_from_string(std::string_view value);
 NEOGRAPH_PROGRAM_API void             to_json(json& value, const ImportRef& import_ref);
@@ -45,6 +61,15 @@ public:
     static constexpr std::uint32_t    JAVASCRIPT_HOST_API_VERSION       = 1;
     static constexpr std::string_view JAVASCRIPT_ENGINE                 = "quickjs";
     static constexpr std::string_view JAVASCRIPT_ENGINE_VERSION         = "2026-06-04";
+    static constexpr std::string_view JAVASCRIPT_QUICKJS_ARCHIVE_DIGEST =
+        "sha256:b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a";
+    static constexpr std::string_view JAVASCRIPT_QUICKJS_BUILD_OPTIONS =
+        "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;DYNAMIC_MODULES=disabled";
+    static constexpr std::string_view JAVASCRIPT_PROFILE                = "sealed-v1";
+    static constexpr std::uint32_t    JAVASCRIPT_PROFILE_VERSION        = 1;
+    static constexpr std::uint32_t    JAVASCRIPT_NG_API_VERSION          = 1;
+
+    static JavaScriptRuntimeIdentity default_javascript_runtime_identity();
 
     static ProgramSource from_canonical_json(std::string                 source_id,
                                              std::string                 source_text,
@@ -75,6 +100,8 @@ public:
     json                               document() const;
     const std::vector<ImportRef>&      imports() const noexcept;
     const std::vector<SourceMapEntry>& source_map() const noexcept;
+    /** Runtime/profile identity sealed into a JavaScript source envelope. */
+    JavaScriptRuntimeIdentity          javascript_runtime_identity() const;
     /**
      * Hashes the declared Program schema version and canonical authored document.
      * Import identities are dependency metadata and are bound separately by a

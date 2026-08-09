@@ -136,6 +136,8 @@ struct ProgramBundleData {
     std::uint32_t                program_schema_version = 1;
     std::string                  registry_snapshot_fingerprint;
     std::string                  module_dependency_merkle_root;
+    /** Present for JavaScript bundles; omitted for non-JavaScript sources. */
+    JavaScriptRuntimeIdentity    javascript_runtime;
     /** Exact module coordinates represented by the dependency receipts. */
     std::vector<ModuleCoordinate>     module_coordinates;
     ContractRecord                    input_contract;
@@ -169,6 +171,7 @@ public:
     std::uint32_t                        program_schema_version() const noexcept;
     const std::string&                   registry_snapshot_fingerprint() const noexcept;
     const std::string&                   module_dependency_merkle_root() const noexcept;
+    const JavaScriptRuntimeIdentity&     javascript_runtime() const noexcept;
     const std::vector<ModuleCoordinate>& module_coordinates() const noexcept;
     ContractRecord                       input_contract() const;
     ContractRecord                       output_contract() const;

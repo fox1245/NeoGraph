@@ -1350,9 +1350,44 @@ struct ProgramCompiler::Impl {
     RegistrySnapshot      registry;
     ProgramCompilerConfig config;
 
+    JavaScriptRuntimeIdentity configured_javascript_runtime() const {
+        return {config.quickjs_release,
+                config.quickjs_archive_digest,
+                config.quickjs_build_options,
+                config.javascript_profile,
+                config.javascript_profile_version,
+                config.ng_api_version};
+    }
+
     ProgramBundle compile(const ProgramSource& source) const {
         DiagnosticAccumulator diagnostics(source);
         try {
+            if (source.kind() == SourceKind::JavaScript &&
+                source.javascript_runtime_identity() != configured_javascript_runtime()) {
+                diagnostics.add(
+                    CompilePhase::Source, "P_JS_RUNTIME_IDENTITY", DiagnosticSeverity::Error, "",
+                    "JavaScript source runtime/profile identity does not match the configured compiler",
+                    json{{"source", json{{"quickjs_release",
+                                            source.javascript_runtime_identity().quickjs_release},
+                                           {"quickjs_archive_digest",
+                                            source.javascript_runtime_identity().quickjs_archive_digest},
+                                           {"quickjs_build_options",
+                                            source.javascript_runtime_identity().quickjs_build_options},
+                                           {"javascript_profile",
+                                            source.javascript_runtime_identity().profile},
+                                           {"javascript_profile_version",
+                                            source.javascript_runtime_identity().profile_version},
+                                           {"ng_api_version",
+                                            source.javascript_runtime_identity().ng_api_version}}},
+                         {"compiler", json{{"quickjs_release", config.quickjs_release},
+                                            {"quickjs_archive_digest", config.quickjs_archive_digest},
+                                            {"quickjs_build_options", config.quickjs_build_options},
+                                            {"javascript_profile", config.javascript_profile},
+                                            {"javascript_profile_version",
+                                             config.javascript_profile_version},
+                                            {"ng_api_version", config.ng_api_version}}}});
+                diagnostics.throw_error();
+            }
             json                         document;
             std::optional<ProgramSource> control_source;
             try {
@@ -1437,6 +1472,8 @@ struct ProgramCompiler::Impl {
             data.program_schema_version        = PROGRAM_SCHEMA_VERSION;
             data.registry_snapshot_fingerprint = registry.fingerprint();
             data.module_dependency_merkle_root = merkle_root;
+            if (source.kind() == SourceKind::JavaScript)
+                data.javascript_runtime = configured_javascript_runtime();
             data.input_contract                = std::move(parsed.input_contract);
             data.output_contract               = std::move(parsed.output_contract);
             data.orchestration_plan            = std::move(orchestration);
@@ -1469,6 +1506,19 @@ ProgramCompiler::ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfi
     if (has_control_character(impl_->config.compiler_build_id))
         throw std::invalid_argument(
             "Program compiler_build_id must not contain control characters");
+    const auto& javascript_runtime = impl_->config;
+    if (javascript_runtime.quickjs_release.empty() ||
+        javascript_runtime.quickjs_build_options.empty() ||
+        javascript_runtime.javascript_profile.empty() ||
+        javascript_runtime.javascript_profile_version == 0 ||
+        javascript_runtime.ng_api_version == 0) {
+        throw std::invalid_argument("JavaScript runtime identity must be complete");
+    }
+    detail::validate_utf8(javascript_runtime.quickjs_release);
+    detail::validate_utf8(javascript_runtime.quickjs_build_options);
+    detail::validate_utf8(javascript_runtime.javascript_profile);
+    if (!detail::is_sha256_identity(javascript_runtime.quickjs_archive_digest))
+        throw std::invalid_argument("JavaScript QuickJS archive digest must be sha256-pinned");
     const auto& limits = impl_->config.javascript;
     if (limits.memory_limit_bytes == 0 || limits.max_stack_bytes == 0 ||
         limits.max_interrupt_polls == 0 || limits.max_wall_time_ms == 0 ||

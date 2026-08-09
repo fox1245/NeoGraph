@@ -99,7 +99,9 @@ void validate_common(std::string_view                   source_id,
 void validate_javascript_document(const json& document) {
     detail::reject_unknown_fields(
         document, "JavaScript Program source",
-        {"language", "language_version", "engine", "engine_version", "host_api_version", "source"});
+        {"language", "language_version", "engine", "engine_version",
+         "quickjs_archive_digest", "quickjs_build_options", "javascript_profile",
+         "javascript_profile_version", "ng_api_version", "host_api_version", "source"});
     if (require_string(document, "language") != "javascript") {
         throw std::invalid_argument("JavaScript Program source language must be javascript");
     }
@@ -111,6 +113,21 @@ void validate_javascript_document(const json& document) {
         require_string(document, "engine_version") !=
             std::string(ProgramSource::JAVASCRIPT_ENGINE_VERSION)) {
         throw std::invalid_argument("JavaScript Program source engine is unsupported");
+    }
+    if (require_string(document, "quickjs_archive_digest") !=
+            std::string(ProgramSource::JAVASCRIPT_QUICKJS_ARCHIVE_DIGEST) ||
+        require_string(document, "quickjs_build_options") !=
+            std::string(ProgramSource::JAVASCRIPT_QUICKJS_BUILD_OPTIONS)) {
+        throw std::invalid_argument("JavaScript Program source QuickJS build identity is unsupported");
+    }
+    if (require_string(document, "javascript_profile") !=
+            std::string(ProgramSource::JAVASCRIPT_PROFILE) ||
+        require_uint32(document, "javascript_profile_version") !=
+            ProgramSource::JAVASCRIPT_PROFILE_VERSION) {
+        throw std::invalid_argument("JavaScript Program source profile is unsupported");
+    }
+    if (require_uint32(document, "ng_api_version") != ProgramSource::JAVASCRIPT_NG_API_VERSION) {
+        throw std::invalid_argument("JavaScript Program source ng API version is unsupported");
     }
     if (require_uint32(document, "host_api_version") !=
         ProgramSource::JAVASCRIPT_HOST_API_VERSION) {
@@ -269,6 +286,11 @@ ProgramSource ProgramSource::from_javascript(std::string                 source_
                          {"language_version", JAVASCRIPT_LANGUAGE_VERSION},
                          {"engine", JAVASCRIPT_ENGINE},
                          {"engine_version", JAVASCRIPT_ENGINE_VERSION},
+                         {"quickjs_archive_digest", JAVASCRIPT_QUICKJS_ARCHIVE_DIGEST},
+                         {"quickjs_build_options", JAVASCRIPT_QUICKJS_BUILD_OPTIONS},
+                         {"javascript_profile", JAVASCRIPT_PROFILE},
+                         {"javascript_profile_version", JAVASCRIPT_PROFILE_VERSION},
+                         {"ng_api_version", JAVASCRIPT_NG_API_VERSION},
                          {"host_api_version", JAVASCRIPT_HOST_API_VERSION},
                          {"source", std::move(source_text)}};
     std::string canonical_document;
@@ -393,6 +415,26 @@ ProgramSource ProgramSource::parse(std::string_view stored_bytes) {
 
 SourceKind ProgramSource::kind() const noexcept {
     return impl_->kind;
+}
+
+JavaScriptRuntimeIdentity ProgramSource::default_javascript_runtime_identity() {
+    return {std::string(JAVASCRIPT_ENGINE_VERSION),
+            std::string(JAVASCRIPT_QUICKJS_ARCHIVE_DIGEST),
+            std::string(JAVASCRIPT_QUICKJS_BUILD_OPTIONS),
+            std::string(JAVASCRIPT_PROFILE),
+            JAVASCRIPT_PROFILE_VERSION,
+            JAVASCRIPT_NG_API_VERSION};
+}
+
+JavaScriptRuntimeIdentity ProgramSource::javascript_runtime_identity() const {
+    if (impl_->kind != SourceKind::JavaScript) return {};
+    const auto& document = impl_->document;
+    return {document.at("engine_version").get<std::string>(),
+            document.at("quickjs_archive_digest").get<std::string>(),
+            document.at("quickjs_build_options").get<std::string>(),
+            document.at("javascript_profile").get<std::string>(),
+            document.at("javascript_profile_version").get<std::uint32_t>(),
+            document.at("ng_api_version").get<std::uint32_t>()};
 }
 std::uint32_t ProgramSource::schema_version() const noexcept {
     return impl_->schema_version;

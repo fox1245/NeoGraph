@@ -449,6 +449,17 @@ void validate_execution_guarantee(ExecutionGuarantee guarantee, std::string_view
     }
 }
 
+void validate_javascript_runtime(const JavaScriptRuntimeIdentity& identity) {
+    require_nonempty_utf8(identity.quickjs_release, "Program bundle QuickJS release");
+    require_sha256(identity.quickjs_archive_digest,
+                   "Program bundle QuickJS archive digest");
+    require_nonempty_utf8(identity.quickjs_build_options,
+                          "Program bundle QuickJS build options");
+    require_nonempty_utf8(identity.profile, "Program bundle JavaScript profile");
+    if (identity.profile_version == 0 || identity.ng_api_version == 0)
+        throw std::invalid_argument("Program bundle JavaScript runtime versions must be positive");
+}
+
 void normalize_data(ProgramBundleData& data) {
     data.input_contract.schema   = detail::owned_json_copy(data.input_contract.schema);
     data.output_contract.schema  = detail::owned_json_copy(data.output_contract.schema);
@@ -484,6 +495,12 @@ void normalize_data(ProgramBundleData& data) {
                    "Program bundle registry_snapshot_fingerprint");
     require_sha256(data.module_dependency_merkle_root,
                    "Program bundle module_dependency_merkle_root");
+    if (data.source_kind == SourceKind::JavaScript) {
+        validate_javascript_runtime(data.javascript_runtime);
+    } else if (data.javascript_runtime != JavaScriptRuntimeIdentity{}) {
+        throw std::invalid_argument(
+            "Non-JavaScript Program bundles cannot carry a JavaScript runtime identity");
+    }
     for (const auto& coordinate : data.module_coordinates)
         validate_module_coordinate(coordinate, "Program bundle module coordinate");
     std::sort(data.module_coordinates.begin(), data.module_coordinates.end(),
@@ -745,6 +762,14 @@ json bundle_body(const ProgramBundleData& data) {
     value["program_schema_version"]        = data.program_schema_version;
     value["registry_snapshot_fingerprint"] = data.registry_snapshot_fingerprint;
     value["module_dependency_merkle_root"] = data.module_dependency_merkle_root;
+    if (data.source_kind == SourceKind::JavaScript) {
+        value["quickjs_release"]            = data.javascript_runtime.quickjs_release;
+        value["quickjs_archive_digest"]     = data.javascript_runtime.quickjs_archive_digest;
+        value["quickjs_build_options"]      = data.javascript_runtime.quickjs_build_options;
+        value["javascript_profile"]         = data.javascript_runtime.profile;
+        value["javascript_profile_version"] = data.javascript_runtime.profile_version;
+        value["ng_api_version"]              = data.javascript_runtime.ng_api_version;
+    }
     if (!data.module_coordinates.empty()) {
         json coordinates = json::array();
         for (const auto& coordinate : data.module_coordinates)
@@ -832,6 +857,17 @@ ProgramBundleData parse_body(const json& value) {
     data.program_schema_version        = require_uint32(value, "program_schema_version");
     data.registry_snapshot_fingerprint = require_string(value, "registry_snapshot_fingerprint");
     data.module_dependency_merkle_root = require_string(value, "module_dependency_merkle_root");
+    if (data.source_kind == SourceKind::JavaScript) {
+        data.javascript_runtime.quickjs_release = require_string(value, "quickjs_release");
+        data.javascript_runtime.quickjs_archive_digest =
+            require_string(value, "quickjs_archive_digest");
+        data.javascript_runtime.quickjs_build_options =
+            require_string(value, "quickjs_build_options");
+        data.javascript_runtime.profile = require_string(value, "javascript_profile");
+        data.javascript_runtime.profile_version =
+            require_uint32(value, "javascript_profile_version");
+        data.javascript_runtime.ng_api_version = require_uint32(value, "ng_api_version");
+    }
     if (value.contains("module_coordinates")) {
         if (!value["module_coordinates"].is_array())
             throw std::invalid_argument("Program bundle module_coordinates must be an array");
@@ -1220,6 +1256,12 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
                                    "program_schema_version",
                                    "registry_snapshot_fingerprint",
                                    "module_dependency_merkle_root",
+                                   "quickjs_release",
+                                   "quickjs_archive_digest",
+                                   "quickjs_build_options",
+                                   "javascript_profile",
+                                   "javascript_profile_version",
+                                   "ng_api_version",
                                    "module_coordinates",
                                    "input_contract",
                                    "output_contract",
@@ -1269,6 +1311,9 @@ const std::string& ProgramBundle::registry_snapshot_fingerprint() const noexcept
 }
 const std::string& ProgramBundle::module_dependency_merkle_root() const noexcept {
     return impl_->data.module_dependency_merkle_root;
+}
+const JavaScriptRuntimeIdentity& ProgramBundle::javascript_runtime() const noexcept {
+    return impl_->data.javascript_runtime;
 }
 const std::vector<ModuleCoordinate>& ProgramBundle::module_coordinates() const noexcept {
     return impl_->data.module_coordinates;
