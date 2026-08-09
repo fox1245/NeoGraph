@@ -99,6 +99,7 @@ struct SnapshotEntry {
     ExecutableManifest            manifest;
     json                          metadata;
     ExecutableRequirementResolver requirement_resolver;
+    std::optional<NativeControlBinding> native_binding;
 };
 
 json encode_identity(const ExecutableIdentity& identity) {
@@ -157,15 +158,9 @@ ExecutionGuarantee native_execution_guarantee(const NativeControlMetadata& metad
 
 }  // namespace
 
-struct NativeBinding {
-    std::string          name;
-    NativeControlBinding binding;
-};
-
 struct RegistrySnapshot::Impl {
     graph::GraphRegistry       registry;
     std::vector<SnapshotEntry> entries;
-    std::vector<NativeBinding> native_bindings;
     std::string                fingerprint;
     json                       manifest;
 };
@@ -179,7 +174,6 @@ struct RegistrySnapshotBuilder::Impl {
     graph::GraphRegistry          registry;
     std::vector<SnapshotEntry>    entries;
     std::vector<ImportedBinding>  imported_targets;
-    std::vector<NativeBinding>    native_bindings;
 };
 
 RegistrySnapshot::RegistrySnapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -208,11 +202,13 @@ std::optional<ExecutableManifest> RegistrySnapshot::find(ExecutableKind   kind,
 }
 
 std::optional<NativeControlBinding> RegistrySnapshot::find_native(std::string_view name) const {
-    const auto binding = std::find_if(
-        impl_->native_bindings.begin(), impl_->native_bindings.end(),
-        [name](const NativeBinding& candidate) { return candidate.name == name; });
-    if (binding == impl_->native_bindings.end()) return std::nullopt;
-    return binding->binding;
+    const auto entry = std::find_if(
+        impl_->entries.begin(), impl_->entries.end(), [name](const SnapshotEntry& candidate) {
+            return candidate.manifest.identity.kind == ExecutableKind::Imported &&
+                   candidate.manifest.identity.name == name && candidate.native_binding.has_value();
+        });
+    if (entry == impl_->entries.end()) return std::nullopt;
+    return entry->native_binding;
 }
 
 const ExecutableManifest& detail::RegistrySnapshotAccess::require_manifest(
@@ -422,9 +418,9 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_native(ExecutableManifest 
         throw std::invalid_argument(
             "Native control manifest execution_guarantee does not match its replay behavior");
     }
-    impl_->native_bindings.push_back({manifest.identity.name, binding});
     impl_->entries.push_back(SnapshotEntry{
-        std::move(manifest), detail::owned_json_copy(encode_native_metadata(metadata)), {}});
+        std::move(manifest), detail::owned_json_copy(encode_native_metadata(metadata)), {},
+        std::move(binding)});
     return *this;
 }
 
@@ -502,7 +498,6 @@ RegistrySnapshot RegistrySnapshotBuilder::build() && {
     auto result         = std::make_shared<RegistrySnapshot::Impl>();
     result->registry    = std::move(impl_->registry);
     result->entries     = std::move(impl_->entries);
-    result->native_bindings = std::move(impl_->native_bindings);
     result->fingerprint = fingerprint;
     result->manifest    = detail::owned_json_copy(body);
     impl_.reset();

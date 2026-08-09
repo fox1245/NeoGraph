@@ -5,7 +5,11 @@
  * This header deliberately contains C layouts only.  A plugin owns the
  * `userdata` it gives to a binding and must not throw across any callback.
  * Inputs are borrowed for the duration of `invoke`; a completion owns its
- * result bytes until it calls the supplied release hook exactly once.
+ * result bytes until the host has copied them and called the supplied release
+ * hook exactly once.  `struct_size` is the number of bytes the producer
+ * allocated for that versioned value.  A consumer must reject a value whose
+ * size does not cover every field it reads, and must ignore fields beyond the
+ * known v1 prefix so a later ABI can append fields safely.
  */
 #pragma once
 
@@ -33,13 +37,21 @@ typedef struct neograph_program_native_byte_span_v1 {
 
 /**
  * Releases one output allocation. The host calls this at most once, after it
- * has copied the bytes. The callback must not call NeoGraph or throw.
+ * has copied the bytes, on the thread executing the completion callback. The
+ * allocation and release callback must come from the same allocator domain;
+ * neither side may apply a second allocator or free the bytes itself. The
+ * callback must not call NeoGraph or throw.
  */
 typedef void (*neograph_program_native_release_v1)(void*          userdata,
                                                     const uint8_t* data,
                                                     size_t         size);
 
-/** Plugin-owned bytes returned through a completion callback. */
+/**
+ * Plugin-owned bytes returned through a completion callback. An empty payload
+ * is `{NULL, 0, NULL, NULL}` and has no allocation to release. A non-empty
+ * payload must have a non-null data pointer and release callback; a zero-size
+ * payload with any other field populated is malformed.
+ */
 typedef struct neograph_program_native_owned_bytes_v1 {
     const uint8_t*                       data;
     size_t                               size;
@@ -50,7 +62,8 @@ typedef struct neograph_program_native_owned_bytes_v1 {
 /**
  * A borrowed cancellation view. It remains valid only until the matching
  * completion callback returns. Plugins may poll it from their own worker
- * threads, but must not retain it after completion.
+ * threads, but must synchronize those workers before returning completion and
+ * must not retain or call the view after completion.
  */
 typedef struct neograph_program_native_cancellation_v1 {
     uint32_t abi_version;
@@ -85,9 +98,12 @@ typedef void (*neograph_program_native_completion_v1)(
     const neograph_program_native_result_v1*       result);
 
 /**
- * Starts one invocation. Return ACCEPTED only if the plugin will invoke the
- * completion callback exactly once, possibly synchronously. Return REJECTED
- * if it will not invoke completion. Neither path may throw across the ABI.
+ * Starts one invocation. The callback runs on the caller's thread and may
+ * complete synchronously. Return ACCEPTED only if the plugin will invoke the
+ * completion callback exactly once, possibly on another thread. Return
+ * REJECTED if it will not invoke completion. Cancellation may race completion;
+ * the first terminal completion wins and the host invokes cancel at most once
+ * for an invocation id. Neither path may throw across the ABI.
  */
 typedef int32_t (*neograph_program_native_invoke_v1)(
     void*                                             userdata,
@@ -95,12 +111,19 @@ typedef int32_t (*neograph_program_native_invoke_v1)(
     neograph_program_native_completion_v1            completion,
     void*                                             completion_userdata);
 
-/** Requests cancellation of one accepted invocation; it never frees userdata. */
+/**
+ * Requests cancellation of one accepted invocation; it never frees userdata.
+ * The callback may race completion and must be safe to call from any host
+ * thread that owns the invocation handle.
+ */
 typedef void (*neograph_program_native_cancel_v1)(void* userdata, uint64_t invocation_id);
 
 /**
- * Releases plugin-owned userdata exactly once after every accepted invocation
- * has completed. A plugin must not invoke any completion after this callback.
+ * Releases plugin-owned userdata exactly once after the binding and every
+ * accepted invocation have quiesced. A plugin must not invoke any completion
+ * after this callback. The callback may run on the thread which releases the
+ * final host-owned handle and must therefore be thread-safe with invoke,
+ * cancel, and release callbacks.
  */
 typedef void (*neograph_program_native_destroy_v1)(void* userdata);
 
