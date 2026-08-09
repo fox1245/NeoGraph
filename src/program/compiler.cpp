@@ -30,6 +30,21 @@ constexpr std::array<std::string_view, 9> kBudgetResources = {
     "max_dynamic_compiles", "max_child_depth",        "max_total_children",
 };
 
+json budget_document(const RunBudget& budget) {
+    const std::array<std::uint64_t, 9> values = {
+        budget.wall_time_ms,         budget.model_tokens,           budget.monetary_microunits,
+        budget.max_concurrency,      budget.max_program_operations, budget.max_core_steps,
+        budget.max_dynamic_compiles, budget.max_child_depth,        budget.max_total_children,
+    };
+    json result = json::array();
+    for (std::size_t index = 0; index < kBudgetResources.size(); ++index) {
+        result.push_back({{"resource", std::string(kBudgetResources[index])},
+                          {"minimum", values[index]},
+                          {"maximum", values[index]}});
+    }
+    return result;
+}
+
 std::string escape_pointer_segment(std::string_view segment) {
     std::string result;
     result.reserve(segment.size());
@@ -1633,8 +1648,13 @@ struct ProgramCompiler::Impl {
                 config.ng_api_version};
     }
 
-    ProgramBundle compile(const ProgramSource& source,
-                          const ModuleResolution* verified_resolution = nullptr) const {
+    ProgramBundle compile(
+        const ProgramSource& source,
+        const ModuleResolution* verified_resolution = nullptr,
+        const std::optional<RunBudget>& javascript_budget = std::nullopt) const {
+        if (javascript_budget && source.kind() != SourceKind::JavaScript)
+            throw std::invalid_argument(
+                "Host-owned JavaScript budget requires a JavaScript ProgramSource");
         DiagnosticAccumulator diagnostics(source);
         try {
             if (source.kind() == SourceKind::JavaScript &&
@@ -1671,6 +1691,9 @@ struct ProgramCompiler::Impl {
                 if (source.kind() == SourceKind::JavaScript) {
                     auto evaluation = detail::evaluate_javascript_source(source, config.javascript);
                     document        = std::move(evaluation.document);
+                    if (javascript_budget)
+                        document["declared_budget_requirements"] =
+                            budget_document(*javascript_budget);
                     if (evaluation.has_control_generator) control_source = source;
                 } else {
                     document = source.document();
@@ -1821,6 +1844,11 @@ const std::string& ProgramCompiler::registry_snapshot_fingerprint() const noexce
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
     return impl_->compile(source, nullptr);
+}
+
+ProgramBundle ProgramCompiler::compile(const ProgramSource& source,
+                                       const RunBudget&          javascript_budget) const {
+    return impl_->compile(source, nullptr, javascript_budget);
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,

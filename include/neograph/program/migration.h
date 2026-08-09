@@ -16,6 +16,50 @@
 
 namespace neograph::program {
 
+/**
+ * Classification of a retained legacy source artifact at the authoring
+ * cutover boundary.  These values are deliberately independent from
+ * MigrationCompatibility: they describe whether a stored source may be
+ * translated, drained on its exact old runtime, or must be rejected.
+ */
+enum class StoredArtifactClassification : std::uint8_t {
+    Translated,
+    DrainOnly,
+    Rejected,
+};
+
+/** Stored source families to which the cutover rules apply. */
+enum class StoredArtifactKind : std::uint8_t {
+    LegacyCoreDefinition,
+    LegacyProgramVersion,
+};
+
+/**
+ * Explicit policy result; adapters must not infer a compiler from JSON shape.
+ * Translated rules allow new publication/run without legacy runtime; drain-only
+ * rules require the exact legacy runtime and forbid both; rejected rules forbid
+ * publication, run, and runtime fallback.
+ */
+struct StoredArtifactClassificationRule {
+    StoredArtifactClassification classification = StoredArtifactClassification::Rejected;
+    bool                        allows_new_publication = false;
+    bool                        allows_new_run         = false;
+    bool                        requires_legacy_runtime = false;
+    std::string                 diagnostic_code;
+    StoredArtifactKind           kind = StoredArtifactKind::LegacyCoreDefinition;
+
+    bool operator==(const StoredArtifactClassificationRule&) const = default;
+};
+
+NEOGRAPH_PROGRAM_API void to_json(json& value, const StoredArtifactClassificationRule& rule);
+NEOGRAPH_PROGRAM_API void from_json(const json& value, StoredArtifactClassificationRule& rule);
+NEOGRAPH_PROGRAM_API std::string_view to_string(
+    StoredArtifactClassification classification) noexcept;
+NEOGRAPH_PROGRAM_API StoredArtifactClassification stored_artifact_classification_from_string(
+    std::string_view value);
+NEOGRAPH_PROGRAM_API std::string_view to_string(StoredArtifactKind kind) noexcept;
+NEOGRAPH_PROGRAM_API StoredArtifactKind stored_artifact_kind_from_string(std::string_view value);
+
 enum class MigrationCompatibility : std::uint8_t {
     /// The version is admitted for new invocations only; pinned runs drain.
     NewRunsOnly,

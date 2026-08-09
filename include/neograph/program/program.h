@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include <neograph/program/authoring.h>
 #include <neograph/graph/node.h>
 #include <neograph/program/admission.h>
 #include <neograph/program/bundle.h>

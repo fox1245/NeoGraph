@@ -86,6 +86,7 @@ add_executable(neograph_tests
 )
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_program_tests
+        test_program_authoring.cpp
         test_program_values.cpp
         test_program_command.cpp
         test_program_native.cpp
