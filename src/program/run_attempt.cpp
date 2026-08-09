@@ -1306,6 +1306,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                            "javascript");
                 }
                 const auto step = session.next(std::move(response));
+                if (control->cancel_token->is_cancelled()) {
+                    co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
+                                           "JavaScript control command cancelled before dispatch",
+                                           "javascript");
+                }
                 if (step.done) {
                     result.output   = step.value;
                     result.returned = true;
@@ -1325,6 +1330,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         json{{"requested_core", command.name},
                              {"admitted_core", control->materialized->root->core_name}});
                 }
+                if (control->cancel_token->is_cancelled()) {
+                    co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
+                                           "JavaScript control command cancelled before dispatch",
+                                           "javascript");
+                }
 
                 const auto operation_id = "javascript/" + std::to_string(++command_sequence);
                 if (auto failure = charge_operation(operation_id)) co_return std::move(*failure);
@@ -1341,6 +1351,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         operation_id);
                 }
                 update_peak(active + 1);
+                if (control->cancel_token->is_cancelled()) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    co_return plan_failure(ProgramTerminalStatus::Cancelled,
+                                           "P_RUNTIME_CANCELLED",
+                                           "JavaScript control command cancelled before dispatch",
+                                           operation_id);
+                }
 
                 CoreInvocation invocation;
                 try {
@@ -1365,6 +1382,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     throw NestedOperationFailure(operation_id, "Unknown Core failure");
                 }
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                if (control->cancel_token->is_cancelled()) {
+                    co_return plan_failure(ProgramTerminalStatus::Cancelled,
+                                           "P_RUNTIME_CANCELLED",
+                                           "JavaScript control command cancelled after dispatch",
+                                           operation_id);
+                }
 
                 const auto core_status = invocation.result.status();
                 result.execution_trace.insert(
@@ -1389,8 +1412,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         PlanExecution plan_result;
         if (control_source) {
             try {
-                auto session = JavaScriptGenerator::open(*control_source, std::move(input),
-                                                         JavaScriptCompileLimits{});
+                JavaScriptCompileLimits javascript_limits;
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                javascript_limits.max_wall_time_ms =
+                    remaining.count() > 0 ? static_cast<std::uint64_t>(remaining.count()) : 1;
+                auto session = JavaScriptGenerator::open(
+                    *control_source, std::move(input), javascript_limits,
+                    [token = control->cancel_token] { return token->is_cancelled(); }, deadline);
                 if (!session) {
                     throw_runtime_diagnostic(
                         "P_JS_CONTROL_MAIN",
@@ -1398,6 +1427,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 plan_result = co_await execute_javascript_control(*session);
             } catch (const JavaScriptCompileError& error) {
+                if (error.code() == "P_JS_TIMEOUT") {
+                    control->cancel(CancellationCause::Timeout);
+                } else if (error.code() == "P_JS_CANCELLED" &&
+                           control->cancellation_cause() == CancellationCause::None) {
+                    control->cancel(CancellationCause::User);
+                }
                 throw_runtime_diagnostic(error.code(), error.what(), error.witness());
             }
         } else {
