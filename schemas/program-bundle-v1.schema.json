@@ -29,7 +29,7 @@
   "properties": {
     "format": { "const": "neograph-program-bundle" },
     "storage_schema_version": { "const": 1 },
-    "source_kind": { "enum": ["canonical_json", "cpp_builder"] },
+    "source_kind": { "enum": ["canonical_json", "cpp_builder", "javascript"] },
     "id": { "$ref": "#/$defs/sha256" },
     "source_hash": { "$ref": "#/$defs/sha256" },
     "canonical_program_hash": { "$ref": "#/$defs/sha256" },
@@ -37,6 +37,20 @@
     "program_schema_version": { "const": 1 },
     "registry_snapshot_fingerprint": { "$ref": "#/$defs/sha256" },
     "module_dependency_merkle_root": { "$ref": "#/$defs/sha256" },
+    "quickjs_release": { "$ref": "#/$defs/nonemptyString" },
+    "quickjs_archive_digest": { "$ref": "#/$defs/sha256" },
+    "quickjs_build_options": { "$ref": "#/$defs/nonemptyString" },
+    "javascript_profile": { "$ref": "#/$defs/nonemptyString" },
+    "javascript_profile_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "ng_api_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
     "module_coordinates": {
       "type": "array",
       "uniqueItems": true,
@@ -88,6 +102,49 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source_kind": { "const": "javascript" }
+        }
+      },
+      "then": {
+        "required": [
+          "quickjs_release",
+          "quickjs_archive_digest",
+          "quickjs_build_options",
+          "javascript_profile",
+          "javascript_profile_version",
+          "ng_api_version"
+        ],
+        "properties": {
+          "quickjs_release": { "const": "2026-06-04" },
+          "quickjs_archive_digest": {
+            "const": "sha256:b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a"
+          },
+          "quickjs_build_options": {
+            "const": "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;DYNAMIC_MODULES=disabled"
+          },
+          "javascript_profile": { "const": "sealed-v1" },
+          "javascript_profile_version": { "const": 1 },
+          "ng_api_version": { "const": 1 }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["quickjs_release"] },
+            { "required": ["quickjs_archive_digest"] },
+            { "required": ["quickjs_build_options"] },
+            { "required": ["javascript_profile"] },
+            { "required": ["javascript_profile_version"] },
+            { "required": ["ng_api_version"] }
+          ]
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {
       "type": "string",

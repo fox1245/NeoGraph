@@ -25,7 +25,8 @@
     "kind": {
       "enum": [
         "canonical_json",
-        "cpp_builder"
+        "cpp_builder",
+        "javascript"
       ]
     },
     "source_id": {
@@ -150,6 +151,63 @@
             }
           }
         }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "javascript" }
+        }
+      },
+      "then": {
+        "properties": {
+          "document": { "$ref": "#/$defs/javascriptDocument" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "javascriptDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "language_version",
+        "engine",
+        "engine_version",
+        "quickjs_archive_digest",
+        "quickjs_build_options",
+        "javascript_profile",
+        "javascript_profile_version",
+        "ng_api_version",
+        "host_api_version",
+        "source"
+      ],
+      "properties": {
+        "language": { "const": "javascript" },
+        "language_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "engine": { "const": "quickjs" },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "quickjs_archive_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "quickjs_build_options": { "type": "string", "minLength": 1 },
+        "javascript_profile": { "type": "string", "minLength": 1 },
+        "javascript_profile_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "ng_api_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "host_api_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "source": { "type": "string" }
       }
     }
   }

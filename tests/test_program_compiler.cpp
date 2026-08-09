@@ -401,7 +401,16 @@ TEST(ProgramCompilerTest, JavaScriptDefinitionMustReturnOneGraphBuilder) {
         (void)compiler.compile(source);
         FAIL() << "expected ProgramCompileError";
     } catch (const ProgramCompileError& error) {
-        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_DEFINE_VALUE"));
+        ASSERT_TRUE(contains_code(error.diagnostics(), "P_JS_DEFINE_VALUE"));
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_JS_DEFINE_VALUE";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.source_id, "missing-builder.js");
+        EXPECT_GT(it->primary.span->byte_end, it->primary.span->byte_begin);
+        EXPECT_EQ(it->primary.span->line_begin, 1U);
     }
 }
 
@@ -567,6 +576,199 @@ TEST(ProgramCompilerTest, JavaScriptGraphBuilderRejectsUnknownObjectsBeforeCoreA
     } catch (const ProgramCompileError& error) {
         EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_AMBIENT_DENIED"));
     }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSyntaxDiagnosticsCarryExactSourceSites) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "syntax.js", "export function define() {\n  const graph = ;\n  return graph;\n}\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_JS_EVALUATION";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->primary.source_id, "syntax.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_GE(it->primary.span->line_begin, 2U);
+        EXPECT_GT(it->primary.span->byte_end, it->primary.span->byte_begin);
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptBridgeDiagnosticsCarryExactSourceSites) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "bridge.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.node(\"work\", new Map());\n"
+        "  return graph;\n"
+        "}\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_JS_GRAPH_VALUE";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->primary.source_id, "bridge.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_GE(it->primary.span->line_begin, 2U);
+        EXPECT_GT(it->primary.span->byte_end, it->primary.span->byte_begin);
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptAmbientImportsFailBeforeAnyDispatch) {
+    reset_dispatch_counters();
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "ambient.js",
+        "import \"std\";\n"
+        "export function define() { return ng.graph(\"main\"); }\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_IMPORT_UNRESOLVED";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->phase, CompilePhase::Resolve);
+        EXPECT_EQ(it->primary.source_id, "ambient.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.span->line_begin, 1U);
+    }
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, JavaScriptDynamicImportsFailBeforeAnyDispatch) {
+    reset_dispatch_counters();
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "dynamic.js",
+        "export function define() {\n"
+        "  import(\"module\");\n"
+        "  return ng.graph(\"main\");\n"
+        "}\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_IMPORT_DYNAMIC";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->phase, CompilePhase::Resolve);
+        EXPECT_EQ(it->primary.source_id, "dynamic.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.span->line_begin, 2U);
+    }
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, JavaScriptBundleRoundTripPinsExactFrontendIdentity) {
+    const auto source = ProgramSource::from_javascript(
+        "identity.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.node(\"work\", {type: \"local-node\"});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto bundle  = compiler.compile(source);
+    const auto parsed  = ProgramBundle::parse(bundle.serialize_canonical());
+    const auto runtime = source.javascript_runtime_identity();
+
+    EXPECT_EQ(bundle.javascript_runtime(), runtime);
+    EXPECT_EQ(parsed.javascript_runtime(), runtime);
+    const auto encoded = json::parse(bundle.serialize_canonical());
+    EXPECT_EQ(encoded.at("quickjs_release"), runtime.quickjs_release);
+    EXPECT_EQ(encoded.at("quickjs_archive_digest"), runtime.quickjs_archive_digest);
+    EXPECT_EQ(encoded.at("quickjs_build_options"), runtime.quickjs_build_options);
+    EXPECT_EQ(encoded.at("javascript_profile"), runtime.profile);
+    EXPECT_EQ(encoded.at("javascript_profile_version"), runtime.profile_version);
+    EXPECT_EQ(encoded.at("ng_api_version"), runtime.ng_api_version);
+
+    ProgramCompilerConfig mismatch;
+    mismatch.compiler_build_id      = "program-compiler-test/javascript/v1";
+    mismatch.quickjs_build_options += ";changed";
+    ProgramCompiler incompatible(complete_snapshot(), std::move(mismatch));
+    try {
+        (void)incompatible.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RUNTIME_IDENTITY"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSourceMapRoundTripsAlongsideBundleSites) {
+    const SourceMapEntry authored{
+        "/root", {"authoring.dsl", "/graph", SourceSpan{4, 18, 2, 3, 2, 17}}};
+    const auto source = ProgramSource::from_javascript(
+        "mapped.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.node(\"work\", {type: \"local-node\"});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n",
+        {}, {authored});
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto bundle = compiler.compile(source);
+    const auto parsed = ProgramBundle::parse(bundle.serialize_canonical());
+    const auto it = std::find(parsed.source_map().begin(), parsed.source_map().end(), authored);
+    EXPECT_NE(it, parsed.source_map().end());
+}
+
+TEST(ProgramCompilerTest, JavaScriptAllowlistRejectsUnknownSyntaxImportBeforeEvaluation) {
+    ProgramModuleData module_data;
+    module_data.owner_scope    = "tenant:compiler";
+    module_data.coordinate     = ModuleCoordinate{"sealed", "allowed", "1.0.0", ""};
+    module_data.attestation_id = "attestation:test";
+    const auto module          = ProgramModule::create(std::move(module_data));
+    ModuleResolution resolution;
+    resolution.root = module.coordinate();
+    resolution.modules.push_back(module);
+    resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
+
+    const auto source = ProgramSource::from_javascript(
+        "allowlist.js",
+        "import \"sealed:blocked@1.0.0\";\n"
+        "export function define() { return ng.graph(\"main\"); }\n",
+        {{module.coordinate().qualified_name(), module.id()}});
+    reset_dispatch_counters();
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    try {
+        (void)compiler.compile(source, resolution);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_IMPORT_UNRESOLVED";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->phase, CompilePhase::Resolve);
+        EXPECT_EQ(it->primary.source_id, "allowlist.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.span->line_begin, 1U);
+    }
+    expect_dispatch_counters_zero();
 }
 #endif
 

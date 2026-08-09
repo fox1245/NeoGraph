@@ -638,6 +638,43 @@ void validate_module_resolution(const ModuleResolution& resolution) {
         throw std::invalid_argument("Module resolution receipts do not cover the full closure");
 }
 
+struct VerifiedModuleResolver::Impl {
+    ModuleResolution                         resolution;
+    std::map<std::string, ModuleCoordinate>  coordinates;
+};
+
+VerifiedModuleResolver::VerifiedModuleResolver(ModuleResolution resolution)
+    : impl_(std::make_unique<Impl>()) {
+    validate_module_resolution(resolution);
+    if (resolution.receipts.empty())
+        throw std::invalid_argument(
+            "VerifiedModuleResolver requires non-empty ModuleResolution receipts");
+    impl_->resolution = std::move(resolution);
+    for (const auto& module : impl_->resolution.modules)
+        impl_->coordinates.emplace(module.coordinate().qualified_name(), module.coordinate());
+}
+
+VerifiedModuleResolver::VerifiedModuleResolver(VerifiedModuleResolver&&) noexcept = default;
+VerifiedModuleResolver& VerifiedModuleResolver::operator=(VerifiedModuleResolver&&) noexcept =
+    default;
+VerifiedModuleResolver::~VerifiedModuleResolver() = default;
+
+const ModuleResolution& VerifiedModuleResolver::resolution() const noexcept {
+    return impl_->resolution;
+}
+
+std::optional<ModuleCoordinate> VerifiedModuleResolver::resolve(std::string_view source_id) const {
+    const auto found = impl_->coordinates.find(std::string(source_id));
+    if (found == impl_->coordinates.end()) return std::nullopt;
+    const auto receipt = std::find_if(
+        impl_->resolution.receipts.begin(), impl_->resolution.receipts.end(),
+        [&](const auto& value) { return value.dependency_id == source_id; });
+    if (receipt == impl_->resolution.receipts.end() ||
+        receipt->content_identity != found->second.content_identity)
+        return std::nullopt;
+    return found->second;
+}
+
 namespace {
 
 std::uint64_t budget_value(const BudgetLimits& budget, std::string_view resource) {

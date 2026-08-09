@@ -136,8 +136,6 @@ struct ProgramBundleData {
     std::uint32_t                program_schema_version = 1;
     std::string                  registry_snapshot_fingerprint;
     std::string                  module_dependency_merkle_root;
-    /** Present for JavaScript bundles; omitted for non-JavaScript sources. */
-    JavaScriptRuntimeIdentity    javascript_runtime;
     /** Exact module coordinates represented by the dependency receipts. */
     std::vector<ModuleCoordinate>     module_coordinates;
     ContractRecord                    input_contract;
@@ -152,6 +150,8 @@ struct ProgramBundleData {
     std::vector<BudgetRequirement>  declared_budget_requirements;
     std::vector<SourceMapEntry>     source_map;
     std::vector<Diagnostic>         diagnostics;
+    /** Present for JavaScript bundles; omitted for non-JavaScript sources. */
+    JavaScriptRuntimeIdentity        javascript_runtime;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramBundle {

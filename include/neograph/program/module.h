@@ -108,6 +108,29 @@ struct ModuleResolution {
     std::vector<ModuleCoordinate> coordinates() const;
 };
 
+/**
+ * Immutable allowlist view over a verified ModuleResolution.  JavaScript
+ * module lookup is by the exact receipt source id; there is no range,
+ * filesystem, process-global, or network fallback.
+ */
+class NEOGRAPH_PROGRAM_API VerifiedModuleResolver final {
+public:
+    explicit VerifiedModuleResolver(ModuleResolution resolution);
+
+    VerifiedModuleResolver(VerifiedModuleResolver&&) noexcept;
+    VerifiedModuleResolver& operator=(VerifiedModuleResolver&&) noexcept;
+    VerifiedModuleResolver(const VerifiedModuleResolver&)            = delete;
+    VerifiedModuleResolver& operator=(const VerifiedModuleResolver&) = delete;
+    ~VerifiedModuleResolver();
+
+    const ModuleResolution& resolution() const noexcept;
+    std::optional<ModuleCoordinate> resolve(std::string_view source_id) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 /** A child version and its immutable bundle, paired before dispatch. */
 struct ChildProgramBinding {
     std::string   child_name;

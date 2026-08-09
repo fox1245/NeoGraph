@@ -30,6 +30,9 @@ struct ProgramCompilerConfig {
     // closure, Core-parser, round-trip, and validator semantics together.
     // Mandatory, nonempty UTF-8; do not synthesize from pointer/RTTI/process state.
     std::string compiler_build_id;
+    // Applied only to SourceKind::JavaScript. Limits are host policy, not
+    // source-authored semantics; changing them requires a new build identity.
+    JavaScriptCompileLimits javascript;
     /**
      * Exact JavaScript frontend identity. These defaults describe the
      * vendored QuickJS target; changing any value is a semantic compiler
@@ -43,9 +46,6 @@ struct ProgramCompilerConfig {
     std::string javascript_profile = std::string(ProgramSource::JAVASCRIPT_PROFILE);
     std::uint32_t javascript_profile_version = ProgramSource::JAVASCRIPT_PROFILE_VERSION;
     std::uint32_t ng_api_version            = ProgramSource::JAVASCRIPT_NG_API_VERSION;
-    // Applied only to SourceKind::JavaScript. Limits are host policy, not
-    // source-authored semantics; changing them requires a new build identity.
-    JavaScriptCompileLimits javascript;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCompileError final : public std::runtime_error {

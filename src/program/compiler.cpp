@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -159,13 +160,15 @@ public:
              DiagnosticSeverity severity,
              std::string        generated_pointer,
              std::string        message,
-             json               witness = json::object()) {
+             json               witness = json::object(),
+             std::optional<SourceSpan> span = std::nullopt) {
         PendingDiagnostic pending;
         pending.generated_pointer   = std::move(generated_pointer);
         pending.diagnostic.phase    = phase;
         pending.diagnostic.code     = std::move(code);
         pending.diagnostic.severity = severity;
         pending.diagnostic.primary  = map(pending.generated_pointer);
+        if (span) pending.diagnostic.primary.span = std::move(span);
         pending.diagnostic.message  = std::move(message);
         pending.diagnostic.witness  = detail::owned_json_copy(witness);
         pending.canonical_witness   = detail::canonical_json_bytes(pending.diagnostic.witness);
@@ -1286,6 +1289,277 @@ std::string import_merkle_root(const ProgramSource& source, DiagnosticAccumulato
     return level.front();
 }
 
+struct JavaScriptImportSite {
+    std::string   specifier;
+    std::size_t   byte_begin = 0;
+    std::size_t   byte_end   = 0;
+    std::uint32_t line       = 1;
+    std::uint32_t column     = 1;
+    bool          dynamic    = false;
+};
+
+bool javascript_identifier_start(unsigned char value) noexcept {
+    return value == '_' || value == '$' || std::isalpha(value) != 0;
+}
+
+bool javascript_identifier_continue(unsigned char value) noexcept {
+    return javascript_identifier_start(value) || std::isdigit(value) != 0;
+}
+
+void skip_javascript_space(std::string_view source, std::size_t& offset) {
+    while (offset < source.size()) {
+        if (std::isspace(static_cast<unsigned char>(source[offset])) != 0) {
+            ++offset;
+            continue;
+        }
+        if (offset + 1 < source.size() && source[offset] == '/' && source[offset + 1] == '/') {
+            offset += 2;
+            while (offset < source.size() && source[offset] != '\n') ++offset;
+            continue;
+        }
+        if (offset + 1 < source.size() && source[offset] == '/' && source[offset + 1] == '*') {
+            offset += 2;
+            while (offset + 1 < source.size() &&
+                   !(source[offset] == '*' && source[offset + 1] == '/'))
+                ++offset;
+            if (offset + 1 < source.size()) offset += 2;
+            continue;
+        }
+        break;
+    }
+}
+
+std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>>
+read_javascript_string(std::string_view source, std::size_t offset) {
+    if (offset >= source.size() || (source[offset] != '\'' && source[offset] != '"'))
+        return std::nullopt;
+    const auto quote = source[offset++];
+    const auto begin = offset - 1;
+    std::string result;
+    while (offset < source.size()) {
+        const char value = source[offset++];
+        if (value == quote) return std::make_pair(std::move(result), std::make_pair(begin, offset));
+        if (value == '\\' && offset < source.size()) {
+            // Import specifiers are intentionally restricted to simple
+            // string literals. Escape sequences are decoded only for the
+            // common one-byte forms needed by a module name.
+            const char escaped = source[offset++];
+            switch (escaped) {
+                case 'n':
+                    result.push_back('\n');
+                    break;
+                case 'r':
+                    result.push_back('\r');
+                    break;
+                case 't':
+                    result.push_back('\t');
+                    break;
+                default:
+                    result.push_back(escaped);
+                    break;
+            }
+            continue;
+        }
+        if (value == '\n' || value == '\r') return std::nullopt;
+        result.push_back(value);
+    }
+    return std::nullopt;
+}
+
+std::vector<JavaScriptImportSite> javascript_import_sites(std::string_view source) {
+    std::vector<JavaScriptImportSite> result;
+    std::size_t                    offset = 0;
+    while (offset < source.size()) {
+        if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '/') {
+            skip_javascript_space(source, offset);
+            continue;
+        }
+        if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '*') {
+            skip_javascript_space(source, offset);
+            continue;
+        }
+        if (source[offset] == '\'' || source[offset] == '"' || source[offset] == '`') {
+            const auto quote = source[offset++];
+            while (offset < source.size()) {
+                if (source[offset] == '\\') {
+                    offset += std::min<std::size_t>(2, source.size() - offset);
+                } else if (source[offset++] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (!javascript_identifier_start(static_cast<unsigned char>(source[offset]))) {
+            ++offset;
+            continue;
+        }
+        const auto word_begin = offset++;
+        while (offset < source.size() &&
+               javascript_identifier_continue(static_cast<unsigned char>(source[offset])))
+            ++offset;
+        const auto word = source.substr(word_begin, offset - word_begin);
+        if (word != "import" && word != "export" && word != "require") continue;
+
+        auto cursor = offset;
+        skip_javascript_space(source, cursor);
+        if (word == "require") {
+            if (cursor >= source.size() || source[cursor] != '(') continue;
+            ++cursor;
+            skip_javascript_space(source, cursor);
+            const auto parsed = read_javascript_string(source, cursor);
+            if (!parsed) {
+                result.push_back({{}, word_begin, cursor, 1, 1, true});
+            } else {
+                result.push_back({parsed->first, word_begin, parsed->second.second, 1, 1, true});
+            }
+            continue;
+        }
+        if (word == "import" && cursor < source.size() && source[cursor] == '(') {
+            ++cursor;
+            skip_javascript_space(source, cursor);
+            const auto parsed = read_javascript_string(source, cursor);
+            if (!parsed) {
+                result.push_back({{}, word_begin, cursor, 1, 1, true});
+            } else {
+                result.push_back({parsed->first, word_begin, parsed->second.second, 1, 1, true});
+            }
+            continue;
+        }
+
+        // `import "x"`, `import {x} from "x"`, and `export ... from
+        // "x"` all resolve through the same sealed allowlist. The bounded
+        // scanner deliberately does not try to implement JavaScript syntax;
+        // QuickJS remains authoritative for malformed source.
+        const auto direct = read_javascript_string(source, cursor);
+        if (direct) {
+            result.push_back({direct->first, word_begin, direct->second.second, 1, 1, false});
+            continue;
+        }
+        const auto statement_end = source.find(';', cursor);
+        const auto end = statement_end == std::string_view::npos ? source.size() : statement_end;
+        auto       from = source.find("from", cursor);
+        if (from == std::string_view::npos || from >= end) continue;
+        if (from > cursor && javascript_identifier_continue(static_cast<unsigned char>(source[from - 1])))
+            continue;
+        auto after_from = from + 4;
+        if (after_from < source.size() &&
+            javascript_identifier_continue(static_cast<unsigned char>(source[after_from])))
+            continue;
+        skip_javascript_space(source, after_from);
+        const auto parsed = read_javascript_string(source, after_from);
+        if (parsed)
+            result.push_back({parsed->first, word_begin, parsed->second.second, 1, 1, false});
+    }
+    auto line_column = [&](std::size_t byte) {
+        std::uint32_t line = 1;
+        std::uint32_t col  = 1;
+        for (std::size_t index = 0; index < byte && index < source.size(); ++index) {
+            if (source[index] == '\n') {
+                ++line;
+                col = 1;
+            } else {
+                ++col;
+            }
+        }
+        return std::pair{line, col};
+    };
+    for (auto& site : result) {
+        const auto [line, column] = line_column(site.byte_begin);
+        site.line                 = line;
+        site.column               = column;
+    }
+    return result;
+}
+
+SourceSpan javascript_span(std::string_view source, std::size_t begin, std::size_t end) {
+    const auto line_column = [&](std::size_t byte) {
+        std::uint32_t line = 1;
+        std::uint32_t col  = 1;
+        for (std::size_t index = 0; index < byte && index < source.size(); ++index) {
+            if (source[index] == '\n') {
+                ++line;
+                col = 1;
+            } else {
+                ++col;
+            }
+        }
+        return std::pair{line, col};
+    };
+    const auto [line_begin, column_begin] = line_column(begin);
+    const auto [line_end, column_end]     = line_column(std::min(end, source.size()));
+    return SourceSpan{begin, std::min(end, source.size()), line_begin, column_begin, line_end,
+                      column_end};
+}
+
+void validate_javascript_import_allowlist(const ProgramSource&     source,
+                                          const ModuleResolution* resolution,
+                                          DiagnosticAccumulator&   diagnostics) {
+    if (source.kind() != SourceKind::JavaScript) return;
+    const auto document = source.document();
+    const auto script   = document.at("source").get<std::string>();
+    const auto sites    = javascript_import_sites(script);
+    if (!resolution) {
+        if (!sites.empty()) {
+            for (const auto& site : sites) {
+                const auto span = std::optional<SourceSpan>{javascript_span(
+                    script, site.byte_begin, site.byte_end)};
+                diagnostics.add(
+                    CompilePhase::Resolve, site.dynamic ? "P_IMPORT_DYNAMIC" : "P_IMPORT_UNRESOLVED",
+                    DiagnosticSeverity::Error, "/imports",
+                    site.dynamic
+                        ? "Dynamic JavaScript module loading is forbidden"
+                        : "JavaScript imports require a verified ModuleResolution receipt",
+                    json{{"specifier", site.specifier}}, span);
+            }
+        }
+        if (!source.imports().empty()) {
+            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED",
+                            DiagnosticSeverity::Error, "/imports",
+                            "JavaScript imports require a verified ModuleResolution receipt",
+                            json{{"import_count", source.imports().size()},
+                                 {"syntax_import_count", sites.size()}});
+        }
+        return;
+    }
+    if (resolution->receipts.empty()) {
+        for (const auto& site : sites) {
+            const auto span = std::optional<SourceSpan>{javascript_span(
+                script, site.byte_begin, site.byte_end)};
+            diagnostics.add(CompilePhase::Resolve,
+                            site.dynamic ? "P_IMPORT_DYNAMIC" : "P_IMPORT_UNRESOLVED",
+                            DiagnosticSeverity::Error, "/imports",
+                            site.dynamic
+                                ? "Dynamic JavaScript module loading is forbidden"
+                                : "JavaScript imports require non-empty verified ModuleResolution receipts",
+                            json{{"specifier", site.specifier}}, span);
+        }
+        if (!source.imports().empty()) {
+            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED",
+                            DiagnosticSeverity::Error, "/imports",
+                            "JavaScript imports require non-empty verified ModuleResolution receipts",
+                            json{{"import_count", source.imports().size()},
+                                 {"syntax_import_count", sites.size()}});
+        }
+        return;
+    }
+    const VerifiedModuleResolver verified(*resolution);
+    for (const auto& site : sites) {
+        const auto found = verified.resolve(site.specifier);
+        const auto span = std::optional<SourceSpan>{javascript_span(script, site.byte_begin,
+                                                                     site.byte_end)};
+        if (site.dynamic) {
+            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_DYNAMIC", DiagnosticSeverity::Error,
+                            "/imports", "Dynamic JavaScript module loading is forbidden",
+                            json{{"specifier", site.specifier}}, span);
+        } else if (!found) {
+            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED",
+                            DiagnosticSeverity::Error, "/imports",
+                            "JavaScript module is absent from the verified resolution receipts",
+                            json{{"specifier", site.specifier}}, span);
+        }
+    }
+}
+
 std::vector<SourceMapEntry> generated_source_map(const ProgramSource&   source,
                                                  DiagnosticAccumulator& diagnostics) {
     auto                  result = source.source_map();
@@ -1359,7 +1633,8 @@ struct ProgramCompiler::Impl {
                 config.ng_api_version};
     }
 
-    ProgramBundle compile(const ProgramSource& source) const {
+    ProgramBundle compile(const ProgramSource& source,
+                          const ModuleResolution* verified_resolution = nullptr) const {
         DiagnosticAccumulator diagnostics(source);
         try {
             if (source.kind() == SourceKind::JavaScript &&
@@ -1388,6 +1663,8 @@ struct ProgramCompiler::Impl {
                                             {"ng_api_version", config.ng_api_version}}}});
                 diagnostics.throw_error();
             }
+            validate_javascript_import_allowlist(source, verified_resolution, diagnostics);
+            if (diagnostics.has_errors()) diagnostics.throw_error();
             json                         document;
             std::optional<ProgramSource> control_source;
             try {
@@ -1400,7 +1677,7 @@ struct ProgramCompiler::Impl {
                 }
             } catch (const detail::JavaScriptCompileError& error) {
                 diagnostics.add(CompilePhase::Source, error.code(), DiagnosticSeverity::Error, "",
-                                error.what(), error.witness());
+                                error.what(), error.witness(), error.source_span());
                 diagnostics.throw_error();
             }
             auto parsed = parse_program(source, document, diagnostics);
@@ -1543,7 +1820,7 @@ const std::string& ProgramCompiler::registry_snapshot_fingerprint() const noexce
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
-    return impl_->compile(source);
+    return impl_->compile(source, nullptr);
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,
@@ -1580,7 +1857,7 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,
                     json{{"source_import_count", actual_imports.size()},
                          {"resolved_import_count", resolved_imports.size()}});
 
-    auto compiled = compile(source);
+    auto compiled = impl_->compile(source, &resolution);
     if (compiled.module_dependency_merkle_root() != resolution.dependency_merkle_root())
         return fail("P_IMPORT_UNRESOLVED",
                     "Program module dependency root differs from the resolved closure",

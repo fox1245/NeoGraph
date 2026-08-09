@@ -56,6 +56,8 @@ ProgramBundleData make_bundle_data(const ProgramSource& source) {
     data.program_schema_version        = source.schema_version();
     data.registry_snapshot_fingerprint = sha('b');
     data.module_dependency_merkle_root = sha('c');
+    if (source.kind() == SourceKind::JavaScript)
+        data.javascript_runtime = source.javascript_runtime_identity();
     data.input_contract                = ContractRecord{1, json{{"type", "object"}}};
     data.output_contract               = ContractRecord{1, json{{"type", "object"}}};
     data.orchestration_plan            = OrchestrationPlanRecord{1, json{{"entry", "alpha"}}};

@@ -277,6 +277,31 @@ TEST(ProgramModuleTest, ResolverReturnsCompletePinnedDependencyClosure) {
     EXPECT_EQ(resolution.root, root.coordinate());
 }
 
+TEST(ProgramModuleTest, VerifiedResolverIsAnExactImmutableReceiptAllowlist) {
+    ProgramModuleData module_data;
+    module_data.owner_scope    = "tenant:module";
+    module_data.coordinate     = ModuleCoordinate{"sealed", "allowlisted", "1.0.0", ""};
+    module_data.attestation_id = "attestation:module";
+    const auto module          = ProgramModule::create(std::move(module_data));
+
+    ModuleResolution resolution;
+    resolution.root = module.coordinate();
+    resolution.modules.push_back(module);
+    resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
+
+    VerifiedModuleResolver resolver(resolution);
+    const auto coordinate = resolver.resolve(module.coordinate().qualified_name());
+    ASSERT_TRUE(coordinate.has_value());
+    EXPECT_EQ(*coordinate, module.coordinate());
+    EXPECT_FALSE(resolver.resolve("sealed:allowlisted@2.0.0").has_value());
+    EXPECT_FALSE(resolver.resolve("file:///etc/passwd").has_value());
+
+    resolution.receipts.clear();
+    resolution.modules.clear();
+    EXPECT_TRUE(resolver.resolve(module.coordinate().qualified_name()).has_value());
+    EXPECT_EQ(resolver.resolution().receipts.size(), 1U);
+}
+
 TEST(ProgramModuleTest, ResolutionRejectsUnpinnedDependency) {
     ProgramModuleData root_data;
     root_data.owner_scope    = "tenant:module";

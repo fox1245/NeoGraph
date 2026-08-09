@@ -19,13 +19,19 @@ namespace neograph::program::detail {
 class JavaScriptCompileError final : public std::runtime_error {
 public:
     JavaScriptCompileError(std::string code, std::string message, json witness = json::object());
+    JavaScriptCompileError(std::string code,
+                           std::string message,
+                           json        witness,
+                           std::optional<SourceSpan> source_span);
 
     const std::string& code() const noexcept;
     const json&        witness() const noexcept;
+    const std::optional<SourceSpan>& source_span() const noexcept;
 
 private:
     std::string code_;
     json        witness_;
+    std::optional<SourceSpan> source_span_;
 };
 
 struct JavaScriptSourceEvaluation {

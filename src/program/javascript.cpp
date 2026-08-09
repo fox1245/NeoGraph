@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -28,12 +29,25 @@ namespace neograph::program::detail {
 JavaScriptCompileError::JavaScriptCompileError(std::string code, std::string message, json witness)
     : std::runtime_error(message), code_(std::move(code)), witness_(std::move(witness)) {}
 
+JavaScriptCompileError::JavaScriptCompileError(std::string              code,
+                                               std::string              message,
+                                               json                     witness,
+                                               std::optional<SourceSpan> source_span)
+    : std::runtime_error(message),
+      code_(std::move(code)),
+      witness_(std::move(witness)),
+      source_span_(std::move(source_span)) {}
+
 const std::string& JavaScriptCompileError::code() const noexcept {
     return code_;
 }
 
 const json& JavaScriptCompileError::witness() const noexcept {
     return witness_;
+}
+
+const std::optional<SourceSpan>& JavaScriptCompileError::source_span() const noexcept {
+    return source_span_;
 }
 
 #if defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
@@ -148,6 +162,11 @@ const JSMallocFunctions kAccountedAllocator{
     accounted_usable_size,
 };
 
+struct JavaScriptExceptionDetails {
+    std::string              message;
+    std::optional<SourceSpan> source_span;
+};
+
 std::string bounded_utf8(std::string_view text) {
     if (text.size() <= kMaxDiagnosticTextBytes) return std::string(text);
 
@@ -181,6 +200,171 @@ std::string value_text(JSContext* context, JSValueConst value) {
     const std::string result = text ? bounded_utf8(text) : exception_text(context);
     if (text) JS_FreeCString(context, text);
     return result;
+}
+
+std::optional<SourceSpan> source_span_from_line_column(std::string_view source,
+                                                       std::int32_t     line,
+                                                       std::int32_t     column) {
+    if (line <= 0 || column <= 0) return std::nullopt;
+    std::size_t offset = 0;
+    for (std::int32_t current = 1; current < line; ++current) {
+        const auto newline = source.find('\n', offset);
+        if (newline == std::string_view::npos) return std::nullopt;
+        offset = newline + 1;
+    }
+    offset += static_cast<std::size_t>(column - 1);
+    if (offset > source.size()) offset = source.size();
+    const auto end = offset < source.size() && source[offset] != '\n' ? offset + 1 : offset;
+    return SourceSpan{offset, end, static_cast<std::uint32_t>(line),
+                      static_cast<std::uint32_t>(column), static_cast<std::uint32_t>(line),
+                      static_cast<std::uint32_t>(column + (end > offset ? 1 : 0))};
+}
+
+bool javascript_identifier_character(unsigned char value) noexcept {
+    return value == '_' || value == '$' || std::isalnum(value) != 0;
+}
+
+std::optional<std::size_t> find_javascript_token(std::string_view source,
+                                                 std::string_view token) {
+    std::size_t offset = 0;
+    while (offset < source.size()) {
+        if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '/') {
+            offset += 2;
+            while (offset < source.size() && source[offset] != '\n') ++offset;
+            continue;
+        }
+        if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '*') {
+            offset += 2;
+            while (offset + 1 < source.size() &&
+                   !(source[offset] == '*' && source[offset + 1] == '/'))
+                ++offset;
+            offset = std::min(source.size(), offset + 2);
+            continue;
+        }
+        if (source[offset] == '\'' || source[offset] == '"' || source[offset] == '`') {
+            const auto quote = source[offset++];
+            while (offset < source.size()) {
+                if (source[offset] == '\\') {
+                    offset += std::min<std::size_t>(2, source.size() - offset);
+                } else if (source[offset++] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (offset + token.size() <= source.size() &&
+            source.substr(offset, token.size()) == token &&
+            (offset == 0 || !javascript_identifier_character(
+                                 static_cast<unsigned char>(source[offset - 1]))) &&
+            (offset + token.size() == source.size() ||
+             !javascript_identifier_character(
+                 static_cast<unsigned char>(source[offset + token.size()]))))
+            return offset;
+        ++offset;
+    }
+    return std::nullopt;
+}
+
+std::optional<SourceSpan> source_span_for_token(std::string_view source, std::string_view token) {
+    const auto found = find_javascript_token(source, token);
+    if (!found) return std::nullopt;
+    std::size_t line = 1;
+    std::size_t col  = 1;
+    for (std::size_t index = 0; index < *found; ++index) {
+        if (source[index] == '\n') {
+            ++line;
+            col = 1;
+        } else {
+            ++col;
+        }
+    }
+    return SourceSpan{*found,
+                      *found + token.size(),
+                      static_cast<std::uint32_t>(line),
+                      static_cast<std::uint32_t>(col),
+                      static_cast<std::uint32_t>(line),
+                      static_cast<std::uint32_t>(col + token.size())};
+}
+
+bool read_error_integer(JSContext* context,
+                        JSValueConst error,
+                        const char*   property,
+                        std::int32_t& output) {
+    JSValue value = JS_GetPropertyStr(context, error, property);
+    if (JS_IsException(value)) {
+        JS_FreeValue(context, value);
+        if (JS_HasException(context)) {
+            JSValue ignored = JS_GetException(context);
+            JS_FreeValue(context, ignored);
+        }
+        return false;
+    }
+    const bool present = JS_IsNumber(value) && JS_ToInt32(context, &output, value) >= 0;
+    if (JS_HasException(context)) {
+        JSValue ignored = JS_GetException(context);
+        JS_FreeValue(context, ignored);
+    }
+    JS_FreeValue(context, value);
+    return present;
+}
+
+JavaScriptExceptionDetails exception_details(JSContext*       context,
+                                              JSValueConst     error,
+                                              std::string_view source) {
+    JavaScriptExceptionDetails details;
+    const char* text = JS_ToCString(context, error);
+    details.message  = text ? bounded_utf8(text) : "QuickJS exception";
+    if (text) JS_FreeCString(context, text);
+
+    std::int32_t line = 0;
+    std::int32_t col  = 0;
+    if (read_error_integer(context, error, "lineNumber", line) &&
+        read_error_integer(context, error, "columnNumber", col)) {
+        details.source_span = source_span_from_line_column(source, line, col);
+    }
+    if (!details.source_span) {
+        JSValue stack = JS_GetPropertyStr(context, error, "stack");
+        if (!JS_IsException(stack) && JS_IsString(stack)) {
+            size_t      size = 0;
+            const char* text_stack = JS_ToCStringLen(context, &size, stack);
+            if (text_stack) {
+                std::string_view stack_view(text_stack, size);
+                // QuickJS formats frames as `filename:line:column`. The
+                // final pair is sufficient for a stable primary site.
+                const auto colon = stack_view.rfind(':');
+                if (colon != std::string_view::npos && colon > 0) {
+                    const auto previous = stack_view.rfind(':', colon - 1);
+                    if (previous != std::string_view::npos) {
+                        try {
+                            line = static_cast<std::int32_t>(std::stoi(
+                                std::string(stack_view.substr(previous + 1, colon - previous - 1))));
+                            col = static_cast<std::int32_t>(
+                                std::stoi(std::string(stack_view.substr(colon + 1))));
+                            details.source_span = source_span_from_line_column(source, line, col);
+                        } catch (...) {
+                            // The engine's human-readable stack is a best
+                            // effort fallback; the diagnostic remains useful
+                            // with its source site even when parsing changes.
+                        }
+                    }
+                }
+                JS_FreeCString(context, text_stack);
+            }
+        }
+        JS_FreeValue(context, stack);
+        if (JS_HasException(context)) {
+            JSValue ignored = JS_GetException(context);
+            JS_FreeValue(context, ignored);
+        }
+    }
+    return details;
+}
+
+JavaScriptExceptionDetails take_exception_details(JSContext* context, std::string_view source) {
+    JSValue exception = JS_GetException(context);
+    auto    details   = exception_details(context, exception, source);
+    JS_FreeValue(context, exception);
+    return details;
 }
 
 bool looks_like_resource_exhaustion(std::string_view message) {
@@ -1134,7 +1318,10 @@ JSValue create_graph(JSContext* context, JSValueConst this_value, int argc, JSVa
     }
 }
 
-JSValue json_to_js_value(JSContext* context, const json& value);
+JSValue json_to_js_value(JSContext* context, const json& value) {
+    const auto canonical = detail::canonical_json_bytes(value);
+    return JS_ParseJSON(context, canonical.c_str(), canonical.size(), "<program-command>");
+}
 
 constexpr std::string_view kDefaultCommandSourceSite = "<program-control>";
 
@@ -1590,6 +1777,8 @@ JSValue create_host_capability(JSContext* context,
         return graph_internal_error(context,
                                     "NeoGraph hostCapability construction failed unexpectedly");
     }
+}
+
 enum AmbientFacility : int {
     AmbientDate = 1,
     AmbientEval,
@@ -1724,6 +1913,23 @@ void install_host(JSContext* context, HostContext profile) {
         throw JavaScriptCompileError("P_JS_RUNTIME", exception_text(context));
     };
 
+    // QuickJS itself is the only embedded component.  Keep the language
+    // runtime useful for deterministic computation while removing ambient
+    // host-like entry points and dynamic compilation from the sealed profile.
+    for (const char* name : {"std", "os", "process", "require", "fetch", "load", "Worker",
+                             "SharedArrayBuffer", "Atomics", "eval", "Function",
+                             "WeakRef", "FinalizationRegistry"}) {
+        if (JS_SetPropertyStr(context, global, name, JS_UNDEFINED) < 0) fail();
+    }
+    JSValue math = JS_GetPropertyStr(context, global, "Math");
+    if (!JS_IsException(math)) {
+        if (JS_SetPropertyStr(context, math, "random", JS_UNDEFINED) < 0) {
+            JS_FreeValue(context, math);
+            fail();
+        }
+    }
+    JS_FreeValue(context, math);
+
     const int version_status = JS_DefinePropertyValueStr(
         context, host, "apiVersion",
         JS_NewUint32(context, ProgramSource::JAVASCRIPT_HOST_API_VERSION), JS_PROP_ENUMERABLE);
@@ -1815,22 +2021,27 @@ json resource_witness(const JavaScriptCompileLimits& limits,
     return witness;
 }
 
-[[noreturn]] void throw_captured_failure(const DefinitionCapture& capture) {
+[[noreturn]] void throw_captured_failure(
+    const DefinitionCapture& capture,
+    std::optional<SourceSpan> source_span = std::nullopt) {
     json witness = capture.failure_witness;
     if (!witness.is_object()) witness = json::object();
     witness["engine"] = "quickjs";
     if (capture.native_builder_bytes != 0)
         witness["native_builder_bytes"] = capture.native_builder_bytes;
     throw JavaScriptCompileError(capture.failure_code, capture.failure_message,
-                                 std::move(witness));
+                                 std::move(witness), std::move(source_span));
 }
 
-[[noreturn]] void throw_evaluation_failure(JSContext*                     context,
-                                           const DefinitionCapture&       capture,
-                                           InterruptBudget&               budget,
-                                           const JavaScriptCompileLimits& limits,
-                                           const AllocationAccounting*   accounting = nullptr,
-                                           std::string                    message = {}) {
+[[noreturn]] void throw_evaluation_failure(
+    JSContext*                     context,
+    const DefinitionCapture&       capture,
+    InterruptBudget&               budget,
+    const JavaScriptCompileLimits& limits,
+    const AllocationAccounting*    accounting = nullptr,
+    std::string_view               source = {},
+    std::string                    message = {},
+    std::optional<SourceSpan>      source_span = std::nullopt) {
     refresh_external_interrupt(budget);
     if (budget.reason == InterruptReason::Cancelled) {
         throw JavaScriptCompileError("P_JS_CANCELLED",
@@ -1842,18 +2053,29 @@ json resource_witness(const JavaScriptCompileLimits& limits,
                                      "JavaScript evaluation exceeded its wall-time ceiling",
                                      resource_witness(limits, budget, accounting));
     }
-    if (!capture.failure_code.empty()) {
-        throw_captured_failure(capture);
+    if (message.empty()) {
+        if (source.empty()) {
+            message = exception_text(context);
+        } else {
+            auto details = take_exception_details(context, source);
+            message = std::move(details.message);
+            source_span = std::move(details.source_span);
+        }
     }
-    if (message.empty()) message = exception_text(context);
+    if (!capture.failure_code.empty()) {
+        throw_captured_failure(capture, std::move(source_span));
+    }
     if (budget.reason == InterruptReason::PollLimit ||
         looks_like_resource_exhaustion(message)) {
-        throw JavaScriptCompileError("P_JS_RESOURCE_LIMIT",
-                                     "JavaScript evaluation exceeded a configured resource limit",
-                                     resource_witness(limits, budget, accounting));
+        throw JavaScriptCompileError(
+            "P_JS_RESOURCE_LIMIT",
+            "JavaScript evaluation exceeded a configured resource limit",
+            resource_witness(limits, budget, accounting), std::move(source_span));
     }
-    throw JavaScriptCompileError("P_JS_EVALUATION", "JavaScript evaluation failed: " + message,
-                                 resource_witness(limits, budget, accounting));
+    throw JavaScriptCompileError("P_JS_EVALUATION",
+                                 "JavaScript evaluation failed: " + message,
+                                 resource_witness(limits, budget, accounting),
+                                 std::move(source_span));
 }
 
 json projected_program_document(const json& definition) {
@@ -1909,19 +2131,19 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
         refresh_external_interrupt(budget);
         if (budget.reason != InterruptReason::None)
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
 
         JSValue compiled = JS_Eval(scope.context(), script.data(), script.size(), "<program>",
                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         if (JS_IsException(compiled)) {
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
         }
         auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
         JSValue module_result = JS_EvalFunction(scope.context(), compiled);
         if (JS_IsException(module_result)) {
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
         }
         const auto module_state = JS_PromiseState(scope.context(), module_result);
         if (module_state == JS_PROMISE_PENDING) {
@@ -1929,16 +2151,18 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
             throw JavaScriptCompileError(
                 "P_JS_DEFINE_ASYNC",
                 "JavaScript definition modules must complete synchronously without top-level await",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "define"));
         }
         if (module_state == JS_PROMISE_REJECTED) {
             JSValue    rejection = JS_PromiseResult(scope.context(), module_result);
-            const auto message   = value_text(scope.context(), rejection);
+            const auto details   = exception_details(scope.context(), rejection, script);
+            const auto& message  = details.message;
             JS_FreeValue(scope.context(), rejection);
             JS_FreeValue(scope.context(), module_result);
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting(),
-                                     "JavaScript definition module failed: " + message);
+                                     &scope.accounting(), script,
+                                     "JavaScript definition module failed: " + message,
+                                     details.source_span);
         }
         if (module_state != JS_PROMISE_FULFILLED) {
             JS_FreeValue(scope.context(), module_result);
@@ -1952,13 +2176,13 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
         JSValue module_namespace = JS_GetModuleNamespace(scope.context(), module);
         if (JS_IsException(module_namespace)) {
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
         }
         JSValue define = JS_GetPropertyStr(scope.context(), module_namespace, "define");
         if (JS_IsException(define)) {
             JS_FreeValue(scope.context(), module_namespace);
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
         }
         if (!JS_IsFunction(scope.context(), define)) {
             JS_FreeValue(scope.context(), define);
@@ -1966,14 +2190,14 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
             throw JavaScriptCompileError(
                 "P_JS_DEFINE_MISSING",
                 "JavaScript source must export a synchronous define() function",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "define"));
         }
         JSValue main = JS_GetPropertyStr(scope.context(), module_namespace, "main");
         if (JS_IsException(main)) {
             JS_FreeValue(scope.context(), define);
             JS_FreeValue(scope.context(), module_namespace);
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
         }
         const bool has_control_generator = !JS_IsUndefined(main);
         if (has_control_generator && !JS_IsFunction(scope.context(), main)) {
@@ -1983,7 +2207,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
             throw JavaScriptCompileError(
                 "P_JS_CONTROL_MAIN",
                 "JavaScript control entry main must be a function when exported",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "main"));
         }
         JS_FreeValue(scope.context(), main);
         JSValue builder = JS_Call(scope.context(), define, JS_UNDEFINED, 0, nullptr);
@@ -1991,11 +2215,11 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
         JS_FreeValue(scope.context(), module_namespace);
         if (JS_IsException(builder)) {
             throw_evaluation_failure(scope.context(), capture, budget, limits,
-                                     &scope.accounting());
+                                     &scope.accounting(), script);
         }
         if (!capture.failure_code.empty()) {
             JS_FreeValue(scope.context(), builder);
-            throw_captured_failure(capture);
+            throw_captured_failure(capture, source_span_for_token(script, "define"));
         }
         auto* graph = static_cast<GraphBuilder*>(JS_GetOpaque(builder, graph_builder_class_id));
         if (!graph || graph->context != scope.context() || graph->capture != &capture ||
@@ -2004,7 +2228,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
             throw JavaScriptCompileError(
                 "P_JS_DEFINE_VALUE",
                 "JavaScript define() must return exactly one open NeoGraph graph builder",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "define"));
         }
         graph->sealed   = true;
         auto definition = detail::owned_json_copy(graph->definition);
@@ -2030,10 +2254,11 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
 
 struct JavaScriptGenerator::Impl {
 #if defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
-    explicit Impl(const JavaScriptCompileLimits&                          limits,
-                  std::function<bool()>                                  cancellation_requested,
-                  std::optional<std::chrono::steady_clock::time_point>   deadline)
-        : configured_limits(limits), scope(configured_limits) {
+    explicit Impl(const JavaScriptCompileLimits&                        limits,
+                  std::string                                           source,
+                  std::function<bool()>                                 cancellation_requested,
+                  std::optional<std::chrono::steady_clock::time_point> deadline)
+        : configured_limits(limits), source_text(std::move(source)), scope(configured_limits) {
         capture.max_native_builder_bytes = configured_limits.max_generated_document_bytes;
         budget.limit                     = configured_limits.max_interrupt_polls;
         budget.deadline                  = deadline.value_or(
@@ -2048,13 +2273,14 @@ struct JavaScriptGenerator::Impl {
     }
 
     JavaScriptCompileLimits configured_limits;
+    std::string              source_text;
     QuickJsScope            scope;
     DefinitionCapture       capture;
     InterruptBudget         budget;
     JSValue                 iterator = JS_UNDEFINED;
     bool                    finished = false;
 #else
-    explicit Impl(const JavaScriptCompileLimits&, std::function<bool()>,
+    explicit Impl(const JavaScriptCompileLimits&, std::string, std::function<bool()>,
                   std::optional<std::chrono::steady_clock::time_point>) {}
 #endif
 };
@@ -2083,14 +2309,21 @@ JSValue json_to_js_value(JSContext*                         context,
                                         const DefinitionCapture&       capture,
                                         InterruptBudget&               budget,
                                         const JavaScriptCompileLimits& limits,
-                                        const AllocationAccounting*    accounting = nullptr) {
-    throw_evaluation_failure(context, capture, budget, limits, accounting);
+                                        const AllocationAccounting*    accounting = nullptr,
+                                        std::string_view                source = {}) {
+    throw_evaluation_failure(context, capture, budget, limits, accounting, source);
 }
 
 [[noreturn]] void throw_control_value_error(std::string message,
                                             std::string code = "P_JS_CONTROL_VALUE") {
     throw JavaScriptCompileError(std::move(code), std::move(message),
                                  json{{"engine", "quickjs"}});
+}
+
+[[noreturn]] void throw_control_value_error(std::string message,
+                                            std::optional<SourceSpan> source_span) {
+    throw JavaScriptCompileError("P_JS_CONTROL_VALUE", std::move(message),
+                                 json{{"engine", "quickjs"}}, std::move(source_span));
 }
 
 JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     impl,
@@ -2100,19 +2333,21 @@ JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     imp
     if (!JS_IsObject(result)) {
         JS_FreeValue(context, result);
         throw_control_value_error(
-            "JavaScript control main().next() must return an iterator result");
+            "JavaScript control main().next() must return an iterator result",
+            source_span_for_token(impl.source_text, "main"));
     }
 
     JSValue done = JS_GetPropertyStr(context, result, "done");
     if (JS_IsException(done)) {
         JS_FreeValue(context, result);
         throw_control_failure(context, impl.capture, impl.budget, limits,
-                              &impl.scope.accounting());
+                              &impl.scope.accounting(), impl.source_text);
     }
     if (!JS_IsBool(done)) {
         JS_FreeValue(context, done);
         JS_FreeValue(context, result);
-        throw_control_value_error("JavaScript control iterator result.done must be boolean");
+        throw_control_value_error("JavaScript control iterator result.done must be boolean",
+                                  source_span_for_token(impl.source_text, "main"));
     }
     const bool is_done = JS_ToBool(context, done) != 0;
     JS_FreeValue(context, done);
@@ -2121,13 +2356,14 @@ JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     imp
     if (JS_IsException(value)) {
         JS_FreeValue(context, result);
         throw_control_failure(context, impl.capture, impl.budget, limits,
-                              &impl.scope.accounting());
+                              &impl.scope.accounting(), impl.source_text);
     }
     if (JS_IsUndefined(value)) {
         JS_FreeValue(context, value);
         JS_FreeValue(context, result);
         throw_control_value_error(
-            "JavaScript control iterator result.value must be canonical JSON, not undefined");
+            "JavaScript control iterator result.value must be canonical JSON, not undefined",
+            source_span_for_token(impl.source_text, "yield"));
     }
 
     json                              converted;
@@ -2154,14 +2390,15 @@ JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     imp
     if (!converted_ok) {
         if (conversion.error.empty()) {
             throw_control_failure(context, impl.capture, impl.budget, limits,
-                                  &impl.scope.accounting());
+                                  &impl.scope.accounting(), impl.source_text);
         }
         if (conversion.error == "graph configuration exceeds the native byte limit")
             throw_control_value_error(
                 "JavaScript control iterator result.value exceeds its native byte limit",
                 "P_JS_RESOURCE_LIMIT");
         throw_control_value_error(
-            "JavaScript control iterator result.value is not canonical JSON: " + conversion.error);
+            "JavaScript control iterator result.value is not canonical JSON: " + conversion.error,
+            source_span_for_token(impl.source_text, "yield"));
     }
     return JavaScriptGeneratorStep{is_done, std::move(converted), std::move(sealed_command)};
 }
@@ -2190,7 +2427,7 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
     const auto envelope = source.document();
     const auto script   = envelope.at("source").get<std::string>();
 
-    auto  impl    = std::make_unique<Impl>(limits, std::move(cancellation_requested), deadline);
+    auto impl = std::make_unique<Impl>(limits, script, std::move(cancellation_requested), deadline);
     auto* context = impl->scope.context();
     JS_SetContextOpaque(context, &impl->capture);
     try {
@@ -2199,19 +2436,19 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
         refresh_external_interrupt(impl->budget);
         if (impl->budget.reason != InterruptReason::None)
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
 
         JSValue compiled = JS_Eval(context, script.data(), script.size(), "<program-control>",
                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         if (JS_IsException(compiled)) {
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
         JSValue module_result = JS_EvalFunction(context, compiled);
         if (JS_IsException(module_result)) {
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         const auto module_state = JS_PromiseState(context, module_result);
         if (module_state == JS_PROMISE_PENDING) {
@@ -2219,16 +2456,18 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
             throw JavaScriptCompileError(
                 "P_JS_CONTROL_ASYNC",
                 "JavaScript control modules must complete synchronously without top-level await",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "main"));
         }
         if (module_state == JS_PROMISE_REJECTED) {
             JSValue    rejection = JS_PromiseResult(context, module_result);
-            const auto message   = value_text(context, rejection);
+            const auto details   = exception_details(context, rejection, script);
+            const auto& message  = details.message;
             JS_FreeValue(context, rejection);
             JS_FreeValue(context, module_result);
             throw_evaluation_failure(context, impl->capture, impl->budget, limits,
-                                     &impl->scope.accounting(),
-                                     "JavaScript control module failed: " + message);
+                                     &impl->scope.accounting(), impl->source_text,
+                                     "JavaScript control module failed: " + message,
+                                     details.source_span);
         }
         if (module_state != JS_PROMISE_FULFILLED) {
             JS_FreeValue(context, module_result);
@@ -2242,13 +2481,13 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
         JSValue module_namespace = JS_GetModuleNamespace(context, module);
         if (JS_IsException(module_namespace)) {
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         JSValue main = JS_GetPropertyStr(context, module_namespace, "main");
         JS_FreeValue(context, module_namespace);
         if (JS_IsException(main)) {
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         if (JS_IsUndefined(main)) {
             JS_FreeValue(context, main);
@@ -2258,34 +2497,35 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
             JS_FreeValue(context, main);
             throw JavaScriptCompileError("P_JS_CONTROL_MAIN",
                                          "JavaScript control entry main must be a function",
-                                         json{{"engine", "quickjs"}});
+                                         json{{"engine", "quickjs"}},
+                                         source_span_for_token(script, "main"));
         }
 
         JSValue input_value = json_to_js_value(context, input, limits);
         if (JS_IsException(input_value)) {
             JS_FreeValue(context, main);
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         JSValue iterator = JS_Call(context, main, JS_UNDEFINED, 1, &input_value);
         JS_FreeValue(context, input_value);
         JS_FreeValue(context, main);
         if (JS_IsException(iterator)) {
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         if (!JS_IsObject(iterator)) {
             JS_FreeValue(context, iterator);
             throw JavaScriptCompileError(
                 "P_JS_CONTROL_MAIN",
                 "JavaScript control main(input) must return a synchronous generator",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "main"));
         }
         JSValue next = JS_GetPropertyStr(context, iterator, "next");
         if (JS_IsException(next)) {
             JS_FreeValue(context, iterator);
             throw_control_failure(context, impl->capture, impl->budget, limits,
-                                  &impl->scope.accounting());
+                                  &impl->scope.accounting(), impl->source_text);
         }
         const bool is_generator = JS_IsFunction(context, next);
         JS_FreeValue(context, next);
@@ -2294,7 +2534,7 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
             throw JavaScriptCompileError(
                 "P_JS_CONTROL_MAIN",
                 "JavaScript control main(input) must return a synchronous generator",
-                json{{"engine", "quickjs"}});
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "main"));
         }
         impl->iterator = iterator;
         JavaScriptGenerator generator(std::move(impl));
@@ -2323,11 +2563,11 @@ JavaScriptGeneratorStep JavaScriptGenerator::next(std::optional<json> response) 
     refresh_external_interrupt(impl_->budget);
     if (impl_->budget.reason != InterruptReason::None)
         throw_control_failure(context, impl_->capture, impl_->budget, limits,
-                              &impl_->scope.accounting());
+                              &impl_->scope.accounting(), impl_->source_text);
     JSValue     next    = JS_GetPropertyStr(context, impl_->iterator, "next");
     if (JS_IsException(next)) {
         throw_control_failure(context, impl_->capture, impl_->budget, limits,
-                              &impl_->scope.accounting());
+                              &impl_->scope.accounting(), impl_->source_text);
     }
     if (!JS_IsFunction(context, next)) {
         JS_FreeValue(context, next);
@@ -2342,7 +2582,7 @@ JavaScriptGeneratorStep JavaScriptGenerator::next(std::optional<json> response) 
         if (JS_IsException(response_value)) {
             JS_FreeValue(context, next);
             throw_control_failure(context, impl_->capture, impl_->budget, limits,
-                                  &impl_->scope.accounting());
+                                  &impl_->scope.accounting(), impl_->source_text);
         }
         argc = 1;
     }
@@ -2352,7 +2592,7 @@ JavaScriptGeneratorStep JavaScriptGenerator::next(std::optional<json> response) 
     JS_FreeValue(context, next);
     if (JS_IsException(result)) {
         throw_control_failure(context, impl_->capture, impl_->budget, limits,
-                              &impl_->scope.accounting());
+                              &impl_->scope.accounting(), impl_->source_text);
     }
     auto step       = decode_generator_step(*impl_, result, limits);
     impl_->finished = step.done;
