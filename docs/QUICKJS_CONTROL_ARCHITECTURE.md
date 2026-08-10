@@ -1,6 +1,7 @@
 # NeoGraph QuickJS Control Architecture
 
-Status: Base runtime implemented; final legacy drain/removal remains gated
+Status: Base runtime implemented; Core DSL/elaborator deletion complete, Program
+legacy drain/removal remains gated
 Date: 2026-08-08
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Supersedes: user authoring through the bounded Core DSL and Program JSON operation DSL
@@ -8,6 +9,7 @@ Runtime selection: QuickJS with JavaScript
 Canonical migration plan: `QUICKJS_CONTROL_MIGRATION.md`
 Executable plan: `../spec/quickjs-control-runtime.sdd.yaml`
 Public authoring boundary: `QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`
+Execution profiles and extension boundary: [`QUICKJS_EXECUTION_PROFILES.md`](QUICKJS_EXECUTION_PROFILES.md)
 Controller extension: [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
 defines developer-authorized profiles, capability compilation, immutable
 self-evolution, and the falsifiable general-agent-controller hypothesis.
@@ -17,15 +19,19 @@ Workstreams: [#24](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues
 [#26](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/26),
 [#27](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27), and
 [#28](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/28)
+Related authority-profile workstream: [#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35)
 
 
 ## Decision
 
 NeoGraph will have one user-authored language: standard JavaScript executed by
-embedded QuickJS. The only public authoring frontends after cutover are that
-sealed QuickJS surface and the direct NeoGraph C++ embedding API for trusted
-applications. This replaces both the bounded Core DSL and the Program JSON
-operation DSL. NeoGraph will own only the domain boundary that JavaScript cannot
+embedded QuickJS. The public authoring frontends after cutover are the
+profile-governed QuickJS surface and the direct NeoGraph C++ embedding API for
+trusted applications. This replaces both the bounded Core DSL and the Program
+JSON operation DSL. The restricted durable profile exposes a sealed command
+kernel; an explicitly admitted trusted profile remains within the same
+JavaScript frontend while carrying its own authority, identity, and execution
+guarantee. NeoGraph will own only the domain boundary that JavaScript cannot
 provide: typed graph construction, canonical Core IR, capability admission,
 typed host calls, budgets, cancellation, durability, replay, version identity,
 and dispatch to pinned `GraphEngine` generations.
@@ -64,8 +70,10 @@ QuickJS is pinned at release `2026-06-04`; its audited source digest,
 license, provenance, and isolated prefixed build sources are recorded under
 [`../deps/quickjs/`](../deps/quickjs/). The default-off
 `NEOGRAPH_BUILD_QUICKJS_CONTROL` target keeps Core-only consumers independent
-of that dependency. Final cross-platform qualification and deletion of the
-drain-only legacy implementation remain explicit cutover gates.
+of that dependency. The Core DSL/elaborator and Program JSON authoring
+implementation are deleted, and the scoped no-deployment drain proof passes.
+Cross-platform qualification, installed-consumer evidence, and final release
+gates remain explicit.
 
 Authoritative upstream reference:
 <https://bellard.org/quickjs/quickjs.html>
@@ -137,9 +145,8 @@ conditions. NeoGraph does not reproduce those features in the builder API.
 
 ### Program control
 
-A control module exports a generator entry point. Generator yields are the only
-way untrusted JavaScript requests durable NeoGraph work.
-
+A restricted durable control module exports a synchronous generator entry point.
+Generator yields are the only way that profile requests durable NeoGraph work.
 ```javascript
 export function* main(input) {
   let draft = input;
@@ -176,13 +183,17 @@ JavaScript generator
 
 Unknown objects, forged slots, malformed arguments, unsupported commands, and
 commands outside the admitted closure fail before dispatch.
+The profile-specific namespace, native-extension, and asynchronous-execution
+rules are defined in [QuickJS Execution Profiles and Extension
+Boundary](QUICKJS_EXECUTION_PROFILES.md).
+
 
 ## Native extension model
 
-The language runtime must be extensible from C/C++. User programs receive no
-arbitrary C FFI or ambient host authority by default. A developer may admit a
-privileged profile with broader authority under the explicit guarantee and
-identity rules below.
+The language runtime supports C/C++ extension through a profile-governed
+boundary. User programs receive no arbitrary C FFI or ambient host authority by
+default. A developer may admit a privileged profile with broader authority under
+the explicit guarantee and identity rules below.
 
 ### Pure native intrinsics
 
@@ -234,10 +245,10 @@ The implementation must extend the existing `ExecutableManifest`,
 `ExecutableKind::Imported`, `EffectMode`, admission profile, and catalog binding
 surfaces instead of creating a second native registry.
 
-## JavaScript safety profile
+## Restricted JavaScript safety profile
 
-The default control context is constructed from an allowlist. It does not expose
-the standalone QuickJS `std` or `os` modules.
+The default `restricted_durable` control context is constructed from an
+allowlist. It does not expose the standalone QuickJS `std` or `os` modules.
 
 The initial profile disables or excludes:
 
@@ -275,7 +286,10 @@ replacement, or mutation of the remaining balance.
 The canonical authority model, `strict`/`recorded`/`unmanaged` guarantee
 lattice, composition rules, capability-compiler boundary, and self-evolution
 protocol are defined in
-[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md).
+[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md). The
+profile division—restricted durable generators, trusted direct execution, and
+the deferred durable-Promise design—is defined in
+[QuickJS Execution Profiles and Extension Boundary](QUICKJS_EXECUTION_PROFILES.md).
 
 ## Deterministic replay
 
@@ -335,11 +349,12 @@ Strict Core JSON remains the canonical serialization and low-level Core
 interchange format; it is validated data, not a public programming language.
 Direct C++ embedding may construct validated in-process `json` values, but
 Harness and other public source transports do not accept standalone Core or
-Program JSON authoring after cutover. The bounded Core topology elaborator,
-Harness `mode: "dsl"`, Program JSON operation trees, Program-v2/v3/v4 authoring
-schemas, and Harness `mode: "program"` are frozen legacy authoring surfaces.
-They receive only correctness, security, and migration fixes while stored
-definitions and in-flight runs drain. No new language feature is added to them.
+Program JSON authoring after cutover. The bounded Core topology elaborator and
+Harness `mode: "dsl"` were deleted in the Core authoring cleanup; requests that
+still name them fail with an explicit migration diagnostic. Program JSON
+operation trees, Program-v2/v3/v4 authoring schemas, and Harness `mode:
+"program"` remain frozen legacy surfaces under the separate stored-version
+drain. No new language feature is added to them.
 
 The migration uses a clean cutover:
 
@@ -353,8 +368,8 @@ The migration uses a clean cutover:
 6. switch all new user authoring to JavaScript;
 7. classify and drain or explicitly migrate stored Core DSL and Program DSL
    versions; and
-8. delete the Core elaborator and legacy Program parser/operation dispatcher
-   after the announced compatibility boundary.
+8. remove the remaining legacy Program parser/operation dispatcher after the
+   announced compatibility boundary (the Core elaborator deletion is complete).
 
 There is no permanent dual-language authoring product. Compatibility adapters
 do not become alternate compilers or runtimes.
@@ -405,6 +420,8 @@ following evidence exists:
 - Serializing raw QuickJS heaps, C pointers, callbacks, or live host objects.
 - Moving Core node execution, persistence ownership, or effect commit into
   QuickJS.
+- Treating ordinary JavaScript Promises as a durable command protocol without a
+  separately implemented scheduler, journal, recovery, and ordering contract.
 - Claiming Turing completeness makes admitted runs unbounded; production runs
   remain finite under nonrenewable resource limits.
 
@@ -415,6 +432,6 @@ This document owns the user-authored language and embedded-runtime direction.
 machine-readable capability, immutable self-evolution, and controller-evidence
 extension. `V1_ARCHITECTURE.md` continues to own the retained Core IR, catalog,
 activation, tenant, capability, durability, and `GraphEngine` boundaries.
-Where the earlier architecture preserves the Core elaborator, requires a
+Where the earlier architecture preserves the Core authoring DSL, requires a
 bounded Program operation DSL, or rejects an embedded control interpreter, this
 document supersedes it.

@@ -3,7 +3,7 @@
 
 spec:
   id: self-evolving-agent-controller
-  revision: 2
+  revision: 3
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -18,6 +18,7 @@ spec:
   tracking_epic: 29
   workstreams:
     authority_and_guarantees: 30
+    trusted_quickjs_execution_profiles: 35
     capability_compiler: 31
     reusable_memory: 32
     evolution_loop: 33
@@ -709,7 +710,7 @@ phases:
       Extension implementation uses delivered base interfaces and no duplicate
       language, runtime, scheduler, journal, registry, or activation path exists.
   C1_authority_and_guarantee_profiles:
-    issue: 30
+    issues: [30, 35]
     depends_on: [C0_base_contract_gate]
     deliver:
       - versioned authority profile contract
@@ -718,6 +719,10 @@ phases:
       - provider selection and dynamic child authority
       - authorized durable budget grants
       - strict recorded unmanaged guarantee propagation
+      - restricted durable versus trusted direct JavaScript execution-profile contract
+      - explicit trusted async lifecycle, identity, and unmanaged-guarantee reporting
+      - non-extensible restricted command kernel and extensible trusted namespace with locked kernel members
+      - deferred durable-Promise scheduler boundary
     gate: >-
       Default source has zero ambient authority, every privileged fixture is
       available only with an explicit grant, and every composed Program reports
@@ -789,10 +794,11 @@ documentation:
   authority: docs/SELF_EVOLVING_AGENT_CONTROLLER.md
   base_links_required:
     - docs/QUICKJS_CONTROL_ARCHITECTURE.md
+    - docs/QUICKJS_EXECUTION_PROFILES.md
     - docs/QUICKJS_CONTROL_MIGRATION.md
     - docs/V1_ARCHITECTURE.md
     - spec/quickjs-control-runtime.sdd.yaml
-  issue_links_required: [29, 30, 31, 32, 33, 34]
+  issue_links_required: [29, 30, 31, 32, 33, 34, 35]
   update_rule: >-
     Public API, examples, claims, and changelog update only after the
     corresponding behavior is implemented and smoke-tested. Architecture and

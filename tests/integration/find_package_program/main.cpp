@@ -219,7 +219,6 @@ int main() {
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
         .allow_source_kind(SourceKind::CppBuilder)
-        .allow_source_kind(SourceKind::CanonicalJson)
         .allow_executable(
             ExecutableIdentity{ExecutableKind::Node, "installed-node", "1.0.0", hash('1')})
         .allow_executable(
@@ -244,8 +243,10 @@ int main() {
     const SourceCoordinate authored{"installed-consumer", "/steps/0", span};
     const ImportRef        import{"module:installed", hash('9')};
     const SourceMapEntry   mapping{"/steps/0", authored};
-    auto                   stored_source = ProgramSource::from_canonical_json(
-        "installed-consumer", R"({"program_schema_version":1,"steps":[]})", {import}, {mapping});
+    auto                   stored_source = ProgramSource::from_cpp_builder(
+        "installed-consumer", 1,
+        neograph::json{{"program_schema_version", 1}, {"steps", neograph::json::array()}},
+        {import}, {mapping});
     const auto source_round_trip = ProgramSource::parse(stored_source.serialize_canonical());
 
     Diagnostic diagnostic;

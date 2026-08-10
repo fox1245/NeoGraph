@@ -27,11 +27,11 @@ add_executable(neograph_tests
     test_host_admission.cpp
     test_compiler.cpp
     test_compiler_strict.cpp
+    test_graph_upgrade.cpp
     test_validator.cpp
     test_graph_registry_local.cpp
     test_pbt_roundtrip.cpp
     test_corpus.cpp
-    test_elaborator.cpp
     test_evolution.cpp
     test_harness_bench.cpp
     test_schema_evolution.cpp

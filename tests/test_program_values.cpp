@@ -43,8 +43,9 @@ SealedCoreDefinition sealed_definition(std::string name, json definition) {
 }
 
 ProgramSource make_source() {
-    return ProgramSource::from_canonical_json(
-        "source.json", R"({"program_schema_version":1,"nodes":{},"edges":[]})");
+    return ProgramSource::from_cpp_builder(
+        "source.cpp", 1,
+        json{{"program_schema_version", 1}, {"nodes", json::object()}, {"edges", json::array()}});
 }
 
 ProgramBundleData make_bundle_data(const ProgramSource& source) {
@@ -111,7 +112,7 @@ AdmissionProfile make_admission_profile(const RegistrySnapshot& registry,
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     return std::move(builder).build();
 }
@@ -142,15 +143,27 @@ ProgramVersionData make_version_data(const ProgramBundle& bundle) {
             {CorePlanIdentity{"beta", sha('f')}, CorePlanIdentity{"alpha", sha('1')}}});
 }
 
-TEST(ProgramSourceTest, CanonicalIdentityIgnoresObjectKeyOrder) {
-    auto first = ProgramSource::from_canonical_json(
-        "source-a", R"({"program_schema_version":1,"nodes":{},"edges":[]})");
-    auto second = ProgramSource::from_canonical_json(
-        "source-b", R"({"edges":[],"nodes":{},"program_schema_version":1})");
+TEST(ProgramSourceTest, CppBuilderIdentityIgnoresObjectKeyOrder) {
+    auto first = ProgramSource::from_cpp_builder(
+        "source-a", 1,
+        json{{"program_schema_version", 1}, {"nodes", json::object()}, {"edges", json::array()}});
+    auto second = ProgramSource::from_cpp_builder(
+        "source-b", 1,
+        json{{"edges", json::array()}, {"nodes", json::object()}, {"program_schema_version", 1}});
 
     EXPECT_EQ(first.source_hash(), second.source_hash());
     EXPECT_EQ(first.canonical_document(), second.canonical_document());
-    EXPECT_EQ(first.kind(), SourceKind::CanonicalJson);
+    EXPECT_EQ(first.kind(), SourceKind::CppBuilder);
+}
+
+TEST(ProgramSourceTest, LegacyCanonicalKindRemainsStorageOnly) {
+    auto stored = json::parse(make_source().serialize_canonical());
+    stored["kind"] = "canonical_json";
+
+    const auto restored = ProgramSource::parse(stored.dump());
+    EXPECT_EQ(restored.kind(), SourceKind::CanonicalJson);
+    EXPECT_EQ(restored.canonical_document(), make_source().canonical_document());
+    EXPECT_EQ(restored.source_hash(), make_source().source_hash());
 }
 
 TEST(ProgramSourceTest, JavaScriptSourcePinsEngineAndHostAbiInItsEnvelope) {
@@ -185,32 +198,12 @@ TEST(ProgramSourceTest, StoredJavaScriptSourceRejectsAnIncompatibleHostAbi) {
     }
 }
 
-TEST(ProgramSourceTest, ParseFailureDoesNotFabricateSpanForUtf8Source) {
-    try {
-        (void)ProgramSource::from_canonical_json("utf8-source", R"({"이름":"값",})");
-        FAIL() << "expected ProgramDiagnosticError";
-    } catch (const ProgramDiagnosticError& error) {
-        EXPECT_EQ(error.diagnostic().code, "P_SOURCE_JSON_PARSE");
-        EXPECT_EQ(error.diagnostic().primary.source_id, "utf8-source");
-
-        EXPECT_FALSE(error.diagnostic().primary.span.has_value());
-    }
-}
-
 TEST(ProgramSourceTest, InvalidSourceIdIsRejectedBeforeParseDiagnostics) {
-    EXPECT_THROW((void)ProgramSource::from_canonical_json("", "{"), std::invalid_argument);
-    EXPECT_THROW(
-        (void)ProgramSource::from_canonical_json(std::string(1, static_cast<char>(0xff)), "{"),
-        std::invalid_argument);
-}
-
-TEST(ProgramSourceTest, RejectsNegativeAndOverflowingPersistedVersions) {
-    EXPECT_THROW((void)ProgramSource::from_canonical_json("negative-version",
-                                                          R"({"program_schema_version":-1})"),
-                 ProgramDiagnosticError);
-    EXPECT_THROW((void)ProgramSource::from_canonical_json(
-                     "overflowing-version", R"({"program_schema_version":4294967296})"),
-                 ProgramDiagnosticError);
+    EXPECT_THROW((void)ProgramSource::from_cpp_builder("", 1, json::object()),
+                 std::invalid_argument);
+    EXPECT_THROW((void)ProgramSource::from_cpp_builder(
+                     std::string(1, static_cast<char>(0xff)), 1, json::object()),
+                 std::invalid_argument);
 }
 
 TEST(ProgramSourceTest, StoredParserRejectsDuplicateObjectMembers) {
@@ -228,16 +221,20 @@ TEST(ProgramSourceTest, StoredParserRejectsDuplicateObjectMembers) {
 }
 
 TEST(ProgramSourceTest, StrictParserBoundsBytesAndNestingBeforeMaterialization) {
-    std::string deeply_nested(257, '[');
+    std::string deeply_nested = R"({"payload":)";
+    deeply_nested.append(257, '[');
     deeply_nested += '0';
     deeply_nested.append(257, ']');
-    EXPECT_THROW((void)ProgramSource::from_canonical_json("deep-source", std::move(deeply_nested)),
+    deeply_nested += '}';
+    EXPECT_THROW((void)ProgramSource::from_cpp_builder("deep-source", 1,
+                                                       json::parse(deeply_nested)),
                  ProgramDiagnosticError);
 
     std::string oversized = R"({"program_schema_version":1,"payload":")";
     oversized.append(16u * 1024u * 1024u, 'x');
     oversized += R"("})";
-    EXPECT_THROW((void)ProgramSource::from_canonical_json("large-source", std::move(oversized)),
+    EXPECT_THROW((void)ProgramSource::from_cpp_builder("large-source", 1,
+                                                       json::parse(oversized)),
                  ProgramDiagnosticError);
 }
 TEST(ProgramSourceTest, CppBuilderDetachesProxyJsonInput) {

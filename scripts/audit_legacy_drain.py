@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Produce a deterministic, fail-closed proof for QuickJS legacy-runtime removal.
 
-The audit consumes a frozen, explicitly enumerated storage snapshot.  It never
-opens a database writable and does not infer legacy status from a JSON shape:
-known Program/Harness records are classified from their persisted source and
-frontend receipts; every discovered legacy record needs an explicit terminal
-classification in the inventory.
+The audit consumes either a frozen, explicitly enumerated storage snapshot or
+an explicit operator attestation that no pre-release or production deployment
+ever existed. It never opens a database writable and does not infer legacy
+status from a JSON shape: known Program/Harness records are classified from
+their persisted source and frontend receipts; every discovered legacy record
+needs an explicit terminal classification in the inventory.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,6 +29,10 @@ INVENTORY_FORMAT = "neograph-legacy-drain-inventory"
 PROOF_FORMAT = "neograph-legacy-drain-proof"
 SCHEMA_VERSION = 1
 SHA256_PREFIX = "sha256:"
+NO_DEPLOYMENT_STATEMENT = "no_pre_release_or_production_deployment_has_ever_existed"
+NO_DEPLOYMENT_SCOPE = "all_neograph_program_and_harness_durable_state"
+
+
 
 CURRENT_SOURCE_KINDS = {"javascript", "cpp_builder"}
 LEGACY_SOURCE_KIND = "canonical_json"
@@ -50,11 +57,16 @@ HARNESS_TERMINAL_RUN_STATUSES = {
 }
 STORE_KINDS = {
     "program_sqlite",
+    "program_postgres_dump",
     "program_transitions_sqlite",
     "harness_sqlite",
     "harness_file",
 }
-
+SQLITE_STORE_KINDS = {
+    "program_sqlite",
+    "program_transitions_sqlite",
+    "harness_sqlite",
+}
 SQLITE_LIVE_SIDECAR_SUFFIXES = ("-journal", "-shm", "-wal")
 
 
@@ -90,10 +102,11 @@ class LegacyArtifact:
     bundle_id: str | None = None
     active_runs: list[str] = field(default_factory=list)
     classification: dict[str, Any] | None = None
+    active_activation_scopes: list[str] = field(default_factory=list)
 
     @property
     def active_or_recoverable(self) -> bool:
-        return bool(self.active_runs)
+        return bool(self.active_runs or self.active_activation_scopes)
 
     def as_json(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -103,6 +116,7 @@ class LegacyArtifact:
             "store_id": self.store_id,
             "active_or_recoverable": self.active_or_recoverable,
             "active_run_ids": sorted(self.active_runs),
+            "active_activation_scopes": sorted(self.active_activation_scopes),
         }
         if self.bundle_id is not None:
             value["bundle_id"] = self.bundle_id
@@ -133,6 +147,12 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return SHA256_PREFIX + digest.hexdigest()
+
+
+def sha256_regular_file(path: Path, context: str) -> str:
+    if not path.is_file() or path.is_symlink():
+        raise AuditError(f"{context} is not a non-symlink regular file: {path}")
+    return sha256_file(path)
 
 
 def sqlite_sidecar_suffixes(path: Path) -> tuple[str, ...]:
@@ -181,6 +201,16 @@ def require_bool(value: Any, context: str) -> bool:
     return value
 
 
+def require_positive_integer(value: Any, context: str) -> int:
+    if isinstance(value, str):
+        if not value.isascii() or not value.isdecimal() or value.startswith("0"):
+            raise AuditError(f"{context} must be a positive integer")
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise AuditError(f"{context} must be a positive integer")
+    return value
+
+
 def require_exact_keys(value: dict[str, Any], context: str, keys: set[str]) -> None:
     actual = set(value)
     missing = keys - actual
@@ -205,6 +235,23 @@ def parse_timestamp(value: Any, context: str) -> str:
         raise AuditError(f"{context} must include a timezone")
     return text
 
+def validate_no_deployment_attestation(value: Any) -> dict[str, Any]:
+    attestation = require_object(value, "inventory.no_deployment_attestation")
+    require_exact_keys(
+        attestation,
+        "inventory.no_deployment_attestation",
+        {"attestation_id", "attested_by", "statement", "scope"},
+    )
+    require_string(attestation["attestation_id"], "inventory.no_deployment_attestation.attestation_id")
+    require_string(attestation["attested_by"], "inventory.no_deployment_attestation.attested_by")
+    if attestation["statement"] != NO_DEPLOYMENT_STATEMENT:
+        raise AuditError("inventory.no_deployment_attestation.statement is unsupported")
+    if attestation["scope"] != NO_DEPLOYMENT_SCOPE:
+        raise AuditError("inventory.no_deployment_attestation.scope is unsupported")
+    return attestation
+
+
+
 
 def resolve_snapshot_path(root: Path, relative_path: Any, context: str) -> Path:
     text = require_string(relative_path, context)
@@ -228,18 +275,20 @@ def parse_inventory(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise AuditError(f"cannot read inventory {path}: {error}") from error
     document = require_object(document, "inventory")
+    base_keys = {
+        "format",
+        "schema_version",
+        "cutover_id",
+        "captured_at",
+        "inventory_complete",
+        "stores",
+        "legacy_artifacts",
+    }
+    has_no_deployment_attestation = "no_deployment_attestation" in document
     require_exact_keys(
         document,
         "inventory",
-        {
-            "format",
-            "schema_version",
-            "cutover_id",
-            "captured_at",
-            "inventory_complete",
-            "stores",
-            "legacy_artifacts",
-        },
+        base_keys | ({"no_deployment_attestation"} if has_no_deployment_attestation else set()),
     )
     if document["format"] != INVENTORY_FORMAT:
         raise AuditError("inventory format is unsupported")
@@ -249,9 +298,16 @@ def parse_inventory(path: Path) -> dict[str, Any]:
     parse_timestamp(document["captured_at"], "inventory.captured_at")
     require_bool(document["inventory_complete"], "inventory.inventory_complete")
 
+    if has_no_deployment_attestation:
+        validate_no_deployment_attestation(document["no_deployment_attestation"])
+
     stores = document["stores"]
-    if not isinstance(stores, list) or not stores:
-        raise AuditError("inventory.stores must be a non-empty array")
+    if not isinstance(stores, list):
+        raise AuditError("inventory.stores must be an array")
+    if not stores and not has_no_deployment_attestation:
+        raise AuditError("inventory.stores must be a non-empty array without no_deployment_attestation")
+    if stores and has_no_deployment_attestation:
+        raise AuditError("inventory.no_deployment_attestation requires inventory.stores to be empty")
     seen_store_ids: set[str] = set()
     for index, store in enumerate(stores):
         store = require_object(store, f"inventory.stores[{index}]")
@@ -267,6 +323,8 @@ def parse_inventory(path: Path) -> dict[str, Any]:
     entries = document["legacy_artifacts"]
     if not isinstance(entries, list):
         raise AuditError("inventory.legacy_artifacts must be an array")
+    if has_no_deployment_attestation and entries:
+        raise AuditError("inventory.no_deployment_attestation requires legacy_artifacts to be empty")
     seen_artifact_ids: set[str] = set()
     for index, entry in enumerate(entries):
         validate_classification_entry(entry, f"inventory.legacy_artifacts[{index}]")
@@ -338,7 +396,7 @@ def require_sqlite_tables(connection: sqlite3.Connection, store_id: str, expecte
         raise AuditError(f"store {store_id!r} is missing expected SQLite tables {sorted(missing)}")
 
 
-def decode_sqlite_json(value: Any, context: str) -> dict[str, Any]:
+def decode_stored_json(value: Any, context: str) -> dict[str, Any]:
     if isinstance(value, bytes):
         try:
             text = value.decode("utf-8")
@@ -362,8 +420,10 @@ def source_kind_from_bundle(bundle: dict[str, Any], context: str) -> str:
     return source_kind
 
 
-def classify_program_store(
-    connection: sqlite3.Connection,
+def classify_program_records(
+    bundle_rows: Iterable[tuple[Any, Any]],
+    version_rows: Iterable[tuple[Any, Any, Any, Any]],
+    activation_rows: Iterable[tuple[Any, Any, Any, Any, Any]],
     store_id: str,
     artifacts: dict[str, LegacyArtifact],
     legacy_version_candidates: dict[tuple[str, str], list[str]],
@@ -371,39 +431,34 @@ def classify_program_store(
     known_bundle_ids: set[str],
     known_artifact_ids: set[str],
 ) -> None:
-    require_sqlite_tables(connection, store_id, {"program_bundles", "program_versions"})
-    try:
-        bundle_rows = list(connection.execute("SELECT id, canonical_bytes FROM program_bundles ORDER BY id"))
-        version_rows = list(
-            connection.execute(
-                "SELECT id, bundle_id, owner_scope, canonical_bytes FROM program_versions ORDER BY id"
-            )
-        )
-    except sqlite3.Error as error:
-        raise AuditError(f"cannot query Program SQLite store {store_id!r}: {error}") from error
-
     bundles: dict[str, tuple[dict[str, Any], str]] = {}
     for stored_id, canonical_bytes in bundle_rows:
         bundle_id = require_string(stored_id, f"program store {store_id} bundle row id")
-        bundle = decode_sqlite_json(canonical_bytes, f"program store {store_id} bundle {bundle_id}")
+        bundle = decode_stored_json(canonical_bytes, f"program store {store_id} bundle {bundle_id}")
         if bundle.get("id") != bundle_id:
             raise AuditError(f"program store {store_id} bundle {bundle_id!r} identity mismatch")
+        if bundle_id in bundles:
+            raise AuditError(f"program store {store_id} has duplicate bundle {bundle_id!r}")
         bundles[bundle_id] = (bundle, source_kind_from_bundle(bundle, f"program store {store_id} bundle {bundle_id}"))
         known_bundle_ids.add(bundle_id)
 
     versions_by_bundle: dict[str, list[str]] = {bundle_id: [] for bundle_id in bundles}
+    versions_by_id: dict[str, tuple[str, str]] = {}
     for stored_id, stored_bundle_id, owner_scope, canonical_bytes in version_rows:
         version_id = require_string(stored_id, f"program store {store_id} version row id")
         bundle_id = require_string(stored_bundle_id, f"program store {store_id} version {version_id}.bundle_id")
-        require_string(owner_scope, f"program store {store_id} version {version_id}.owner_scope")
-        version = decode_sqlite_json(canonical_bytes, f"program store {store_id} version {version_id}")
+        owner_scope = require_string(owner_scope, f"program store {store_id} version {version_id}.owner_scope")
+        version = decode_stored_json(canonical_bytes, f"program store {store_id} version {version_id}")
         if version.get("id") != version_id or version.get("bundle_id") != bundle_id:
             raise AuditError(f"program store {store_id} version {version_id!r} identity mismatch")
         if bundle_id not in bundles:
             raise AuditError(
                 f"program store {store_id} version {version_id!r} references missing bundle {bundle_id!r}"
             )
+        if version_id in versions_by_id:
+            raise AuditError(f"program store {store_id} has duplicate version {version_id!r}")
         versions_by_bundle[bundle_id].append(version_id)
+        versions_by_id[version_id] = (bundle_id, owner_scope)
         known_artifact_ids.add(f"{store_id}/version/{version_id}")
 
     for bundle_id, (_, source_kind) in bundles.items():
@@ -433,6 +488,245 @@ def classify_program_store(
             )
             known_artifact_ids.add(artifact_id)
 
+    for stored_owner_scope, stored_generation, stored_active_version_id, stored_policy_hash, canonical_bytes in activation_rows:
+        owner_scope = require_string(stored_owner_scope, f"program store {store_id} activation row owner_scope")
+        generation = require_positive_integer(stored_generation, f"program store {store_id} activation {owner_scope}.generation")
+        active_version_id = require_string(
+            stored_active_version_id, f"program store {store_id} activation {owner_scope}.active_version_id"
+        )
+        policy_hash = require_string(
+            stored_policy_hash, f"program store {store_id} activation {owner_scope}.policy_snapshot_hash"
+        )
+        activation = decode_stored_json(canonical_bytes, f"program store {store_id} activation {owner_scope}")
+        if (
+            activation.get("owner_scope") != owner_scope
+            or activation.get("generation") != generation
+            or activation.get("active_version_id") != active_version_id
+            or activation.get("policy_snapshot_hash") != policy_hash
+        ):
+            raise AuditError(f"program store {store_id} activation {owner_scope!r} identity mismatch")
+        version = versions_by_id.get(active_version_id)
+        if version is None:
+            raise AuditError(
+                f"program store {store_id} activation {owner_scope!r} references missing version {active_version_id!r}"
+            )
+        bundle_id, version_owner_scope = version
+        if version_owner_scope != owner_scope:
+            raise AuditError(
+                f"program store {store_id} activation {owner_scope!r} targets a version owned by {version_owner_scope!r}"
+            )
+        if bundles[bundle_id][1] != LEGACY_SOURCE_KIND:
+            continue
+        artifact_id = f"{store_id}/version/{active_version_id}"
+        artifacts[artifact_id].active_activation_scopes.append(owner_scope)
+
+
+def classify_program_store(
+    connection: sqlite3.Connection,
+    store_id: str,
+    artifacts: dict[str, LegacyArtifact],
+    legacy_version_candidates: dict[tuple[str, str], list[str]],
+    legacy_bundle_ids: set[str],
+    known_bundle_ids: set[str],
+    known_artifact_ids: set[str],
+) -> None:
+    require_sqlite_tables(connection, store_id, {"program_bundles", "program_versions", "program_activations"})
+    try:
+        bundle_rows = list(connection.execute("SELECT id, canonical_bytes FROM program_bundles ORDER BY id"))
+        version_rows = list(
+            connection.execute(
+                "SELECT id, bundle_id, owner_scope, canonical_bytes FROM program_versions ORDER BY id"
+            )
+        )
+        activation_rows = list(
+            connection.execute(
+                "SELECT owner_scope, generation, active_version_id, policy_snapshot_hash, canonical_bytes "
+                "FROM program_activations ORDER BY owner_scope"
+            )
+        )
+    except sqlite3.Error as error:
+        raise AuditError(f"cannot query Program SQLite store {store_id!r}: {error}") from error
+    classify_program_records(
+        bundle_rows,
+        version_rows,
+        activation_rows,
+        store_id,
+        artifacts,
+        legacy_version_candidates,
+        legacy_bundle_ids,
+        known_bundle_ids,
+        known_artifact_ids,
+    )
+
+
+POSTGRES_PROGRAM_TABLES = (
+    ("neograph_program_bundles", ("id", "canonical_bytes")),
+    ("neograph_program_versions", ("id", "bundle_id", "owner_scope", "canonical_bytes")),
+    (
+        "neograph_program_activations",
+        ("owner_scope", "generation", "active_version_id", "policy_snapshot_hash", "canonical_bytes"),
+    ),
+)
+
+
+def decode_postgres_copy_field(value: str, context: str) -> str | None:
+    if value == r"\N":
+        return None
+    decoded: list[str] = []
+    index = 0
+    escaped_characters = {
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+    }
+    while index < len(value):
+        character = value[index]
+        if character != "\\":
+            decoded.append(character)
+            index += 1
+            continue
+        index += 1
+        if index == len(value):
+            raise AuditError(f"{context} has an unterminated PostgreSQL COPY escape")
+        escaped = value[index]
+        if escaped in "01234567x":
+            raise AuditError(f"{context} uses an unsupported PostgreSQL COPY numeric escape")
+        decoded.append(escaped_characters.get(escaped, escaped))
+        index += 1
+    return "".join(decoded)
+
+
+def parse_postgres_copy_rows(
+    output: str,
+    store_id: str,
+    table: str,
+    expected_columns: tuple[str, ...],
+) -> list[tuple[str, ...]]:
+    rows: list[tuple[str, ...]] = []
+    copy_blocks = 0
+    lines = output.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith("COPY "):
+            index += 1
+            continue
+        copy_blocks += 1
+        if copy_blocks > 1:
+            raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} emitted multiple COPY blocks")
+        suffix = " FROM stdin;"
+        if not line.endswith(suffix):
+            raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} emitted an invalid COPY header")
+        try:
+            relation, encoded_columns = line[len("COPY ") : -len(suffix)].split(" (", 1)
+        except ValueError as error:
+            raise AuditError(
+                f"PostgreSQL dump store {store_id!r} table {table!r} emitted an invalid COPY target"
+            ) from error
+        if relation != f"public.{table}" or not encoded_columns.endswith(")"):
+            raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} emitted an unexpected COPY target")
+        columns = tuple(column.strip() for column in encoded_columns[:-1].split(","))
+        if columns != expected_columns:
+            raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} has an unexpected COPY column layout")
+        index += 1
+        while index < len(lines):
+            row = lines[index]
+            index += 1
+            if row == r"\.":
+                break
+            fields = row.split("\t")
+            if len(fields) != len(expected_columns):
+                raise AuditError(
+                    f"PostgreSQL dump store {store_id!r} table {table!r} has a COPY row with the wrong field count"
+                )
+            decoded = [
+                decode_postgres_copy_field(
+                    field,
+                    f"PostgreSQL dump store {store_id!r} table {table!r} COPY row {len(rows) + 1}",
+                )
+                for field in fields
+            ]
+            if any(field is None for field in decoded):
+                raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} has a null required field")
+            rows.append(tuple(field for field in decoded if field is not None))
+        else:
+            raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} has an unterminated COPY block")
+    if copy_blocks != 1:
+        raise AuditError(f"PostgreSQL dump store {store_id!r} table {table!r} has no COPY data block")
+    return rows
+
+
+def postgres_dump_table_rows(
+    path: Path,
+    store_id: str,
+    table: str,
+    expected_columns: tuple[str, ...],
+) -> list[tuple[str, ...]]:
+    pg_restore = shutil.which("pg_restore")
+    if pg_restore is None:
+        raise AuditError("pg_restore is required to scan a program_postgres_dump snapshot")
+    # pg_restore 18 docs, fetched 2026-08-10:
+    # --file=- emits a script instead of restoring, and --strict-names rejects
+    # an archive that lacks an expected table.
+    # https://www.postgresql.org/docs/current/app-pgrestore.html
+    try:
+        result = subprocess.run(
+            [
+                pg_restore,
+                "--data-only",
+                "--strict-names",
+                f"--table=public.{table}",
+                "--file=-",
+                str(path),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise AuditError(f"cannot execute pg_restore for PostgreSQL dump store {store_id!r}: {error}") from error
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise AuditError(
+            f"pg_restore cannot extract PostgreSQL dump store {store_id!r} table {table!r}: "
+            f"{detail or f'exit status {result.returncode}'}"
+        )
+    try:
+        output = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AuditError(
+            f"pg_restore emitted non-UTF-8 data for PostgreSQL dump store {store_id!r} table {table!r}"
+        ) from error
+    return parse_postgres_copy_rows(output, store_id, table, expected_columns)
+
+
+def scan_postgres_program_dump(
+    path: Path,
+    store_id: str,
+    artifacts: dict[str, LegacyArtifact],
+    legacy_version_candidates: dict[tuple[str, str], list[str]],
+    legacy_bundle_ids: set[str],
+    known_bundle_ids: set[str],
+    known_artifact_ids: set[str],
+) -> None:
+    extracted = {
+        table: postgres_dump_table_rows(path, store_id, table, columns)
+        for table, columns in POSTGRES_PROGRAM_TABLES
+    }
+    classify_program_records(
+        extracted["neograph_program_bundles"],
+        extracted["neograph_program_versions"],
+        extracted["neograph_program_activations"],
+        store_id,
+        artifacts,
+        legacy_version_candidates,
+        legacy_bundle_ids,
+        known_bundle_ids,
+        known_artifact_ids,
+    )
 
 def program_run_is_recoverable(run: dict[str, Any], context: str) -> bool:
     terminal_result = run.get("terminal_result")
@@ -469,7 +763,7 @@ def classify_transition_store(
     blockers: list[Blocker] = []
     for owner_scope, stored_run_id, run_record_bytes in rows:
         run_id = require_string(stored_run_id, f"transition store {store_id} run row id")
-        run = decode_sqlite_json(run_record_bytes, f"transition store {store_id} run {run_id}")
+        run = decode_stored_json(run_record_bytes, f"transition store {store_id} run {run_id}")
         if run.get("run_id") != run_id or run.get("owner_scope") != owner_scope:
             raise AuditError(f"transition store {store_id} run {run_id!r} identity mismatch")
         bundle_id = require_string(run.get("bundle_id"), f"transition store {store_id} run {run_id}.bundle_id")
@@ -536,7 +830,7 @@ def classify_harness_records(
             if record.get("artifact_id") != artifact_id:
                 raise AuditError(f"harness store {store_id} artifact {artifact_id!r} identity mismatch")
             bundle_text = require_string(record.get("bundle"), f"harness store {store_id} artifact {artifact_id}.bundle")
-            bundle = decode_sqlite_json(bundle_text, f"harness store {store_id} artifact {artifact_id}.bundle")
+            bundle = decode_stored_json(bundle_text, f"harness store {store_id} artifact {artifact_id}.bundle")
             source_kind = source_kind_from_bundle(bundle, f"harness store {store_id} artifact {artifact_id}.bundle")
             projection = require_object(record.get("projection"), f"harness store {store_id} artifact {artifact_id}.projection")
             frontend = projection.get("authoring_frontend")
@@ -642,11 +936,11 @@ def scan_harness_sqlite(
     except sqlite3.Error as error:
         raise AuditError(f"cannot query Harness SQLite store {store_id!r}: {error}") from error
     artifact_records = [
-        (require_string(stored_id, f"harness store {store_id} artifact row id"), decode_sqlite_json(record, f"harness store {store_id} artifact {stored_id}"))
+        (require_string(stored_id, f"harness store {store_id} artifact row id"), decode_stored_json(record, f"harness store {store_id} artifact {stored_id}"))
         for stored_id, record in artifact_rows
     ]
     run_records = [
-        (require_string(stored_id, f"harness store {store_id} run row id"), decode_sqlite_json(record, f"harness store {store_id} run {stored_id}"))
+        (require_string(stored_id, f"harness store {store_id} run row id"), decode_stored_json(record, f"harness store {store_id} run {stored_id}"))
         for stored_id, record in run_rows
     ]
     return classify_harness_records(store_id, artifact_records, run_records, artifacts, known_artifact_ids)
@@ -714,13 +1008,23 @@ def attach_classifications(
                     store_id=artifact.store_id,
                 )
             )
-        if artifact.active_or_recoverable:
+        if artifact.active_runs:
             blockers.append(
                 Blocker(
                     "ACTIVE_OR_RECOVERABLE_LEGACY_RUN",
                     "A legacy source still has an active or recoverable persisted run",
                     artifact_id=artifact.artifact_id,
                     run_id=",".join(sorted(artifact.active_runs)),
+                    store_id=artifact.store_id,
+                )
+            )
+        if artifact.active_activation_scopes:
+            blockers.append(
+                Blocker(
+                    "ACTIVATED_LEGACY_PROGRAM_VERSION",
+                    "A legacy Program version remains active for owner scopes: "
+                    + ", ".join(sorted(artifact.active_activation_scopes)),
+                    artifact_id=artifact.artifact_id,
                     store_id=artifact.store_id,
                 )
             )
@@ -746,6 +1050,9 @@ def count_artifacts(artifacts: Iterable[LegacyArtifact]) -> dict[str, int]:
         ),
         "unclassified_legacy_artifacts": sum(value.classification is None for value in values),
         "active_or_recoverable_legacy_runs": len(active_runs),
+        "active_legacy_program_activations": sum(
+            len(set(value.active_activation_scopes)) for value in values
+        ),
     }
 
 
@@ -780,8 +1087,12 @@ def audit(inventory: dict[str, Any], root: Path) -> dict[str, Any]:
         store_id = store["id"]
         store_kind = store["kind"]
         path = resolve_snapshot_path(root, store["path"], f"inventory store {store_id!r} path")
-        sidecars = () if store_kind == "harness_file" else sqlite_sidecar_suffixes(path)
-        content_identity = sha256_directory(path) if store_kind == "harness_file" else sha256_file(path)
+        sidecars = sqlite_sidecar_suffixes(path) if store_kind in SQLITE_STORE_KINDS else ()
+        content_identity = (
+            sha256_directory(path)
+            if store_kind == "harness_file"
+            else sha256_regular_file(path, f"inventory store {store_id!r} snapshot")
+        )
         resolved_stores.append((store, path, content_identity, sidecars))
         if sidecars:
             blockers.append(
@@ -794,6 +1105,7 @@ def audit(inventory: dict[str, Any], root: Path) -> dict[str, Any]:
 
     for expected_kind in (
         "program_sqlite",
+        "program_postgres_dump",
         "program_transitions_sqlite",
         "harness_sqlite",
         "harness_file",
@@ -816,6 +1128,16 @@ def audit(inventory: dict[str, Any], root: Path) -> dict[str, Any]:
                             known_bundle_ids,
                             known_artifact_ids,
                         )
+                elif expected_kind == "program_postgres_dump":
+                    scan_postgres_program_dump(
+                        path,
+                        store_id,
+                        artifacts,
+                        legacy_version_candidates,
+                        legacy_bundle_ids,
+                        known_bundle_ids,
+                        known_artifact_ids,
+                    )
                 elif expected_kind == "program_transitions_sqlite":
                     with sqlite_connection(path) as connection:
                         blockers.extend(
@@ -842,8 +1164,12 @@ def audit(inventory: dict[str, Any], root: Path) -> dict[str, Any]:
     for store, path, before, before_sidecars in resolved_stores:
         store_id = store["id"]
         store_kind = store["kind"]
-        after = sha256_directory(path) if store_kind == "harness_file" else sha256_file(path)
-        after_sidecars = () if store_kind == "harness_file" else sqlite_sidecar_suffixes(path)
+        after = (
+            sha256_directory(path)
+            if store_kind == "harness_file"
+            else sha256_regular_file(path, f"inventory store {store_id!r} snapshot")
+        )
+        after_sidecars = sqlite_sidecar_suffixes(path) if store_kind in SQLITE_STORE_KINDS else ()
         if before != after:
             blockers.append(
                 Blocker(
@@ -883,12 +1209,16 @@ def audit(inventory: dict[str, Any], root: Path) -> dict[str, Any]:
             value["message"],
         ),
     )
+    no_deployment_attestation = inventory.get("no_deployment_attestation")
     body: dict[str, Any] = {
         "format": PROOF_FORMAT,
         "schema_version": SCHEMA_VERSION,
         "cutover_id": inventory["cutover_id"],
         "captured_at": inventory["captured_at"],
         "inventory_identity": sha256_bytes(canonical_json(inventory)),
+        "evidence_mode": "no_deployment_attestation"
+        if no_deployment_attestation is not None
+        else "storage_snapshot",
         "scanned_stores": sorted(scanned_stores, key=lambda value: value["id"]),
         "legacy_artifacts": sorted(
             (artifact.as_json() for artifact in artifacts.values()), key=lambda value: value["artifact_id"]
@@ -896,6 +1226,8 @@ def audit(inventory: dict[str, Any], root: Path) -> dict[str, Any]:
         "counts": count_artifacts(artifacts.values()),
         "final_drain": {"passed": not sorted_blockers, "blockers": sorted_blockers},
     }
+    if no_deployment_attestation is not None:
+        body["no_deployment_attestation"] = no_deployment_attestation
     body["proof_identity"] = sha256_bytes(canonical_json(body))
     return body
 

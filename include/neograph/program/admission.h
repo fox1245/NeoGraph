@@ -59,6 +59,7 @@ public:
     std::uint32_t                   max_program_schema_version() const noexcept;
     /// Lowest execution guarantee this profile permits in an admitted closure.
     ExecutionGuarantee              minimum_execution_guarantee() const noexcept;
+    /** New admissions may allow trusted C++ builders and JavaScript only. */
     std::vector<SourceKind>         allowed_source_kinds() const;
     std::vector<ExecutableIdentity> allowed_executables() const;
     std::vector<EffectMode>         allowed_effect_modes() const;
@@ -91,6 +92,7 @@ public:
     AdmissionProfileBuilder& mode(AdmissionMode value);
     AdmissionProfileBuilder& max_program_schema_version(std::uint32_t value);
     AdmissionProfileBuilder& minimum_execution_guarantee(ExecutionGuarantee value);
+    /** CanonicalJson is a retained legacy storage kind and is rejected here. */
     AdmissionProfileBuilder& allow_source_kind(SourceKind value);
     AdmissionProfileBuilder& allow_executable(ExecutableIdentity value);
     AdmissionProfileBuilder& allow_effect_mode(EffectMode value);

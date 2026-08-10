@@ -9,6 +9,7 @@ Executable extension contract:
 [`../spec/self-evolving-agent-controller.sdd.yaml`](../spec/self-evolving-agent-controller.sdd.yaml)
 Tracking epic: [#29](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/29)
 Workstreams: [#30](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/30),
+[#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35),
 [#31](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/31),
 [#32](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/32),
 [#33](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/33), and
@@ -184,6 +185,12 @@ The correct invariant is:
 This is one JavaScript language and one QuickJS runtime. Authority profiles are
 policy and identity inputs, not additional programming languages or execution
 engines.
+The profile-specific JavaScript extension and asynchronous-execution boundary is
+defined in [QuickJS Execution Profiles and Extension
+Boundary](QUICKJS_EXECUTION_PROFILES.md). In particular, explicitly authorized
+trusted/direct asynchronous execution starts at the `unmanaged` floor; ordinary
+Promises do not create an unearned durable-replay claim.
+
 
 ### 4.1 Example grants
 

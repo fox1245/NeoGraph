@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
         "JSON topology object, no prose or markdown. It must have schema_version 1; exactly two "
         "channels named prompt and response, each with reducer overwrite; exactly one node named "
         "copy_ninja with type copy_ninja_local; and exactly two edges __start__ -> copy_ninja and "
-        "copy_ninja -> __end__. Do not use templates, use, any other node type, config, source "
+        "copy_ninja -> __end__. Do not include legacy composition keys, any other node type, config, source "
         "URL, "
         "tool, credential, or executable text. The node reads prompt and writes response.";
     std::vector<neograph::ChatMessage> conversation = {
@@ -266,9 +266,9 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        json dsl;
+        json core_candidate;
         try {
-            dsl = beast::extract_json_object(response.message.content);
+            core_candidate = beast::extract_json_object(response.message.content);
         } catch (const std::exception& error) {
             std::cout << "  UNPARSEABLE (" << error.what() << "); asking again.\n";
             conversation.push_back({"assistant", response.message.content});
@@ -276,11 +276,11 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        const auto verdict = beast::validate_harness(dsl, context);
+        const auto verdict = beast::validate_harness(core_candidate, context);
         if (!verdict.ok) {
             std::cout << "  REJECTED at generic gate '" << verdict.gate
                       << "': " << verdict.report.substr(0, 400) << "\n";
-            conversation.push_back({"assistant", dsl.dump()});
+            conversation.push_back({"assistant", core_candidate.dump()});
             conversation.push_back({"user", "The generic compiler rejected it at '" + verdict.gate +
                                                 "': " + verdict.report +
                                                 "\nFix only that error. Output only JSON."});
@@ -290,7 +290,7 @@ int main(int argc, char** argv) {
         const auto binding_error = local_binding_error(verdict.core);
         if (!binding_error.empty()) {
             std::cout << "  REJECTED at local-binding gate: " << binding_error << "\n";
-            conversation.push_back({"assistant", dsl.dump()});
+            conversation.push_back({"assistant", core_candidate.dump()});
             conversation.push_back({"user", "The local-binding gate rejected it: " + binding_error +
                                                 ". Output the exact required JSON topology."});
             continue;

@@ -1,12 +1,14 @@
 # QuickJS Public Authoring Boundary
 
-Status: Adopted architecture contract; base runtime implemented, final legacy drain still gates deletion
+Status: Adopted architecture contract; Core DSL/elaborator and Program JSON authoring deletion complete
+Final no-deployment drain proof passes; platform/consumer qualification remains
 
-Date: 2026-08-08  
+Date: 2026-08-10
 Parent architecture: [QuickJS Control Architecture](QUICKJS_CONTROL_ARCHITECTURE.md)  
 Migration plan: [QuickJS Control Runtime Migration Plan](QUICKJS_CONTROL_MIGRATION.md)  
+Execution profiles: [QuickJS Execution Profiles and Extension Boundary](QUICKJS_EXECUTION_PROFILES.md)
 Executable contract: [`../spec/quickjs-control-runtime.sdd.yaml`](../spec/quickjs-control-runtime.sdd.yaml)  
-Tracking: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23), [#27](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27), [authoring-boundary decision](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27#issuecomment-5230015368)
+Tracking: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23), [#27](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27), [#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35), [authoring-boundary decision](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27#issuecomment-5230015368)
 
 ## Decision
 
@@ -14,12 +16,16 @@ The target state, reached after the authoring cutover and final legacy drain,
 exposes exactly two authoring frontends:
 
 1. the direct NeoGraph C++ embedding API for trusted applications; and
-2. standard JavaScript executed by embedded QuickJS through the sealed `ng` binding.
+2. standard JavaScript executed by embedded QuickJS through a profile-governed
+   `ng` binding.
 
-The bounded Core DSL and Program JSON operation DSL freeze at the cutover
-boundary and are deleted after the final legacy drain. They never survive as
-compatibility modes, fallback parsers, hidden Harness request modes, or
-alternate runtimes.
+`restricted_durable` is the default JavaScript execution ABI. An explicitly
+admitted `trusted_direct` profile is still JavaScript, not another source
+language or a public JSON/DSL frontend.
+The bounded Core DSL and elaborator and the Program JSON operation-tree authoring
+surface are deleted. Retained canonical storage decoding and migration
+classification do not expose either source system as a compatibility mode,
+fallback parser, hidden Harness request mode, or alternate runtime.
 
 This decision does **not** remove canonical JSON from NeoGraph. Strict Core JSON
 remains an internal canonical serialization and low-level interchange artifact;
@@ -40,7 +46,8 @@ security and durability boundary, not merely an API preference.
 |---|---|---|
 | Direct C++ graph and runtime API | Retained | Trusted embedding/application API; callers own process construction and do not submit a wire-level source language. |
 | QuickJS `define()` | Retained | JavaScript graph composition lowers to validated strict Core IR without dispatch. |
-| QuickJS generator `main()` | Retained | JavaScript owns ordinary control flow and yields immutable durable commands. |
+| QuickJS restricted generator `main()` | Retained | JavaScript owns ordinary control flow and yields immutable durable commands. |
+| QuickJS trusted/direct `main()` | Planned through [#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35) | Explicitly authorized ordinary or `async` JavaScript may use direct bindings, with an honest `unmanaged` guarantee rather than inferred durable replay. |
 | Strict Core JSON | Internal/interchange only | Canonical storage, hashing, diagnostics, and low-level exchange; never selected as a Harness authoring mode. |
 | Program bundle/journal/record JSON | Internal/interchange only | Immutable durable artifacts, not executable input syntax. |
 | Core DSL / `graph::Elaborator` | Deleted | JavaScript replaces variables, interpolation, templates, conditional inclusion, and composition helpers. |
@@ -59,7 +66,7 @@ rewrite of every C++ `json` parameter into a new builder class.
 ```mermaid
 flowchart LR
     accTitle: Public Authoring Boundary
-    accDescr: Trusted C++ embedding and sealed JavaScript are the only source frontends. Both converge on canonical Core data and the existing durable Program runtime; JSON artifacts are not independently executable source languages.
+    accDescr: The diagram depicts the restricted durable JavaScript control path. Direct C++ embedding and profile-governed JavaScript remain the only source frontends; JSON artifacts are not independently executable source languages.
 
     cpp_api["Trusted C++ embedding API"]
     js_define["QuickJS define()"]
@@ -91,6 +98,12 @@ flowchart LR
 `GraphEngine` remains the only executor of Core/application nodes. QuickJS is
 not a scheduler, a checkpoint owner, an effect executor, or a substitute for
 admission and journal semantics.
+The diagram intentionally depicts only the restricted durable JavaScript path.
+An explicitly admitted trusted/direct `main()` is outside that recovery lane;
+its authority and weaker guarantee must be visible in the admitted identity and
+run record. See [QuickJS Execution Profiles and Extension
+Boundary](QUICKJS_EXECUTION_PROFILES.md).
+
 
 ### Direct C++ embedding API
 
@@ -144,9 +157,10 @@ nonserializable before seal, and invalid after context teardown. On successful
 return NeoGraph validates it and stores only canonical strict Core IR plus
 source-map and identity metadata.
 
-### QuickJS `main()` context
+### Restricted QuickJS `main()` context
 
-A JavaScript module exports a generator `main()` for Program control.
+A restricted JavaScript module exports a synchronous generator `main()` for
+durable Program control.
 
 ```javascript
 export function* main(input) {
@@ -197,6 +211,17 @@ JavaScript may use loops, recursion, closures, exceptions, helper modules, and
 ordinary local state. It does not receive direct authority to run a Core node,
 commit an effect, select an arbitrary provider or credential, block inside a C
 binding, or resume a QuickJS context from a worker thread.
+### Trusted QuickJS `main()` context (planned)
+
+The tracked `trusted_direct` profile permits an explicitly developer-authorized
+ordinary or `async main()` with direct native/capability bindings. It is not a
+shortcut around `ProgramRuntime`: the complete direct execution is permanently
+`unmanaged`, even if an individual binding records an outcome. It cannot claim
+generator-style cross-process exact replay or duplicate prevention by virtue of
+using a Promise. The full required lifecycle and the separate durable-async
+preconditions are in [QuickJS Execution Profiles and Extension
+Boundary](QUICKJS_EXECUTION_PROFILES.md).
+
 
 ## Canonical artifact policy
 
@@ -217,17 +242,19 @@ heuristics.
 
 ## Security and lifetime boundary
 
-The sealed `ng` module is allowlisted. By default it does not expose QuickJS
-`std` or `os`, dynamic native-module loading, filesystem, network, process,
-environment, clock, unrecorded randomness, workers, shared memory, raw native
-pointers, or arbitrary FFI.
+The restricted `ng` command kernel is allowlisted and non-extensible. It does
+not expose QuickJS `std` or `os`, dynamic native-module loading, filesystem,
+network, process, environment, clock, unrecorded randomness, workers, shared
+memory, raw native pointers, or arbitrary FFI. In the planned trusted profile,
+the namespace may accept application helper properties, but the built-in command
+constructors remain non-writable and non-configurable.
 
-Native binding rules are strict:
+Native binding rules are strict for every command and pure intrinsic:
 
 - a binding constructs a command synchronously or runs an admitted pure
   intrinsic;
-- an effectful or asynchronous operation runs only after the VM yielded and the
-  runtime durably admitted it;
+- an effectful or asynchronous durable operation runs only after the VM yielded
+  and the runtime durably admitted it;
 - asynchronous work owns canonical host data, never borrowed `JSValue`,
   `JSContext`, or JavaScript closure state;
 - one owning executor serializes a QuickJS context;
@@ -237,17 +264,20 @@ Native binding rules are strict:
 
 A developer may grant broader authority only through the existing
 capability/admission model. Source requests authority; it never grants itself
-authority.
+authority. A trusted/direct run still records its exact grant and guarantee
+floor, and a weaker descendant cannot silently compose into a `strict` parent.
+The profile-specific namespace and Promise rules are defined in [QuickJS
+Execution Profiles and Extension Boundary](QUICKJS_EXECUTION_PROFILES.md).
 
 ## Legacy removal inventory
 
 The removal target is the user-source and translation machinery, not the
 validated Core executor or durable records.
 
-| Delete after final drain | Retain |
+| Delete or complete after final drain | Retain |
 |---|---|
-| `graph::Elaborator` and its Core DSL grammar | `GraphCompiler`, `GraphEngine`, strict validation, canonicalization, and Core IR serialization |
-| Core DSL parser/source maps and Harness `mode: "dsl"` translator | C++ graph construction and validated Core interchange |
+| `graph::Elaborator` and its Core DSL grammar (**completed**) | `GraphCompiler`, `GraphEngine`, strict validation, canonicalization, and Core IR serialization |
+| Core DSL parser/source maps and Harness `mode: "dsl"` translator (**completed**) | C++ graph construction and validated Core interchange |
 | Program-v2/v3/v4 JSON authoring schemas | Program catalog, admission, versioning, runtime, journal, transition store, replay, and result contracts |
 | Program operation-tree parser/compiler/dispatcher paths only needed to interpret legacy source | host-owned command execution and structured-concurrency scheduling |
 | Harness `mode: "program"` translator | JavaScript source validation and QuickJS command bridge |
@@ -332,4 +362,6 @@ observed:
   budgets, cancellation, effects, or replay.
 - Supporting a permanent JavaScript/Core DSL/Program JSON multi-language
   product.
+- Treating ordinary JavaScript Promises as durable commands without the separate
+  scheduler, journal, recovery, and ordering contract required for that claim.
 - Retaining a compatibility shim after the final legacy drain.

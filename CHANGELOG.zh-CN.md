@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=30ec458d3f83e4718421a04a36fc7dcdce7233530ffc644543c2f192c7f74e61 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2aec329226eb4b687367daba27af8d37f751c54aed3dc50c013cf129db79a27d -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -30,6 +30,20 @@ NeoGraph 的所有显著变更均记录于本文件。
   sidecar 的 SQLite 输入会在打开前被拒绝，因此不会将活动 WAL 数据库的 raw
   copy 当作 final proof。这建立了 Q7 evidence mechanism，但并不声称
   deployment 专属的 final drain 或 legacy parser 删除已经完成。
+
+- **PostgreSQL final-drain 归档扫描。** legacy-drain 审计器现在接受冻结的
+  `program_postgres_dump` custom archive，并且只会以 data-only、strict-table、
+  script-output 模式调用 `pg_restore`，绝不向数据库执行 restore。它会验证
+  Program bundle、version 和 activation table 的 persisted identity，拒绝缺少
+  任一必需 table 或在扫描期间发生变化的 archive，并将仍选择 legacy Program
+  version 的 activation 作为 final-removal blocker。
+
+- **无部署 Q7 final-proof 模式。** legacy-drain 审计器仅在从未存在过
+  pre-release 或 production NeoGraph deployment 时才接受具名的 operator
+  attestation。该模式既不接受 storage target，也不接受历史 legacy artifact，
+  会将生成的 proof 标记为
+  `evidence_mode: "no_deployment_attestation"`，并对混合的或未 attested 的空
+  inventory 失败封闭。它不能覆盖已 drain、已删除、已丢失或不可访问的历史 state。
 
 - **OpenRouter 提供商路由。** `OpenAIProvider` 现在会将
   `CompletionParams::extra_fields.provider` 中传入的对象作为 `provider`

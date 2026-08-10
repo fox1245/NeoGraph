@@ -487,52 +487,6 @@ json preset_core(const std::string&                 preset,
     return core;
 }
 
-void enrich_worker_nodes(json&                               core,
-                         const std::map<std::string, json>& workers,
-                         std::string_view                   authored_root) {
-    if (!core.contains("nodes") || !core["nodes"].is_object()) return;
-    for (const auto& [name, node] : core["nodes"].items()) {
-        if (!node.is_object() || node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
-        const auto worker_id = node.value("worker_id", "");
-        const auto worker    = workers.find(worker_id);
-        if (worker == workers.end())
-            fail("H_WORKER_BINDING",
-                 std::string(authored_root) + "/nodes/" + escape_pointer(name),
-                 "Harness DSL worker node references an undeclared worker");
-        const auto barrier =
-            node.contains("barrier") ? std::optional<json>{node.at("barrier")} : std::nullopt;
-        core["nodes"][name] = worker->second;
-        if (barrier) core["nodes"][name]["barrier"] = *barrier;
-    }
-}
-
-void reject_transport_values(const json& value, const std::string& pointer) {
-    static const std::set<std::string> forbidden = {
-        "executor", "server_ref",   "agent",   "url",        "auth",    "authorization",
-        "api_key",  "bearer_token", "session", "session_id", "process", "command"};
-    if (value.is_object()) {
-        for (const auto& [key, child] : value.items()) {
-            const auto child_pointer = pointer + "/" + escape_pointer(key);
-            if (forbidden.contains(key))
-                fail("H_TRANSPORT_VALUE", child_pointer,
-                     "Transport, credential, session, and process fields are host-only");
-            if (key != "schema" && key != "input_schema" && key != "output_schema")
-                reject_transport_values(child, child_pointer);
-        }
-    } else if (value.is_array()) {
-        for (std::size_t index = 0; index < value.size(); ++index)
-            reject_transport_values(value[index], pointer + "/" + std::to_string(index));
-    }
-}
-
-std::string dsl_source_pointer(const std::string& source) {
-    if (source.rfind("use[", 0) == 0) {
-        const auto close = source.find(']');
-        if (close != std::string::npos)
-            return "/harness/definition/use/" + source.substr(4, close - 4);
-    }
-    return "/harness/definition";
-}
 std::vector<program::SourceMapEntry> source_map(const json&                     core,
                                                 const std::string&              source_id,
                                                 const std::vector<std::string>& worker_ids) {
@@ -853,7 +807,7 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     const auto mode = request.at("harness").at("mode").get<std::string>();
     if (mode == "dsl")
         fail("H_MIGRATION_CORE_DSL", "/harness/mode",
-             "Core DSL authoring is frozen; submit JavaScript define() source instead");
+             "Core DSL authoring was removed; submit JavaScript define() source instead");
     if (mode == "core")
         fail("H_MIGRATION_CORE_JSON", "/harness/mode",
              "Standalone Core JSON authoring is internal/interchange only; submit JavaScript "

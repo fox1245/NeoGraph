@@ -21,7 +21,6 @@
 // Run:    ./build/cookbook_the_beast_forge ["task"]
 
 #include <neograph/neograph.h>
-#include <neograph/graph/elaborator.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
 #include <neograph/llm/openai_provider.h>
@@ -41,17 +40,14 @@
 using neograph::json;
 namespace ng = neograph::graph;
 
-// ---- three coherence gates (unchanged across the whole cookbook) ----
+// ---- strict Core coherence gates (unchanged across the whole cookbook) ----
 struct Verdict { bool ok = false; std::string gate, report; json core; };
-Verdict forge_gate(const json& dsl, const ng::NodeContext& ctx) {
-    if (!dsl.contains("schema_version")
-        || !dsl["schema_version"].is_number_integer()
-        || dsl["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
+Verdict forge_gate(const json& core, const ng::NodeContext& ctx) {
+    if (!core.contains("schema_version")
+        || !core["schema_version"].is_number_integer()
+        || core["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
         return {false, "schema", "schema_version must match TOPOLOGY_SCHEMA_VERSION", {}};
     }
-    json core;
-    try { core = ng::Elaborator::elaborate(dsl).core; }
-    catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }
     try {
         auto cg = ng::GraphCompiler::compile(core, ctx);
         ng::GraphCompiler::verify_roundtrip(core, cg);
@@ -199,17 +195,17 @@ int main(int argc, char** argv) {
 
     json core;
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
-        json dsl;
-        try { dsl = extract_json(ask(provider, hconvo)); }
+        json core_candidate;
+        try { core_candidate = extract_json(ask(provider, hconvo)); }
         catch (const std::exception& e) {
             hconvo.push_back({"user", "Not valid JSON. Output ONLY the JSON harness."});
             std::cout << "  #" << attempt << " unparseable; retry.\n"; continue;
         }
-        const Verdict v = forge_gate(dsl, ctx);
+        const Verdict v = forge_gate(core_candidate, ctx);
         if (!v.ok) {
             std::cout << "  #" << attempt << " REJECTED at '" << v.gate << "': "
                       << v.report.substr(0, 200) << " → self-repair.\n";
-            hconvo.push_back({"assistant", dsl.dump()});
+            hconvo.push_back({"assistant", core_candidate.dump()});
             hconvo.push_back({"user", "Compiler REJECTED at '" + v.gate + "':\n" + v.report +
                                       "\nFix only what it names. Output ONLY corrected JSON."});
             continue;

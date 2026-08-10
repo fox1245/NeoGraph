@@ -2110,6 +2110,15 @@ struct ProgramCompiler::Impl {
                           const std::optional<RunBudget>& javascript_budget   = std::nullopt,
                           const ContractRecord*           input_contract      = nullptr,
                           const ContractRecord*           output_contract     = nullptr) const {
+        DiagnosticAccumulator diagnostics(source);
+        if (source.kind() == SourceKind::CanonicalJson) {
+            diagnostics.add(
+                CompilePhase::Source, "P_MIGRATION_PROGRAM_JSON", DiagnosticSeverity::Error, "",
+                "Legacy Program JSON operation-tree authoring is no longer supported",
+                json{{"source_kind", std::string(to_string(source.kind()))},
+                     {"replacement", "javascript_or_trusted_cpp"}});
+            diagnostics.throw_error();
+        }
         const bool has_host_contracts = input_contract != nullptr || output_contract != nullptr;
         if ((javascript_budget || has_host_contracts) && source.kind() != SourceKind::JavaScript)
             throw std::invalid_argument(
@@ -2117,7 +2126,6 @@ struct ProgramCompiler::Impl {
         if ((input_contract == nullptr) != (output_contract == nullptr))
             throw std::invalid_argument(
                 "Host-owned JavaScript input and output contracts must be supplied together");
-        DiagnosticAccumulator diagnostics(source);
         try {
             if (source.kind() == SourceKind::JavaScript &&
                 source.javascript_runtime_identity() != configured_javascript_runtime()) {

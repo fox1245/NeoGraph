@@ -34,7 +34,7 @@ class GraphRegistry;
 /// One static-analysis finding, with a machine-readable witness
 /// (counterexample) for tooling to highlight.
 struct Diagnostic {
-    std::string code;          ///< "E3".."E12" (docs/dsl §5 catalog)
+    std::string code;          ///< "E3".."E12" (topology validation catalog)
     std::string severity;      ///< "error" | "warning"
     std::string path;          ///< Legacy JSON-ish display path
     std::string message;       ///< human-readable, self-contained
@@ -102,7 +102,7 @@ public:
     /**
      * @brief Run all static checks against a compiled graph.
      *
-     * Checks (catalog codes from the DSL research doc §5):
+     * Checks (catalog codes from the topology validation research doc):
      *  - E3  dangling references: edge endpoints, conditional-edge
      *        sources and route targets, interrupt names, barrier
      *        wait_for members must name existing nodes (errors).

@@ -4,7 +4,7 @@
 
 spec:
   id: quickjs-control-runtime
-  revision: 4
+  revision: 5
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -23,6 +23,8 @@ spec:
     base_cutover_blocking: false
     language_runtime_reuse: required
     second_execution_stack: forbidden
+  execution_profile_design: docs/QUICKJS_EXECUTION_PROFILES.md
+  execution_profile_tracking_issue: 35
   runtime_selection:
     language: javascript
     engine: quickjs
@@ -66,7 +68,8 @@ completion_state:
   deterministic_replay: implemented
   native_control_abi: implemented
   authoring_cutover: implemented
-  legacy_runtime_removal: pending_final_drain
+  legacy_drain_proof: passed_no_deployment_attestation
+  legacy_runtime_removal: pending_platform_qualification
   controller_extension_architecture: accepted
   controller_extension_implementation: not_started
   controller_hypothesis_evaluation: not_started
@@ -169,7 +172,7 @@ blocking_invariants:
     proof:
       - every stored legacy Core definition and Program version is translated, drain_only, or rejected
       - no new legacy Core or Program publication after the announced boundary
-      - Core DSL elaborator and Program parser/dispatcher deleted after the final drain gate
+      - Core DSL elaborator and Harness DSL translation are deleted; the remaining Program parser/dispatcher is deleted after its final drain gate
 
 selected_upstream_contract:
   canonical_docs: https://bellard.org/quickjs/quickjs.html
@@ -190,6 +193,24 @@ selected_upstream_contract:
     exact runtime/compiler identity.
 
 javascript_profile:
+  baseline_profile: restricted_durable
+  execution_profiles:
+    restricted_durable:
+      status: implemented
+      main: synchronous_generator
+      durable_boundary: yielded_opaque_typed_command
+      ng_namespace: non_extensible_command_kernel
+    trusted_direct:
+      status: planned_issue_35
+      main: synchronous_or_async_function
+      authority: explicit_developer_grant_and_identity
+      ng_namespace: extensible_with_non_writable_non_configurable_kernel_members
+      guarantee_floor: unmanaged_for_the_entire_direct_execution
+      recovery: no_exact_replay_or_duplicate_prevention_claim_across_the_direct_execution
+    durable_async:
+      status: deferred_separate_scheduler_design
+      entry: async_main_with_durable_command_promises
+      requirement: journal_before_dispatch_owner_thread_settlement_recorded_ordering_and_restart_reconstruction
   entry_contracts:
     core_definition:
       export: define
@@ -504,7 +525,9 @@ authoring_cutover_contract:
       requires_QuickJS: false
     JavaScript_QuickJS:
       role: sole_user_authored_graph_and_Program_language
-      binding: sealed_versioned_ng_control_module
+      binding: profile_governed_ng_control_module
+      default_profile: restricted_durable_sealed_command_kernel
+      trusted_direct_profile: planned_issue_35
     standalone_Core_or_Program_JSON:
       role: forbidden_public_authoring_input
       fallback_compiler_selection: forbidden
@@ -519,10 +542,11 @@ authoring_cutover_contract:
     statement: >-
       Direct C++ APIs may use JSON values as in-process validated data without
       creating a standalone public JSON authoring protocol.
-  frozen:
+  removed:
     - bounded_Core_DSL
     - graph_Elaborator_authoring
     - Harness_mode_dsl
+  frozen:
     - Program_v2_v3_v4_operation_tree_authoring
     - Harness_mode_program
     - standalone_Core_JSON_public_authoring
@@ -538,9 +562,11 @@ authoring_cutover_contract:
     rejected:
       rule: exact_semantics_identity_authority_or_state_cannot_be_preserved
       behavior: explicit_terminal_migration_diagnostic
-  removal_targets:
+  completed_removals:
     - Core_DSL_parser_and_elaborator
     - Harness_Core_DSL_translation
+    - Core_DSL_only_examples_fixtures_docs_and_tests
+  removal_targets:
     - Program_source_schemas_and_operation_tree_parser
     - legacy_Program_operation_tree_lowering_and_dispatch
     - Harness_Program_JSON_translation
@@ -555,29 +581,44 @@ final_drain_proof:
     schema_version: 1
     storage_boundary: frozen_read_only_snapshot
     inventory_complete: explicit_operator_attestation_required
+    no_deployment_exception:
+      exact_statement: no_pre_release_or_production_deployment_has_ever_existed
+      exact_scope: all_neograph_program_and_harness_durable_state
+      requires:
+        - named_operator_attestation
+        - empty_stores
+        - empty_legacy_artifacts
+      prohibited_for:
+        - drained_deleted_lost_or_inaccessible_historical_state
+        - any_pre_release_or_production_deployment_that_ever_existed
     supported_store_snapshots:
       - program_sqlite
+      - program_postgres_dump
       - program_transitions_sqlite
       - harness_sqlite
       - harness_file
   verification:
     - every_scanned_input_has_stable_pre_and_post_content_identity
     - sqlite_snapshots_have_no_live_wal_shm_or_rollback_journal_sidecars
+    - postgres_dump_scans_exact_public_Program_COPY_tables_with_pg_restore_data_only_strict_names
+    - no_deployment_attestation_is_named_and_emits_a_distinct_proof_mode
+    - no_deployment_attestation_permits_no_store_or_legacy_artifact
     - every_discovered_legacy_source_has_exactly_one_terminal_classification
     - translated_source_has_scanned_replacement_and_sha256_equivalence_evidence
     - rejected_source_has_explicit_terminal_reason
     - drain_only_source_is_a_hard_final_removal_blocker
-    - active_recoverable_interrupted_or_unknown_legacy_run_is_a_hard_blocker
+    - active_recoverable_interrupted_unknown_or_activated_legacy_Program_is_a_hard_blocker
     - unscanned_bundle_or_artifact_reference_is_a_hard_blocker
   output:
     format: neograph-legacy-drain-proof
     proof_identity: canonical_sha256
+    evidence_mode: storage_snapshot_or_no_deployment_attestation
   release_gate:
     command: >-
       python3 scripts/audit_legacy_drain.py --inventory <inventory.json>
       --root <frozen-export-root> --output <proof.json> --require-final
     pass_condition: final_drain.passed_is_true
-    non_substitute: source_checkout_or_synthetic_fixture
+    non_substitute: source_checkout_synthetic_fixture_or_unattested_empty_inventory
 
 phases:
   Q0_dependency_qualification:
@@ -648,7 +689,7 @@ phases:
   Q7_legacy_removal:
     deliver:
       - final stored-definition and stored-version drain proof
-      - Core DSL elaborator and Program schema/parser/dispatcher deletion
+      - Core DSL elaborator deletion (completed) and remaining Program schema/parser/dispatcher deletion
       - compatibility dependency removal
       - full graph-equivalence, migration, replay, sanitizer, consumer, and performance evidence
     gate: One source authoring language, one canonical Core IR, and one durable effect model remain.
@@ -659,6 +700,7 @@ issue_plan:
   javascript_runtime_and_replay: 25
   native_control_abi: 26
   legacy_authoring_cutover: 27
+  trusted_execution_profiles: 35
   javascript_graph_definition: 28
 
 acceptance:
@@ -669,14 +711,15 @@ acceptance:
   - Adversarial source cannot reach ungranted host authority.
   - Replay after process death reaches the exact pending command without repeating completed effects.
   - Parallel, race, quorum, and bounded fan-out execute in C++ ProgramRuntime and never inside a blocking QuickJS callback.
-  - Sealed ng structured-concurrency constructors perform zero dispatch until their typed join command is yielded and durably admitted.
+  - Restricted ng structured-concurrency constructors perform zero dispatch until their typed join command is yielded and durably admitted.
   - Structured joins preserve admitted bounds, deterministic selection, cancellation drain, child lineage, and exact replay across process death.
   - Native extension behavior is exact-bound, cancellable, durable, and ABI-versioned.
   - Stored legacy Core definitions and Programs have an explicit terminal migration classification.
   - Legacy DSL direction documents and open issues are superseded by the QuickJS issue tree.
-  - No permanent Core DSL or Program DSL implementation remains after cutover.
+  - No permanent Core DSL implementation remains; Program DSL removal remains a final-drain gate.
 
 documentation:
+  execution_profiles: docs/QUICKJS_EXECUTION_PROFILES.md
   update_rule: >-
     Architecture and migration contracts may precede implementation. Public API,
     reference, example, and changelog claims update only after the corresponding

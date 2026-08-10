@@ -78,7 +78,7 @@ ProgramBundle bundle(const RegistrySnapshot& registry) {
     const json definition = {{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
                              {"nodes", json{{"main", json{{"type", "persist-node"}}}}}};
     ProgramBundleData data;
-    data.source_kind                   = SourceKind::CanonicalJson;
+    data.source_kind                   = SourceKind::CppBuilder;
     data.source_hash                   = digest('1');
     data.canonical_program_hash        = digest('2');
     data.compiler_build_id             = "persist-compiler/v1";
@@ -102,7 +102,7 @@ AdmissionProfile profile(const RegistrySnapshot& registry) {
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     return std::move(builder).build();
 }

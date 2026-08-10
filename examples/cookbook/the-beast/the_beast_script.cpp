@@ -11,8 +11,8 @@
 // behavior AND the graph's flow, in data, with no recompile.
 //
 // Coherence stays non-negotiable. The script declares its contract in
-// config (reads / writes / goto_targets); the harness passes the three
-// DSL gates, PLUS a contract check (declared writes must be declared
+// config (reads / writes / goto_targets); the harness passes the strict
+// Core compiler gates, PLUS a contract check (declared writes must be declared
 // channels; goto targets must be real nodes), PLUS a runtime wrapper that
 // REJECTS any write or goto outside the declaration. That restores the
 // effect/route guarantees (boundaries 2 & 6) at the Beast layer with
@@ -27,7 +27,6 @@
 // Run:    ./build/cookbook_the_beast_script
 
 #include <neograph/neograph.h>
-#include <neograph/graph/elaborator.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
 #include <neograph/llm/openai_provider.h>
@@ -239,12 +238,9 @@ void register_script_node() {
     (void)once;
 }
 
-// ---- three DSL gates ----
+// ---- strict Core compiler gates ----
 struct Verdict { bool ok = false; std::string gate, report; json core; };
-Verdict forge_gate(const json& dsl, const ng::NodeContext& ctx) {
-    json core;
-    try { core = ng::Elaborator::elaborate(dsl).core; }
-    catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }
+Verdict forge_gate(const json& core, const ng::NodeContext& ctx) {
     try {
         auto cg = ng::GraphCompiler::compile(core, ctx);
         ng::GraphCompiler::verify_roundtrip(core, cg);
@@ -331,8 +327,8 @@ int main(int argc, char** argv) {
         // Deterministic path: gate the canned harness, no LLM. Proves the
         // script_node mechanism (subprocess exec + goto flow + contract).
         std::cout << "── --selftest: gating a canned script_node harness (offline) ──\n";
-        const json dsl = canned_harness();
-        Verdict v = forge_gate(dsl, ctx);
+        const json core_candidate = canned_harness();
+        Verdict v = forge_gate(core_candidate, ctx);
         std::string cc = v.ok ? contract_check(v.core) : std::string{};
         if (!v.ok || !cc.empty()) {
             std::cout << "  REJECTED: " << (v.ok ? cc : v.report) << "\n"; return 1;
@@ -378,20 +374,20 @@ int main(int argc, char** argv) {
         try { resp = provider->complete(p); }
         catch (const std::exception& e) { std::cerr << "  LLM error: " << e.what() << "\n"; return 1; }
 
-        json dsl;
-        try { dsl = extract_json(resp.message.content); }
+        json core_candidate;
+        try { core_candidate = extract_json(resp.message.content); }
         catch (const std::exception&) {
             convo.push_back({"user", "Not valid JSON. Output ONLY the JSON harness."});
             std::cout << "  unparseable; retry.\n\n"; continue;
         }
 
-        Verdict v = forge_gate(dsl, ctx);
+        Verdict v = forge_gate(core_candidate, ctx);
         std::string cerr_ = v.ok ? contract_check(v.core) : std::string{};
         if (!v.ok || !cerr_.empty()) {
             const std::string gate = v.ok ? "contract" : v.gate;
             const std::string report = v.ok ? cerr_ : v.report;
             std::cout << "  REJECTED at '" << gate << "':\n    " << report.substr(0, 300) << "\n";
-            convo.push_back({"assistant", dsl.dump()});
+            convo.push_back({"assistant", core_candidate.dump()});
             convo.push_back({"user", "Compiler/contract REJECTED at '" + gate + "':\n" + report +
                 "\nFix only what it names. Output ONLY corrected JSON."});
             std::cout << "  → self-repair.\n\n";

@@ -305,6 +305,10 @@ AdmissionProfileBuilder::minimum_execution_guarantee(ExecutionGuarantee value) {
     return *this;
 }
 AdmissionProfileBuilder& AdmissionProfileBuilder::allow_source_kind(SourceKind value) {
+    if (value == SourceKind::CanonicalJson) {
+        throw std::invalid_argument(
+            "Canonical JSON is a retained legacy storage kind, not an admissible authoring frontend");
+    }
     impl_->allowed_source_kinds.push_back(value);
     return *this;
 }

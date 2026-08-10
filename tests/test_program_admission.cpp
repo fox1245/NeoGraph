@@ -40,9 +40,9 @@ AdmissionProfile admission_profile(const RegistrySnapshot& registry,
         .max_program_schema_version(1);
     if (reverse) {
         builder.allow_source_kind(SourceKind::CppBuilder)
-            .allow_source_kind(SourceKind::CanonicalJson);
+            .allow_source_kind(SourceKind::JavaScript);
     } else {
-        builder.allow_source_kind(SourceKind::CanonicalJson)
+        builder.allow_source_kind(SourceKind::JavaScript)
             .allow_source_kind(SourceKind::CppBuilder);
     }
     builder.allow_executable(registry.identities().front());
@@ -127,7 +127,7 @@ TEST(AdmissionProfileTest, MultiTenantRejectsTrustedNativeAndDuplicatesFailClose
         .semantic_version("1.0.0")
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered)
         .allow_effect_mode(EffectMode::TrustedNative);
     EXPECT_THROW((void)std::move(native).build(), std::invalid_argument);
@@ -136,8 +136,8 @@ TEST(AdmissionProfileTest, MultiTenantRejectsTrustedNativeAndDuplicatesFailClose
     duplicate.id("profile")
         .semantic_version("1.0.0")
         .registry(registry)
-        .allow_source_kind(SourceKind::CanonicalJson)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     EXPECT_THROW((void)std::move(duplicate).build(), std::invalid_argument);
 
@@ -145,7 +145,7 @@ TEST(AdmissionProfileTest, MultiTenantRejectsTrustedNativeAndDuplicatesFailClose
     unknown_executable.id("profile")
         .semantic_version("1.0.0")
         .registry(registry)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_executable(ExecutableIdentity{ExecutableKind::Node, "missing", "1.0.0", digest('9')})
         .allow_effect_mode(EffectMode::Brokered);
     EXPECT_THROW((void)std::move(unknown_executable).build(), std::invalid_argument);
@@ -155,10 +155,16 @@ TEST(AdmissionProfileTest, MultiTenantRejectsTrustedNativeAndDuplicatesFailClose
         .semantic_version("1.0.0")
         .registry(registry)
         .mode(AdmissionMode::TrustedEmbedding)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_executable(registry.identities().front())
         .allow_effect_mode(EffectMode::TrustedNative);
     EXPECT_THROW((void)std::move(omitted_effect).build(), std::invalid_argument);
+}
+
+TEST(AdmissionProfileTest, CanonicalJsonIsNotAdmissibleForNewPublication) {
+    AdmissionProfileBuilder builder;
+    builder.id("profile").semantic_version("1.0.0").registry(registry_snapshot());
+    EXPECT_THROW(builder.allow_source_kind(SourceKind::CanonicalJson), std::invalid_argument);
 }
 
 TEST(PolicySnapshotTest, CanonicalFingerprintIsOrderIndependentAndRoundTripsStrictly) {
@@ -256,7 +262,7 @@ TEST(PolicySnapshotTest, EnforcesTrustedNativeCapabilityAndFiniteBudgets) {
         .semantic_version("1.0.0")
         .registry(registry_snapshot())
         .mode(AdmissionMode::TrustedEmbedding)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     const auto            restricted_profile = std::move(restricted_profile_builder).build();
     PolicySnapshotBuilder restricted_overgrant;

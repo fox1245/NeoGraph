@@ -38,7 +38,7 @@ AdmissionProfile make_admission(const RegistrySnapshot& registry,
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
         .minimum_execution_guarantee(minimum_guarantee)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     return std::move(builder).build();
 }
@@ -74,7 +74,7 @@ ProgramBundle make_bundle(std::string    module_root,
         {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
         {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
     ProgramBundleData data;
-    data.source_kind                   = SourceKind::CanonicalJson;
+    data.source_kind                   = SourceKind::CppBuilder;
     data.source_hash                   = digest('2');
     data.canonical_program_hash        = digest('3');
     data.compiler_build_id             = "compiler:module";
@@ -151,7 +151,7 @@ ProgramBundle make_composition_bundle(std::string         registry_fingerprint,
     const json definition = json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
                                  {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
     ProgramBundleData data;
-    data.source_kind                   = SourceKind::CanonicalJson;
+    data.source_kind                   = SourceKind::CppBuilder;
     data.source_hash                   = digest('8');
     data.canonical_program_hash        = digest('9');
     data.compiler_build_id             = "compiler:module-overflow";

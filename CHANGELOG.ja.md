@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=30ec458d3f83e4718421a04a36fc7dcdce7233530ffc644543c2f192c7f74e61 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=2aec329226eb4b687367daba27af8d37f751c54aed3dc50c013cf129db79a27d -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -32,6 +32,22 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   raw copy は final proof になりません。これは Q7 evidence mechanism を確立
   しますが、deployment 固有の final drain または legacy parser 削除の完了を
   主張するものではありません。
+
+- **PostgreSQL final-drain アーカイブ走査。** legacy-drain 監査は凍結された
+  `program_postgres_dump` custom archive を受け入れ、`pg_restore` を
+  data-only、strict-table、script-output モードでのみ呼び出し、database へは
+  restore しません。Program bundle、version、activation table の persisted
+  identity を検証し、必須 table を欠くまたは変更された archive を拒否し、
+  legacy Program version を選択する activation を final-removal blocker として
+  扱います。
+
+- **no-deployment Q7 final-proof モード。** legacy-drain 監査は、pre-release
+  または production の NeoGraph deployment が一度も存在しなかった場合にのみ、
+  名前付き operator attestation を受け入れます。このモードでは storage target
+  も過去の legacy artifact も一切許可せず、生成される proof を
+  `evidence_mode: "no_deployment_attestation"` と明示し、混在または
+  attestation のない空の inventory は fail-closed になります。drain 済み、
+  削除済み、失われた、またはアクセス不能な過去 state には使えません。
 
 - **OpenRouter プロバイダールーティング。** `OpenAIProvider` は
   `CompletionParams::extra_fields.provider` に渡されたオブジェクトを Chat

@@ -315,54 +315,6 @@ void from_json(const json& value, SourceMapEntry& entry) {
 
 ProgramSource::ProgramSource(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
 
-ProgramSource ProgramSource::from_canonical_json(std::string                 source_id,
-                                                 std::string                 source_text,
-                                                 std::vector<ImportRef>      imports,
-                                                 std::vector<SourceMapEntry> source_map) {
-    validate_source_id(source_id);
-    json document;
-    try {
-        document = detail::parse_json_strict(source_text);
-    } catch (const std::exception& error) {
-        throw_source_error(std::move(source_id), "P_SOURCE_JSON_PARSE", error.what());
-    }
-    if (!document.is_object()) {
-        throw_source_error(std::move(source_id), "P_SOURCE_ROOT_TYPE",
-                           "Program canonical source root must be an object");
-    }
-
-    std::uint32_t schema_version = 1;
-    if (document.contains("program_schema_version")) {
-        if (!document["program_schema_version"].is_number_unsigned()) {
-            throw_source_error(std::move(source_id), "P_SOURCE_SCHEMA_VERSION",
-                               "program_schema_version must be a positive unsigned integer");
-        }
-        const auto value = document["program_schema_version"].get<unsigned long long>();
-        if (value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
-            throw_source_error(std::move(source_id), "P_SOURCE_SCHEMA_VERSION",
-                               "program_schema_version is outside the supported integer range");
-        }
-        schema_version = static_cast<std::uint32_t>(value);
-    }
-
-    try {
-        validate_common(source_id, schema_version, document, imports, source_map);
-    } catch (const std::exception& error) {
-        throw_source_error(std::move(source_id), "P_SOURCE_INVALID", error.what());
-    }
-
-    auto impl                = std::make_shared<Impl>();
-    impl->kind               = SourceKind::CanonicalJson;
-    impl->schema_version     = schema_version;
-    impl->source_id          = std::move(source_id);
-    impl->document           = std::move(document);
-    impl->imports            = std::move(imports);
-    impl->source_map         = std::move(source_map);
-    impl->canonical_document = detail::canonical_json_bytes(impl->document);
-    impl->source_hash        = compute_source_hash(impl->schema_version, impl->document);
-    return ProgramSource(std::move(impl));
-}
-
 ProgramSource ProgramSource::from_javascript(
     std::string source_id,
     std::string source_text,
@@ -499,6 +451,9 @@ ProgramSource ProgramSource::parse(std::string_view stored_bytes) {
         }
     }
 
+    // CanonicalJson is intentionally accepted here only as a storage decode
+    // path for legacy records. It is never exposed as a source constructor and
+    // the compiler rejects it before any operation-tree parsing or dispatch.
     ProgramSource parsed = [&]() {
         if (kind == SourceKind::JavaScript) {
             if (program_schema_version != JAVASCRIPT_PROGRAM_SCHEMA_VERSION) {

@@ -3,9 +3,8 @@
 //   ./example_evolution seed.json task.json > lineage.json
 //   ./example_evolution --smoke
 //
-// The lineage document contains every individual across all generations,
-// compile-gate statistics, and the best individual's core + sourcemap.
-
+// The input seed is already strict Core JSON; evolution mutates only the
+// canonical interchange topology and never translates a source language.
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/node.h>
 
@@ -89,7 +88,7 @@ int main(int argc, char** argv) {
     task.expected_output = task_doc.value("expected_output", json::object());
     task.expected_super_steps = task_doc.value("expected_super_steps", 0);
 
-    auto elab = Elaborator::elaborate(seed_doc);
+    auto core = seed_doc;
 
     EvolutionConfig cfg;
     cfg.offspring_per_gen = 10;
@@ -98,7 +97,7 @@ int main(int argc, char** argv) {
     cfg.seed = 42;
     cfg.run_evaluation = true;
 
-    auto result = evolve(elab.core, task, cfg);
+    auto result = evolve(core, task, cfg);
     auto output = to_json(result);
     output["task"] = task.name;
     output["seed_name"] = seed_doc.value("name", "");

@@ -19,7 +19,6 @@
 // Run:    ./build/cookbook_the_beast_apex ["your task"]
 
 #include <neograph/neograph.h>
-#include <neograph/graph/elaborator.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
 #include <neograph/llm/openai_provider.h>
@@ -83,18 +82,15 @@ std::vector<std::unique_ptr<neograph::Tool>> make_tools() {
     return t;
 }
 
-// The three coherence gates.
+// The strict Core coherence gates.
 struct Verdict { bool ok = false; std::string gate, report; json core; };
 
-Verdict forge(const json& dsl, const ng::NodeContext& ctx) {
-    if (!dsl.contains("schema_version")
-        || !dsl["schema_version"].is_number_integer()
-        || dsl["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
+Verdict forge(const json& core, const ng::NodeContext& ctx) {
+    if (!core.contains("schema_version")
+        || !core["schema_version"].is_number_integer()
+        || core["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
         return {false, "schema", "schema_version must match TOPOLOGY_SCHEMA_VERSION", {}};
     }
-    json core;
-    try { core = ng::Elaborator::elaborate(dsl).core; }
-    catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }
     try {
         auto cg = ng::GraphCompiler::compile(core, ctx);
         ng::GraphCompiler::verify_roundtrip(core, cg);
@@ -181,18 +177,18 @@ int main(int argc, char** argv) {
         try { resp = neograph::async::run_sync(provider->invoke(p, nullptr)); }
         catch (const std::exception& e) { std::cerr << "  LLM error: " << e.what() << "\n"; return 1; }
 
-        json dsl;
-        try { dsl = extract_json(resp.message.content); }
+        json core_candidate;
+        try { core_candidate = extract_json(resp.message.content); }
         catch (const std::exception& e) {
             convo.push_back({"assistant", resp.message.content});
             convo.push_back({"user", "Not valid JSON. Output ONLY the JSON harness."});
             std::cout << "  unparseable; retry.\n\n"; continue;
         }
-        const Verdict v = forge(dsl, ctx);
+        const Verdict v = forge(core_candidate, ctx);
         if (!v.ok) {
             std::cout << "  REJECTED at '" << v.gate << "': " << v.report.substr(0, 300) << "\n";
             std::cout << "  → feeding diagnostics back for self-repair.\n\n";
-            convo.push_back({"assistant", dsl.dump()});
+            convo.push_back({"assistant", core_candidate.dump()});
             convo.push_back({"user", "The compiler REJECTED that at the '" + v.gate +
                 "' gate:\n" + v.report + "\nFix only what it names. Output ONLY corrected JSON."});
             continue;

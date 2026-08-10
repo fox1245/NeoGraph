@@ -25,7 +25,6 @@
 // Run:    ./build/cookbook_the_beast_evolve   [--darwin-only]
 
 #include <neograph/neograph.h>
-#include <neograph/graph/elaborator.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/loader.h>

@@ -20,7 +20,7 @@ contract:
   diagnostics:
     - Aggregate deterministic violations instead of first-error exit.
     - Include a stable JSON path, node name/type, keyword, expected, and actual.
-    - Remap to an elaborator source coordinate only when a source map is available.
+    - Remap to an authored source coordinate only when a source map is available.
   invariants:
     - Built-in and custom node schemas use the same validator.
     - Exported schema and compiler claim exactly the same supported subset.

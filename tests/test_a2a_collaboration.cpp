@@ -87,7 +87,7 @@ neograph::program::ProgramVersion make_program_version() {
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
-        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     auto admission = std::move(admission_builder).build();
 

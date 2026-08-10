@@ -2,11 +2,11 @@
 // =================================================================
 // The offline the_beast.cpp mocks the author. THIS one is live: a real
 // LLM (DeepSeek v4 flash via OpenRouter) is handed the engine's exported
-// schema and asked to WRITE a harness in the DSL surface. Whatever it
-// produces is forced through the three coherence gates; on rejection the
+// schema and asked to WRITE a harness as strict Core JSON. Whatever it
+// produces is forced through the compiler and validation gates; on rejection the
 // gate's diagnostics are fed straight back into the conversation and the
 // model rewrites — a genuine self-repair loop. Only a harness that
-// survives all three gates is compiled and run (with a checkpointer, so
+// survives the compiler and validation gates is compiled and run (with a checkpointer, so
 // its execution can be rolled back).
 //
 // The load-bearing idea: the model may hallucinate freely, but it can
@@ -116,20 +116,16 @@ int main(int argc, char** argv) {
 
     const std::string sys =
         "You are the architect of a NeoGraph agent harness. A harness is a "
-        "graph TOPOLOGY described in JSON (the DSL surface). You output ONLY a "
+        "graph TOPOLOGY described as strict Core JSON. You output ONLY a "
         "single JSON object — no prose, no markdown fences.\n\n"
-        "DSL surface rules:\n"
+        "Strict Core JSON rules:\n"
         "- Top level: \"schema_version\": 1, \"name\", \"channels\", "
-        "\"templates\", \"use\", \"nodes\", \"edges\".\n"
+        "\"nodes\", \"edges\".\n"
         "- channels: { \"<name>\": { \"reducer\": \"append\"|\"overwrite\" } }.\n"
-        "- templates: { \"<t>\": { \"params\": [..], \"nodes\": { \"<local>\": "
-        "{ \"type\": \"<nodetype>\" } }, \"edges\": [..] } }. Inside a template, "
-        "reference a param as \"@{param}\".\n"
-        "- use: [ { \"template\": \"<t>\", \"prefix\": \"<p>\", \"args\": {..} } ]. "
-        "Each template node <local> becomes \"<p>_<local>\".\n"
+        "- nodes: { \"<name>\": { \"type\": \"<nodetype>\" } }. Name every node explicitly; "
+        "do not include legacy composition keys, variables, or interpolation.\n"
         "- edges: [ { \"from\": \"__start__\"|<node>, \"to\": <node>|\"__end__\" } ]. "
-        "Every edge endpoint MUST be a node that exists after `use` expansion, "
-        "or __start__/__end__.\n"
+        "Every edge endpoint MUST be an explicitly declared node, or __start__/__end__.\n"
         "- Available node types (use ONLY these): " +
         node_types.dump() +
         ". "
@@ -139,10 +135,10 @@ int main(int argc, char** argv) {
 
     std::string task = (argc > 1)
                            ? argv[1]
-                           : "Design a 3-stage pipeline: research -> critique -> summarize. Use a "
-                             "single template instantiated three times via `use` (prefixes r/c/s), "
-                             "each stage one beast_node worker, wired in a line from __start__ to "
-                             "__end__. Declare a \"trail\" channel with the append reducer.";
+                           : "Design a 3-stage pipeline with explicitly named nodes research, "
+                             "critique, and summarize, each a beast_node worker, wired in a line "
+                             "from __start__ to __end__. Declare a \"trail\" channel with the "
+                             "append reducer.";
 
     std::vector<neograph::ChatMessage> convo = {{"system", sys}, {"user", task}};
 
@@ -170,9 +166,9 @@ int main(int argc, char** argv) {
         const std::string reply = resp.message.content;
         std::cout << "  model returned " << reply.size() << " chars of JSON.\n";
 
-        json dsl;
+        json core_candidate;
         try {
-            dsl = beast::extract_json_object(reply);
+            core_candidate = beast::extract_json_object(reply);
         } catch (const std::exception& e) {
             std::cout << "  UNPARSEABLE (" << e.what() << "); asking again.\n\n";
             convo.push_back({"assistant", reply});
@@ -181,12 +177,12 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        const beast::HarnessVerdict v = beast::validate_harness(dsl, ctx);
+        const beast::HarnessVerdict v = beast::validate_harness(core_candidate, ctx);
         if (!v.ok) {
             std::cout << "  REJECTED at gate '" << v.gate << "':\n";
             std::cout << "    " << v.report.substr(0, 400) << "\n";
             std::cout << "  → feeding the compiler's diagnostics back to the model.\n\n";
-            convo.push_back({"assistant", dsl.dump()});
+            convo.push_back({"assistant", core_candidate.dump()});
             convo.push_back({"user", "The compiler REJECTED that harness at the '" + v.gate +
                                          "' gate:\n" + v.report +
                                          "\nFix ONLY what the diagnostics name. Output ONLY the "
@@ -194,7 +190,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        std::cout << "  ACCEPTED — all three gates passed.\n";
+        std::cout << "  ACCEPTED — strict compile and validation gates passed.\n";
         accepted_core = v.core;
         std::cout << "  Core lockfile nodes: ";
         for (auto it = accepted_core["nodes"].begin(); it != accepted_core["nodes"].end(); ++it)

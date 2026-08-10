@@ -22,7 +22,6 @@
 #include <neograph/graph/types.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/validator.h>
-#include <neograph/graph/elaborator.h>
 
 #include <string>
 #include <vector>
@@ -56,7 +55,6 @@ struct NEOGRAPH_API HarnessTask {
     bool has_barrier = false;
     bool has_interrupt = false;
     bool has_tool_calls = false;
-    bool has_template_vars = false;
 };
 
 /// Parse a HarnessTask from a JSON fixture file.

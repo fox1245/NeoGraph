@@ -15,6 +15,12 @@
 
 namespace neograph::program {
 
+/**
+ * Source identity carried by Program values. CanonicalJson is retained only
+ * for decoding already-stored legacy artifacts; it is not a new-authoring
+ * frontend. New sources are created through the trusted C++ builder or the
+ * JavaScript frontend.
+ */
 enum class SourceKind { CanonicalJson, CppBuilder, JavaScript };
 
 struct ImportRef {
@@ -90,11 +96,6 @@ public:
 
     static JavaScriptRuntimeIdentity default_javascript_runtime_identity();
 
-    static ProgramSource from_canonical_json(std::string                 source_id,
-                                             std::string                 source_text,
-                                             std::vector<ImportRef>      imports    = {},
-                                             std::vector<SourceMapEntry> source_map = {});
-
     /**
      * Store a sealed JavaScript control source. The text is evaluated only by
      * an explicitly enabled compiler frontend; it is never a runtime node or
@@ -112,6 +113,7 @@ public:
                                           std::vector<ImportRef>      imports    = {},
                                           std::vector<SourceMapEntry> source_map = {});
 
+    /** Decode a versioned stored value; this is not a public source frontend. */
     static ProgramSource parse(std::string_view stored_bytes);
 
     SourceKind                         kind() const noexcept;

@@ -6,7 +6,7 @@ NeoGraph Harness compiles a bounded multi-worker workflow before it runs. The
 stable MCP surface stays at six tools:
 
 - `neograph_schema` discovers the installed request contract and presets.
-- `neograph_compile` elaborates, compiles, and validates without executing.
+- `neograph_compile` compiles and validates without executing.
 - `neograph_start` starts a retained artifact or an inline request.
 - `neograph_get` polls compact status or dereferences a result artifact URI.
 - `neograph_resume` validates and submits the exact pending host result.
@@ -163,13 +163,14 @@ Accepted Harness requests still translate to the legacy `ProgramSource`,
 compile through `ProgramCompiler`, admit through `ProgramCatalog`, and execute
 through `ProgramRuntime`; `GraphEngine` remains the only node executor.
 
-The accepted replacement for general Program authoring is standard JavaScript
-on embedded QuickJS. The current `dsl` and `program` modes are migration inputs,
-not permanent parallel languages. See
+The accepted replacement for general authoring is standard JavaScript on
+embedded QuickJS. The former `dsl`, standalone `core`, and `program` modes are
+rejected for new publication with explicit migration diagnostics; strict Core
+JSON remains internal/interchange data. See
 [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) and
 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md). This document
-describes shipped compatibility behavior until that cutover lands; it does not
-authorize new legacy DSL semantics.
+describes the retained compatibility behavior and migration diagnostics; it
+does not authorize new legacy source semantics.
 
 ## Build And Run
 

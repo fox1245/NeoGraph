@@ -413,16 +413,28 @@ TEST(ProgramCompilerTest, SourceKindIsPreservedAndBoundIntoBundleIdentity) {
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
     const auto      document = program_document();
     const auto builder = compiler.compile(ProgramSource::from_cpp_builder("builder", 1, document));
-    const auto canonical =
-        compiler.compile(ProgramSource::from_canonical_json("source.json", document.dump()));
 
     EXPECT_EQ(builder.source_kind(), SourceKind::CppBuilder);
     EXPECT_EQ(ProgramBundle::parse(builder.serialize_canonical()).source_kind(),
               SourceKind::CppBuilder);
-    EXPECT_EQ(canonical.source_kind(), SourceKind::CanonicalJson);
-    EXPECT_EQ(ProgramBundle::parse(canonical.serialize_canonical()).source_kind(),
-              SourceKind::CanonicalJson);
-    EXPECT_NE(builder.id(), canonical.id());
+}
+
+TEST(ProgramCompilerTest, StoredCanonicalJsonSourceIsNotACompilationFrontend) {
+    auto snapshot = complete_snapshot();
+    ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
+    auto stored = json::parse(
+        ProgramSource::from_cpp_builder("legacy", 1, program_document()).serialize_canonical());
+    stored["kind"] = "canonical_json";
+
+    const auto legacy = ProgramSource::parse(stored.dump());
+    EXPECT_EQ(legacy.kind(), SourceKind::CanonicalJson);
+    try {
+        (void)compiler.compile(legacy);
+        FAIL() << "legacy canonical Program JSON unexpectedly compiled";
+    } catch (const ProgramCompileError& error) {
+        ASSERT_EQ(error.diagnostics().size(), 1U);
+        EXPECT_EQ(error.diagnostics().front().code, "P_MIGRATION_PROGRAM_JSON");
+    }
 }
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
@@ -1131,10 +1143,9 @@ TEST(ProgramCompilerTest,
     auto            snapshot = complete_snapshot();
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
     const auto      document = program_document();
-    auto            compact  = ProgramSource::from_canonical_json("format:test", document.dump());
+    auto            compact  = ProgramSource::from_cpp_builder("format:test", 1, document);
     SourceMapEntry mapped{"/root/definition", {"dsl:test", "/graph", SourceSpan{0, 4, 1, 1, 1, 5}}};
-    auto           formatted =
-        ProgramSource::from_canonical_json("format:test", document.dump(2), {}, {mapped});
+    auto           formatted = ProgramSource::from_cpp_builder("format:test", 1, document, {}, {mapped});
 
     const auto first  = compiler.compile(compact);
     const auto second = compiler.compile(formatted);

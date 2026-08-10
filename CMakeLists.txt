@@ -487,7 +487,6 @@ add_library(neograph_core
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
     src/core/graph_validator.cpp
-    src/core/elaborator.cpp
     src/core/graph_coordinator.cpp
     src/core/graph_executor.cpp
     src/core/node_cache.cpp
@@ -1408,11 +1407,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 neograph::core neograph::llm cppdotenv)
 
             # "The Beast" — a self-evolving agent that WRITES its own
-            # harness in the DSL surface, gates it through the three
-            # coherence gates (elaborate → strict compile + TV →
-            # validate), and spawns the survivor as a disposable
+            # harness as strict Core JSON, gates it through strict compile +
+            # TV → validate, and spawns the survivor as a disposable
             # sub-agent. The category only NeoGraph makes safe: the
-            # authored topology is data, and the DSL compiler proves it
+            # authored topology is canonical data and the compiler proves it
             # coherent before a single node runs. Offline, no provider
             # (deterministic stub nodes).
             add_executable(cookbook_the_beast
@@ -1685,13 +1683,8 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_export_schema examples/52_export_schema.cpp)
         target_link_libraries(example_export_schema PRIVATE neograph::core)
 
-        # DSL -> core topology expander (issue #75 M4). The lockfile
-        # workflow: `./example_elaborate harness.dsl.json > harness.json`.
-        add_executable(example_elaborate examples/53_elaborate.cpp)
-        target_link_libraries(example_elaborate PRIVATE neograph::core)
-
         # Harness evolution loop (issue #80). Example 54: reproduce the
-        # README evolution benchmark from a DSL seed + task fixture.
+        # README evolution benchmark from a strict Core seed + task fixture.
         #   ./example_evolution seed.json task.json > lineage.json
         add_executable(example_evolution examples/54_evolution.cpp)
         target_link_libraries(example_evolution PRIVATE neograph::core)

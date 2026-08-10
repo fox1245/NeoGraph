@@ -16,7 +16,7 @@
     "max_program_schema_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "allowed_source_kinds": {
       "type": "array", "uniqueItems": true,
-      "items": { "enum": ["canonical_json", "cpp_builder"] }
+      "items": { "enum": ["cpp_builder", "javascript"] }
     },
     "allowed_executables": {
       "type": "array", "uniqueItems": true,

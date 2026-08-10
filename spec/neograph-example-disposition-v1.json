@@ -933,23 +933,6 @@
       }
     },
     {
-      "id": "example_53_elaborate",
-      "kind": "example",
-      "path": "examples/53_elaborate.cpp",
-      "target": "example_elaborate",
-      "disposition": "Core-kept",
-      "requires": [
-        "NEOGRAPH_BUILD_LLM=ON"
-      ],
-      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
-      "proof": {
-        "status": "pending-component-smoke",
-        "build": "cmake --build <build-dir> --target example_elaborate",
-        "run": "<build-dir>/example_elaborate",
-        "expected": "recipe-specific output; exit 0"
-      }
-    },
-    {
       "id": "example_53_grpc",
       "kind": "example",
       "path": "examples/53_grpc_client.cpp",

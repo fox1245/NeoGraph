@@ -1,7 +1,6 @@
 // NeoGraph Cookbook — shared live-Beast validation helpers
 #pragma once
 
-#include <neograph/graph/elaborator.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/validator.h>
 #include <neograph/json.h>
@@ -11,7 +10,7 @@
 
 namespace neograph::cookbook::beast {
 
-/** Result of the schema → elaboration → compiler/validator gate sequence. */
+/** Result of the strict Core schema → compiler/validator gate sequence. */
 struct HarnessVerdict {
     bool        ok = false;
     std::string gate;
@@ -20,20 +19,13 @@ struct HarnessVerdict {
 };
 
 /**
- * Validate a generated topology through the same three coherence gates used by
- * the live Beast. On success, returns the elaborated strict Core lockfile.
+ * Validate a generated strict Core topology through the same coherence gates
+ * used by the live Beast. On success, returns the canonical interchange JSON.
  */
-inline HarnessVerdict validate_harness(const json& dsl, const graph::NodeContext& ctx) {
-    if (!dsl.contains("schema_version") || !dsl["schema_version"].is_number_integer() ||
-        dsl["schema_version"].get<int>() != graph::TOPOLOGY_SCHEMA_VERSION) {
+inline HarnessVerdict validate_harness(const json& core, const graph::NodeContext& ctx) {
+    if (!core.contains("schema_version") || !core["schema_version"].is_number_integer() ||
+        core["schema_version"].get<int>() != graph::TOPOLOGY_SCHEMA_VERSION) {
         return {false, "schema", "schema_version must match TOPOLOGY_SCHEMA_VERSION", {}};
-    }
-
-    json core;
-    try {
-        core = graph::Elaborator::elaborate(dsl).core;
-    } catch (const std::exception& e) {
-        return {false, "elaborate", e.what(), {}};
     }
 
     try {

@@ -1,12 +1,13 @@
 # NeoGraph v1 Core + Program Architecture
 
-Status: Accepted Core architecture; source-language direction amended 2026-08-08
+Status: Accepted Core architecture; source-language direction amended 2026-08-10
 Date: 2026-07-31
 Source baseline: `d80c316de1f3a10f0948477c3689a0b1b80d771b`
 Source-language amendment:
 [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) supersedes
-this document wherever it preserves the bounded Core authoring DSL, requires a
-bounded NeoGraph Program operation DSL, or rejects embedded JavaScript control.
+this document wherever it defines JavaScript authoring or removes legacy
+source-language implementations. The bounded Core authoring DSL/elaborator is
+deleted; strict Core JSON, typed Core IR, and trusted C++ embedding remain.
 The typed Core IR, GraphEngine, catalog, activation, authority, durability, and
 tenant boundaries below remain in force.
 Post-cutover controller extension:
@@ -648,13 +649,15 @@ native code is rejected or isolated outside the process.
 ### ProgramSource
 
 The authored document plus its source kind, declared schema version, imports,
-and source coordinates. Supported frontends are C++ builder values, canonical
-JSON, and opt-in JavaScript. JavaScript source is sealed in a canonical envelope
-that pins its QuickJS engine, language, and host-API versions. `define()` lowers
-through the compile-time graph-builder boundary above; an optional generator
-`main(input)` remains sealed as runtime control source and yields only durable
-typed Program commands. YAML or model-specific syntax may be added later only
-by lowering to the same typed source model.
+and source coordinates. New sources use trusted C++ builder values or sealed
+JavaScript. Canonical JSON remains a storage identity for already-retained
+legacy artifacts, but is not a source constructor or a compilation frontend.
+JavaScript source is sealed in a canonical envelope that pins its QuickJS
+engine, language, and host-API versions. `define()` lowers through the
+compile-time graph-builder boundary above; an optional generator `main(input)`
+remains sealed as runtime control source and yields only durable typed Program
+commands. YAML or model-specific syntax may be added later only by lowering to
+the same typed source model.
 
 ### ProgramBundle
 
@@ -1102,23 +1105,24 @@ in [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md).
 
 ## Compatibility and cutover
 
-The current Harness Core DSL, Program JSON operation trees, strict Core
-documents, retained artifacts, and MCP methods are migration inputs, not
-parallel permanent architectures.
+Strict Core documents, retained artifacts, and MCP methods remain compatibility
+surfaces, while source authoring has one public language: JavaScript.
 
 - Existing strict Core JSON remains validated low-level interchange and
   canonical serialization, not a second programming language.
-- Bounded Core topology elaboration, Harness `mode: "dsl"`, Program-v2/v3/v4
-  operation-tree authoring, and Harness `mode: "program"` are frozen. Stored
-  definitions and versions are classified as translated, drain-only, or
-  rejected before the JavaScript authoring cutover.
-- New Core graph definitions use bounded JavaScript `define()` evaluation; new
-  Programs use JavaScript generator `main()`. Both retain the same validation,
-  admission, activation, durability, effect, and GraphEngine boundaries.
+- The bounded Core topology elaborator, Harness `mode: "dsl"`, and their
+  source-authoring tests/examples are deleted. New requests using that mode
+  fail with an explicit migration diagnostic rather than selecting a fallback.
+- New Core graph definitions use JavaScript `define()` evaluation or the
+  trusted C++ embedding API; new Programs use JavaScript generator `main()`.
+  Both retain the same validation, admission, activation, durability, effect,
+  and GraphEngine boundaries.
+- Program-v2/v3/v4 operation-tree authoring and Harness `mode: "program"` remain
+  frozen migration surfaces under the separate Program drain plan.
 - Existing MCP method names may remain as transport compatibility, but adapters
   do not own another compiler or runtime.
-- The Core elaborator and legacy Program parser/dispatcher are deleted after
-  their stored data drains.
+- The Core elaborator is deleted; legacy Program parser/dispatcher removal
+  remains governed by the stored-version drain plan.
 - Superseded DSL and Control-VM studies are removed from the live documentation;
   repository history remains the historical record.
 

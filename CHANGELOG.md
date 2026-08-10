@@ -30,6 +30,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not claim the deployment-specific final drain or legacy-parser deletion is
   complete.
 
+- **PostgreSQL final-drain archive scan.** The legacy-drain auditor now
+  accepts a frozen `program_postgres_dump` custom archive and invokes
+  `pg_restore` only in data-only, strict-table, script-output mode; it never
+  restores into a database. It validates the Program bundle, version, and
+  activation tables against their persisted identities, rejects an archive that
+  omits or changes any required table, and treats an activation of a legacy
+  Program version as a final-removal blocker.
+
+- **No-deployment Q7 final-proof mode.** The legacy-drain auditor now accepts
+  a named operator attestation only when no pre-release or production NeoGraph
+  deployment ever existed. That mode accepts neither storage targets nor
+  historical legacy artifacts, labels the emitted proof
+  `evidence_mode: "no_deployment_attestation"`, and fails closed for any
+  mixed or unattested empty inventory. It cannot cover drained, deleted, lost,
+  or inaccessible historical state.
+
 - **OpenRouter provider routing.** `OpenAIProvider` now forwards an object
   passed at `CompletionParams::extra_fields.provider` into the Chat Completions
   request body as `provider`; non-object values fail before an HTTP request.

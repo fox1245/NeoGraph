@@ -4,7 +4,7 @@
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 > 一个自我进化的代理，编写自己的执行框架，并在
-> DSL 编译器，并通过检查点机制倒回其执行。
+> strict Core 编译器，并通过检查点机制倒回其执行。
 > **生成。进化了。倒回。野兽依然存在。**
 
 大多数“代理框架”都可以让您“构建”图。野兽做了三件事
@@ -19,7 +19,7 @@
    检查点机制——真正的时间旅行，而不是重播。
 
 这只是安全的，因为在 NeoGraph 中，执行框架是 **数据** — 一种拓扑
-JSON 中描述（问题 #56）——DSL 编译器（问题 #75）可以
+JSON 中描述（问题 #56）——strict Core 编译器（问题 #75）可以
 *在运行之前证明执行框架是一致的*。把它拿走，然后“一个代理
 自己写图的”只是一台生产破图的机器。
 编译器将怪物从负担变成了范畴。
@@ -33,8 +33,8 @@ $ ./build/cookbook_the_beast
 
 ```
 ── ACT I · generate a harness, prove it coherent ──
-  ACCEPTED — 3 gates passed. Core lockfile nodes: s1_n s2_n s3_n
-  (DSL surface expanded away: vars/templates/use gone.)
+  ACCEPTED — strict gates passed. Core lockfile nodes: s1_n s2_n s3_n
+  (strict Core JSON expanded away: strict Core JSON retained.)
 
 ── ACT II · evolve the harness (compiler = fitness) ──
   generations: 4 · offspring: 36 · survived compile gate: 36 · rejected (invalid, never run): 0
@@ -57,29 +57,27 @@ Generated. Evolved. Rewound. The Beast remains.
 ```
 ## 第一幕 — 生成 + 门
 
-The Beast 在 DSL **surface** 中编写了一个执行框架（`vars` / `templates` /
-`use`) 并迫使它按顺序通过三个相干门。一个执行框架
+The Beast 直接用 strict Core JSON 的显式节点和边编写执行框架，并使其依次
+通过编译和验证门。一个执行框架
 任何门失败的都会被**丢弃**。
 
 | 门控 | API | 捕获的问题 |
 |---|---|---|
-| **1. 展开** | `Elaborator::elaborate`|针对 DSL 坐标的表层错误 - 未知模板、丢失/额外 `use` 参数、变量周期、节点名称冲突。总体和确定性：相同的 DSL 总是产生字节相同的核心，因此门 2-3 推理出固定的产物。 |
+| **1. 编译 + TV** | `GraphCompiler::compile`（严格，`schema_version: 1`）+`verify_roundtrip` | 未知键会产生硬错误，并验证规范化的 strict Core JSON。 |
 | **2. 编译 + TV** | `GraphCompiler::compile`（严格，`schema_version: 1`）+`verify_roundtrip` |拼写错误或不受支持的键是*硬错误*（已消费键核算），而不是无声丢弃。 翻译验证然后断言`canon(source) == canon(compile(source).to_json())`——编译器不能悄悄地重新连接任何东西。 |
-| **3. 验证** | `GraphValidator::validate` |该图的**含义**：悬空边（E3）、永远不会发射的障碍（E8）、不完整的路由表（E10）、通道效应违规（E4/E6）。错误仅适用于“永远”不可能正确的构造；其余的都是lint 提示。 |
+| **2. 验证** | `GraphValidator::validate` |该图的**含义**：悬空边（E3）、永远不会发射的障碍（E8）、不完整的路由表（E10）、通道效应违规（E4/E6）。 |
 
-种子是一个 `stage` 模板，通过 `use` 实例化 3 次；
-细化将其扩展为核心链`s1_n → s2_n → s3_n`。
+种子是三个显式节点，组成核心链 `s1_n → s2_n → s3_n`。
 
 ## 第二幕——进化（编译器是适应度函数）
 
 `neograph::graph::evolve()`（问题#80）运行**真正的变异算子**
-种子上方 — `swap_template`、`add_use`、`remove_use`、`tune_param`、
-`toggle_conditional_edge`、`toggle_barrier`、`add_edge`、`remove_edge`。
+种子上方 — `toggle_conditional_edge`、`toggle_barrier`、`add_edge`、`remove_edge`。
 每个后代都首先通过**编译门控**：无效的后代死亡
 零成本死亡，完全不执行。拒绝率本身就是一种健康
 衡量算子的指标。
 
-关键的设计选择：突变空间是**DSL（M4），而不是原始空间
+关键的设计选择：突变空间是**strict Core（M4），而不是原始空间
 JSON**，因此后代在结构上是有效的*通过构造* - 这是
 为什么这里的拒绝计数是0。门是安全网，使
 无约束的进化是安全的，并且它始终武装在每个子代上。
@@ -109,7 +107,7 @@ JSON**，因此后代在结构上是有效的*通过构造* - 这是
 是真实的：现场LLM已交付`NodeFactory::export_schema()`
 （该引擎构建接受的确切调色板 - 它不会漂移，因为它
 *是*引擎的架构，请参阅[`../../52_export_schema.cpp`](../../52_export_schema.cpp))
-并要求在 DSL 表层编写一个执行框架。无论它返回什么
+并要求在 strict Core JSON编写一个执行框架。无论它返回什么
 经历同样的三道门控制；拒绝门的诊断
 直接反馈到对话中并且模型重写 -
 真正的自我修复循环。
@@ -135,7 +133,7 @@ $ ./build/cookbook_the_beast_live                  # optional: pass a task strin
 ```
 ── Attempt #1: asking the model to write a harness ──
   model returned 663 chars of JSON.
-  ACCEPTED — all three gates passed.
+  ACCEPTED — all strict gates passed.
   Core lockfile nodes: r_stage c_stage s_stage
 
 ── Spawning the model's harness (checkpointed) ──
@@ -171,7 +169,7 @@ capability-to-harness 路径做成了可执行示例；它不会把 A2A Card 变
    `copy-ninja.hello-world-echo.v1` template，然后将它 materialize 为
    本地 `CopyNinjaNode`。
 4. live Beast 只能编写两个 channel、一个 node 的 topology。常规的
-   elaborate → compile/round-trip → validate 门控之后，第四个 local-binding
+   compile/round-trip → validate 门控之后，第四个 local-binding
    gate 要求 `__start__` 与 `__end__` 之间恰好有一个
    `copy_ninja_local`。
 
@@ -286,7 +284,7 @@ It discovered tools, forged the missing one, and used them all.
 运行时的 C++ 节点类型。但其意图通过三种方式得以体现
 野兽*可以*从数据中驱动：
 
-- **复合节点** — DSL 的 `templates` / `use` (M4) 让模型
+- **复合节点** — strict Core 的 `explicit nodes` / `explicit edges` (M4) 让模型
   纯粹在数据中定义可重用的节点/拓扑单元；这正是
   `the_beast.cpp` 的种子所做的事。
 - **递归** — `subgraph`节点将整个执行框架嵌入为一个节点，
@@ -314,7 +312,7 @@ express.** `script_node` 是一个预编译的 C++ 节点，其配置包含
 数据，无需重新编译。
 
 一致性是不容谈判的。该脚本在配置中声明其契约
-（`reads` / `writes` / `goto_targets`）；执行框架通过三个DSL
+（`reads` / `writes` / `goto_targets`）；执行框架通过三个strict Core
 门加上野兽层**合约检查**（声明的写入必须是
 声明渠道； goto 目标必须是真实节点）加上 **运行时
 拒绝声明之外的任何写入/转到的包装器**。那
@@ -713,6 +711,6 @@ manuscript: /abs/path/novel_12ch.txt
   `channel_of()` 助手将其打开。相同形状`RunResult::channel`
   读。
 - 核心锁文件通过阐述保留了`schema_version: 1`，这
-  是选择 Gate 2 进入严格模式的原因 - 在 DSL 表层进行创作
+  是选择 Gate 2 进入严格模式的原因 - 在 strict Core JSON进行创作
   绝不默默降级一致性保证进化循环
   取决于。

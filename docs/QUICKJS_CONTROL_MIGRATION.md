@@ -1,7 +1,8 @@
 # QuickJS Control Runtime Migration Plan
 
-Status: Base runtime implemented; final platform qualification and Q7 legacy removal remain pending
-Date: 2026-08-08
+Status: Base runtime implemented; Core DSL/elaborator and Program JSON authoring deletion complete;
+final no-deployment drain proof passes; platform/consumer qualification remains
+Date: 2026-08-10
 Architecture: `QUICKJS_CONTROL_ARCHITECTURE.md`
 Public authoring boundary: [`QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
@@ -28,8 +29,9 @@ must preserve:
   owner/tenant isolation exist;
 - Program-v2/v3/v4 operation trees implement bounded orchestration, parallel
   child maps, and part of dynamic task-graph expansion; and
-- Harness currently translates bounded Core DSL or Program JSON through Program
-  admission.
+- Harness rejects new Core DSL/Core JSON/Program JSON authoring and translates
+  presets or JavaScript through Program admission; strict Core JSON remains an
+  internal interchange artifact.
 
 The problem is the authoring direction. Core DSL composition and each new
 Program construct spread language semantics across elaborator, source schema,
@@ -55,9 +57,8 @@ This migration is a replacement, not a second permanent language stack.
 
 ### Freeze
 
-- bounded Core DSL authoring, including `vars`, interpolation, `templates`,
-  `use`, and `when`;
-- the Core `graph::Elaborator` authoring path and Harness `mode: "dsl"`;
+- the Core DSL and `graph::Elaborator` authoring path are already deleted;
+  Harness `mode: "dsl"` remains an explicit rejection for migration callers;
 - Program JSON operation-tree authoring and Program-v2/v3/v4 source schemas;
 - Harness `mode: "program"`;
 - standalone Core JSON and Program JSON public source endpoints;
@@ -83,8 +84,9 @@ fixes required to drain existing versions.
 
 ### Delete after cutover
 
-- legacy Core DSL and Program DSL schemas and authoring documentation;
-- the Core DSL parser/elaborator and Harness `mode: "dsl"` translation;
+- legacy Program DSL schemas and authoring documentation;
+- the remaining Program parser/compiler/dispatcher branches and Harness
+  `mode: "program"` translation;
 - standalone public Core JSON and Program JSON source constructors, schemas,
   and transport routes;
 - operation-specific Program source parsing and source-only plan descriptors not
@@ -239,7 +241,8 @@ Deliverables:
 
 - verify no active or recoverable stored definition or version requires legacy
   authoring or runtime code;
-- delete the Core DSL parser/elaborator, legacy Program
+- verify the Core DSL parser/elaborator and its source-authoring examples/tests
+  remain deleted, then remove the remaining legacy Program
   schema/parser/compiler/dispatcher branches, public JSON authoring routes,
   examples, and tests;
 - retain canonical serialization and the trusted C++ embedding API;
@@ -275,11 +278,14 @@ and canonical storage, not as a public programming-language submission.
 
 ### Final drain proof procedure
 
-Q7 is gated by a **frozen storage snapshot**, not by the absence of legacy
-source files in a checkout. The repository supplies
-[`scripts/audit_legacy_drain.py`](../scripts/audit_legacy_drain.py), which
-reads only explicitly enumerated, read-only snapshot targets and emits a
-canonical `neograph-legacy-drain-proof` record with a content identity.
+Q7 is normally gated by a **frozen storage snapshot**, not by the absence of
+legacy source files in a checkout. The sole exception is an explicitly named
+operator attestation that no pre-release or production NeoGraph deployment ever
+existed; it is a distinct proof mode, not an empty-snapshot shortcut. The
+repository supplies [`scripts/audit_legacy_drain.py`](../scripts/audit_legacy_drain.py),
+which reads only explicitly enumerated, read-only snapshot targets or that
+strict no-deployment declaration and emits a canonical
+`neograph-legacy-drain-proof` record with a content identity.
 
 ```sh
 python3 scripts/audit_legacy_drain.py \
@@ -288,6 +294,29 @@ python3 scripts/audit_legacy_drain.py \
   --output /secure-export/legacy-drain-proof.json \
   --require-final
 ```
+
+#### No-deployment exception
+
+Use this path **only** when the release operator can attest that no
+pre-release or production NeoGraph deployment ever existed. It cannot stand in
+for a drained, deleted, lost, or inaccessible historical store. In this mode,
+`stores` and `legacy_artifacts` must both be empty, and the inventory must
+carry exactly this named declaration:
+
+```json
+"no_deployment_attestation": {
+  "attestation_id": "operator:<immutable-release-evidence-id>",
+  "attested_by": "<release-operator>",
+  "statement": "no_pre_release_or_production_deployment_has_ever_existed",
+  "scope": "all_neograph_program_and_harness_durable_state"
+}
+```
+
+`inventory_complete` remains an explicit operator attestation. Preserve the
+inventory and emitted proof with release evidence. The proof records
+`evidence_mode: "no_deployment_attestation"` and repeats this declaration so
+reviewers cannot mistake it for a scanned storage snapshot.
+
 
 #### Capture handoff
 
@@ -310,15 +339,31 @@ resume a legacy-authoring run solely from a checkpoint store or another durable
 store, it is outside the current auditor's supported set and must receive a
 dedicated scanner before final proof.
 
-For an actual PostgreSQL `ProgramStore`, capture a consistent database export
-rather than bind-mounting a raw `PGDATA` directory. The isolated restore target
+For an actual PostgreSQL `ProgramStore`, capture a consistent **regular,
+custom-format** archive, for example:
+
+```sh
+# Do not add --inserts or --column-inserts: the scanner admits COPY data only.
+pg_dump --format=custom --file /secure-export/program.dump <connection-or-database>
+```
+
+Never bind-mount a raw `PGDATA` directory. Declare that archive as one
+`program_postgres_dump` inventory target. The auditor uses
+`pg_restore --data-only --strict-names --table=public.<required-table> --file=-`
+to read only the standard-public-schema
+`neograph_program_bundles`, `neograph_program_versions`, and
+`neograph_program_activations`; it never connects to or restores into a
+database. The archive must contain each exact table, its current column layout,
+and standard `COPY` data, `pg_restore` must be available on the audit host,
+and the archive identity must remain stable over all three extracts.
+
+The isolated restore target
 [`tests/fixtures/q7-postgres/compose.audit.yaml`](../tests/fixtures/q7-postgres/compose.audit.yaml)
-mounts `NEOGRAPH_Q7_POSTGRES_SNAPSHOT_DIR` at `/snapshot` read-only, refuses
-to create a missing host path, exposes no host port, and keeps only the restore
-target itself in tmpfs. It does not connect to a live deployment, create a
-snapshot, or make an empty database evidence. A PostgreSQL export still needs
-a dedicated, tested scanner or conversion to a supported snapshot format before
-it can satisfy `--require-final`.
+remains useful for independently restoring and testing a real captured
+archive. It mounts `NEOGRAPH_Q7_POSTGRES_SNAPSHOT_DIR` at `/snapshot`
+read-only, refuses to create a missing host path, exposes no host port, and
+keeps only the restore target itself in tmpfs. It does not connect to a live
+deployment, create a snapshot, or make an empty database evidence.
 
 Before creating `inventory_complete: true`, the operator records the immutable
 archive location, capture mechanism/backup identity, cutover ID, and every
@@ -349,6 +394,34 @@ The inventory accepts no implicit defaults. A minimal snapshot declaration is:
 }
 ```
 
+For PostgreSQL, replace the `program_sqlite` entry with:
+
+```json
+{ "id": "program", "kind": "program_postgres_dump", "path": "program.dump" }
+```
+
+For the no-deployment exception, use no storage entries or legacy-artifact
+classifications:
+
+```json
+{
+  "format": "neograph-legacy-drain-inventory",
+  "schema_version": 1,
+  "cutover_id": "quickjs-control-<announced-boundary>",
+  "captured_at": "2026-08-10T00:00:00Z",
+  "inventory_complete": true,
+  "stores": [],
+  "legacy_artifacts": [],
+  "no_deployment_attestation": {
+    "attestation_id": "operator:<immutable-release-evidence-id>",
+    "attested_by": "<release-operator>",
+    "statement": "no_pre_release_or_production_deployment_has_ever_existed",
+    "scope": "all_neograph_program_and_harness_durable_state"
+  }
+}
+```
+
+
 The tool emits `store/version/<id>` for legacy Program versions,
 `store/bundle/<id>` for orphaned legacy bundles, and `store/artifact/<id>`
 for Harness artifacts. A translated record instead supplies
@@ -356,16 +429,23 @@ for Harness artifacts. A translated record instead supplies
 supplies `legacy_runtime_identity`.
 
 The inventory is versioned, has an operator-attested
-`inventory_complete: true` boundary, and names every persisted
-`program_sqlite`, `program_transitions_sqlite`, `harness_sqlite`, and
-`harness_file` snapshot. The tool fingerprints every input before and after
-the read, rejects symlinks, unknown schemas, malformed records, unscanned
-references, and mutable snapshots, and records the exact content identities it
-did inspect. A deployment with another durable source store does **not** have
-a final proof until it is exported into a supported snapshot format or the
-auditor is extended and tested for that format.
+`inventory_complete: true` boundary, and normally names every persisted
+`program_sqlite`, `program_postgres_dump`, `program_transitions_sqlite`,
+`harness_sqlite`, and `harness_file` snapshot used by the deployment. The
+tool fingerprints every input before and after the read, rejects symlinks,
+unknown schemas, malformed records, unscanned references, and mutable
+snapshots, and records the exact content identities it did inspect. A
+deployment with another durable source store does **not** have a final proof
+until it is exported into a supported snapshot format or the auditor is
+extended and tested for that format.
 
-Every discovered legacy source must have one inventory classification:
+The no-deployment exception admits no store, no legacy artifact, and no
+historical-state inference. Its exact statement is limited to a deployment
+that never existed; any prior deployment, even one whose data has since been
+discarded, must use the frozen-snapshot path.
+
+Every discovered legacy source in a storage snapshot must have one inventory
+classification:
 
 - `translated` requires a distinct scanned replacement artifact and a
   SHA-256 equivalence-evidence identity;
@@ -373,12 +453,17 @@ Every discovered legacy source must have one inventory classification:
 - `drain_only` always blocks `--require-final`: it must be purged after its
   last pinned run drains, before parser/runtime deletion.
 
-An active run, a pending/recoverable run, an interrupted Program result, an
-unknown status, or a run pointing at an unscanned legacy bundle is a final-gate
-blocker regardless of classification. A successful synthetic CTest verifies
-the audit contract only; it is not a deployment proof. Q7 remains pending
-until a retained production/pre-release snapshot produces a passing proof and
-the remaining platform gates are accepted.
+An active run, a pending/recoverable run, an interrupted Program result,
+unknown status, an activation that still selects a legacy Program version, or a
+run pointing at an unscanned legacy bundle is a final-gate blocker regardless
+of classification. A successful synthetic CTest verifies the audit contract
+only; it is not a deployment proof. Nor is an un-attested empty inventory.
+The scoped no-deployment attestation proof executed on 2026-08-10 passed with
+zero legacy artifacts, active/recoverable legacy runs, and drain-only blockers.
+Its emitted proof identity was `sha256:06f362cb6a11d773a45b8db7d4a247a1d4b319795181d173195288ba03fd6217`.
+The storage-drain gate is therefore closed for this repository; installed-
+consumer, sanitizer, and performance qualification remain separate release
+gates.
 
 ## 5. Runtime invariants
 

@@ -22,7 +22,7 @@
     "allow_global_fallback": {"const": false},
     "modes": {
       "type": "object",
-      "propertyNames": {"enum": ["preset", "dsl", "core", "program"]},
+      "propertyNames": {"enum": ["preset", "core", "program"]},
       "additionalProperties": {
         "type": "object",
         "required": ["binding_contract"],
