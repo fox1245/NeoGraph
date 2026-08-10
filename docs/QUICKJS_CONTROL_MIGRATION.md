@@ -272,6 +272,104 @@ equivalent.
 Strict Core documents remain supported only as validated low-level interchange
 and canonical storage, not as a public programming-language submission.
 
+
+### Final drain proof procedure
+
+Q7 is gated by a **frozen storage snapshot**, not by the absence of legacy
+source files in a checkout. The repository supplies
+[`scripts/audit_legacy_drain.py`](../scripts/audit_legacy_drain.py), which
+reads only explicitly enumerated, read-only snapshot targets and emits a
+canonical `neograph-legacy-drain-proof` record with a content identity.
+
+```sh
+python3 scripts/audit_legacy_drain.py \
+  --inventory /secure-export/legacy-drain-inventory.json \
+  --root /secure-export \
+  --output /secure-export/legacy-drain-proof.json \
+  --require-final
+```
+
+#### Capture handoff
+
+The archive must represent one cutover boundary. Either place legacy
+publication/resume and writes to the captured stores behind a temporary write
+fence, or use the storage platform's consistent snapshot/export mechanism.
+The service need not stay offline after an immutable export exists, but the
+legacy write fence must remain in place through the removal deployment.
+
+For a SQLite target, use that mechanism to materialize a standalone database
+copy. Do **not** raw-copy a live WAL database. The auditor rejects any target
+with sibling `-wal`, `-shm`, or `-journal` files and does not open it; their
+presence means the snapshot is not an acceptable final-drain input.
+
+The stock Harness server maps
+`$NEOGRAPH_HARNESS_STATE_DIR/runs.db` to one `harness_sqlite` inventory entry.
+Its sibling `checkpoints.db` is not a `harness_sqlite` source-artifact store;
+retain it for the separate migration/replay evidence. If an embedding can
+resume a legacy-authoring run solely from a checkpoint store or another durable
+store, it is outside the current auditor's supported set and must receive a
+dedicated scanner before final proof.
+
+Before creating `inventory_complete: true`, the operator records the immutable
+archive location, capture mechanism/backup identity, cutover ID, and every
+durable store covered by the deployment. Those records are release evidence;
+the audit hashes what it reads but cannot infer an omitted store.
+
+The inventory accepts no implicit defaults. A minimal snapshot declaration is:
+
+```json
+{
+  "format": "neograph-legacy-drain-inventory",
+  "schema_version": 1,
+  "cutover_id": "quickjs-control-<announced-boundary>",
+  "captured_at": "2026-08-10T00:00:00Z",
+  "inventory_complete": true,
+  "stores": [
+    { "id": "program", "kind": "program_sqlite", "path": "program.db" },
+    { "id": "transitions", "kind": "program_transitions_sqlite", "path": "transitions.db" }
+  ],
+  "legacy_artifacts": [
+    {
+      "artifact_id": "program/version/<legacy-version-id>",
+      "kind": "legacy_program_version",
+      "classification": "rejected",
+      "reason": "pre-release state intentionally discarded"
+    }
+  ]
+}
+```
+
+The tool emits `store/version/<id>` for legacy Program versions,
+`store/bundle/<id>` for orphaned legacy bundles, and `store/artifact/<id>`
+for Harness artifacts. A translated record instead supplies
+`replacement_artifact_id` and `equivalence_proof`; a drain-only record
+supplies `legacy_runtime_identity`.
+
+The inventory is versioned, has an operator-attested
+`inventory_complete: true` boundary, and names every persisted
+`program_sqlite`, `program_transitions_sqlite`, `harness_sqlite`, and
+`harness_file` snapshot. The tool fingerprints every input before and after
+the read, rejects symlinks, unknown schemas, malformed records, unscanned
+references, and mutable snapshots, and records the exact content identities it
+did inspect. A deployment with another durable source store does **not** have
+a final proof until it is exported into a supported snapshot format or the
+auditor is extended and tested for that format.
+
+Every discovered legacy source must have one inventory classification:
+
+- `translated` requires a distinct scanned replacement artifact and a
+  SHA-256 equivalence-evidence identity;
+- `rejected` requires an explicit terminal reason; and
+- `drain_only` always blocks `--require-final`: it must be purged after its
+  last pinned run drains, before parser/runtime deletion.
+
+An active run, a pending/recoverable run, an interrupted Program result, an
+unknown status, or a run pointing at an unscanned legacy bundle is a final-gate
+blocker regardless of classification. A successful synthetic CTest verifies
+the audit contract only; it is not a deployment proof. Q7 remains pending
+until a retained production/pre-release snapshot produces a passing proof and
+the remaining platform gates are accepted.
+
 ## 5. Runtime invariants
 
 The cutover must preserve:

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=0ce9d7195740e020aeb3404702dd07f670ab5c0c1048ae36e34a73f5c83a6604 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=30ec458d3f83e4718421a04a36fc7dcdce7233530ffc644543c2f192c7f74e61 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,25 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
 
 
 ### 追加
+- **隔離された PostgreSQL Program-store 統合 fixture。** tmpfs storage と health
+  gate を備えた digest-pinned、loopback-only
+  `tests/fixtures/q7-postgres/compose.yaml` を追加しました。
+  `NEOGRAPH_TEST_POSTGRES_URL` が使い捨ての test database を指す場合、
+  `ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility` は
+  publish、activation、reopen、owner isolation を検証します。これは test
+  infrastructure であり、Q7 final-proof snapshot ではありません。
+
+- **fail-closed QuickJS legacy-drain 監査。**
+  `scripts/audit_legacy_drain.py` とその CTest 契約を追加しました。このツールは
+  明示的に列挙された凍結 Program/Harness ストレージスナップショットから
+  canonical かつ content-addressed な proof を生成し、不明または変更された
+  record、未分類の legacy source、drain-only record、active または
+  recoverable な legacy run を拒否します。live `-wal`、`-shm`、`-journal`
+  sidecar を伴う SQLite input は開く前に拒否するため、稼働中 WAL database の
+  raw copy は final proof になりません。これは Q7 evidence mechanism を確立
+  しますが、deployment 固有の final drain または legacy parser 削除の完了を
+  主張するものではありません。
+
 - **OpenRouter プロバイダールーティング。** `OpenAIProvider` は
   `CompletionParams::extra_fields.provider` に渡されたオブジェクトを Chat
   Completions リクエスト本文の `provider` として転送します。オブジェクト

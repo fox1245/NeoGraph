@@ -125,6 +125,14 @@ if(NEOGRAPH_BUILD_PROGRAM)
             neograph::program_sqlite
         )
     endif()
+    if(TARGET neograph_program_postgres)
+        target_compile_definitions(neograph_program_tests PRIVATE
+            NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        )
+        target_link_libraries(neograph_program_tests PRIVATE
+            neograph::program_postgres
+        )
+    endif()
 endif()
 
 if(TARGET neograph_quickjs)
@@ -351,8 +359,28 @@ add_test(NAME CrossRepositoryCompatibility.Metadata
 set_tests_properties(CrossRepositoryCompatibility.Metadata
     PROPERTIES LABELS "compatibility;metadata")
 
+# Q7 uses a frozen-storage audit rather than a claim inferred from source
+# availability. Keep its Python contract runnable in minimal configurations.
+add_test(NAME QuickJS.LegacyDrainAudit
+    COMMAND Python3::Interpreter
+        ${PROJECT_SOURCE_DIR}/tests/test_legacy_drain_audit.py)
+set_tests_properties(QuickJS.LegacyDrainAudit
+    PROPERTIES LABELS "quickjs;migration;metadata")
+
 if(TARGET neograph_program_tests)
-    gtest_discover_tests(neograph_program_tests)
+    if(NEOGRAPH_BUILD_POSTGRES)
+        # Keep the Program PostgreSQL store integration case off the shared
+        # checkpoint fixture while other test cases remain parallelizable.
+        set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
+            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility")
+        gtest_discover_tests(neograph_program_tests
+            TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
+            PROPERTIES RESOURCE_LOCK postgres_test_db)
+        gtest_discover_tests(neograph_program_tests
+            TEST_FILTER "-${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}")
+    else()
+        gtest_discover_tests(neograph_program_tests)
+    endif()
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
     gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)

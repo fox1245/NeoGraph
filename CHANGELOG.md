@@ -12,6 +12,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Isolated PostgreSQL Program-store integration fixture.** Added
+  digest-pinned, loopback-only `tests/fixtures/q7-postgres/compose.yaml` with
+  tmpfs storage and a health gate. When `NEOGRAPH_TEST_POSTGRES_URL` names a
+  disposable test database, `ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility`
+  covers publish, activation, reopen, and owner isolation. This is test
+  infrastructure, not a Q7 final-proof snapshot.
+
+- **Fail-closed QuickJS legacy-drain audit.** Added
+  `scripts/audit_legacy_drain.py` and its CTest contract. The tool produces a
+  canonical, content-addressed proof from an explicitly enumerated frozen
+  Program/Harness storage snapshot; it rejects unknown or mutable records,
+  unclassified legacy sources, drain-only records, and active or recoverable
+  legacy runs. SQLite inputs with live `-wal`, `-shm`, or `-journal` sidecars
+  are rejected before opening, so raw copies of active WAL databases cannot
+  serve as final proof. This establishes the Q7 evidence mechanism but does
+  not claim the deployment-specific final drain or legacy-parser deletion is
+  complete.
+
 - **OpenRouter provider routing.** `OpenAIProvider` now forwards an object
   passed at `CompletionParams::extra_fields.provider` into the Chat Completions
   request body as `provider`; non-object values fail before an HTTP request.

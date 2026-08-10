@@ -7,10 +7,13 @@
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_store.h>
 #endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+#include <neograph/program/postgres_store.h>
+#endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <filesystem>
 #endif
-
+#include <cstdlib>
 #include "catalog_access.h"
 #include <gtest/gtest.h>
 
@@ -1329,5 +1332,50 @@ TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
     }
 
     std::filesystem::remove(path);
+}
+#endif
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+TEST(ProgramCatalogTest, PostgreSQLProgramStoreReopensActivationAndOwnerVisibility) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; "
+                     << "skipping PostgreSQLProgramStore integration test.";
+    }
+
+    CatalogFixture fixture(registry());
+    const auto     bundle  = compile(fixture.snapshot);
+    const auto     version = fixture.catalog.admit(bundle, fixture.request());
+
+    std::uint64_t persisted_generation = 0;
+    {
+        PostgreSQLProgramStore store(url);
+        store.publish_admitted(bundle, version);
+        const auto current = store.get_activation("tenant:catalog");
+        const auto expected_generation = current ? current->generation() : std::uint64_t{0};
+        const auto activation = store.compare_activate(
+            "tenant:catalog", expected_generation, version.id(),
+            version.policy_snapshot().fingerprint());
+        ASSERT_TRUE(activation == ProgramActivationResult::Activated ||
+                    activation == ProgramActivationResult::AlreadyPresent);
+        persisted_generation =
+            activation == ProgramActivationResult::Activated ? expected_generation + 1
+                                                             : expected_generation;
+    }
+    {
+        PostgreSQLProgramStore store(url);
+        ASSERT_TRUE(store.get_bundle(bundle.id()).has_value());
+        ASSERT_TRUE(store.get_version(version.id()).has_value());
+        ASSERT_TRUE(store.get_version("tenant:catalog", version.id()).has_value());
+        EXPECT_FALSE(store.get_version("tenant:other", version.id()).has_value());
+        ASSERT_TRUE(store.get_bundle("tenant:catalog", bundle.id()).has_value());
+        EXPECT_FALSE(store.get_bundle("tenant:other", bundle.id()).has_value());
+
+        const auto activation = store.get_activation("tenant:catalog");
+        ASSERT_TRUE(activation.has_value());
+        EXPECT_EQ(activation->generation(), persisted_generation);
+        EXPECT_EQ(activation->active_version_id(), version.id());
+        EXPECT_EQ(activation->policy_snapshot_hash(), version.policy_snapshot().fingerprint());
+    }
 }
 #endif

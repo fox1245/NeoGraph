@@ -547,6 +547,38 @@ authoring_cutover_contract:
     - legacy_syntax_only_docs_examples_and_tests
     - public_legacy_JSON_source_constructors_schemas_and_transport_routes
   rollback_rule: never_reopen_legacy_authoring_or_create_a_permanent_dual_stack
+
+final_drain_proof:
+  tool: scripts/audit_legacy_drain.py
+  input:
+    format: neograph-legacy-drain-inventory
+    schema_version: 1
+    storage_boundary: frozen_read_only_snapshot
+    inventory_complete: explicit_operator_attestation_required
+    supported_store_snapshots:
+      - program_sqlite
+      - program_transitions_sqlite
+      - harness_sqlite
+      - harness_file
+  verification:
+    - every_scanned_input_has_stable_pre_and_post_content_identity
+    - sqlite_snapshots_have_no_live_wal_shm_or_rollback_journal_sidecars
+    - every_discovered_legacy_source_has_exactly_one_terminal_classification
+    - translated_source_has_scanned_replacement_and_sha256_equivalence_evidence
+    - rejected_source_has_explicit_terminal_reason
+    - drain_only_source_is_a_hard_final_removal_blocker
+    - active_recoverable_interrupted_or_unknown_legacy_run_is_a_hard_blocker
+    - unscanned_bundle_or_artifact_reference_is_a_hard_blocker
+  output:
+    format: neograph-legacy-drain-proof
+    proof_identity: canonical_sha256
+  release_gate:
+    command: >-
+      python3 scripts/audit_legacy_drain.py --inventory <inventory.json>
+      --root <frozen-export-root> --output <proof.json> --require-final
+    pass_condition: final_drain.passed_is_true
+    non_substitute: source_checkout_or_synthetic_fixture
+
 phases:
   Q0_dependency_qualification:
     deliver:

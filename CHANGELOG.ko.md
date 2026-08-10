@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=0ce9d7195740e020aeb3404702dd07f670ab5c0c1048ae36e34a73f5c83a6604 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=30ec458d3f83e4718421a04a36fc7dcdce7233530ffc644543c2f192c7f74e61 -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,23 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 ## [Unreleased]
 
 ### 추가
+- **격리된 PostgreSQL Program-store 통합 fixture.** tmpfs storage와 health gate를
+  갖춘 digest-pinned, loopback-only `tests/fixtures/q7-postgres/compose.yaml`을
+  추가했다. `NEOGRAPH_TEST_POSTGRES_URL`가 일회용 test database를 가리키면
+  `ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility`가
+  publish, activation, reopen, owner isolation을 검증한다. 이는 test
+  infrastructure이며 Q7 final-proof snapshot이 아니다.
+
+- **실패 폐쇄형 QuickJS legacy-drain 감사.**
+  `scripts/audit_legacy_drain.py`와 해당 CTest 계약을 추가했다. 이 도구는
+  명시적으로 열거된 고정 Program/Harness 스토리지 스냅샷으로부터 canonical
+  content-addressed proof를 만들며, 알 수 있거나 변경된 레코드, 분류되지 않은
+  legacy source, drain-only 레코드, 활성 또는 복구 가능한 legacy run을
+  거부한다. live `-wal`, `-shm`, `-journal` sidecar가 있는 SQLite 입력은
+  열기 전에 거부하므로 활성 WAL 데이터베이스의 raw copy가 final proof가 될 수
+  없다. 이는 Q7 evidence mechanism을 마련하지만 deployment별 final drain이나
+  legacy parser 삭제가 완료되었다고 주장하지는 않는다.
+
 - **OpenRouter 공급자 라우팅.** `OpenAIProvider`는
   `CompletionParams::extra_fields.provider`로 전달한 객체를 Chat Completions
   요청 본문의 `provider`로 전달한다. 객체가 아닌 값은 HTTP 요청 전에
