@@ -310,6 +310,16 @@ resume a legacy-authoring run solely from a checkpoint store or another durable
 store, it is outside the current auditor's supported set and must receive a
 dedicated scanner before final proof.
 
+For an actual PostgreSQL `ProgramStore`, capture a consistent database export
+rather than bind-mounting a raw `PGDATA` directory. The isolated restore target
+[`tests/fixtures/q7-postgres/compose.audit.yaml`](../tests/fixtures/q7-postgres/compose.audit.yaml)
+mounts `NEOGRAPH_Q7_POSTGRES_SNAPSHOT_DIR` at `/snapshot` read-only, refuses
+to create a missing host path, exposes no host port, and keeps only the restore
+target itself in tmpfs. It does not connect to a live deployment, create a
+snapshot, or make an empty database evidence. A PostgreSQL export still needs
+a dedicated, tested scanner or conversion to a supported snapshot format before
+it can satisfy `--require-final`.
+
 Before creating `inventory_complete: true`, the operator records the immutable
 archive location, capture mechanism/backup identity, cutover ID, and every
 durable store covered by the deployment. Those records are release evidence;
