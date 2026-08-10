@@ -57,6 +57,8 @@ public:
     const std::string&              registry_fingerprint() const noexcept;
     AdmissionMode                   mode() const noexcept;
     std::uint32_t                   max_program_schema_version() const noexcept;
+    /// Lowest execution guarantee this profile permits in an admitted closure.
+    ExecutionGuarantee              minimum_execution_guarantee() const noexcept;
     std::vector<SourceKind>         allowed_source_kinds() const;
     std::vector<ExecutableIdentity> allowed_executables() const;
     std::vector<EffectMode>         allowed_effect_modes() const;
@@ -88,6 +90,7 @@ public:
     AdmissionProfileBuilder& registry(RegistrySnapshot snapshot);
     AdmissionProfileBuilder& mode(AdmissionMode value);
     AdmissionProfileBuilder& max_program_schema_version(std::uint32_t value);
+    AdmissionProfileBuilder& minimum_execution_guarantee(ExecutionGuarantee value);
     AdmissionProfileBuilder& allow_source_kind(SourceKind value);
     AdmissionProfileBuilder& allow_executable(ExecutableIdentity value);
     AdmissionProfileBuilder& allow_effect_mode(EffectMode value);
@@ -118,6 +121,8 @@ public:
     std::vector<std::string> allowed_effects() const;
     std::vector<std::string> allowed_module_digests() const;
     const BudgetLimits&      budget_ceiling() const noexcept;
+    /// Explicit policy floor for the effective Program and composed child closure.
+    ExecutionGuarantee       minimum_execution_guarantee() const noexcept;
     json                     manifest() const;
     std::string              serialize_canonical() const;
 
@@ -149,6 +154,7 @@ public:
     PolicySnapshotBuilder& allow_module_digest(std::string value);
     PolicySnapshotBuilder& budget_ceiling(BudgetLimits value);
 
+    PolicySnapshotBuilder& minimum_execution_guarantee(ExecutionGuarantee value);
     PolicySnapshot build() &&;
 
 private:

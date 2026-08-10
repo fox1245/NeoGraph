@@ -54,13 +54,15 @@ struct ProgramVersionData {
                        PolicySnapshot                 policy,
                        std::vector<DependencyReceipt> dependencies,
                        std::string                    owner,
-                       CoreMaterializationReceipt     materialization)
+                       CoreMaterializationReceipt     materialization,
+                       ExecutionGuarantee             guarantee = ExecutionGuarantee::Strict)
         : bundle_id(std::move(bundle)),
           admission_profile(std::move(admission)),
           policy_snapshot(std::move(policy)),
           dependency_receipts(std::move(dependencies)),
           ownership_scope(std::move(owner)),
-          core_materialization_receipt(std::move(materialization)) {}
+          core_materialization_receipt(std::move(materialization)),
+          execution_guarantee(guarantee) {}
 
     std::string                    bundle_id;
     AdmissionProfile               admission_profile;
@@ -68,6 +70,8 @@ struct ProgramVersionData {
     std::vector<DependencyReceipt> dependency_receipts;
     std::string                    ownership_scope;
     CoreMaterializationReceipt     core_materialization_receipt;
+    /// Effective floor after the admitted child closure is included.
+    ExecutionGuarantee             execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramVersion {
@@ -84,6 +88,7 @@ public:
     const std::vector<DependencyReceipt>& dependency_receipts() const noexcept;
     const std::string&                    ownership_scope() const noexcept;
     const CoreMaterializationReceipt&     core_materialization_receipt() const noexcept;
+    ExecutionGuarantee                    execution_guarantee() const noexcept;
     std::string                           serialize_canonical() const;
 
 private:

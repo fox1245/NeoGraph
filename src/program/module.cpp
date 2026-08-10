@@ -167,14 +167,17 @@ json encode_child(const ChildProgramDescriptor& child) {
                 {"outputs", std::move(outputs)},
                 {"required_capabilities", child.required_capabilities},
                 {"required_effects", child.required_effects},
-                {"budget", encode_budget(child.budget)}};
+                {"budget", encode_budget(child.budget)},
+                {"minimum_execution_guarantee",
+                 std::string(to_string(child.minimum_execution_guarantee))}};
 }
 
 ChildProgramDescriptor parse_child(const json& value) {
     require_object(value, "child program");
     detail::reject_unknown_fields(value, "child program",
                                   {"name", "program_version_id", "inputs", "outputs",
-                                   "required_capabilities", "required_effects", "budget"});
+                                   "required_capabilities", "required_effects", "budget",
+                                   "minimum_execution_guarantee"});
     ChildProgramDescriptor result;
     result.name = required_string(value, "name");
     result.program_version_id = required_string(value, "program_version_id");
@@ -187,21 +190,28 @@ ChildProgramDescriptor parse_child(const json& value) {
                                                  "required_capabilities");
     result.required_effects = parse_strings(value.at("required_effects"), "required_effects");
     result.budget = parse_budget(value.at("budget"));
+    result.minimum_execution_guarantee =
+        execution_guarantee_from_string(required_string(value, "minimum_execution_guarantee"));
     return result;
 }
 
 json structural_body(const ProgramModuleData& data) {
     json dependencies = json::array();
-    for (const auto& dependency : data.dependencies) dependencies.push_back(encode_coordinate(dependency));
+    for (const auto& dependency : data.dependencies)
+        dependencies.push_back(encode_coordinate(dependency));
     json children = json::array();
     for (const auto& child : data.children) children.push_back(encode_child(child));
-    return json{{"owner_scope", data.owner_scope},
-                {"coordinate", encode_coordinate_without_identity(data.coordinate)},
-                {"attestation_id", data.attestation_id},
-                {"dependencies", std::move(dependencies)},
-                {"children", std::move(children)},
-                {"allowed_capabilities", data.allowed_capabilities},
-                {"declared_effects", data.declared_effects}};
+    json body{{"owner_scope", data.owner_scope},
+              {"coordinate", encode_coordinate_without_identity(data.coordinate)},
+              {"attestation_id", data.attestation_id},
+              {"dependencies", std::move(dependencies)},
+              {"children", std::move(children)},
+              {"allowed_capabilities", data.allowed_capabilities},
+              {"declared_effects", data.declared_effects}};
+    if (data.pure_javascript_source.has_value()) {
+        body["pure_javascript_source"] = *data.pure_javascript_source;
+    }
+    return body;
 }
 
 std::string structural_identity(const ProgramModuleData& data) {
@@ -239,6 +249,12 @@ void validate_module_data(ProgramModuleData& data) {
     require_nonempty(data.coordinate.name, "Module name");
     require_semver(data.coordinate.semantic_version, "Module semantic_version");
     require_nonempty(data.attestation_id, "Module attestation_id");
+    if (data.pure_javascript_source.has_value()) {
+        if (data.pure_javascript_source->empty()) {
+            throw std::invalid_argument("Module pure_javascript_source must not be empty");
+        }
+        detail::validate_utf8(*data.pure_javascript_source);
+    }
     for (auto& dependency : data.dependencies) {
         require_nonempty(dependency.namespace_name, "Module dependency namespace");
         require_nonempty(dependency.name, "Module dependency name");
@@ -278,6 +294,9 @@ void validate_module_data(ProgramModuleData& data) {
             require_nonempty(effect, "Child effect");
             if (!contains(data.declared_effects, effect))
                 throw std::invalid_argument("Child effect widens module authority");
+        }
+        if (execution_guarantee_rank(child.minimum_execution_guarantee) == 0) {
+            throw std::invalid_argument("Child minimum_execution_guarantee is unsupported");
         }
     }
     if (std::adjacent_find(data.children.begin(), data.children.end(),
@@ -400,7 +419,9 @@ json link_body(const ModuleLinkReceiptData& data, std::string_view id) {
                 {"child_output_contract_fingerprint", data.child_output_contract_fingerprint},
                 {"granted_capabilities", data.granted_capabilities},
                 {"granted_effects", data.granted_effects},
-                {"budget", encode_budget(data.budget)}};
+                {"budget", encode_budget(data.budget)},
+                {"minimum_execution_guarantee",
+                 std::string(to_string(data.minimum_execution_guarantee))}};
 }
 
 std::string link_identity(const ModuleLinkReceiptData& data) {
@@ -433,6 +454,9 @@ void validate_link_data(ModuleLinkReceiptData& data) {
     for (const auto& value : data.granted_capabilities)
         require_nonempty(value, "Module link capability");
     for (const auto& value : data.granted_effects) require_nonempty(value, "Module link effect");
+    if (execution_guarantee_rank(data.minimum_execution_guarantee) == 0) {
+        throw std::invalid_argument("Module link minimum_execution_guarantee is unsupported");
+    }
 }
 
 }  // namespace
@@ -494,7 +518,8 @@ ProgramModule ProgramModule::parse(std::string_view stored_bytes) {
     detail::reject_unknown_fields(value, "Stored ProgramModule",
                                   {"format", "storage_schema_version", "id", "owner_scope",
                                    "coordinate", "attestation_id", "lifecycle", "dependencies",
-                                   "children", "allowed_capabilities", "declared_effects"});
+                                   "pure_javascript_source", "children", "allowed_capabilities",
+                                   "declared_effects"});
     if (required_string(value, "format") != "neograph-program-module")
         throw std::invalid_argument("Stored ProgramModule has unknown format");
     if (required_u32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
@@ -506,6 +531,9 @@ ProgramModule ProgramModule::parse(std::string_view stored_bytes) {
     data.coordinate = parse_coordinate(value.at("coordinate"));
     data.attestation_id = required_string(value, "attestation_id");
     data.lifecycle = module_lifecycle_from_string(required_string(value, "lifecycle"));
+    if (value.contains("pure_javascript_source")) {
+        data.pure_javascript_source = required_string(value, "pure_javascript_source");
+    }
     require_array(value.at("dependencies"), "module dependencies");
     for (const auto& item : value.at("dependencies")) data.dependencies.push_back(parse_coordinate(item));
     require_array(value.at("children"), "module children");
@@ -524,10 +552,21 @@ const std::string& ProgramModule::owner_scope() const noexcept { return impl_->d
 const ModuleCoordinate& ProgramModule::coordinate() const noexcept { return impl_->data.coordinate; }
 const std::string& ProgramModule::attestation_id() const noexcept { return impl_->data.attestation_id; }
 ModuleLifecycle ProgramModule::lifecycle() const noexcept { return impl_->data.lifecycle; }
-const std::vector<ModuleCoordinate>& ProgramModule::dependencies() const noexcept { return impl_->data.dependencies; }
-const std::vector<ChildProgramDescriptor>& ProgramModule::children() const noexcept { return impl_->data.children; }
-const std::vector<std::string>& ProgramModule::allowed_capabilities() const noexcept { return impl_->data.allowed_capabilities; }
-const std::vector<std::string>& ProgramModule::declared_effects() const noexcept { return impl_->data.declared_effects; }
+const std::vector<ModuleCoordinate>& ProgramModule::dependencies() const noexcept {
+    return impl_->data.dependencies;
+}
+const std::vector<ChildProgramDescriptor>& ProgramModule::children() const noexcept {
+    return impl_->data.children;
+}
+const std::optional<std::string>& ProgramModule::pure_javascript_source() const noexcept {
+    return impl_->data.pure_javascript_source;
+}
+const std::vector<std::string>& ProgramModule::allowed_capabilities() const noexcept {
+    return impl_->data.allowed_capabilities;
+}
+const std::vector<std::string>& ProgramModule::declared_effects() const noexcept {
+    return impl_->data.declared_effects;
+}
 const std::string& ProgramModule::id() const noexcept { return impl_->id; }
 std::string ProgramModule::serialize_canonical() const {
     return detail::canonical_json_bytes(module_body(impl_->data, impl_->id));
@@ -626,6 +665,43 @@ void validate_module_resolution(const ModuleResolution& resolution) {
         throw std::invalid_argument("Module resolution receipts do not cover the full closure");
 }
 
+struct VerifiedModuleResolver::Impl {
+    ModuleResolution                         resolution;
+    std::map<std::string, ModuleCoordinate>  coordinates;
+};
+
+VerifiedModuleResolver::VerifiedModuleResolver(ModuleResolution resolution)
+    : impl_(std::make_unique<Impl>()) {
+    validate_module_resolution(resolution);
+    if (resolution.receipts.empty())
+        throw std::invalid_argument(
+            "VerifiedModuleResolver requires non-empty ModuleResolution receipts");
+    impl_->resolution = std::move(resolution);
+    for (const auto& module : impl_->resolution.modules)
+        impl_->coordinates.emplace(module.coordinate().qualified_name(), module.coordinate());
+}
+
+VerifiedModuleResolver::VerifiedModuleResolver(VerifiedModuleResolver&&) noexcept = default;
+VerifiedModuleResolver& VerifiedModuleResolver::operator=(VerifiedModuleResolver&&) noexcept =
+    default;
+VerifiedModuleResolver::~VerifiedModuleResolver() = default;
+
+const ModuleResolution& VerifiedModuleResolver::resolution() const noexcept {
+    return impl_->resolution;
+}
+
+std::optional<ModuleCoordinate> VerifiedModuleResolver::resolve(std::string_view source_id) const {
+    const auto found = impl_->coordinates.find(std::string(source_id));
+    if (found == impl_->coordinates.end()) return std::nullopt;
+    const auto receipt = std::find_if(
+        impl_->resolution.receipts.begin(), impl_->resolution.receipts.end(),
+        [&](const auto& value) { return value.dependency_id == source_id; });
+    if (receipt == impl_->resolution.receipts.end() ||
+        receipt->content_identity != found->second.content_identity)
+        return std::nullopt;
+    return found->second;
+}
+
 namespace {
 
 constexpr std::string_view kCompositionBudgetOverflow =
@@ -659,24 +735,28 @@ std::uint64_t budget_value(const BudgetLimits& budget, std::string_view resource
     return 0;
 }
 
+template <typename Value>
+void checked_add_budget_field(Value& total, Value value, std::string_view field) {
+    if (value > std::numeric_limits<Value>::max() - total) {
+        throw std::invalid_argument("Child budget aggregation overflows " + std::string(field));
+    }
+    total += value;
+}
+
 void add_budget(BudgetLimits& total, const BudgetLimits& value) {
-    total.wall_time_ms =
-        checked_budget_add(total.wall_time_ms, value.wall_time_ms);
-    total.model_tokens = checked_budget_add(total.model_tokens, value.model_tokens);
-    total.monetary_microunits =
-        checked_budget_add(total.monetary_microunits, value.monetary_microunits);
-    total.max_concurrency =
-        checked_budget_add(total.max_concurrency, value.max_concurrency);
-    total.max_program_operations =
-        checked_budget_add(total.max_program_operations, value.max_program_operations);
-    total.max_core_steps =
-        checked_budget_add(total.max_core_steps, value.max_core_steps);
-    total.max_dynamic_compiles =
-        checked_budget_add(total.max_dynamic_compiles, value.max_dynamic_compiles);
-    total.max_child_depth =
-        checked_budget_add(total.max_child_depth, value.max_child_depth);
-    total.max_total_children =
-        checked_budget_add(total.max_total_children, value.max_total_children);
+    checked_add_budget_field(total.wall_time_ms, value.wall_time_ms, "wall_time_ms");
+    checked_add_budget_field(total.model_tokens, value.model_tokens, "model_tokens");
+    checked_add_budget_field(total.monetary_microunits, value.monetary_microunits,
+                             "monetary_microunits");
+    checked_add_budget_field(total.max_concurrency, value.max_concurrency, "max_concurrency");
+    checked_add_budget_field(total.max_program_operations, value.max_program_operations,
+                             "max_program_operations");
+    checked_add_budget_field(total.max_core_steps, value.max_core_steps, "max_core_steps");
+    checked_add_budget_field(total.max_dynamic_compiles, value.max_dynamic_compiles,
+                             "max_dynamic_compiles");
+    total.max_child_depth = std::max(total.max_child_depth, value.max_child_depth);
+    checked_add_budget_field(total.max_total_children, value.max_total_children,
+                             "max_total_children");
 }
 
 BudgetLimits maximum_budget(const BudgetLimits& left, const BudgetLimits& right) {
@@ -883,6 +963,11 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             throw std::invalid_argument("Composition is missing a declared child");
         if (child->second->version.id() != descriptor.program_version_id)
             throw std::invalid_argument("Composition child version does not match its descriptor");
+        if (execution_guarantee_rank(child->second->version.execution_guarantee()) <
+            execution_guarantee_rank(descriptor.minimum_execution_guarantee)) {
+            throw std::invalid_argument(
+                "Composition child guarantee falls below its explicitly accepted floor");
+        }
         descriptors.emplace(descriptor.name, &descriptor);
     }
 
@@ -910,6 +995,11 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
         if (resource == std::string_view("max_child_depth")) {
             if (!referenced_children.empty() && found->second->maximum < 1)
                 throw std::invalid_argument("Child depth is not admitted");
+            if (found->second->maximum < aggregate.max_child_depth)
+                throw std::invalid_argument("Child budget exceeds the parent allocation");
+        } else if (resource == std::string_view("max_total_children")) {
+            if (found->second->maximum < composition.parent.children().size())
+                throw std::invalid_argument("Child count exceeds the parent allocation");
         } else if (found->second->maximum < budget_value(aggregate, resource)) {
             throw std::invalid_argument("Child budget exceeds the parent allocation");
         }
@@ -942,7 +1032,7 @@ ModuleLinkReceipt ModuleLinkReceipt::parse(std::string_view stored_bytes) {
         {"format", "storage_schema_version", "id", "owner_scope", "parent_module_id",
          "dependency_merkle_root", "child_name", "child_program_version_id", "child_bundle_id",
          "child_input_contract_fingerprint", "child_output_contract_fingerprint",
-         "granted_capabilities", "granted_effects", "budget"});
+         "granted_capabilities", "granted_effects", "budget", "minimum_execution_guarantee"});
     if (required_string(value, "format") != "neograph-program-module-link")
         throw std::invalid_argument("Stored ModuleLinkReceipt has unknown format");
     if (required_u32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
@@ -964,6 +1054,8 @@ ModuleLinkReceipt ModuleLinkReceipt::parse(std::string_view stored_bytes) {
                                                "granted_capabilities");
     data.granted_effects = parse_strings(value.at("granted_effects"), "granted_effects");
     data.budget = parse_budget(value.at("budget"));
+    data.minimum_execution_guarantee =
+        execution_guarantee_from_string(required_string(value, "minimum_execution_guarantee"));
     auto result = create(std::move(data));
     if (result.id() != stored_id)
         throw std::invalid_argument("Stored ModuleLinkReceipt id does not match its body");
@@ -1001,6 +1093,9 @@ const std::vector<std::string>& ModuleLinkReceipt::granted_effects() const noexc
     return impl_->data.granted_effects;
 }
 const BudgetLimits& ModuleLinkReceipt::budget() const noexcept { return impl_->data.budget; }
+ExecutionGuarantee ModuleLinkReceipt::minimum_execution_guarantee() const noexcept {
+    return impl_->data.minimum_execution_guarantee;
+}
 const std::string& ModuleLinkReceipt::id() const noexcept { return impl_->id; }
 std::string ModuleLinkReceipt::serialize_canonical() const {
     return detail::canonical_json_bytes(link_body(impl_->data, impl_->id));
@@ -1042,6 +1137,11 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
     const auto& descriptor = *descriptor_it;
     if (descriptor.program_version_id != child.id())
         throw std::invalid_argument("Child Program version does not match its descriptor");
+    if (execution_guarantee_rank(child.execution_guarantee()) <
+        execution_guarantee_rank(descriptor.minimum_execution_guarantee)) {
+        throw std::invalid_argument(
+            "Child Program guarantee falls below the module descriptor floor");
+    }
     if (descriptor.inputs.size() != 1 || descriptor.outputs.size() != 1)
         throw std::invalid_argument("Module links require exactly one input and output port");
 
@@ -1093,6 +1193,7 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
     data.granted_capabilities = descriptor.required_capabilities;
     data.granted_effects = descriptor.required_effects;
     data.budget = descriptor.budget;
+    data.minimum_execution_guarantee = descriptor.minimum_execution_guarantee;
     return ModuleLinkReceipt::create(std::move(data));
 }
 struct InMemoryModuleStore::Impl {

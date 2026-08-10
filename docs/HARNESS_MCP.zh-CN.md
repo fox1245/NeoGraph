@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=c9cfe5b49187064fd55d7ed31b96565dfe522bee91f6206498315ae79b4138dd -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=b09a63e8a367d734aa3e9a1be015fcef1bc3d3b9fe472e138e040ed6ce0f53f9 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -14,19 +14,124 @@ NeoGraph Harness 会在运行前编译一个有界的多工作器工作流。稳
 - `neograph_resume` 验证并提交精确的待处理主机结果。
 - `neograph_cancel` 协作取消排队、正在运行或等待中的工作流。
 
-随附的预设包括 `fanout_judge`、`pr_review_panel`、`bug_triage` 和 `research_synthesis`。预设会产生普通的 strict-core 图构件，因此相同的诊断和源映射同时适用于预设请求和 DSL 请求。
+随附的预设包括 `fanout_judge`、`pr_review_panel`、`bug_triage` 和
+`research_synthesis`。预设生成 strict-Core 图构件；JavaScript 请求保留自己的
+`ProgramSource` 封套和源映射。
 
-### 封闭式准入与显式 Core 模式
+### JavaScript 创作边界
 
-`harness.mode` 接受 `preset`、`dsl` 或 `core`。`preset` 和 `dsl` 保持现有的有界 fanout/judge 兼容性契约。`core` 接受已经是严格拓扑（`schema_version: 1`）的输入，而不经过 Elaborator；它适用于显式配置的通用 Core 准入配置文件。
+新发布只接受 `harness.mode` 为 `preset` 或 `javascript`。JavaScript 源码放在
+`harness.source` 中，并可用 `harness.source_id` 固定源 ID。`define()` 通过封闭的
+`ng` 绑定构造一个图；可选生成器 `main()` 使用普通 JavaScript 循环和分支，并且只
+yield `ng.callCore`、`ng.all`、`ng.any`、`ng.race` 等类型化命令。
 
-模式导出、编译和启动现在都使用同一个不可变的 `HarnessAdmissionProfile`。其作用域限定的 `GraphRegistry` 和清单会列出所有可用的节点、归约器和条件，连同实现、降级和兼容性元数据。进程全局的注册表条目不属于此调色板，也无法被 Harness 准入解析。编译会在经过验证的声明式 `TopologySpec` 处停止，因此被拒绝的输入结构不会构建 `GraphNode`，也不会派发任何工作器或效果。保留的构件会绑定配置文件 ID 和指纹；不匹配或属于早期配置文件的构件会在启动/恢复时失败关闭，而不是被重新解释。
+```json
+{
+  "harness": {
+    "mode": "javascript",
+    "source_id": "review:main.js",
+    "source": "export function define() { const g = ng.graph('main'); /* ... */ return g; }"
+  }
+}
+```
 
-C++ 嵌入方在构造时通过 `HarnessServiceResources` 传入非默认配置文件。这个附加资源边界会保留现有的 `HarnessServiceConfig` 布局。配置文件指纹涵盖清单以及作用域注册表导出的语义投影。每个 `implementation_identity` 都是受信任的声明；对应的可调用行为发生变化时，必须同步更新它。
+#### 控制流迁移示例
 
-这是当前由 Program 支持的 Harness 兼容性适配器。获准的 Harness 请求仍会转换为旧版 `ProgramSource`，通过 `ProgramCompiler` 编译，经 `ProgramCatalog` 接纳，并由 `ProgramRuntime` 执行；`GraphEngine` 仍是唯一的节点执行器。
+`define()` 只在编译时运行；所有运行时效果都必须位于 yield 的类型化命令之后。
+下面是一个完整请求：生成器最多使用两个操作和两路并行，工作节点与主机从请求
+中封存的配置完全一致，终止返回值也符合 Harness 结果格式。
 
-一般 Program 创作所采用的替代方案是在嵌入式 QuickJS 上运行的标准 JavaScript。当前的 `dsl` 和 `program` 模式是迁移输入，而不是永久并存的语言。请参阅 [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) 和 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)。本文档在该切换落地前描述已发布的兼容行为，并不授权新增旧版 DSL 语义。
+```javascript
+const source = String.raw`
+function workerConfig() {
+  return {
+    type: "neograph_harness_worker",
+    worker_id: "reviewer",
+    instructions: "Return structured findings",
+    tool_ids: [],
+    tool_descriptions: {},
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_ms: 30000,
+    max_output_tokens: 512,
+    input_token_ceiling: 16384,
+    max_retries: 1,
+    max_provider_tool_rounds: 8,
+    evidence_required: [],
+    read_only: true
+  };
+}
+
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("task", {reducer: "overwrite", initial: {}});
+  graph.channel("worker_results", {reducer: "append", initial: []});
+  graph.channel("final_result", {reducer: "overwrite", initial: null});
+  graph.node("reviewer", workerConfig());
+  graph.node("judge", {
+    type: "neograph_harness_judge",
+    barrier: {wait_for: ["reviewer"]}
+  });
+  graph.edge("__start__", "reviewer");
+  graph.edge("reviewer", "judge");
+  graph.edge("judge", "__end__");
+  return graph;
+}
+
+export function* main(input) {
+  const results = yield ng.all([
+    ng.callCore("review", {task: input.task}, "review:first"),
+    ng.callCore("review", {task: input.task}, "review:second")
+  ], {max_in_flight: 2}, "review:all");
+  return results[0].channels.final_result.value;
+}
+`;
+
+const request = {
+  task: {
+    objective: "Review the change",
+    acceptance: ["Return structured, evidence-backed findings"]
+  },
+  harness: {mode: "javascript", source_id: "review:main.js", source},
+  workers: [{
+    id: "reviewer",
+    instructions: "Return structured findings",
+    tools: [],
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  }],
+  tool_catalog: [],
+  budgets: {
+    max_steps: 40,
+    timeout_seconds: 60,
+    max_parallel_workers: 2,
+    max_program_operations: 2,
+    max_worker_retries: 1,
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  },
+  policy: {read_only: true, evidence_required: []}
+};
+```
+
+稳定的源码位置字符串属于持久命令坐标的一部分；重试和重启之间必须保持确定性。
+当所需数量的成功先完成时使用 `ng.any(...)`，当第一个终止成员应获胜时使用
+`ng.race(...)`；两者都会通过结构化并发取消尚未完成的兄弟任务。环境 I/O、
+计时器、动态加载、`eval` 和原生句柄仍不可用。
+
+`harness.mode` 必须显式指定。`dsl` 以 `H_MIGRATION_CORE_DSL` 失败，`core` 以
+`H_MIGRATION_CORE_JSON` 失败，`program`/`program_json` 以
+`H_MIGRATION_PROGRAM_JSON` 失败。strict Core JSON 和受信任的 C++ 构造仅作为
+内部表示保留，不是公开的 Harness 创作语言。
+
+模式导出、编译和启动使用同一个不可变 `HarnessAdmissionProfile`。只有作用域限定的
+`GraphRegistry` 可参与解析，不会回退到进程全局注册项。被拒绝的输入不会派发节点、
+工作器或效果。
+
+预设和 JavaScript 请求都经过 `ProgramSource`、`ProgramCompiler`、
+`ProgramCatalog` 和 `ProgramRuntime`；`GraphEngine` 仍是唯一的节点执行器。已保存的
+旧构件会显式分类为 `translated`、`drain_only` 或 `rejected`。`drain_only` 不允许
+新发布或新运行，只能在完整保留的旧运行时上恢复已有运行。
 
 ## 构建并运行
 

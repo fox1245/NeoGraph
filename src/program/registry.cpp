@@ -84,6 +84,9 @@ void validate_manifest(ExecutableManifest& manifest) {
     normalize_strings(manifest.required_capabilities, "required_capabilities");
     normalize_strings(manifest.declared_effects, "declared_effects");
     normalize_dependencies(manifest);
+    if (execution_guarantee_rank(manifest.execution_guarantee) == 0) {
+        throw std::invalid_argument("Executable execution_guarantee is unsupported");
+    }
 }
 
 void require_kind(const ExecutableManifest& manifest, ExecutableKind expected) {
@@ -96,6 +99,8 @@ struct SnapshotEntry {
     ExecutableManifest            manifest;
     json                          metadata;
     ExecutableRequirementResolver requirement_resolver;
+    std::optional<NativeControlBinding> native_binding;
+    std::optional<std::uint32_t>        native_import_slot;
 };
 
 json encode_identity(const ExecutableIdentity& identity) {
@@ -109,6 +114,7 @@ json encode_manifest(const SnapshotEntry& entry) {
     const auto& manifest           = entry.manifest;
     json        value              = encode_identity(manifest.identity);
     value["effect_mode"]           = std::string(to_string(manifest.effect_mode));
+    value["execution_guarantee"]    = std::string(to_string(manifest.execution_guarantee));
     value["attestation_id"]        = manifest.attestation_id;
     value["required_capabilities"] = manifest.required_capabilities;
     value["declared_effects"]      = manifest.declared_effects;
@@ -118,6 +124,40 @@ json encode_manifest(const SnapshotEntry& entry) {
     value["required_executables"] = std::move(dependencies);
     value["metadata"]             = detail::owned_json_copy(entry.metadata);
     return value;
+}
+
+json encode_native_metadata(const NativeControlMetadata& metadata,
+                            std::optional<std::uint32_t> import_slot) {
+    const auto encode_contract = [](const ContractRecord& contract) {
+        return json{{"schema_version", contract.schema_version},
+                    {"schema", detail::owned_json_copy(contract.schema)}};
+    };
+    json result{
+        {"native_abi_version", NEOGRAPH_PROGRAM_NATIVE_ABI_V1},
+        {"input_contract", encode_contract(metadata.input_contract)},
+        {"output_contract", encode_contract(metadata.output_contract)},
+        {"idempotency", std::string(to_string(metadata.idempotency))},
+        {"replay_behavior", std::string(to_string(metadata.replay_behavior))},
+        {"resource_declaration",
+         {{"max_input_bytes", metadata.resource_declaration.max_input_bytes},
+          {"max_output_bytes", metadata.resource_declaration.max_output_bytes},
+          {"advisory_wall_time_ms", metadata.resource_declaration.advisory_wall_time_ms},
+          {"advisory_memory_bytes", metadata.resource_declaration.advisory_memory_bytes}}},
+    };
+    if (import_slot) result["import_slot"] = *import_slot;
+    return result;
+}
+
+ExecutionGuarantee native_execution_guarantee(const NativeControlMetadata& metadata) {
+    switch (metadata.replay_behavior) {
+        case NativeReplayBehavior::Deterministic:
+            return ExecutionGuarantee::Strict;
+        case NativeReplayBehavior::Recorded:
+            return ExecutionGuarantee::Recorded;
+        case NativeReplayBehavior::Unmanaged:
+            return ExecutionGuarantee::Unmanaged;
+    }
+    throw std::invalid_argument("Native control binding replay behavior is unsupported");
 }
 
 }  // namespace
@@ -135,9 +175,9 @@ struct RegistrySnapshotBuilder::Impl {
         ExecutableIdentity target;
     };
 
-    graph::GraphRegistry         registry;
-    std::vector<SnapshotEntry>   entries;
-    std::vector<ImportedBinding> imported_targets;
+    graph::GraphRegistry          registry;
+    std::vector<SnapshotEntry>    entries;
+    std::vector<ImportedBinding>  imported_targets;
 };
 
 RegistrySnapshot::RegistrySnapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -163,6 +203,16 @@ std::optional<ExecutableManifest> RegistrySnapshot::find(ExecutableKind   kind,
         });
     if (it == impl_->entries.end()) return std::nullopt;
     return it->manifest;
+}
+
+std::optional<NativeControlBinding> RegistrySnapshot::find_native(std::string_view name) const {
+    const auto entry = std::find_if(
+        impl_->entries.begin(), impl_->entries.end(), [name](const SnapshotEntry& candidate) {
+            return candidate.manifest.identity.kind == ExecutableKind::Imported &&
+                   candidate.manifest.identity.name == name && candidate.native_binding.has_value();
+        });
+    if (entry == impl_->entries.end()) return std::nullopt;
+    return entry->native_binding;
 }
 
 const ExecutableManifest& detail::RegistrySnapshotAccess::require_manifest(
@@ -194,6 +244,16 @@ std::vector<ExecutableIdentity> detail::RegistrySnapshotAccess::resolve_node_req
     if (!entry->requirement_resolver) return {};
     const auto owned_config = detail::owned_json_copy(node_config);
     return entry->requirement_resolver(owned_config);
+}
+std::vector<detail::RegistryNativeControlBinding> detail::RegistrySnapshotAccess::native_bindings(
+    const RegistrySnapshot& snapshot) {
+    std::vector<detail::RegistryNativeControlBinding> result;
+    for (const auto& entry : snapshot.impl_->entries) {
+        if (!entry.native_import_slot || !entry.native_binding) continue;
+        result.push_back(
+            {*entry.native_import_slot, entry.manifest.identity, *entry.native_binding});
+    }
+    return result;
 }
 
 std::shared_ptr<const graph::GraphRegistry>
@@ -361,6 +421,63 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_imported(
     return *this;
 }
 
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_native(ExecutableManifest manifest,
+                                                              NativeControlBinding binding) & {
+    require_kind(manifest, ExecutableKind::Imported);
+    validate_manifest(manifest);
+    if (!binding.valid()) throw std::invalid_argument("Native control binding must not be empty");
+
+    const auto& metadata = binding.metadata();
+    if (manifest.execution_guarantee != native_execution_guarantee(metadata)) {
+        throw std::invalid_argument(
+            "Native control manifest execution_guarantee does not match its replay behavior");
+    }
+    impl_->entries.push_back(
+        SnapshotEntry{std::move(manifest),
+                      detail::owned_json_copy(encode_native_metadata(metadata, std::nullopt)),
+                      {},
+                      std::move(binding),
+                      std::nullopt});
+    return *this;
+}
+
+RegistrySnapshotBuilder&& RegistrySnapshotBuilder::add_native(ExecutableManifest manifest,
+                                                               NativeControlBinding binding) && {
+    this->add_native(std::move(manifest), std::move(binding));
+    return std::move(*this);
+}
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_native(std::uint32_t        import_slot,
+                                                             ExecutableManifest   manifest,
+                                                             NativeControlBinding binding) & {
+    if (import_slot < NATIVE_CONTROL_IMPORT_SLOT_MIN) {
+        throw std::invalid_argument(
+            "Native control import_slot collides with a built-in JavaScript command slot");
+    }
+    require_kind(manifest, ExecutableKind::Imported);
+    validate_manifest(manifest);
+    if (!binding.valid()) throw std::invalid_argument("Native control binding must not be empty");
+
+    const auto& metadata = binding.metadata();
+    if (manifest.execution_guarantee != native_execution_guarantee(metadata)) {
+        throw std::invalid_argument(
+            "Native control manifest execution_guarantee does not match its replay behavior");
+    }
+    impl_->entries.push_back(
+        SnapshotEntry{std::move(manifest),
+                      detail::owned_json_copy(encode_native_metadata(metadata, import_slot)),
+                      {},
+                      std::move(binding),
+                      import_slot});
+    return *this;
+}
+
+RegistrySnapshotBuilder&& RegistrySnapshotBuilder::add_native(std::uint32_t        import_slot,
+                                                              ExecutableManifest   manifest,
+                                                              NativeControlBinding binding) && {
+    this->add_native(import_slot, std::move(manifest), std::move(binding));
+    return std::move(*this);
+}
+
 RegistrySnapshot RegistrySnapshotBuilder::build() && {
     if (!impl_) throw std::logic_error("RegistrySnapshotBuilder was already consumed");
     std::sort(
@@ -378,6 +495,14 @@ RegistrySnapshot RegistrySnapshotBuilder::build() && {
     if (duplicate != impl_->entries.end()) {
         throw std::invalid_argument("Duplicate executable registration: " +
                                     duplicate->manifest.identity.name);
+    }
+    std::vector<std::uint32_t> native_slots;
+    for (const auto& entry : impl_->entries) {
+        if (entry.native_import_slot) native_slots.push_back(*entry.native_import_slot);
+    }
+    std::sort(native_slots.begin(), native_slots.end());
+    if (std::adjacent_find(native_slots.begin(), native_slots.end()) != native_slots.end()) {
+        throw std::invalid_argument("Duplicate native control import_slot registration");
     }
     for (const auto& binding : impl_->imported_targets) {
         const auto local = std::find_if(impl_->entries.begin(), impl_->entries.end(),
@@ -399,6 +524,7 @@ RegistrySnapshot RegistrySnapshotBuilder::build() && {
         alias->manifest.effect_mode           = local->manifest.effect_mode;
         alias->manifest.required_capabilities = local->manifest.required_capabilities;
         alias->manifest.declared_effects      = local->manifest.declared_effects;
+        alias->manifest.execution_guarantee    = local->manifest.execution_guarantee;
         validate_manifest(alias->manifest);
     }
     for (const auto& entry : impl_->entries) {

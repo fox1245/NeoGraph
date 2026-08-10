@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fe44de5a1daaa7973fe032ec711d496702f2576bed6ce0431e64250b63eb676e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=0ce9d7195740e020aeb3404702dd07f670ab5c0c1048ae36e34a73f5c83a6604 -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -72,6 +72,19 @@ NeoGraph 的所有显著变更均记录于本文件。
   checkpoint 谱系。Journal 提交先于 checkpoint/terminal 事件交付；并发恢复
   仅允许一个 CAS 胜者；在 Core broker 就绪前拒绝 effectful 或非空 schema
   Program。
+
+- **QuickJS 控制语言前端。** 新增选择启用的
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`、封存的
+  `ProgramSource::from_javascript(...)` 以及私有的仅编译 QuickJS 上下文。
+  源信封固定引擎/语言/主机 API 版本；唯一的 `ng` 主机表面是带版本的图构建器，
+  内存、栈和中断轮询限制均以故障关闭方式处理。JavaScript 只生成一个不可变的
+  `call_core` Program 计划，绝不会成为运行时 VM、字节码工件或 Core 依赖。
+
+- **A2A Agent Card 兼容候选。** 新增一次请求、无认证且不跟随重定向的
+  well-known 卡片收集器，以及仅工厂构造的不可变候选编译器。候选只保留摘要固定的
+  provenance、受限协议事实和安全 skill ID；会排除自由文本卡片内容、声明的 RPC
+  endpoint、provider/security 配置和 credential。Copy Ninja PoC 还要求与该
+  摘要固定的独立观察行为，且绝不调度源 agent。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、

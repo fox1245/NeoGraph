@@ -5,6 +5,7 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -104,7 +105,6 @@ bool budget_is_empty(const RunBudget& budget) noexcept {
            budget.max_dynamic_compiles == 0 && budget.max_child_depth == 0 &&
            budget.max_total_children == 0;
 }
-
 bool budget_at_most(const RunBudget& value, const RunBudget& limit) noexcept {
     return value.wall_time_ms <= limit.wall_time_ms && value.model_tokens <= limit.model_tokens &&
            value.monetary_microunits <= limit.monetary_microunits &&
@@ -114,6 +114,96 @@ bool budget_at_most(const RunBudget& value, const RunBudget& limit) noexcept {
            value.max_dynamic_compiles <= limit.max_dynamic_compiles &&
            value.max_child_depth <= limit.max_child_depth &&
            value.max_total_children <= limit.max_total_children;
+}
+
+template <typename Integer>
+bool sum_at_most(Integer value_available,
+                 Integer value_reserved,
+                 Integer limit_available,
+                 Integer limit_reserved) noexcept {
+    using Unsigned         = std::make_unsigned_t<Integer>;
+    const auto value_a     = static_cast<Unsigned>(value_available);
+    const auto value_b     = static_cast<Unsigned>(value_reserved);
+    const auto limit_a     = static_cast<Unsigned>(limit_available);
+    const auto limit_b     = static_cast<Unsigned>(limit_reserved);
+    const auto value_sum   = static_cast<Unsigned>(value_a + value_b);
+    const auto limit_sum   = static_cast<Unsigned>(limit_a + limit_b);
+    const bool value_carry = value_sum < value_a;
+    const bool limit_carry = limit_sum < limit_a;
+    return value_carry == limit_carry ? value_sum <= limit_sum : !value_carry;
+}
+
+bool budget_total_at_most(const RunBudget& value_available,
+                          const RunBudget& value_reserved,
+                          const RunBudget& limit_available,
+                          const RunBudget& limit_reserved) noexcept {
+    return sum_at_most(value_available.wall_time_ms, value_reserved.wall_time_ms,
+                       limit_available.wall_time_ms, limit_reserved.wall_time_ms) &&
+           sum_at_most(value_available.model_tokens, value_reserved.model_tokens,
+                       limit_available.model_tokens, limit_reserved.model_tokens) &&
+           sum_at_most(value_available.monetary_microunits, value_reserved.monetary_microunits,
+                       limit_available.monetary_microunits, limit_reserved.monetary_microunits) &&
+           sum_at_most(value_available.max_concurrency, value_reserved.max_concurrency,
+                       limit_available.max_concurrency, limit_reserved.max_concurrency) &&
+           sum_at_most(
+               value_available.max_program_operations, value_reserved.max_program_operations,
+               limit_available.max_program_operations, limit_reserved.max_program_operations) &&
+           sum_at_most(value_available.max_core_steps, value_reserved.max_core_steps,
+                       limit_available.max_core_steps, limit_reserved.max_core_steps) &&
+           sum_at_most(value_available.max_dynamic_compiles, value_reserved.max_dynamic_compiles,
+                       limit_available.max_dynamic_compiles, limit_reserved.max_dynamic_compiles) &&
+           sum_at_most(value_available.max_child_depth, value_reserved.max_child_depth,
+                       limit_available.max_child_depth, limit_reserved.max_child_depth) &&
+           sum_at_most(value_available.max_total_children, value_reserved.max_total_children,
+                       limit_available.max_total_children, limit_reserved.max_total_children);
+}
+template <typename Integer>
+bool checked_total(Integer available, Integer reserved, Integer& total) noexcept {
+    using Limits = std::numeric_limits<Integer>;
+    if (reserved > Limits::max() - available) return false;
+    total = static_cast<Integer>(available + reserved);
+    return true;
+}
+
+bool settled_reservation_budget(const ProgramJournalRecord& previous,
+                                const ProgramUsage&         usage,
+                                RunBudget&                  settled) noexcept {
+    if (!checked_total(previous.remaining_budget.wall_time_ms,
+                       previous.inflight_reservation.wall_time_ms, settled.wall_time_ms) ||
+        !checked_total(previous.remaining_budget.model_tokens,
+                       previous.inflight_reservation.model_tokens, settled.model_tokens) ||
+        !checked_total(previous.remaining_budget.monetary_microunits,
+                       previous.inflight_reservation.monetary_microunits,
+                       settled.monetary_microunits) ||
+        !checked_total(previous.remaining_budget.max_program_operations,
+                       previous.inflight_reservation.max_program_operations,
+                       settled.max_program_operations) ||
+        !checked_total(previous.remaining_budget.max_core_steps,
+                       previous.inflight_reservation.max_core_steps, settled.max_core_steps) ||
+        !checked_total(previous.remaining_budget.max_concurrency,
+                       previous.inflight_reservation.max_concurrency, settled.max_concurrency) ||
+        !checked_total(previous.remaining_budget.max_dynamic_compiles,
+                       previous.inflight_reservation.max_dynamic_compiles,
+                       settled.max_dynamic_compiles) ||
+        !checked_total(previous.remaining_budget.max_child_depth,
+                       previous.inflight_reservation.max_child_depth, settled.max_child_depth) ||
+        !checked_total(previous.remaining_budget.max_total_children,
+                       previous.inflight_reservation.max_total_children,
+                       settled.max_total_children)) {
+        return false;
+    }
+    if (usage.wall_time_ms > settled.wall_time_ms || usage.model_tokens > settled.model_tokens ||
+        usage.monetary_microunits > settled.monetary_microunits ||
+        usage.program_operations > settled.max_program_operations ||
+        usage.core_steps > settled.max_core_steps) {
+        return false;
+    }
+    settled.wall_time_ms -= usage.wall_time_ms;
+    settled.model_tokens -= usage.model_tokens;
+    settled.monetary_microunits -= usage.monetary_microunits;
+    settled.max_program_operations -= usage.program_operations;
+    settled.max_core_steps -= usage.core_steps;
+    return true;
 }
 
 json encode_checkpoint(const CoreCheckpointIdentity& checkpoint) {
@@ -156,7 +246,6 @@ bool same_checkpoint(const CoreCheckpointIdentity& lhs,
 
 bool same_core(const CoreCheckpointIdentity& lhs, const CoreCheckpointIdentity& rhs) noexcept {
     return lhs.core_name == rhs.core_name && lhs.core_generation_id == rhs.core_generation_id &&
-           lhs.core_thread_id == rhs.core_thread_id &&
            lhs.checkpoint_schema_version == rhs.checkpoint_schema_version;
 }
 
@@ -229,13 +318,16 @@ void validate_record_body(const ProgramJournalRecord& record) {
     if (record.continuation.attempt == 0) {
         throw std::invalid_argument("Program journal attempt must be positive");
     }
-    if (!budget_at_most(record.inflight_reservation, record.remaining_budget)) {
-        throw std::invalid_argument("Program journal reservation exceeds remaining budget");
-    }
+    // remaining_budget is immediately dispatchable capacity, while
+    // inflight_reservation is capacity withheld by already-published work.
+    // Their sum is validated against the previous journal record during an
+    // append; either component may legitimately be larger than the other.
     if (record.continuation.state != ContinuationState::Running &&
+        record.continuation.state != ContinuationState::Interrupted &&
+        record.continuation.state != ContinuationState::AmbiguousEffect &&
         !budget_is_empty(record.inflight_reservation)) {
         throw std::invalid_argument(
-            "Program journal non-running records must have an empty reservation");
+            "Only running or unresolved Program journal records may retain a reservation");
     }
     if (record.timestamp_ms < 0) {
         throw std::invalid_argument("Program journal timestamp_ms must be non-negative");
@@ -278,13 +370,17 @@ void validate_sealed_record(const ProgramJournalRecord& record) {
 }
 
 bool valid_transition_impl(const ProgramJournalRecord& previous,
-                           const ProgramJournalRecord& next) noexcept {
+                           const ProgramJournalRecord& next,
+                           bool allow_reservation_settlement = false) noexcept {
     if (previous.sequence == std::numeric_limits<std::uint64_t>::max() ||
         next.previous_id != previous.id || next.sequence != previous.sequence + 1 ||
         next.run_id != previous.run_id || next.program_version_id != previous.program_version_id ||
         next.bundle_id != previous.bundle_id ||
         next.continuation.operation_id != previous.continuation.operation_id ||
-        !budget_at_most(next.remaining_budget, previous.remaining_budget)) {
+        !budget_total_at_most(next.remaining_budget, next.inflight_reservation,
+                              previous.remaining_budget, previous.inflight_reservation) ||
+        (!allow_reservation_settlement &&
+         !budget_at_most(next.remaining_budget, previous.remaining_budget))) {
         return false;
     }
 
@@ -297,6 +393,12 @@ bool valid_transition_impl(const ProgramJournalRecord& previous,
     if (previous.continuation.state == ContinuationState::Running) {
         if (next.continuation.attempt != previous.continuation.attempt) return false;
         if (next.continuation.state == ContinuationState::Running) {
+            if (allow_reservation_settlement) {
+                if (previous.core_checkpoint && !next.core_checkpoint) return false;
+                return !previous.core_checkpoint ||
+                       (next.core_checkpoint &&
+                        same_core(*previous.core_checkpoint, *next.core_checkpoint));
+            }
             if (previous.core_checkpoint.has_value() != next.core_checkpoint.has_value()) {
                 return false;
             }
@@ -388,7 +490,19 @@ ContinuationState continuation_state_from_string(std::string_view value) {
 
 bool is_valid_program_journal_transition(const ProgramJournalRecord& previous,
                                          const ProgramJournalRecord& next) noexcept {
-    return valid_transition_impl(previous, next);
+    return valid_transition_impl(previous, next, false);
+}
+bool is_valid_program_journal_reservation_settlement(const ProgramJournalRecord& previous,
+                                                     const ProgramJournalRecord& next,
+                                                     const ProgramUsage&         usage) noexcept {
+    if (budget_is_empty(previous.inflight_reservation) ||
+        !budget_is_empty(next.inflight_reservation)) {
+        return false;
+    }
+    RunBudget expected;
+    return valid_transition_impl(previous, next, true) &&
+           settled_reservation_budget(previous, usage, expected) &&
+           next.remaining_budget == expected;
 }
 
 ProgramJournalRecord ProgramJournalRecord::create(ProgramJournalRecordData data) {

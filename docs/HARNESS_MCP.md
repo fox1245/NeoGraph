@@ -13,15 +13,133 @@ stable MCP surface stays at six tools:
 - `neograph_cancel` cooperatively cancels a queued, running, or waiting workflow.
 
 The shipped presets are `fanout_judge`, `pr_review_panel`, `bug_triage`, and
-`research_synthesis`. Presets produce ordinary strict-core graph artifacts, so
-the same diagnostics and source maps apply to preset and DSL requests.
+`research_synthesis`. Presets produce ordinary strict-Core graph artifacts;
+JavaScript requests preserve their own `ProgramSource` envelope and source map.
 
-### Sealed admission and explicit Core mode
+### JavaScript authoring boundary
 
-`harness.mode` accepts `preset`, `dsl`, or `core`. `preset` and `dsl` keep the
-existing bounded fanout/judge compatibility contract. `core` accepts an already
-strict topology (`schema_version: 1`) without passing it through the Elaborator;
-it is intended for an explicitly configured general-Core admission profile.
+`harness.mode` accepts `preset` or `javascript` for new publication. JavaScript
+requests carry source text in `harness.source` and may pin `harness.source_id`:
+
+```json
+{
+  "harness": {
+    "mode": "javascript",
+    "source_id": "review:main.js",
+    "source": "export function define() { const g = ng.graph('main'); /* ... */ return g; }"
+  }
+}
+```
+
+The translator wraps that text in the canonical `ProgramSource` JavaScript
+envelope (language `javascript`, QuickJS engine, frozen host API, imports, and
+source map) and sends it through `ProgramCompiler`, `ProgramCatalog`, and
+`ProgramRuntime`. `define()` constructs one graph through the sealed `ng`
+binding; an optional generator `main()` owns ordinary control flow and yields
+the existing typed Program commands. JavaScript does not dispatch Core nodes,
+select providers/tools, or bypass admission, budgets, journals, or replay.
+
+The evaluated module also selects the result contract. A source that exports
+only `define()` retains the Core root contract, including the
+`channels.final_result.value` wrapper. A source that exports runtime
+`main(input)` instead advertises and validates its terminal return directly
+against the Harness result schema.
+
+#### Control-flow migration example
+
+Keep `define()` compile-time and every runtime effect behind a yielded typed
+command. This complete request gives the generator three operations—the
+`ng.all` join plus its two Core calls—and two-way parallelism. Its worker node
+exactly repeats the configuration sealed from the request and its terminal
+return has the Harness result shape:
+
+```javascript
+const source = String.raw`
+function workerConfig() {
+  return {
+    type: "neograph_harness_worker",
+    worker_id: "reviewer",
+    instructions: "Return structured findings",
+    tool_ids: [],
+    tool_descriptions: {},
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_ms: 30000,
+    max_output_tokens: 512,
+    input_token_ceiling: 16384,
+    max_retries: 1,
+    max_provider_tool_rounds: 8,
+    evidence_required: [],
+    read_only: true
+  };
+}
+
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("task", {reducer: "overwrite", initial: {}});
+  graph.channel("worker_results", {reducer: "append", initial: []});
+  graph.channel("final_result", {reducer: "overwrite", initial: null});
+  graph.node("reviewer", workerConfig());
+  graph.node("judge", {
+    type: "neograph_harness_judge",
+    barrier: {wait_for: ["reviewer"]}
+  });
+  graph.edge("__start__", "reviewer");
+  graph.edge("reviewer", "judge");
+  graph.edge("judge", "__end__");
+  return graph;
+}
+
+export function* main(input) {
+  const results = yield ng.all([
+    ng.callCore("review", {task: input.task}, "review:first"),
+    ng.callCore("review", {task: input.task}, "review:second")
+  ], {max_in_flight: 2}, "review:all");
+  return results[0].channels.final_result.value;
+}
+`;
+
+const request = {
+  task: {
+    objective: "Review the change",
+    acceptance: ["Return structured, evidence-backed findings"]
+  },
+  harness: {mode: "javascript", source_id: "review:main.js", source},
+  workers: [{
+    id: "reviewer",
+    instructions: "Return structured findings",
+    tools: [],
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  }],
+  tool_catalog: [],
+  budgets: {
+    max_steps: 40,
+    timeout_seconds: 60,
+    max_parallel_workers: 2,
+    max_program_operations: 3,
+    max_worker_retries: 1,
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  },
+  policy: {read_only: true, evidence_required: []}
+};
+```
+
+Stable source-site strings are part of the durable command coordinate. Keep
+them deterministic across retries and restarts. Use `ng.any(...)` when the
+first required successes should win and `ng.race(...)` when the first terminal
+member should win; both cancel outstanding siblings through structured
+concurrency. Ambient I/O, timers, dynamic loading, `eval`, and native handles
+remain unavailable.
+
+`harness.mode` must be explicit. `dsl` returns `H_MIGRATION_CORE_DSL`, `core`
+returns `H_MIGRATION_CORE_JSON`, and `program`/`program_json` return
+`H_MIGRATION_PROGRAM_JSON`; all point at `/harness/mode` and are never selected
+from a request's JSON shape or missing fields. Strict Core JSON remains an
+internal/interchange representation for validated Core and Program artifacts,
+and trusted C++ in-process construction remains supported; neither is a public
+Harness authoring language.
 
 Schema export, compile, and start now consume the same immutable
 `HarnessAdmissionProfile`. Its scoped `GraphRegistry` and manifest list every

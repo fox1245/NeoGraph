@@ -74,6 +74,8 @@ private:
     AgentCardCollectionPolicy policy_;
 };
 
+class AgentCardCandidateCompiler;
+
 /**
  * Non-executable compatibility candidate compiled from one collection record.
  *
@@ -81,11 +83,33 @@ private:
  * identifiers, digest-pinned provenance, and explicit non-authority state. It
  * excludes the source card's free-form text, declared endpoint, provider,
  * security schemes, and all credentials.
+ *
+ * Instances are factory-only and expose const views; callers cannot rebind or
+ * alter a compiled candidate into a different local advertisement.
  */
-struct NEOGRAPH_API AgentCardCompatibilityCandidate {
-    std::string id;
-    std::string source_card_sha256;
-    json        descriptor;
+class NEOGRAPH_API AgentCardCompatibilityCandidate {
+public:
+    AgentCardCompatibilityCandidate(const AgentCardCompatibilityCandidate&)            = default;
+    AgentCardCompatibilityCandidate(AgentCardCompatibilityCandidate&&)                 = default;
+    AgentCardCompatibilityCandidate& operator=(const AgentCardCompatibilityCandidate&) = delete;
+    AgentCardCompatibilityCandidate& operator=(AgentCardCompatibilityCandidate&&)      = delete;
+
+    [[nodiscard]] const std::string& id() const noexcept { return id_; }
+    [[nodiscard]] const std::string& source_card_sha256() const noexcept {
+        return source_card_sha256_;
+    }
+    [[nodiscard]] const json& descriptor() const noexcept { return descriptor_; }
+
+private:
+    friend class AgentCardCandidateCompiler;
+
+    AgentCardCompatibilityCandidate(std::string id,
+                                    std::string source_card_sha256,
+                                    json        descriptor);
+
+    std::string id_;
+    std::string source_card_sha256_;
+    json        descriptor_;
 };
 
 /** Compiles a collected card into an unadmitted, text-only compatibility candidate. */

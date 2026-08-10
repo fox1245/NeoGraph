@@ -253,6 +253,108 @@ BundleMigrationFacts bundle_migration_facts(const ProgramBundle& bundle,
 
 }  // namespace
 
+std::string_view to_string(StoredArtifactClassification classification) noexcept {
+    switch (classification) {
+        case StoredArtifactClassification::Translated:
+            return "translated";
+        case StoredArtifactClassification::DrainOnly:
+            return "drain_only";
+        case StoredArtifactClassification::Rejected:
+            return "rejected";
+    }
+    return "unknown";
+}
+
+StoredArtifactClassification stored_artifact_classification_from_string(std::string_view value) {
+    if (value == "translated") return StoredArtifactClassification::Translated;
+    if (value == "drain_only") return StoredArtifactClassification::DrainOnly;
+    if (value == "rejected") return StoredArtifactClassification::Rejected;
+    throw std::invalid_argument("Unknown stored-artifact classification: " + std::string(value));
+}
+
+std::string_view to_string(StoredArtifactKind kind) noexcept {
+    switch (kind) {
+        case StoredArtifactKind::LegacyCoreDefinition:
+            return "legacy_core_definition";
+        case StoredArtifactKind::LegacyProgramVersion:
+            return "legacy_program_version";
+    }
+    return "unknown";
+}
+
+StoredArtifactKind stored_artifact_kind_from_string(std::string_view value) {
+    if (value == "legacy_core_definition") return StoredArtifactKind::LegacyCoreDefinition;
+    if (value == "legacy_program_version") return StoredArtifactKind::LegacyProgramVersion;
+    throw std::invalid_argument("Unknown stored-artifact kind: " + std::string(value));
+}
+
+void validate_stored_artifact_rule(const StoredArtifactClassificationRule& rule) {
+    switch (rule.classification) {
+        case StoredArtifactClassification::Translated:
+            if (rule.requires_legacy_runtime || !rule.allows_new_publication ||
+                !rule.allows_new_run || !rule.diagnostic_code.empty())
+                throw std::invalid_argument(
+                    "Translated stored-artifact rules must allow new publication/run without "
+                    "legacy runtime");
+            return;
+        case StoredArtifactClassification::DrainOnly:
+            if (rule.allows_new_publication || rule.allows_new_run ||
+                !rule.requires_legacy_runtime || rule.diagnostic_code.empty())
+                throw std::invalid_argument(
+                    "Drain-only stored-artifact rules require the exact legacy runtime and "
+                    "forbid new publication/run");
+            return;
+        case StoredArtifactClassification::Rejected:
+            if (rule.allows_new_publication || rule.allows_new_run ||
+                rule.requires_legacy_runtime || rule.diagnostic_code.empty())
+                throw std::invalid_argument(
+                    "Rejected stored-artifact rules must forbid publication/run and legacy "
+                    "runtime");
+            return;
+    }
+    throw std::invalid_argument("Stored-artifact migration rule has an unknown classification");
+}
+
+void to_json(json& value, const StoredArtifactClassificationRule& rule) {
+    validate_stored_artifact_rule(rule);
+    value = json{{"kind", std::string(to_string(rule.kind))},
+                 {"classification", std::string(to_string(rule.classification))},
+                 {"allows_new_publication", rule.allows_new_publication},
+                 {"allows_new_run", rule.allows_new_run},
+                 {"requires_legacy_runtime", rule.requires_legacy_runtime},
+                 {"diagnostic_code", rule.diagnostic_code}};
+}
+
+void from_json(const json& value, StoredArtifactClassificationRule& rule) {
+    if (!value.is_object())
+        throw std::invalid_argument("Stored-artifact migration rule must be an object");
+    detail::reject_unknown_fields(
+        value, "Stored-artifact migration rule",
+        {"kind", "classification", "allows_new_publication", "allows_new_run",
+         "requires_legacy_runtime", "diagnostic_code"});
+    for (const auto field : {"kind", "classification", "allows_new_publication", "allows_new_run",
+                             "requires_legacy_runtime", "diagnostic_code"}) {
+        if (!value.contains(field))
+            throw std::invalid_argument("Stored-artifact migration rule requires field '" +
+                                        std::string(field) + "'");
+    }
+    if (!value.at("kind").is_string() || !value.at("classification").is_string() ||
+        !value.at("diagnostic_code").is_string() ||
+        !value.at("allows_new_publication").is_boolean() ||
+        !value.at("allows_new_run").is_boolean() ||
+        !value.at("requires_legacy_runtime").is_boolean()) {
+        throw std::invalid_argument("Stored-artifact migration rule has an invalid field type");
+    }
+    rule.kind                    = stored_artifact_kind_from_string(value.at("kind").get<std::string>());
+    rule.classification          = stored_artifact_classification_from_string(
+        value.at("classification").get<std::string>());
+    rule.allows_new_publication  = value.at("allows_new_publication").get<bool>();
+    rule.allows_new_run          = value.at("allows_new_run").get<bool>();
+    rule.requires_legacy_runtime = value.at("requires_legacy_runtime").get<bool>();
+    rule.diagnostic_code         = value.at("diagnostic_code").get<std::string>();
+    validate_stored_artifact_rule(rule);
+}
+
 struct MigrationPlan::Impl {
     explicit Impl(MigrationPlanData value) : data(std::move(value)) {}
     MigrationPlanData data;

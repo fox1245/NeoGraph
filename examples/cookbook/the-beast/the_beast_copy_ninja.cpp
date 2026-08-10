@@ -128,14 +128,14 @@ std::shared_ptr<const a2a::CopyNinjaHarness> materialize_local_harness(
     const auto candidate = a2a::AgentCardCandidateCompiler::compile(collected);
 
     a2a::CopyNinjaBehavioralProfile profile;
-    profile.source_card_sha256 = candidate.source_card_sha256;
+    profile.source_card_sha256 = candidate.source_card_sha256();
     profile.template_id        = std::string(kCopyNinjaTemplate);
     profile.development_probes = {
         {"Ada", "Hello, World! I have received your request (Ada)"},
     };
 
-    std::cout << "  collected card digest: " << candidate.source_card_sha256 << "\n"
-              << "  candidate state: " << candidate.descriptor.at("state") << "\n"
+    std::cout << "  collected card digest: " << candidate.source_card_sha256() << "\n"
+              << "  candidate state: " << candidate.descriptor().at("state") << "\n"
               << "  source discovery GETs: " << source_server.card_requests()
               << ", source RPCs: " << source_server.rpc_requests() << "\n";
     return std::make_shared<a2a::CopyNinjaHarness>(

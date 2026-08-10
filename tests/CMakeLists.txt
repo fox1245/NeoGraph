@@ -86,7 +86,11 @@ add_executable(neograph_tests
 )
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_program_tests
+        test_program_authoring.cpp
         test_program_values.cpp
+        test_program_command.cpp
+        test_program_native.cpp
+        native_abi_c_smoke.c
         test_program_registry.cpp
         test_program_admission.cpp
         test_program_compiler.cpp
@@ -108,6 +112,11 @@ if(NEOGRAPH_BUILD_PROGRAM)
         neograph::program
         GTest::gtest_main
     )
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_program_tests PRIVATE
+            NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
+        )
+    endif()
     if(TARGET neograph_program_sqlite)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
@@ -116,6 +125,20 @@ if(NEOGRAPH_BUILD_PROGRAM)
             neograph::program_sqlite
         )
     endif()
+endif()
+
+if(TARGET neograph_quickjs)
+    add_executable(neograph_quickjs_tests
+        test_quickjs_runtime.cpp
+    )
+    target_include_directories(neograph_quickjs_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
+    )
+    target_compile_features(neograph_quickjs_tests PRIVATE cxx_std_17)
+    _neograph_attach_quickjs_runtime(neograph_quickjs_tests)
+    target_link_libraries(neograph_quickjs_tests PRIVATE
+        GTest::gtest_main
+    )
 endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
@@ -136,13 +159,15 @@ endif()
 
 if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
-        test_harness_program_translator.cpp
-        test_harness_program_cutover.cpp
-    )
-    target_sources(neograph_tests PRIVATE
         test_harness_contract.cpp
     )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_sources(neograph_tests PRIVATE
+            test_harness_program_translator.cpp
+            test_harness_program_cutover.cpp
+        )
+    endif()
 endif()
 if(TARGET neograph_mcp_sqlite)
     target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
@@ -167,17 +192,6 @@ if(NEOGRAPH_BUILD_A2A)
     )
 endif()
 
-if(NEOGRAPH_BUILD_UTIL)
-    target_sources(neograph_tests PRIVATE test_request_queue.cpp)
-endif()
-
-if(NEOGRAPH_BUILD_ACP)
-    target_sources(neograph_tests PRIVATE
-        test_acp_types.cpp
-        test_acp_server.cpp
-    )
-endif()
-
 # The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote
 # agent dependency. Keep its end-to-end loopback test independently runnable
 # in the minimal A2A configuration.
@@ -193,6 +207,18 @@ if(NEOGRAPH_BUILD_A2A)
         GTest::gtest_main
     )
 endif()
+
+if(NEOGRAPH_BUILD_UTIL)
+    target_sources(neograph_tests PRIVATE test_request_queue.cpp)
+endif()
+
+if(NEOGRAPH_BUILD_ACP)
+    target_sources(neograph_tests PRIVATE
+        test_acp_types.cpp
+        test_acp_server.cpp
+    )
+endif()
+
 
 # Keep the protocol-neutral invocation and ACP adapter contract independently
 # buildable.  The aggregate neograph_tests target also contains HTTP/schema
@@ -333,6 +359,12 @@ if(TARGET neograph_a2a_agent_card_candidate_tests)
 endif()
 if(TARGET neograph_acp_tests)
     gtest_discover_tests(neograph_acp_tests)
+endif()
+if(TARGET neograph_quickjs_tests)
+    gtest_discover_tests(neograph_quickjs_tests)
+endif()
+if(TARGET neograph_a2a_agent_card_candidate_tests)
+    gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)

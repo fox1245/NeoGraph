@@ -59,7 +59,7 @@ json worker_schema() {
 }
 
 BudgetLimits ceiling() {
-    return {86400000, 1000000000, 1000000000, 64, 1, 1000, 1, 1, 1};
+    return {86400000, 1000000000, 1000000000, 64, 64, 1000, 1, 1, 1};
 }
 
 struct FixtureHost {
@@ -106,6 +106,7 @@ FixtureHost host(std::atomic<int>&        factory_calls,
     defaults.timeout_seconds               = 5;
     defaults.max_core_steps                = 10;
     defaults.max_parallel_workers          = 2;
+    defaults.max_program_operations        = 12;
     defaults.max_worker_retries            = 1;
     defaults.provider_timeout_seconds      = 30;
     defaults.max_output_tokens             = 100;
@@ -135,6 +136,7 @@ json request() {
          {{"max_steps", 10},
           {"timeout_seconds", 5},
           {"max_parallel_workers", 2},
+          {"max_program_operations", 8},
           {"max_worker_retries", 1},
           {"provider_timeout_seconds", 30},
           {"max_output_tokens", 100}}},
@@ -145,12 +147,12 @@ json request() {
 
 ContractManifest frozen_contract(std::string owner_scope, json expected = json::object()) {
     ContractManifestSpec spec;
-    spec.manifest_id = "harness-contract";
-    spec.owner_scope = std::move(owner_scope);
-    spec.scope       = "harness-execution";
+    spec.manifest_id  = "harness-contract";
+    spec.owner_scope  = std::move(owner_scope);
+    spec.scope        = "harness-execution";
     spec.requirements = {{"execute", "Execute the retained Harness Program"}};
-    spec.acceptance   = {{"runtime", "ProgramRuntime returns the expected outcome", true,
-                          std::move(expected)}};
+    spec.acceptance   = {
+        {"runtime", "ProgramRuntime returns the expected outcome", true, std::move(expected)}};
     spec.retry_policy = ContractRetryPolicy{2, 10, 5000};
     return ContractManifest::propose(std::move(spec))
         .review(ContractReview{"reviewer", "approved", true})
@@ -182,50 +184,6 @@ json tool_definition() {
     };
 }
 
-json direct_dsl(const json& sealed_worker) {
-    return {
-        {"schema_version", 1},
-        {"name", "harness_fanout_judge"},
-        {"channels",
-         {{"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
-          {"worker_results", {{"reducer", "append"}, {"initial", json::array()}}},
-          {"final_result", {{"reducer", "overwrite"}, {"initial", nullptr}}}}},
-        {"nodes",
-         {{"worker_0",
-           {{"type", std::string(HARNESS_WORKER_NODE_TYPE)},
-            {"worker_id", sealed_worker.at("worker_id")}}},
-          {"judge",
-           {{"type", std::string(HARNESS_JUDGE_NODE_TYPE)},
-            {"barrier", {{"wait_for", json::array({"worker_0"})}}}}}}},
-        {"edges", json::array({
-                      {{"from", "__start__"}, {"to", "worker_0"}},
-                      {{"from", "worker_0"}, {"to", "judge"}},
-                      {{"from", "judge"}, {"to", "__end__"}},
-                  })},
-    };
-}
-
-json program_root(const json& core, json root) {
-    root["name"]       = core.at("name");
-    root["definition"] = core;
-    return root;
-}
-
-json program_request(const json& core, json root) {
-    auto value         = request();
-    value["harness"] = {{"mode", "program"},
-                        {"definition", program_root(core, std::move(root))}};
-    return value;
-}
-
-const SourceMapEntry* find_source_map_entry(const ProgramBundle& bundle,
-                                            std::string_view     generated_pointer) {
-    const auto found = std::find_if(
-        bundle.source_map().begin(), bundle.source_map().end(), [&](const auto& entry) {
-            return entry.generated_pointer == generated_pointer;
-        });
-    return found == bundle.source_map().end() ? nullptr : &*found;
-}
 
 bool contains_forbidden_transport_key(const json& value) {
     static const std::vector<std::string> keys = {"executor", "server_ref", "agent",  "url",
@@ -242,248 +200,103 @@ bool contains_forbidden_transport_key(const json& value) {
     return false;
 }
 
-TEST(HarnessProgramTranslator, PresetDslAndCoreProduceEquivalentProgramDocuments) {
+TEST(HarnessProgramTranslator, PresetAndJavaScriptAreTheOnlyPublicationFrontends) {
     std::atomic<int> calls{0};
     auto             fixture = host(calls);
     EXPECT_TRUE(fixture.snapshots.registry.find(ExecutableKind::Reducer, "overwrite"));
     EXPECT_TRUE(fixture.snapshots.registry.find(ExecutableKind::Reducer, "append"));
     EXPECT_TRUE(fixture.snapshots.registry.find(ExecutableKind::Condition, "always"));
-    auto preset_request = request();
-    auto preset = HarnessRequestTranslator::translate(preset_request, fixture.snapshots.registry,
+    const auto schema_modes =
+        harness_program_request_schema().at("properties").at("harness").at("properties");
+    EXPECT_EQ(schema_modes.at("mode").at("enum"), json::array({"preset", "javascript"}));
+    EXPECT_FALSE(schema_modes.contains("definition"));
+
+    auto preset = HarnessRequestTranslator::translate(request(), fixture.snapshots.registry,
                                                       fixture.defaults);
-    const auto preset_document = preset.source.document();
-    const auto sealed_worker   = preset_document["root"]["definition"]["nodes"]["worker_0"];
-    EXPECT_EQ(preset_document["root"]["op"], "call_core");
-    EXPECT_EQ(preset_document["program_schema_version"], PROGRAM_SCHEMA_VERSION_V1);
-    EXPECT_EQ(sealed_worker["type"], HARNESS_WORKER_NODE_TYPE);
+    EXPECT_EQ(preset.source.kind(), SourceKind::CppBuilder);
+    EXPECT_EQ(preset.wire.authoring_frontend, AuthoringFrontend::TrustedCpp);
+    EXPECT_EQ(preset.wire.mode, "preset");
 
-    auto dsl_request       = preset_request;
-    dsl_request["harness"] = {{"mode", "dsl"}, {"definition", direct_dsl(sealed_worker)}};
-    auto dsl = HarnessRequestTranslator::translate(dsl_request, fixture.snapshots.registry,
-                                                   fixture.defaults);
-
-    auto core_request       = preset_request;
-    core_request["harness"] = {{"mode", "core"},
-                               {"definition", preset_document["root"]["definition"]}};
-    auto core = HarnessRequestTranslator::translate(core_request, fixture.snapshots.registry,
-                                                    fixture.defaults);
-
-    EXPECT_EQ(preset.source.document(), dsl.source.document());
-    EXPECT_EQ(preset.source.document(), core.source.document());
-    EXPECT_EQ(preset.invocation_template.input, dsl.invocation_template.input);
-    EXPECT_EQ(preset.invocation_template.input, core.invocation_template.input);
-    EXPECT_EQ(calls.load(), 0);
+    auto javascript_request       = request();
+    javascript_request["harness"] = {
+        {"mode", "javascript"},
+        {"source_id", "harness:test/control.js"},
+        {"source",
+         R"JS(export function define() {
+    const graph = ng.graph("main");
+    graph.channel("worker_results", {reducer: "append", initial: []});
+    graph.channel("final_result", {reducer: "overwrite", initial: null});
+    graph.node("judge", {type: "neograph_harness_judge"});
+    graph.entry("judge");
+    graph.exit("judge");
+    return graph;
 }
-
-TEST(HarnessProgramTranslator,
-     ProgramModeBuildsVersionTwoStaticSequenceAndMapsCanonicalOperationsToAuthoredSource) {
-    std::atomic<int> calls{0};
-    auto             fixture = host(calls);
-    EXPECT_EQ(fixture.snapshots.admission_profile.max_program_schema_version(),
-              LATEST_PROGRAM_SCHEMA_VERSION);
-    const auto preset =
-        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
-    const auto core = preset.source.document()["root"]["definition"];
-
-    auto value = program_request(
-        core, json{{"op", "sequence"},
-                   {"children",
-                    json::array({json{{"op", "call_core"}},
-                                 json{{"op", "emit"}, {"value", json{{"kind", "audited"}}}}})}});
-    const auto translated =
-        HarnessRequestTranslator::translate(value, fixture.snapshots.registry, fixture.defaults);
-
-    EXPECT_EQ(translated.source.schema_version(), PROGRAM_SCHEMA_VERSION_V2);
-    EXPECT_EQ(translated.source.document()["program_schema_version"], PROGRAM_SCHEMA_VERSION_V2);
-    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 3U);
-    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 1U);
-    EXPECT_EQ(translated.invocation_template.budget.max_core_steps, 10U);
-    EXPECT_EQ(translated.invocation_template.budget.model_tokens, 1800U);
-
-    ProgramCompiler compiler(fixture.snapshots.registry,
-                             ProgramCompilerConfig{"test:harness-program-mode"});
-    const auto bundle = compiler.compile(translated.source);
-    const auto* first = find_source_map_entry(bundle, "/operations/0");
-    const auto* emit  = find_source_map_entry(bundle, "/operations/1");
-    const auto* root  = find_source_map_entry(bundle, "/operations/2");
-    ASSERT_NE(first, nullptr);
-    ASSERT_NE(emit, nullptr);
-    ASSERT_NE(root, nullptr);
-    EXPECT_EQ(first->authored.json_pointer, "/harness/definition/children/0");
-    EXPECT_EQ(emit->authored.json_pointer, "/harness/definition/children/1");
-    EXPECT_EQ(root->authored.json_pointer, "/harness/definition");
-    EXPECT_EQ(calls.load(), 0);
-}
-
-TEST(HarnessProgramTranslator, ProgramModeCompilesEverySupportedStaticOperation) {
-    std::atomic<int> calls{0};
-    auto             fixture = host(calls);
-    const auto preset =
-        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
-    const auto core = preset.source.document()["root"]["definition"];
-
-    const std::vector<std::pair<std::string, json>> operations = {
-        {"call_core", json{{"op", "call_core"}}},
-        {"sequence",
-         json{{"op", "sequence"},
-              {"children", json::array({json{{"op", "call_core"}}})}}},
-        {"branch",
-         json{{"op", "branch"},
-              {"condition", json{{"path", "/task/objective"}, {"exists", true}}},
-              {"then", json{{"op", "call_core"}}},
-              {"else", json{{"op", "call_core"}}}}},
-        {"loop",
-         json{{"op", "loop"},
-              {"condition", json{{"path", "/not-present"}, {"exists", true}}},
-              {"body", json{{"op", "call_core"}}},
-              {"max_iterations", 1}}},
-        {"retry",
-         json{{"op", "retry"},
-              {"body", json{{"op", "call_core"}}},
-              {"max_attempts", 1}}},
-        {"parallel",
-         json{{"op", "parallel"},
-              {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}}},
-        {"race",
-         json{{"op", "race"},
-              {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}}},
-        {"quorum",
-         json{{"op", "quorum"},
-              {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})},
-              {"min_success", 1}}},
-        {"map",
-         json{{"op", "map"},
-              {"items", json::array({json{{"item", 1}}, json{{"item", 2}}})},
-              {"body", json{{"op", "call_core"}}}}},
-        {"await", json{{"op", "await"}, {"body", json{{"op", "call_core"}}}}},
-        {"emit",
-         json{{"op", "sequence"},
-              {"children",
-               json::array({json{{"op", "call_core"}},
-                            json{{"op", "emit"}, {"value", json{{"kind", "audit"}}}}})}}},
-        {"checkpoint",
-         json{{"op", "checkpoint"}, {"body", json{{"op", "call_core"}}}}},
-        {"cancel",
-         json{{"op", "sequence"},
-              {"children",
-               json::array({json{{"op", "call_core"}},
-                            json{{"op", "cancel"}, {"scope", "run"}, {"reason", "test"}}})}}},
-        {"return",
-         json{{"op", "sequence"},
-              {"children",
-               json::array({json{{"op", "call_core"}},
-                            json{{"op", "return"}, {"value", json{{"outcome", "ok"}}}}})}}},
+export function* main(input) {
+    return {
+        outcome: "zero_findings",
+        workers: [],
+        findings: [],
+        finding_sources: [],
+        valid_workers: 0,
+        failed_workers: 0
     };
-
-    ProgramCompiler compiler(fixture.snapshots.registry,
-                             ProgramCompilerConfig{"test:harness-static-operations"});
-    for (const auto& [name, root] : operations) {
-        SCOPED_TRACE(name);
-        const auto translated = HarnessRequestTranslator::translate(
-            program_request(core, root), fixture.snapshots.registry, fixture.defaults);
-        EXPECT_EQ(translated.source.schema_version(), PROGRAM_SCHEMA_VERSION_V2);
-        EXPECT_NO_THROW((void)compiler.compile(translated.source));
-    }
-    EXPECT_EQ(calls.load(), 0);
-}
-
-TEST(HarnessProgramTranslator,
-     ProgramModeRejectsUnsupportedChildBindingAndStaticBudgetOrGrammarViolations) {
-    std::atomic<int> calls{0};
-    auto             fixture = host(calls);
-    const auto preset =
-        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
-    const auto core = preset.source.document()["root"]["definition"];
-
-    const auto expect_error = [&](json root, std::string_view code, std::string_view pointer) {
-        try {
-            (void)HarnessRequestTranslator::translate(program_request(core, std::move(root)),
-                                                      fixture.snapshots.registry, fixture.defaults);
-            ADD_FAILURE() << "expected HarnessTranslationError";
-        } catch (const HarnessTranslationError& error) {
-            EXPECT_EQ(error.code(), code);
-            EXPECT_EQ(error.pointer(), pointer);
-        }
+})JS"},
     };
-
-    expect_error(json{{"op", "await"},
-                      {"body", json{{"op", "spawn"}, {"child_binding", "child-program"}}}},
-                 "H_PROGRAM_CHILD_BINDING", "/harness/definition/body");
-    expect_error(json{{"op", "parallel_map"}},
-                 "H_PROGRAM_CHILD_BINDING", "/harness/definition");
-    expect_error(
-        json{{"op", "parallel"},
-             {"branches",
-              json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}},
-                           json{{"op", "call_core"}}})}},
-        "H_PROGRAM_CONCURRENCY", "/harness/definition");
-    expect_error(json{{"op", "loop"},
-                      {"condition", json{{"path", "/never"}, {"exists", true}}},
-                      {"body", json{{"op", "call_core"}}},
-                      {"max_iterations", 11}},
-                 "H_PROGRAM_BUDGET", "/harness/definition");
-
-    try {
-        (void)HarnessRequestTranslator::translate(
-            program_request(
-                core, json{{"op", "race"},
-                            {"branches",
-                             json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}},
-                                          json{{"op", "call_core"}}})}}),
-            fixture.snapshots.registry, fixture.defaults);
-        ADD_FAILURE() << "expected HarnessTranslationError";
-    } catch (const HarnessTranslationError& error) {
-        EXPECT_EQ(error.code(), "H_PROGRAM_COMPILE");
-        EXPECT_EQ(error.pointer(), "/harness/definition/branches");
-        EXPECT_NE(std::string(error.what()).find("P_PLAN_RACE_ARITY"), std::string::npos);
+    auto javascript = HarnessRequestTranslator::translate(
+        javascript_request, fixture.snapshots.registry, fixture.defaults);
+    EXPECT_EQ(javascript.source.kind(), SourceKind::JavaScript);
+    EXPECT_EQ(javascript.wire.authoring_frontend, AuthoringFrontend::JavaScript);
+    EXPECT_EQ(javascript.wire.mode, "javascript");
+    ASSERT_EQ(javascript.sealed_workers.size(), 1U);
+    EXPECT_EQ(javascript.sealed_workers.at("reviewer").at("max_retries"), 1);
+    EXPECT_EQ(javascript.input_contract.schema.at("required"), json::array({"task"}));
+    EXPECT_EQ(javascript.output_contract.schema, harness_program_output_schema());
+    ProgramCompiler compiler(fixture.snapshots.registry,
+                             ProgramCompilerConfig{"test:harness-javascript-authority"});
+    const auto bundle = compiler.compile(javascript.source, javascript.invocation_template.budget,
+                                         javascript.input_contract, javascript.output_contract);
+    EXPECT_EQ(bundle.input_contract().schema, javascript.input_contract.schema);
+    EXPECT_EQ(bundle.output_contract().schema, harness_program_output_schema());
+    const json exact_budget = {
+        {"wall_time_ms", javascript.invocation_template.budget.wall_time_ms},
+        {"model_tokens", javascript.invocation_template.budget.model_tokens},
+        {"monetary_microunits", javascript.invocation_template.budget.monetary_microunits},
+        {"max_concurrency", javascript.invocation_template.budget.max_concurrency},
+        {"max_program_operations", javascript.invocation_template.budget.max_program_operations},
+        {"max_core_steps", javascript.invocation_template.budget.max_core_steps},
+        {"max_dynamic_compiles", javascript.invocation_template.budget.max_dynamic_compiles},
+        {"max_child_depth", javascript.invocation_template.budget.max_child_depth},
+        {"max_total_children", javascript.invocation_template.budget.max_total_children},
+    };
+    ASSERT_EQ(bundle.declared_budget_requirements().size(), exact_budget.size());
+    for (const auto& requirement : bundle.declared_budget_requirements()) {
+        ASSERT_TRUE(exact_budget.contains(requirement.resource));
+        EXPECT_EQ(requirement.minimum, exact_budget.at(requirement.resource).get<std::uint64_t>());
+        EXPECT_EQ(requirement.maximum, exact_budget.at(requirement.resource).get<std::uint64_t>());
     }
-
-    try {
-        (void)HarnessRequestTranslator::translate(
-            program_request(core, json{{"op", "loop"},
-                                        {"condition", json{{"path", "/never"}, {"exists", true}}},
-                                        {"body", json{{"op", "call_core"}}}}),
-            fixture.snapshots.registry, fixture.defaults);
-        ADD_FAILURE() << "expected HarnessTranslationError";
-    } catch (const HarnessTranslationError& error) {
-        EXPECT_EQ(error.code(), "H_PROGRAM_COMPILE");
-        EXPECT_EQ(error.pointer(), "/harness/definition/max_iterations");
-    }
-    expect_error(json{{"op", "retry"}, {"body", json{{"op", "call_core"}}}},
-                 "H_PROGRAM_COMPILE", "/harness/definition/max_attempts");
-
+    auto define_only_request                    = javascript_request;
+    define_only_request["harness"]["source_id"] = "harness:test/define-only.js";
+    define_only_request["harness"]["source"] =
+        R"JS(export function define() {
+    const graph = ng.graph("main");
+    graph.channel("worker_results", {reducer: "append", initial: []});
+    graph.channel("final_result", {reducer: "overwrite", initial: null});
+    graph.node("judge", {type: "neograph_harness_judge"});
+    graph.entry("judge");
+    graph.exit("judge");
+    return graph;
+})JS";
+    const auto define_only = HarnessRequestTranslator::translate(
+        define_only_request, fixture.snapshots.registry, fixture.defaults);
+    EXPECT_EQ(define_only.output_contract.schema, preset.output_contract.schema);
+    const auto define_only_bundle =
+        compiler.compile(define_only.source, define_only.invocation_template.budget,
+                         define_only.input_contract, define_only.output_contract);
+    EXPECT_FALSE(define_only_bundle.control_source().has_value());
+    EXPECT_EQ(define_only_bundle.output_contract().schema, preset.output_contract.schema);
     EXPECT_EQ(calls.load(), 0);
 }
 
-TEST(HarnessProgramTranslator, ProgramModePreservesDslAndTransportAuthorityBoundaries) {
-    std::atomic<int> calls{0};
-    auto             fixture = host(calls);
-    const auto preset =
-        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
-    const auto core = preset.source.document()["root"]["definition"];
-
-    auto dsl = program_request(core, json{{"op", "call_core"}});
-    dsl["harness"]["mode"] = "dsl";
-    try {
-        (void)HarnessRequestTranslator::translate(dsl, fixture.snapshots.registry, fixture.defaults);
-        ADD_FAILURE() << "expected HarnessTranslationError";
-    } catch (const HarnessTranslationError& error) {
-        EXPECT_EQ(error.code(), "H_STRICT_CORE");
-        EXPECT_EQ(error.pointer(), "/harness/definition");
-    }
-
-    try {
-        (void)HarnessRequestTranslator::translate(
-            program_request(core, json{{"op", "emit"},
-                                        {"value", json{{"command", "untrusted"}}}}),
-            fixture.snapshots.registry, fixture.defaults);
-        ADD_FAILURE() << "expected HarnessTranslationError";
-    } catch (const HarnessTranslationError& error) {
-        EXPECT_EQ(error.code(), "H_TRANSPORT_VALUE");
-        EXPECT_EQ(error.pointer(), "/harness/definition/value/command");
-    }
-    EXPECT_EQ(calls.load(), 0);
-}
 
 TEST(HarnessProgramTranslator, TransportAndCredentialFieldsRemainHostOnly) {
     std::atomic<int> calls{0};
@@ -526,11 +339,23 @@ TEST(HarnessProgramTranslator, EmitsNineExactFiniteTotalBudgetsAndRejectsUnbound
     }
     EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000u);
     EXPECT_EQ(translated.invocation_template.budget.model_tokens, 1800u);
-    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 1u);
+    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 2u);
     EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 1u);
     EXPECT_EQ(translated.invocation_template.budget.max_dynamic_compiles, 0u);
     EXPECT_EQ(translated.invocation_template.budget.max_child_depth, 0u);
     EXPECT_EQ(translated.invocation_template.budget.max_total_children, 0u);
+
+    auto above_host_default = request();
+    above_host_default["budgets"]["max_program_operations"] =
+        fixture.defaults.max_program_operations + 1;
+    try {
+        (void)HarnessRequestTranslator::translate(above_host_default, fixture.snapshots.registry,
+                                                  fixture.defaults);
+        FAIL() << "request exceeded host max_program_operations authority";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_BUDGET_FINITE");
+        EXPECT_EQ(error.pointer(), "/budgets/max_program_operations");
+    }
 
     auto unbounded              = fixture.defaults;
     unbounded.max_output_tokens = 0;
@@ -573,15 +398,17 @@ TEST(HarnessProgramTranslator, RejectionsNeverDispatchFactoriesOrUseGlobalFallba
                                           {{"type", "object"}, {"additionalProperties", false}},
                                           json::object());
     auto global_request       = request();
-    global_request["workers"] = json::array();
     global_request["harness"] = {
-        {"mode", "core"},
-        {"definition",
-         {{"schema_version", 1},
-          {"name", "global_only"},
-          {"nodes", {{"work", {{"type", "translator_global_only"}}}}},
-          {"edges", json::array({{{"from", "__start__"}, {"to", "work"}},
-                                 {{"from", "work"}, {"to", "__end__"}}})}}}};
+        {"mode", "javascript"},
+        {"source",
+         R"JS(export function define() {
+    const graph = ng.graph("global_only");
+    graph.node("work", {type: "translator_global_only"});
+    graph.entry("work");
+    graph.exit("work");
+    return graph;
+})JS"},
+    };
     auto translated = HarnessRequestTranslator::translate(
         global_request, fixture.snapshots.registry, fixture.defaults);
     ProgramCompiler compiler(fixture.snapshots.registry,
@@ -592,40 +419,93 @@ TEST(HarnessProgramTranslator, RejectionsNeverDispatchFactoriesOrUseGlobalFallba
 
 TEST(HarnessProgramTranslator, RequiresFrozenContractAndCarriesItToHarnessProjection) {
     std::atomic<int> calls{0};
-    auto              fixture = host(calls);
-    auto               proposed = ContractManifest::propose(ContractManifestSpec{
+    auto             fixture      = host(calls);
+    auto             proposed     = ContractManifest::propose(ContractManifestSpec{
         1,
         "unfrozen-harness-contract",
         "owner:test",
         "harness-execution",
-        {},
-        {{"execute", "Execute the retained Harness Program"}},
-        {},
-        {{"runtime", "ProgramRuntime returns the expected outcome", true, json::object()}},
-        {},
-        {},
-        {},
-        {},
+                        {},
+                        {{"execute", "Execute the retained Harness Program"}},
+                        {},
+                        {{"runtime", "ProgramRuntime returns the expected outcome", true, json::object()}},
+                        {},
+                        {},
+                        {},
+                        {},
         ContractRetryPolicy{1, 1, 1000}});
-    auto rejected = request();
+    auto             rejected     = request();
     rejected["contract_manifest"] = json::parse(proposed.serialize_canonical());
-    EXPECT_THROW(HarnessRequestTranslator::translate(rejected, fixture.snapshots.registry,
-                                                     fixture.defaults),
-                 HarnessTranslationError);
+    EXPECT_THROW(
+        HarnessRequestTranslator::translate(rejected, fixture.snapshots.registry, fixture.defaults),
+        HarnessTranslationError);
 
-    auto frozen = request();
+    auto       frozen   = request();
     const auto manifest = frozen_contract("owner:test", json{{"outcome", "zero_findings"}});
-    frozen["contract"] = json::parse(manifest.serialize_canonical());
+    frozen["contract"]  = json::parse(manifest.serialize_canonical());
+    frozen["budgets"]["max_program_operations"] = fixture.defaults.max_program_operations;
     frozen["workspace_revision"] = "workspace-test-1";
     const auto translated =
         HarnessRequestTranslator::translate(frozen, fixture.snapshots.registry, fixture.defaults);
     ASSERT_TRUE(translated.contract.has_value());
     EXPECT_EQ(translated.contract->content_hash(), manifest.content_hash());
     EXPECT_EQ(translated.wire.workspace_revision, "workspace-test-1");
-    EXPECT_EQ(translated.wire.projection["contract_manifest_hash"],
-              manifest.content_hash());
-    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 10U);
+    EXPECT_EQ(translated.wire.projection["contract_manifest_hash"], manifest.content_hash());
+    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 1U);
     EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000U);
+}
+
+TEST(HarnessProgramTranslator, RejectsLegacyAuthoringWithStableMigrationDiagnostics) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    for (const auto mode : {"dsl", "core", "program", "program_json"}) {
+        auto value       = request();
+        value["harness"] = {{"mode", mode}, {"definition", json::object()}};
+        try {
+            (void)HarnessRequestTranslator::translate(value, fixture.snapshots.registry,
+                                                      fixture.defaults);
+            FAIL() << "legacy mode unexpectedly accepted: " << mode;
+        } catch (const HarnessTranslationError& error) {
+            const auto expected =
+                std::string(std::string_view(mode) == "dsl"    ? "H_MIGRATION_CORE_DSL"
+                            : std::string_view(mode) == "core" ? "H_MIGRATION_CORE_JSON"
+                                                               : "H_MIGRATION_PROGRAM_JSON");
+            EXPECT_EQ(error.code(), expected);
+            EXPECT_EQ(error.pointer(), "/harness/mode");
+        }
+    }
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator, JavaScriptModeRequiresExplicitSourceEnvelope) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    auto             value   = request();
+    value["harness"]         = {
+        {"mode", "javascript"},
+        {"source_id", "harness:direct.js"},
+        {"source", "export function define() { return ng.graph('harness_fanout_judge'); }"},
+    };
+
+    const auto translated =
+        HarnessRequestTranslator::translate(value, fixture.snapshots.registry, fixture.defaults);
+    EXPECT_EQ(translated.source.kind(), SourceKind::JavaScript);
+    EXPECT_EQ(translated.source.document().at("language"), "javascript");
+    EXPECT_EQ(translated.source.document().at("source"), value["harness"]["source"]);
+    EXPECT_EQ(translated.wire.authoring_frontend, AuthoringFrontend::JavaScript);
+    EXPECT_EQ(translated.wire.mode, "javascript");
+    EXPECT_EQ(calls.load(), 0);
+
+    auto missing_mode       = value;
+    missing_mode["harness"] = {{"definition", json::object()}};
+    try {
+        (void)HarnessRequestTranslator::translate(missing_mode, fixture.snapshots.registry,
+                                                  fixture.defaults);
+        FAIL() << "missing authoring mode unexpectedly accepted";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_AUTHORING_MODE_REQUIRED");
+        EXPECT_EQ(error.pointer(), "/harness/mode");
+    }
 }
 
 }  // namespace

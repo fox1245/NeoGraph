@@ -3,6 +3,8 @@
 #include <neograph/graph/engine.h>
 #include <neograph/program/catalog.h>
 
+#include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -21,11 +23,17 @@ struct PinnedCoreGeneration {
     std::shared_ptr<Provider>                    provider;
     std::shared_ptr<graph::GraphEngine>         engine;
 };
+struct AdmittedNativeControlBinding {
+    std::uint32_t            import_slot = 0;
+    CapabilityBindingReceipt receipt;
+    NativeControlBinding     binding;
+};
 
 struct MaterializedProgram {
     ProgramBundle                               bundle;
     ProgramVersion                              version;
     std::shared_ptr<const PinnedCoreGeneration> root;
+    std::map<std::uint32_t, AdmittedNativeControlBinding> native_bindings;
 };
 
 class CatalogRuntimeAccess {

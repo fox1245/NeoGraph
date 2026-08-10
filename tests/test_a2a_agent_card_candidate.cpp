@@ -15,20 +15,29 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 using namespace neograph;
 using namespace neograph::a2a;
 
 namespace {
+static_assert(!std::is_default_constructible_v<AgentCardCompatibilityCandidate>);
+static_assert(!std::is_copy_assignable_v<AgentCardCompatibilityCandidate>);
+static_assert(
+    !std::is_constructible_v<AgentCardCompatibilityCandidate, std::string, std::string, json>);
+static_assert(!std::is_move_assignable_v<AgentCardCompatibilityCandidate>);
 
 struct CandidateCardServer {
-    httplib::Server  server;
-    std::thread      thread;
-    int              port = 0;
-    std::atomic<int> card_requests{0};
-    std::atomic<int> rpc_requests{0};
-    json             card = json::parse(R"json(
+    httplib::Server   server;
+    std::thread       thread;
+    int               port = 0;
+    std::atomic<int>  card_requests{0};
+    std::atomic<int>  authorization_headers{0};
+    std::atomic<bool> redirect_card{false};
+    std::atomic<int>  redirected_card_requests{0};
+    std::atomic<int>  rpc_requests{0};
+    json              card = json::parse(R"json(
 {
   "name": "source-hello-world",
   "description": "UNTRUSTED_CARD_TEXT_must_not_become_candidate_code",
@@ -51,10 +60,24 @@ struct CandidateCardServer {
 
     CandidateCardServer() {
         server.Get("/.well-known/agent-card.json",
-                   [this](const httplib::Request&, httplib::Response& response) {
+                   [this](const httplib::Request& request, httplib::Response& response) {
                        card_requests.fetch_add(1, std::memory_order_relaxed);
+                       if (request.has_header("Authorization")) {
+                           authorization_headers.fetch_add(1, std::memory_order_relaxed);
+                       }
+                       if (redirect_card.load(std::memory_order_relaxed)) {
+                           response.status = 302;
+                           response.set_header("Location", "/redirected-agent-card.json");
+                           return;
+                       }
                        response.status = 200;
                        response.set_content(card.dump(), "application/json");
+                   });
+        server.Get("/redirected-agent-card.json",
+                   [this](const httplib::Request&, httplib::Response& response) {
+                       redirected_card_requests.fetch_add(1, std::memory_order_relaxed);
+                       response.status = 500;
+                       response.set_content("redirect followed", "text/plain");
                    });
         server.Post("/", [this](const httplib::Request&, httplib::Response& response) {
             rpc_requests.fetch_add(1, std::memory_order_relaxed);
@@ -131,17 +154,18 @@ TEST(AgentCardCandidate, CollectsOnlyWellKnownCardAndCompilesSafeDescriptor) {
     const auto          collected = collect_local_card(server);
 
     ASSERT_EQ(server.card_requests.load(), 1);
+    EXPECT_EQ(server.authorization_headers.load(), 0);
     ASSERT_EQ(server.rpc_requests.load(), 0);
     EXPECT_EQ(collected.provenance.discovery_url, server.origin());
     EXPECT_EQ(collected.card_sha256.rfind("sha256:", 0), 0U);
     EXPECT_EQ(collected.raw_card.at("url"), "https://source-agent.example.invalid/rpc");
 
     const auto candidate  = AgentCardCandidateCompiler::compile(collected);
-    const auto descriptor = candidate.descriptor.dump();
-    EXPECT_EQ(candidate.descriptor.at("state"), "unadmitted");
-    EXPECT_EQ(candidate.descriptor.at("behavioral_equivalence"), "unproven");
-    EXPECT_TRUE(candidate.descriptor.at("authority").at("requires_new_admission").get<bool>());
-    EXPECT_EQ(candidate.descriptor.at("declared_contract").at("skill_ids"),
+    const auto descriptor = candidate.descriptor().dump();
+    EXPECT_EQ(candidate.descriptor().at("state"), "unadmitted");
+    EXPECT_EQ(candidate.descriptor().at("behavioral_equivalence"), "unproven");
+    EXPECT_TRUE(candidate.descriptor().at("authority").at("requires_new_admission").get<bool>());
+    EXPECT_EQ(candidate.descriptor().at("declared_contract").at("skill_ids"),
               json::array({"echo-bot"}));
     EXPECT_FALSE(descriptor.find("UNTRUSTED_CARD_TEXT") != std::string::npos);
     EXPECT_FALSE(descriptor.find("UNTRUSTED_SKILL_NAME") != std::string::npos);
@@ -154,7 +178,7 @@ TEST(AgentCardCandidate, MaterializesOnlyDigestPinnedVerifiedLocalTemplate) {
     const auto          candidate = AgentCardCandidateCompiler::compile(collect_local_card(server));
 
     CopyNinjaBehavioralProfile profile;
-    profile.source_card_sha256 = candidate.source_card_sha256;
+    profile.source_card_sha256 = candidate.source_card_sha256();
     profile.template_id        = "copy-ninja.hello-world-echo.v1";
     profile.development_probes = {{"Ada", "Hello, World! I have received your request (Ada)"}};
 
@@ -163,7 +187,7 @@ TEST(AgentCardCandidate, MaterializesOnlyDigestPinnedVerifiedLocalTemplate) {
 
     const auto local_card = harness.agent_card("http://127.0.0.1:4890");
     ASSERT_TRUE(local_card.raw.is_object());
-    EXPECT_EQ(local_card.raw.at("name"), candidate.id);
+    EXPECT_EQ(local_card.raw.at("name"), candidate.id());
     EXPECT_EQ(local_card.raw.at("url"), "http://127.0.0.1:4890");
     EXPECT_EQ(local_card.raw.at("skills").at(0).at("id"), "echo-bot");
     const auto local_serialized = local_card.raw.dump();
@@ -178,7 +202,7 @@ TEST(AgentCardCandidate, ServesVerifiedLocalHarnessWithoutSourceDispatch) {
     const auto candidate = AgentCardCandidateCompiler::compile(collect_local_card(source_server));
 
     CopyNinjaBehavioralProfile profile;
-    profile.source_card_sha256 = candidate.source_card_sha256;
+    profile.source_card_sha256 = candidate.source_card_sha256();
     profile.template_id        = "copy-ninja.hello-world-echo.v1";
     profile.development_probes = {
         {"Ada", "Hello, World! I have received your request (Ada)"},
@@ -193,7 +217,7 @@ TEST(AgentCardCandidate, ServesVerifiedLocalHarnessWithoutSourceDispatch) {
     A2AClient  local_client("http://127.0.0.1:" + std::to_string(local_server.port()));
     const auto local_card = local_client.fetch_agent_card();
     ASSERT_TRUE(local_card.raw.is_object());
-    EXPECT_EQ(local_card.name, candidate.id);
+    EXPECT_EQ(local_card.name, candidate.id());
     EXPECT_EQ(local_card.raw.at("url"), "http://127.0.0.1:0");
     EXPECT_EQ(local_card.raw.at("skills").at(0).at("id"), "echo-bot");
     EXPECT_EQ(local_card.raw.dump().find("source-agent.example.invalid"), std::string::npos);
@@ -214,7 +238,7 @@ TEST(AgentCardCandidate, RejectsUnreviewedLocalNodeConfiguration) {
     const auto candidate = AgentCardCandidateCompiler::compile(collect_local_card(source_server));
 
     CopyNinjaBehavioralProfile profile;
-    profile.source_card_sha256 = candidate.source_card_sha256;
+    profile.source_card_sha256 = candidate.source_card_sha256();
     profile.template_id        = "copy-ninja.hello-world-echo.v1";
     profile.development_probes = {
         {"Ada", "Hello, World! I have received your request (Ada)"},
@@ -245,6 +269,20 @@ TEST(AgentCardCandidate, RejectsNullLocalGraphBinding) {
         std::invalid_argument);
 }
 
+TEST(AgentCardCandidate, RejectsRedirectedCardWithoutFollowingIt) {
+    CandidateCardServer server;
+    server.redirect_card.store(true, std::memory_order_relaxed);
+
+    AgentCardCollectionPolicy policy;
+    policy.allow_loopback_http = true;
+    EXPECT_THROW(AgentCardCollector(policy).collect(server.origin(), source_provenance()),
+                 std::runtime_error);
+
+    EXPECT_EQ(server.card_requests.load(), 1);
+    EXPECT_EQ(server.redirected_card_requests.load(), 0);
+    EXPECT_EQ(server.authorization_headers.load(), 0);
+    EXPECT_EQ(server.rpc_requests.load(), 0);
+}
 TEST(AgentCardCandidate, RejectsNonTextCardAndUnapprovedPlainHttp) {
     CandidateCardServer server;
 

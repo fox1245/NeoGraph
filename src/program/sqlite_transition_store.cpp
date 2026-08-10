@@ -1,9 +1,11 @@
 #include <neograph/program/sqlite_transition_store.h>
 
+#include "canonical_json.h"
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -240,17 +242,202 @@ bool valid_effect_outbox_binding(const ProgramRunRecord& run,
            effects.front().effect() == *pending;
 }
 
+bool same_command_coordinate(const ProgramJavaScriptCommandJournalEntry& lhs,
+                             const ProgramJavaScriptCommandJournalEntry& rhs) {
+    return lhs.bundle_id() == rhs.bundle_id() &&
+           lhs.command_ordinal() == rhs.command_ordinal() &&
+           lhs.coordinate_id() == rhs.coordinate_id() &&
+           detail::canonical_json_bytes(lhs.command().to_json()) ==
+               detail::canonical_json_bytes(rhs.command().to_json()) &&
+           lhs.effect_identity() == rhs.effect_identity();
+}
+
+bool valid_command_history_append(
+    const ProgramRunRecord&                                  run,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& new_commands) {
+    if (new_commands.empty()) return true;
+    auto prior = old_commands;
+    std::uint64_t expected_sequence = 0;
+    std::uint64_t highest_ordinal = 0;
+    for (const auto& existing : prior) {
+        if (existing.bundle_id() != run.bundle_id() ||
+            existing.sequence() != expected_sequence + 1)
+            return false;
+        ++expected_sequence;
+        highest_ordinal = std::max(highest_ordinal, existing.command_ordinal());
+    }
+    for (const auto& entry : new_commands) {
+        if (entry.bundle_id() != run.bundle_id() ||
+            entry.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+        const auto found = std::find_if(
+            prior.rbegin(), prior.rend(), [&](const auto& previous) {
+                return previous.command_ordinal() == entry.command_ordinal();
+            });
+        if (found == prior.rend()) {
+            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
+                (!prior.empty() && prior.back().pending()))
+                return false;
+            highest_ordinal = entry.command_ordinal();
+            prior.push_back(entry);
+            continue;
+        }
+        if (!found->pending() || !entry.completed() ||
+            !same_command_coordinate(*found, entry)) {
+            return false;
+        }
+        prior.push_back(entry);
+    }
+    return true;
+}
+bool budget_is_empty(const RunBudget& budget) noexcept {
+    return budget == RunBudget{};
+}
+
+bool budget_increased(const RunBudget& next, const RunBudget& previous) noexcept {
+    return next.wall_time_ms > previous.wall_time_ms || next.model_tokens > previous.model_tokens ||
+           next.monetary_microunits > previous.monetary_microunits ||
+           next.max_concurrency > previous.max_concurrency ||
+           next.max_program_operations > previous.max_program_operations ||
+           next.max_core_steps > previous.max_core_steps ||
+           next.max_dynamic_compiles > previous.max_dynamic_compiles ||
+           next.max_child_depth > previous.max_child_depth ||
+           next.max_total_children > previous.max_total_children;
+}
+
+std::optional<ProgramUsage> command_terminal_usage(
+    const ProgramJavaScriptCommandJournalEntry& entry) {
+    const auto terminal_result = entry.terminal_result();
+    if (!entry.completed() || !terminal_result || !terminal_result->contains("usage") ||
+        !terminal_result->at("usage").is_object()) {
+        return std::nullopt;
+    }
+    const auto& usage = terminal_result->at("usage");
+    const auto  read  = [&](std::string_view key) -> std::optional<std::uint64_t> {
+        const std::string owned(key);
+        if (!usage.contains(owned) || !usage.at(owned).is_number_unsigned()) return std::nullopt;
+        return usage.at(owned).get<std::uint64_t>();
+    };
+    const auto wall       = read("wall_time_ms");
+    const auto model      = read("model_tokens");
+    const auto money      = read("monetary_microunits");
+    const auto operations = read("program_operations");
+    const auto steps      = read("core_steps");
+    const auto peak       = read("peak_concurrency");
+    if (!wall || !model || !money || !operations || !steps || !peak ||
+        *peak > std::numeric_limits<std::uint32_t>::max())
+        return std::nullopt;
+    // Program operations are charged before the resource reservation is staged.
+    return ProgramUsage{*wall, *model, *money, 0, *steps, static_cast<std::uint32_t>(*peak)};
+}
+
+bool checkpoint_event_matches(const std::vector<ProgramEvent>&             events,
+                              const std::optional<CoreCheckpointIdentity>& checkpoint) {
+    if (!checkpoint) return false;
+    return std::any_of(events.begin(), events.end(), [&](const auto& event) {
+        return event.kind == ProgramEventKind::CheckpointPublished &&
+               std::get<ProgramCheckpointEvent>(event.payload).checkpoint == *checkpoint;
+    });
+}
+
+bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&                     run,
+                                             const ProgramJavaScriptCommandJournalEntry& pending,
+                                             const CoreCheckpointIdentity& checkpoint) {
+    const auto thread_for = [&](std::string_view operation_id) {
+        std::string identity(run.run_id());
+        identity.push_back('\0');
+        identity.append(operation_id);
+        identity.push_back('\0');
+        identity.append(checkpoint.core_generation_id);
+        return detail::sha256_identity("program-core-thread/v1", identity);
+    };
+    std::function<bool(const JavaScriptCommand&, std::string, std::size_t)> matches;
+    matches = [&](const JavaScriptCommand& command, std::string operation_id, std::size_t depth) {
+        if (depth > 32) return false;
+        if (command.kind() == JavaScriptCommandKind::CallCore) {
+            const auto arguments = command.arguments();
+            return arguments.contains("name") && arguments.at("name").is_string() &&
+                   arguments.at("name").get<std::string>() == checkpoint.core_name &&
+                   thread_for(operation_id) == checkpoint.core_thread_id;
+        }
+        const auto arguments = command.arguments();
+        if (command.kind() == JavaScriptCommandKind::Await) {
+            return matches(JavaScriptCommand::from_json(arguments.at("command")),
+                           operation_id + "/await", depth + 1);
+        }
+        if (command.kind() == JavaScriptCommandKind::Join) {
+            const auto& members = arguments.at("members");
+            for (std::size_t index = 0; index < members.size(); ++index)
+                if (matches(JavaScriptCommand::from_json(members.at(index)),
+                            operation_id + "/member/" + std::to_string(index), depth + 1))
+                    return true;
+        }
+        return false;
+    };
+    return matches(pending.command(),
+                   "root.javascript." + std::to_string(pending.command_ordinal()), 0);
+}
+
+bool valid_command_reservation_transition(
+    const ProgramJournalRecord&                              previous_journal,
+    const ProgramJournalRecord&                              next_journal,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const ProgramTransitionPublication&                      publication) {
+    const bool increased =
+        budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
+    const bool ordinary  = is_valid_program_journal_transition(previous_journal, next_journal);
+    const auto completed = std::find_if(publication.commands.begin(), publication.commands.end(),
+                                        [](const auto& entry) { return entry.completed(); });
+    const bool checkpoint_changed =
+        previous_journal.core_checkpoint != next_journal.core_checkpoint;
+    if (completed != publication.commands.end()) {
+        if (publication.commands.size() != 1 || !budget_is_empty(next_journal.inflight_reservation))
+            return false;
+        if (checkpoint_changed &&
+            (!checkpoint_event_matches(publication.events, next_journal.core_checkpoint) ||
+             !next_journal.core_checkpoint ||
+             !javascript_call_core_checkpoint_matches(publication.run_record, *completed,
+                                                      *next_journal.core_checkpoint))) {
+            return false;
+        }
+        if (budget_is_empty(previous_journal.inflight_reservation)) return ordinary && !increased;
+        const auto usage = command_terminal_usage(*completed);
+        return usage && is_valid_program_journal_reservation_settlement(previous_journal,
+                                                                        next_journal, *usage);
+    }
+    if (!increased) return ordinary;
+    if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
+        publication.run_record.continuation().state != ContinuationState::Interrupted ||
+        !publication.run_record.terminal_result() ||
+        publication.run_record.terminal_result()->status() != ProgramTerminalStatus::Interrupted ||
+        !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
+        !publication.run_record.exact_checkpoint() ||
+        !javascript_call_core_checkpoint_matches(publication.run_record, old_commands.back(),
+                                                 *publication.run_record.exact_checkpoint()) ||
+        (previous_journal.core_checkpoint &&
+         previous_journal.core_checkpoint == next_journal.core_checkpoint))
+        return false;
+    auto usage               = publication.run_record.terminal_result()->usage();
+    usage.program_operations = 0;
+    return is_valid_program_journal_reservation_settlement(previous_journal, next_journal, usage);
+}
+
 bool valid_initial_publication(const ProgramTransitionPublication& publication) {
     const auto& journal = publication.journal_record;
     const auto  terminal = publication.run_record.terminal_result();
     const bool  terminal_event = !publication.events.empty() &&
                                  publication.events.back().kind == ProgramEventKind::Terminal;
-    return journal.previous_id.empty() && journal.sequence == 1 && !publication.events.empty() &&
+    return journal.previous_id.empty() && journal.sequence == 1 &&
+           budget_is_empty(journal.inflight_reservation) && !publication.events.empty() &&
            publication.events.front().kind == ProgramEventKind::Started &&
            publication.run_record.event_sequence() == publication.events.size() &&
            publication.run_record.effect_sequence() == publication.effects.size() &&
            publication.events.front().sequence == 1 &&
            (publication.effects.empty() || publication.effects.front().sequence() == 1) &&
+           valid_command_history_append(publication.run_record, {}, publication.commands) &&
            (!terminal || terminal_event) &&
            (!publication.run_record.fork_receipt() || publication.migration_plan.has_value());
 }
@@ -273,7 +460,6 @@ bool valid_increment(sqlite3* db, std::string_view owner_scope,
          !terminal_event))
         return false;
     if (old_journal.id != expected_journal_head || next_journal.previous_id != expected_journal_head ||
-        !is_valid_program_journal_transition(old_journal, next_journal) ||
         next_run.created_at_ms() != old_run.created_at_ms() ||
         next_run.updated_at_ms() < old_run.updated_at_ms() ||
         next_run.binding_fingerprint() != old_run.binding_fingerprint() ||
@@ -290,6 +476,25 @@ bool valid_increment(sqlite3* db, std::string_view owner_scope,
         next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
         return false;
     if (!effect_ids_are_new(db, owner_scope, old_run.run_id(), next_publication.effects))
+        return false;
+    std::vector<ProgramJavaScriptCommandJournalEntry> old_commands;
+    {
+        Statement statement(
+            db, "SELECT coordinate_id, canonical_bytes FROM "
+                "program_transition_javascript_command_log_v2 "
+                "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence ASC");
+        statement.bind_text(1, owner_scope);
+        statement.bind_text(2, old_run.run_id());
+        while (statement.step_row()) {
+            auto entry = ProgramJavaScriptCommandJournalEntry::parse(
+                column_blob(statement.get(), 1));
+            if (column_text(statement.get(), 0) != entry.coordinate_id()) return false;
+            old_commands.push_back(std::move(entry));
+        }
+    }
+    if (!valid_command_history_append(old_run, old_commands, next_publication.commands) ||
+        !valid_command_reservation_transition(old_journal, next_journal, old_commands,
+                                              next_publication))
         return false;
     if (next_publication.migration_plan &&
         (!old_head.migration_plan ||
@@ -313,6 +518,12 @@ void create_v2_schema(sqlite3* db) {
              "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
              "effect_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
              "PRIMARY KEY(owner_scope, run_id, sequence), UNIQUE(owner_scope, run_id, effect_id), "
+             "FOREIGN KEY(owner_scope, run_id) REFERENCES "
+             "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_transition_javascript_command_log_v2 ("
+             "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+             "coordinate_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, run_id, sequence), "
              "FOREIGN KEY(owner_scope, run_id) REFERENCES "
              "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
 }
@@ -390,9 +601,29 @@ void append_effects(sqlite3* db, std::string_view owner_scope, std::string_view 
     }
 }
 
-void validate_legacy_snapshot(std::string_view owner_scope, std::string_view run_id,
-                              const ProgramTransitionPublication& publication,
-                              std::string_view last_publication_bytes) {
+void append_javascript_commands(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& commands) {
+    if (commands.empty()) return;
+    Statement statement(
+        db, "INSERT INTO program_transition_javascript_command_log_v2"
+            "(owner_scope, run_id, sequence, coordinate_id, canonical_bytes) "
+            "VALUES(?1, ?2, ?3, ?4, ?5)");
+    for (const auto& command : commands) {
+        statement.bind_text(1, owner_scope);
+        statement.bind_text(2, run_id);
+        statement.bind_uint64(3, command.sequence());
+        statement.bind_text(4, command.coordinate_id());
+        statement.bind_blob(5, command.serialize_canonical());
+        statement.step_done();
+        statement.reset();
+    }
+}
+
+std::string normalize_legacy_snapshot(std::string_view                    owner_scope,
+                                      std::string_view                    run_id,
+                                      const ProgramTransitionPublication& publication,
+                                      std::string_view                    last_publication_bytes) {
     const auto& run = publication.run_record;
     if (run.owner_scope() != owner_scope || run.run_id() != run_id ||
         run.journal_head() != publication.journal_record.id ||
@@ -417,6 +648,12 @@ void validate_legacy_snapshot(std::string_view owner_scope, std::string_view run
         last_publication.run_record.run_id() != run_id ||
         last_publication.journal_record.id != publication.journal_record.id)
         throw std::invalid_argument("Legacy Program transition retry record is inconsistent");
+
+    // Older publication envelopes predate the durable command journal and
+    // therefore omit "commands". Parsing treats that legacy shape as an empty
+    // journal; reserialization upgrades it to the one canonical byte form used
+    // by exact-retry comparisons after migration.
+    return last_publication.serialize_canonical();
 }
 
 void migrate_legacy_schema(sqlite3* db) {
@@ -432,11 +669,13 @@ void migrate_legacy_schema(sqlite3* db) {
             const auto canonical_bytes        = column_blob(statement.get(), 2);
             const auto last_publication_bytes = column_blob(statement.get(), 3);
             const auto publication = ProgramTransitionPublication::parse(canonical_bytes);
-            validate_legacy_snapshot(owner_scope, run_id, publication, last_publication_bytes);
+            const auto normalized_last_publication =
+                normalize_legacy_snapshot(owner_scope, run_id, publication, last_publication_bytes);
             insert_head(db, owner_scope, publication.run_record, publication.journal_record,
-                        publication.migration_plan, last_publication_bytes);
+                        publication.migration_plan, normalized_last_publication);
             append_events(db, owner_scope, run_id, publication.events);
             append_effects(db, owner_scope, run_id, publication.effects);
+            append_javascript_commands(db, owner_scope, run_id, publication.commands);
         }
     }
     exec(db, "DROP TABLE program_transition_runs");
@@ -540,6 +779,31 @@ std::vector<ProgramEffectOutboxEntry> SQLiteProgramTransitionStore::load_effects
     return result;
 }
 
+std::vector<ProgramJavaScriptCommandJournalEntry>
+SQLiteProgramTransitionStore::load_javascript_commands(std::string_view owner_scope,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    after_sequence) const {
+    std::lock_guard lock(impl_->mutex);
+    Statement statement(
+        impl_->db, "SELECT coordinate_id, canonical_bytes FROM "
+                   "program_transition_javascript_command_log_v2 "
+                   "WHERE owner_scope = ?1 AND run_id = ?2 AND sequence > ?3 "
+                   "ORDER BY sequence ASC");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    statement.bind_uint64(3, after_sequence);
+    std::vector<ProgramJavaScriptCommandJournalEntry> result;
+    while (statement.step_row()) {
+        auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 1));
+        if (column_text(statement.get(), 0) != entry.coordinate_id()) {
+            throw std::invalid_argument(
+                "Stored JavaScript command journal coordinate column mismatch");
+        }
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
 std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
@@ -595,6 +859,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
                     migration_plan, publication_bytes);
     append_events(impl_->db, owner_scope, run_id, publication.events);
     append_effects(impl_->db, owner_scope, run_id, publication.effects);
+    append_javascript_commands(impl_->db, owner_scope, run_id, publication.commands);
     transaction.commit();
     return ProgramTransitionPublishResult::Published;
 }

@@ -3,9 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -26,19 +28,24 @@ RegistrySnapshot make_registry() {
     return std::move(builder).build();
 }
 
-AdmissionProfile make_admission(const RegistrySnapshot& registry) {
+AdmissionProfile make_admission(const RegistrySnapshot& registry,
+                                ExecutionGuarantee      minimum_guarantee =
+                                    ExecutionGuarantee::Strict) {
     AdmissionProfileBuilder builder;
     builder.id("module-admission")
         .semantic_version("1.0.0")
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
+        .minimum_execution_guarantee(minimum_guarantee)
         .allow_source_kind(SourceKind::CanonicalJson)
         .allow_effect_mode(EffectMode::Brokered);
     return std::move(builder).build();
 }
 
-PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner) {
+PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner,
+                           ExecutionGuarantee minimum_guarantee =
+                               ExecutionGuarantee::Strict) {
     PolicySnapshotBuilder builder;
     builder.id("module-policy")
         .semantic_version("1.0.0")
@@ -46,7 +53,8 @@ PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner)
         .admission_profile(admission)
         .allow_capability("read")
         .allow_effect("tool")
-        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1})
+        .minimum_execution_guarantee(minimum_guarantee);
     return std::move(builder).build();
 }
 ProgramBundle make_bundle(std::string    module_root,
@@ -59,7 +67,9 @@ ProgramBundle make_bundle(std::string    module_root,
                           std::uint32_t  parallel_map_in_flight = 1,
                           std::uint32_t  declared_max_concurrency = 1,
                           std::uint64_t  declared_resource_max = 10,
-                          std::uint64_t  declared_dynamic_compiles = 1) {
+                          std::uint32_t  declared_dynamic_compiles = 1,
+                          ExecutionGuarantee guarantee = ExecutionGuarantee::Strict,
+                          std::optional<BudgetLimits> declared_budget = std::nullopt) {
     const json definition = json{
         {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
         {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
@@ -115,16 +125,76 @@ ProgramBundle make_bundle(std::string    module_root,
     data.executable_registry_identities = {
         ExecutableIdentity{ExecutableKind::Node, "module-node", "1.0.0", digest('5')}};
     data.capability_effect_closure = CapabilityEffectClosure{{"read"}, {"tool"}};
+    data.execution_guarantee = guarantee;
+    const auto budget = declared_budget.value_or(
+        BudgetLimits{declared_resource_max, declared_resource_max, declared_resource_max,
+                     declared_max_concurrency, declared_resource_max, declared_resource_max,
+                     declared_dynamic_compiles, 1, declared_total_children});
     data.declared_budget_requirements = {
-        BudgetRequirement{"wall_time_ms", 1, declared_resource_max},
-        BudgetRequirement{"model_tokens", 1, declared_resource_max},
-        BudgetRequirement{"monetary_microunits", 1, declared_resource_max},
-        BudgetRequirement{"max_concurrency", 1, declared_max_concurrency},
-        BudgetRequirement{"max_program_operations", 1, declared_resource_max},
-        BudgetRequirement{"max_core_steps", 1, declared_resource_max},
-        BudgetRequirement{"max_dynamic_compiles", 1, declared_dynamic_compiles},
-        BudgetRequirement{"max_child_depth", 1, 1},
-        BudgetRequirement{"max_total_children", 1, declared_total_children},
+        BudgetRequirement{"wall_time_ms", 1, budget.wall_time_ms},
+        BudgetRequirement{"model_tokens", 1, budget.model_tokens},
+        BudgetRequirement{"monetary_microunits", 1, budget.monetary_microunits},
+        BudgetRequirement{"max_concurrency", 1, budget.max_concurrency},
+        BudgetRequirement{"max_program_operations", 1, budget.max_program_operations},
+        BudgetRequirement{"max_core_steps", 1, budget.max_core_steps},
+        BudgetRequirement{"max_dynamic_compiles", 1, budget.max_dynamic_compiles},
+        BudgetRequirement{"max_child_depth", 1, budget.max_child_depth},
+        BudgetRequirement{"max_total_children", 1, budget.max_total_children},
+    };
+    return ProgramBundle(std::move(data));
+}
+
+ProgramBundle make_composition_bundle(std::string         registry_fingerprint,
+                                      ContractRecord      input,
+                                      ContractRecord      output,
+                                      const BudgetLimits& allocation) {
+    const json definition = json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                                 {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
+    ProgramBundleData data;
+    data.source_kind                   = SourceKind::CanonicalJson;
+    data.source_hash                   = digest('8');
+    data.canonical_program_hash        = digest('9');
+    data.compiler_build_id             = "compiler:module-overflow";
+    data.program_schema_version        = PROGRAM_SCHEMA_VERSION_V2;
+    data.registry_snapshot_fingerprint = std::move(registry_fingerprint);
+    data.module_dependency_merkle_root = ModuleResolution{}.dependency_merkle_root();
+    data.input_contract                = std::move(input);
+    data.output_contract               = std::move(output);
+    data.orchestration_plan = OrchestrationPlanRecord{
+        1,
+        json{{"root", "root"},
+             {"operations",
+              json::array({
+                  json{{"id", "root"},
+                       {"op", "sequence"},
+                       {"source_pointer", "/root"},
+                       {"children", json::array({"spawn-a", "spawn-b"})}},
+                  json{{"id", "spawn-a"},
+                       {"op", "spawn"},
+                       {"source_pointer", "/root/children/0"},
+                       {"child_binding", "child-a"}},
+                  json{{"id", "spawn-b"},
+                       {"op", "spawn"},
+                       {"source_pointer", "/root/children/1"},
+                       {"child_binding", "child-b"}},
+              })}}};
+    data.sealed_core_definitions = {
+        SealedCoreDefinition{"main", sealed_core_definition_hash(definition), definition}};
+    data.core_plan_identities           = {CorePlanIdentity{"main", digest('c')}};
+    data.executable_registry_identities = {
+        ExecutableIdentity{ExecutableKind::Node, "module-node", "1.0.0", digest('5')}};
+    data.capability_effect_closure    = CapabilityEffectClosure{{"read"}, {"tool"}};
+    data.execution_guarantee          = ExecutionGuarantee::Strict;
+    data.declared_budget_requirements = {
+        BudgetRequirement{"wall_time_ms", 1, allocation.wall_time_ms},
+        BudgetRequirement{"model_tokens", 1, allocation.model_tokens},
+        BudgetRequirement{"monetary_microunits", 1, allocation.monetary_microunits},
+        BudgetRequirement{"max_concurrency", 1, allocation.max_concurrency},
+        BudgetRequirement{"max_program_operations", 1, allocation.max_program_operations},
+        BudgetRequirement{"max_core_steps", 1, allocation.max_core_steps},
+        BudgetRequirement{"max_dynamic_compiles", 1, allocation.max_dynamic_compiles},
+        BudgetRequirement{"max_child_depth", 1, allocation.max_child_depth},
+        BudgetRequirement{"max_total_children", 1, allocation.max_total_children},
     };
     return ProgramBundle(std::move(data));
 }
@@ -144,7 +214,9 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
                          std::uint64_t declared_total_children = 2,
                          std::uint32_t declared_max_concurrency = 1,
                          std::uint64_t declared_resource_max = 10,
-                         std::uint64_t declared_dynamic_compiles = 1) {
+                         std::uint64_t declared_dynamic_compiles = 1,
+                         ExecutionGuarantee child_guarantee = ExecutionGuarantee::Strict,
+                         ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
     const auto module_root = ModuleResolution{}.dependency_merkle_root();
     const ContractRecord contract{1, json{{"type", "object"}}};
     const auto registry  = make_registry();
@@ -152,11 +224,11 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
                               std::move(child_binding), parallel_map_items,
                               declared_total_children, parallel_map_in_flight,
                               declared_max_concurrency, declared_resource_max,
-                              declared_dynamic_compiles);
-    auto child_bundle =
-        make_bundle(module_root, registry.fingerprint(), contract, contract, "child", 0, 1);
-    const auto admission = make_admission(registry);
-    const auto policy    = make_policy(admission, child_owner);
+                              declared_dynamic_compiles, child_guarantee);
+    auto child_bundle = make_bundle(module_root, registry.fingerprint(), contract, contract,
+                                    "child", 0, 1, 1, 1, 10, 1, child_guarantee);
+    const auto admission = make_admission(registry, child_guarantee);
+    const auto policy    = make_policy(admission, child_owner, child_guarantee);
     ProgramVersion version(
         ProgramVersionData{child_bundle.id(),
                            admission,
@@ -164,7 +236,8 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
                            {},
                            child_owner,
                            CoreMaterializationReceipt{"compiler:module", registry.fingerprint(),
-                                                      {CorePlanIdentity{"main", digest('c')}}}});
+                                                      {CorePlanIdentity{"main", digest('c')}}},
+                           child_guarantee});
 
     ProgramModuleData parent_data;
     parent_data.owner_scope       = "tenant:module";
@@ -174,7 +247,8 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
     parent_data.declared_effects     = {"tool"};
     parent_data.children.push_back(ChildProgramDescriptor{
         "child", version.id(), {ModulePort{"input", contract}}, {ModulePort{"output", contract}},
-        {"read"}, {"tool"}, BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1}});
+        {"read"}, {"tool"}, BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1},
+        accepted_guarantee});
     auto parent = ProgramModule::create(std::move(parent_data));
 
     ModuleResolution resolution;
@@ -182,6 +256,105 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
     resolution.modules.push_back(parent);
     return LinkFixture{std::move(parent), std::move(resolution), std::move(bundle),
                        std::move(child_bundle), std::move(version)};
+}
+
+LinkFixture make_fixture(std::string          child_owner,
+                         std::string          child_binding,
+                         ExecutionGuarantee   child_guarantee,
+                         ExecutionGuarantee   accepted_guarantee) {
+    return make_fixture(std::move(child_owner), std::move(child_binding), 0, 1, 2, 1, 10, 1,
+                        child_guarantee, accepted_guarantee);
+}
+
+struct OverflowCompositionFixture {
+    ProgramBundle      parent_bundle;
+    ProgramComposition composition;
+};
+
+OverflowCompositionFixture make_overflow_composition(BudgetLimits first_budget,
+                                                     BudgetLimits second_budget,
+                                                     BudgetLimits parent_allocation) {
+    const auto           module_root = ModuleResolution{}.dependency_merkle_root();
+    const ContractRecord contract{1, json{{"type", "object"}}};
+    const auto           registry  = make_registry();
+    const auto           admission = make_admission(registry);
+    auto first_bundle = make_bundle(
+        module_root, registry.fingerprint(), contract, contract, "unused-a", 0,
+        first_budget.max_total_children, 1, first_budget.max_concurrency, 10,
+        first_budget.max_dynamic_compiles, ExecutionGuarantee::Strict, first_budget);
+    auto second_bundle = make_bundle(
+        module_root, registry.fingerprint(), contract, contract, "unused-b", 0,
+        second_budget.max_total_children, 1, second_budget.max_concurrency, 10,
+        second_budget.max_dynamic_compiles, ExecutionGuarantee::Strict, second_budget);
+
+    const auto make_child_policy = [&](std::string id, const BudgetLimits& ceiling) {
+        PolicySnapshotBuilder builder;
+        builder.id(std::move(id))
+            .semantic_version("1.0.0")
+            .owner_scope("tenant:module")
+            .admission_profile(admission)
+            .allow_capability("read")
+            .allow_effect("tool")
+            .budget_ceiling(ceiling);
+        return std::move(builder).build();
+    };
+    const auto     first_policy  = make_child_policy("overflow-policy-a", first_budget);
+    const auto     second_policy = make_child_policy("overflow-policy-b", second_budget);
+    ProgramVersion first_version(ProgramVersionData{
+        first_bundle.id(),
+        admission,
+        first_policy,
+        {},
+        "tenant:module",
+        CoreMaterializationReceipt{
+            "compiler:module", registry.fingerprint(), {CorePlanIdentity{"main", digest('c')}}},
+        ExecutionGuarantee::Strict});
+    ProgramVersion second_version(ProgramVersionData{
+        second_bundle.id(),
+        admission,
+        second_policy,
+        {},
+        "tenant:module",
+        CoreMaterializationReceipt{
+            "compiler:module", registry.fingerprint(), {CorePlanIdentity{"main", digest('c')}}},
+        ExecutionGuarantee::Strict});
+
+    auto parent_bundle =
+        make_composition_bundle(registry.fingerprint(), contract, contract, parent_allocation);
+    ProgramModuleData parent_data;
+    parent_data.owner_scope          = "tenant:module";
+    parent_data.coordinate           = ModuleCoordinate{"test", "overflow-parent", "1.0.0", ""};
+    parent_data.attestation_id       = "attestation:module";
+    parent_data.allowed_capabilities = {"read"};
+    parent_data.declared_effects     = {"tool"};
+    parent_data.children             = {
+        ChildProgramDescriptor{"child-a",
+                               first_version.id(),
+                                           {ModulePort{"input", contract}},
+                                           {ModulePort{"output", contract}},
+                                           {"read"},
+                                           {"tool"},
+                               first_budget,
+                               ExecutionGuarantee::Strict},
+        ChildProgramDescriptor{"child-b",
+                               second_version.id(),
+                                           {ModulePort{"input", contract}},
+                                           {ModulePort{"output", contract}},
+                                           {"read"},
+                                           {"tool"},
+                               second_budget,
+                               ExecutionGuarantee::Strict},
+    };
+    auto             parent = ProgramModule::create(std::move(parent_data));
+    ModuleResolution resolution;
+    resolution.root = parent.coordinate();
+    resolution.modules.push_back(parent);
+    ProgramComposition composition{
+        std::move(parent),
+        std::move(resolution),
+        {ChildProgramBinding{"child-a", std::move(first_bundle), std::move(first_version)},
+         ChildProgramBinding{"child-b", std::move(second_bundle), std::move(second_version)}}};
+    return OverflowCompositionFixture{std::move(parent_bundle), std::move(composition)};
 }
 
 TEST(ProgramModuleTest, LinksExactChildAndRoundTripsImmutableReceipt) {
@@ -200,6 +373,25 @@ TEST(ProgramModuleTest, LinksExactChildAndRoundTripsImmutableReceipt) {
     const auto parsed = ModuleLinkReceipt::parse(receipt.serialize_canonical());
     EXPECT_EQ(parsed.id(), receipt.id());
     EXPECT_EQ(parsed.serialize_canonical(), receipt.serialize_canonical());
+}
+
+TEST(ProgramModuleTest, RequiresExplicitChildGuaranteeAcceptanceAndPersistsIt) {
+    auto rejected =
+        make_fixture("tenant:module", "child", ExecutionGuarantee::Recorded,
+                     ExecutionGuarantee::Strict);
+    EXPECT_THROW(link_module_child(rejected.resolution, rejected.parent, "child", rejected.bundle,
+                                   rejected.version),
+                 std::invalid_argument);
+
+    auto accepted =
+        make_fixture("tenant:module", "child", ExecutionGuarantee::Recorded,
+                     ExecutionGuarantee::Recorded);
+    ASSERT_EQ(accepted.child_bundle.id(), accepted.version.bundle_id());
+    const auto receipt = link_module_child(accepted.resolution, accepted.parent, "child",
+                                           accepted.child_bundle, accepted.version);
+    EXPECT_EQ(receipt.minimum_execution_guarantee(), ExecutionGuarantee::Recorded);
+    EXPECT_EQ(ModuleLinkReceipt::parse(receipt.serialize_canonical()).minimum_execution_guarantee(),
+              ExecutionGuarantee::Recorded);
 }
 
 TEST(ProgramModuleTest, RejectsChildOwnerOutsideParentScope) {
@@ -293,6 +485,31 @@ TEST(ProgramModuleTest, ResolverReturnsCompletePinnedDependencyClosure) {
     EXPECT_EQ(resolution.receipts.size(), 2U);
     EXPECT_NO_THROW(validate_module_resolution(resolution));
     EXPECT_EQ(resolution.root, root.coordinate());
+}
+
+TEST(ProgramModuleTest, VerifiedResolverIsAnExactImmutableReceiptAllowlist) {
+    ProgramModuleData module_data;
+    module_data.owner_scope    = "tenant:module";
+    module_data.coordinate     = ModuleCoordinate{"sealed", "allowlisted", "1.0.0", ""};
+    module_data.attestation_id = "attestation:module";
+    const auto module          = ProgramModule::create(std::move(module_data));
+
+    ModuleResolution resolution;
+    resolution.root = module.coordinate();
+    resolution.modules.push_back(module);
+    resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
+
+    VerifiedModuleResolver resolver(resolution);
+    const auto coordinate = resolver.resolve(module.coordinate().qualified_name());
+    ASSERT_TRUE(coordinate.has_value());
+    EXPECT_EQ(*coordinate, module.coordinate());
+    EXPECT_FALSE(resolver.resolve("sealed:allowlisted@2.0.0").has_value());
+    EXPECT_FALSE(resolver.resolve("file:///etc/passwd").has_value());
+
+    resolution.receipts.clear();
+    resolution.modules.clear();
+    EXPECT_TRUE(resolver.resolve(module.coordinate().qualified_name()).has_value());
+    EXPECT_EQ(resolver.resolution().receipts.size(), 1U);
 }
 
 TEST(ProgramModuleTest, ResolutionRejectsUnpinnedDependency) {
@@ -436,6 +653,42 @@ TEST(ProgramModuleTest, WholeCompositionRejectsParallelMapReservationsBeyondPare
         {ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
 
     EXPECT_THROW(validate_program_composition(fixture.bundle, composition), std::invalid_argument);
+}
+TEST(ProgramModuleTest, WholeCompositionRejectsUint64ChildBudgetAggregationOverflow) {
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    auto fixture = make_overflow_composition(BudgetLimits{maximum, 10, 10, 1, 10, 10, 1, 1, 1},
+                                             BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1},
+                                             BudgetLimits{maximum, 20, 20, 2, 20, 20, 2, 1, 2});
+
+    try {
+        validate_program_composition(fixture.parent_bundle, fixture.composition);
+        FAIL() << "expected uint64 child-budget aggregation overflow";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "Child budget aggregation overflows wall_time_ms");
+    }
+}
+
+TEST(ProgramModuleTest, WholeCompositionRejectsUint32ChildBudgetAggregationOverflow) {
+    const auto maximum = std::numeric_limits<std::uint32_t>::max();
+    auto fixture = make_overflow_composition(BudgetLimits{10, 10, 10, maximum, 10, 10, 1, 1, 1},
+                                             BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1},
+                                             BudgetLimits{20, 20, 20, maximum, 20, 20, 2, 1, 2});
+
+    try {
+        validate_program_composition(fixture.parent_bundle, fixture.composition);
+        FAIL() << "expected uint32 child-budget aggregation overflow";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "Child budget aggregation overflows max_concurrency");
+    }
+}
+
+TEST(ProgramModuleTest, WholeCompositionAggregatesChildDepthByMaximum) {
+    auto fixture = make_overflow_composition(
+        BudgetLimits{10, 10, 10, 1, 10, 10, 1, MAX_SUPPORTED_CHILD_DEPTH, 1},
+        BudgetLimits{10, 10, 10, 1, 10, 10, 1, MAX_SUPPORTED_CHILD_DEPTH, 1},
+        BudgetLimits{20, 20, 20, 2, 20, 20, 2, MAX_SUPPORTED_CHILD_DEPTH, 2});
+
+    EXPECT_NO_THROW(validate_program_composition(fixture.parent_bundle, fixture.composition));
 }
 
 TEST(ProgramModuleTest, WholeCompositionRejectsUndeclaredSpawnBinding) {

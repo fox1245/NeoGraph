@@ -1,4 +1,5 @@
 #include <neograph/program/program.h>
+#include <neograph/program/store.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -179,16 +180,15 @@ ExecutableIdentity configured_tool(std::string name, char implementation) {
 }
 
 RegistrySnapshot config_requirement_snapshot() {
-    const auto provider = configured_provider();
-    const auto alpha    = configured_tool("configured-alpha", '9');
-    const auto beta     = configured_tool("configured-beta", 'a');
-    const ExecutableIdentity imported{
-        ExecutableKind::Imported, "configured-import", "1.0.0", alpha.implementation_digest};
+    const auto               provider = configured_provider();
+    const auto               alpha    = configured_tool("configured-alpha", '9');
+    const auto               beta     = configured_tool("configured-beta", 'a');
+    const ExecutableIdentity imported{ExecutableKind::Imported, "configured-import", "1.0.0",
+                                      alpha.implementation_digest};
 
     RegistrySnapshotBuilder builder;
-    builder.add_provider(
-        executable(ExecutableKind::Provider, provider.name, '8'),
-        ProviderMetadata{json::object(), json::object()});
+    builder.add_provider(executable(ExecutableKind::Provider, provider.name, '8'),
+                         ProviderMetadata{json::object(), json::object()});
     builder.add_tool(executable(ExecutableKind::Tool, alpha.name, '9'),
                      ToolMetadata{json::object(), json::object()});
     builder.add_tool(executable(ExecutableKind::Tool, beta.name, 'a'),
@@ -196,27 +196,26 @@ RegistrySnapshot config_requirement_snapshot() {
     builder.add_imported(
         executable(ExecutableKind::Imported, imported.name, '9'),
         ImportedExecutableMetadata{"module:configured", imported.name, digest('b'), alpha});
-    builder.add_node(
-        executable(ExecutableKind::Node, "configured-node", '7'), local_factory(),
-        json{{"type", "object"}}, json::object(),
-        [provider, alpha, beta, imported](const json& config) {
-            std::vector<ExecutableIdentity> requirements;
-            if (config.value("provider_id", "") == provider.name) {
-                requirements.push_back(provider);
-            }
-            if (config.contains("tool_ids") && config["tool_ids"].is_array()) {
-                for (const auto& id : config["tool_ids"]) {
-                    if (id == alpha.name)
-                        requirements.push_back(alpha);
-                    else if (id == beta.name)
-                        requirements.push_back(beta);
-                }
-            }
-            if (config.value("import_id", "") == imported.name) {
-                requirements.push_back(imported);
-            }
-            return requirements;
-        });
+    builder.add_node(executable(ExecutableKind::Node, "configured-node", '7'), local_factory(),
+                     json{{"type", "object"}}, json::object(),
+                     [provider, alpha, beta, imported](const json& config) {
+                         std::vector<ExecutableIdentity> requirements;
+                         if (config.value("provider_id", "") == provider.name) {
+                             requirements.push_back(provider);
+                         }
+                         if (config.contains("tool_ids") && config["tool_ids"].is_array()) {
+                             for (const auto& id : config["tool_ids"]) {
+                                 if (id == alpha.name)
+                                     requirements.push_back(alpha);
+                                 else if (id == beta.name)
+                                     requirements.push_back(beta);
+                             }
+                         }
+                         if (config.value("import_id", "") == imported.name) {
+                             requirements.push_back(imported);
+                         }
+                         return requirements;
+                     });
     return std::move(builder).build();
 }
 
@@ -413,10 +412,9 @@ TEST(ProgramCompilerTest, SourceKindIsPreservedAndBoundIntoBundleIdentity) {
     auto            snapshot = complete_snapshot();
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
     const auto      document = program_document();
-    const auto      builder =
-        compiler.compile(ProgramSource::from_cpp_builder("builder", 1, document));
-    const auto canonical = compiler.compile(
-        ProgramSource::from_canonical_json("source.json", document.dump()));
+    const auto builder = compiler.compile(ProgramSource::from_cpp_builder("builder", 1, document));
+    const auto canonical =
+        compiler.compile(ProgramSource::from_canonical_json("source.json", document.dump()));
 
     EXPECT_EQ(builder.source_kind(), SourceKind::CppBuilder);
     EXPECT_EQ(ProgramBundle::parse(builder.serialize_canonical()).source_kind(),
@@ -425,6 +423,684 @@ TEST(ProgramCompilerTest, SourceKindIsPreservedAndBoundIntoBundleIdentity) {
     EXPECT_EQ(ProgramBundle::parse(canonical.serialize_canonical()).source_kind(),
               SourceKind::CanonicalJson);
     EXPECT_NE(builder.id(), canonical.id());
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramCompilerTest, JavaScriptDefineBuildsOneCoreDefinitionWithOrdinaryControlFlow) {
+    const auto source = ProgramSource::from_javascript(
+        "control.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                const stages = [
+                    ["draft", "local-node"],
+                    ["review", "local-node"],
+                ];
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                for (const [name, type] of stages) {
+                    graph.node(name, {type});
+                }
+                graph.entry("draft");
+                graph.edge("draft", "review");
+                graph.conditionalEdge("review", "local-condition", {done: "__end__"});
+                return graph;
+            }
+        )JS");
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto      bundle = compiler.compile(source);
+
+    EXPECT_EQ(bundle.source_kind(), SourceKind::JavaScript);
+    ASSERT_EQ(bundle.sealed_core_definitions().size(), 1U);
+    EXPECT_EQ(bundle.sealed_core_definitions().front().name, "main");
+    EXPECT_EQ(bundle.orchestration_plan().plan["operations"][0]["op"], "call_core");
+}
+
+TEST(ProgramCompilerTest, JavaScriptHostBudgetAndContractsReplaceEvaluatedDeclarations) {
+    const auto           source = ProgramSource::from_javascript("host-authority.js",
+                                                                 R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+    const RunBudget      budget{5000, 1000, 1, 2, 4, 20, 0, 0, 0};
+    const ContractRecord input{1,
+                               {{"type", "object"},
+                                {"required", json::array({"task"})},
+                                {"properties", {{"task", {{"type", "object"}}}}},
+                                {"additionalProperties", false}}};
+    const ContractRecord output{1,
+                                {{"type", "object"},
+                                 {"required", json::array({"outcome"})},
+                                 {"properties", {{"outcome", {{"type", "string"}}}}},
+                                 {"additionalProperties", false}}};
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript-host/v1"});
+    const auto      bundle = compiler.compile(source, budget, input, output);
+
+    EXPECT_EQ(bundle.input_contract().schema_version, input.schema_version);
+    EXPECT_EQ(bundle.input_contract().schema, input.schema);
+    EXPECT_EQ(bundle.output_contract().schema_version, output.schema_version);
+    EXPECT_EQ(bundle.output_contract().schema, output.schema);
+    const json expected = {
+        {"wall_time_ms", budget.wall_time_ms},
+        {"model_tokens", budget.model_tokens},
+        {"monetary_microunits", budget.monetary_microunits},
+        {"max_concurrency", budget.max_concurrency},
+        {"max_program_operations", budget.max_program_operations},
+        {"max_core_steps", budget.max_core_steps},
+        {"max_dynamic_compiles", budget.max_dynamic_compiles},
+        {"max_child_depth", budget.max_child_depth},
+        {"max_total_children", budget.max_total_children},
+    };
+    ASSERT_EQ(bundle.declared_budget_requirements().size(), expected.size());
+    for (const auto& requirement : bundle.declared_budget_requirements()) {
+        ASSERT_TRUE(expected.contains(requirement.resource));
+        EXPECT_EQ(requirement.minimum, expected.at(requirement.resource).get<std::uint64_t>());
+        EXPECT_EQ(requirement.maximum, expected.at(requirement.resource).get<std::uint64_t>());
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptDefinitionMustReturnOneGraphBuilder) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "missing-builder.js", "export function define() { return {name: 'main'}; }");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        ASSERT_TRUE(contains_code(error.diagnostics(), "P_JS_DEFINE_VALUE"));
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_JS_DEFINE_VALUE";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.source_id, "missing-builder.js");
+        EXPECT_GT(it->primary.span->byte_end, it->primary.span->byte_begin);
+        EXPECT_EQ(it->primary.span->line_begin, 1U);
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptDefinitionCannotReturnMoreThanOneBuilder) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "two-builders.js",
+        R"JS(
+            export function define() {
+                const first = ng.graph("first");
+                const second = ng.graph("second");
+                return [first, second];
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_DEFINE_VALUE"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSourceCannotOutrunItsInterruptBudget) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id              = "program-compiler-test/javascript/v1";
+    config.javascript.max_interrupt_polls = 1;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "infinite.js", "export function define() { while (true) { } }");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RESOURCE_LIMIT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptStrictProfileDeniesAmbientCapabilitiesDeterministically) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const std::vector<std::string> denied_sources = {
+        "export function define() { Date.now(); }",
+        "export function define() { eval('1 + 1'); }",
+        "export function define() { Function('return 1')(); }",
+        "export function define() { (function() {}).constructor('return 1')(); }",
+        "export function define() { (function*() {}).constructor('yield 1')(); }",
+        "export function define() { (async function() {}).constructor('return 1')(); }",
+        "export function define() { (async function*() {}).constructor('yield 1')(); }",
+    };
+    for (std::size_t index = 0; index < denied_sources.size(); ++index) {
+        const auto source = ProgramSource::from_javascript(
+            "ambient-denied-" + std::to_string(index) + ".js", denied_sources[index]);
+        try {
+            (void)compiler.compile(source);
+            FAIL() << "expected ambient capability denial for source " << index;
+        } catch (const ProgramCompileError& error) {
+            EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_AMBIENT_DENIED"))
+                << "source " << index;
+        }
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptStrictProfileReplacesRandomAndHidesWorkerFacilities) {
+    const auto source = ProgramSource::from_javascript(
+        "strict-profile.js",
+        R"JS(
+            export function define() {
+                if (Math.random() !== 0 || typeof Worker !== "undefined" ||
+                    typeof SharedWorker !== "undefined" || typeof SharedArrayBuffer !== "undefined" ||
+                    typeof Atomics !== "undefined" || typeof require !== "undefined" ||
+                    typeof fetch !== "undefined") {
+                    throw new Error("strict profile leaked a nondeterministic facility");
+                }
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    EXPECT_EQ(compiler.compile(source).source_kind(), SourceKind::JavaScript);
+}
+
+TEST(ProgramCompilerTest, JavaScriptSourceStopsAtItsWallTimeCeiling) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id              = "program-compiler-test/javascript-wall-time/v1";
+    config.javascript.max_interrupt_polls = std::numeric_limits<std::uint64_t>::max();
+    config.javascript.max_wall_time_ms    = 1;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "wall-time.js", "export function define() { while (true) { } }");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_TIMEOUT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptGraphBuilderAccountsNativeDocumentBytes) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id                  = "program-compiler-test/javascript-bytes/v1";
+    config.javascript.max_generated_document_bytes = 256;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "native-bytes.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.node("work", {type: "local-node", padding: "x".repeat(512)});
+                return graph;
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_GRAPH_LIMIT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptRetainedBuildersShareTheQuickJsMemoryCeiling) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id              = "program-compiler-test/javascript-native-live/v1";
+    config.javascript.memory_limit_bytes  = 8u * 1024u * 1024u;
+    config.javascript.max_stack_bytes     = 128u * 1024u;
+    config.javascript.max_interrupt_polls = 100'000'000u;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto      source = ProgramSource::from_javascript("native-live-builders.js",
+                                                            R"JS(
+            export function define() {
+                const retained = [];
+                for (let index = 0; index < 100000; ++index) {
+                    retained.push(ng.graph("retained-" + index + "-" + "x".repeat(16 * 1024)));
+                }
+                return ng.graph("main");
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected cumulative native-memory rejection";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RESOURCE_LIMIT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptPreservesSafeIntegerBoundariesAndFiniteDoubles) {
+    ProgramCompiler compiler(complete_snapshot(),
+                             {"program-compiler-test/javascript-safe-number/v1"});
+    const auto      source = ProgramSource::from_javascript("safe-number-boundaries.js",
+                                                            R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: null});
+                graph.node("work", {
+                    type: "local-node",
+                    positive_safe: 9007199254740991,
+                    negative_safe: -9007199254740991,
+                    fractional: 1234.5
+                });
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+
+    std::optional<ProgramBundle> bundle;
+    try {
+        bundle = compiler.compile(source);
+    } catch (const ProgramCompileError& error) {
+        for (const auto& diagnostic : error.diagnostics()) {
+            ADD_FAILURE() << diagnostic.code << " " << diagnostic.primary.json_pointer << ": "
+                          << diagnostic.message << " " << diagnostic.witness.dump();
+        }
+        return;
+    }
+    ASSERT_EQ(bundle->sealed_core_definitions().size(), 1U);
+    const auto& node = bundle->sealed_core_definitions().front().definition.at("nodes").at("work");
+    EXPECT_EQ(node.at("positive_safe").get<std::uint64_t>(), 9007199254740991ULL);
+    EXPECT_EQ(node.at("negative_safe").get<std::int64_t>(), -9007199254740991LL);
+    EXPECT_EQ(node.at("fractional").get<double>(), 1234.5);
+}
+
+TEST(ProgramCompilerTest, JavaScriptRejectsUnsafeIntegralNumbersBeforeJsonConversion) {
+    ProgramCompiler                                        compiler(complete_snapshot(),
+                                                                    {"program-compiler-test/javascript-unsafe-number/v1"});
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"positive-2p53.js", "9007199254740992"},
+        {"rounded-2p53-plus-one.js", "9007199254740993"},
+        {"negative-2p53.js", "-9007199254740992"},
+    };
+
+    for (const auto& [source_id, literal] : cases) {
+        const auto source = ProgramSource::from_javascript(
+            source_id,
+            "export function define() { const graph = ng.graph(\"main\"); "
+            "graph.node(\"work\", {type: \"local-node\", value: " +
+                literal + "}); return graph; }");
+        try {
+            (void)compiler.compile(source);
+            FAIL() << "expected safe-integer rejection for " << literal;
+        } catch (const ProgramCompileError& error) {
+            const auto diagnostic =
+                std::find_if(error.diagnostics().begin(), error.diagnostics().end(),
+                             [](const auto& value) { return value.code == "P_JS_GRAPH_VALUE"; });
+            ASSERT_NE(diagnostic, error.diagnostics().end()) << literal;
+            EXPECT_NE(diagnostic->message.find("outside the JavaScript safe-integer range"),
+                      std::string::npos)
+                << literal;
+        }
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptPreservesEmbeddedNulPropertyKeys) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript-nul-key/v1"});
+    const auto      source = ProgramSource::from_javascript("nul-key.js",
+                                                            R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node", "a\u0000b": 1, a: 2});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+
+    const auto bundle = compiler.compile(source);
+    ASSERT_EQ(bundle.sealed_core_definitions().size(), 1U);
+    const auto& node = bundle.sealed_core_definitions().front().definition.at("nodes").at("work");
+    const std::string embedded_nul("a\0b", 3);
+    ASSERT_TRUE(node.contains(embedded_nul));
+    EXPECT_EQ(node.at(embedded_nul), 1);
+    EXPECT_EQ(node.at("a"), 2);
+}
+
+TEST(ProgramCompilerTest, JavaScriptHostExposesOnlyItsFrozenVersionedGraphBinding) {
+    const auto source = ProgramSource::from_javascript(
+        "sandbox.js",
+        R"JS(
+            export function define() {
+                if (typeof std !== "undefined" || typeof os !== "undefined" ||
+                    typeof process !== "undefined" || typeof neograph !== "undefined" ||
+                    typeof ng.callCore !== "undefined" || ng.apiVersion !== 1 ||
+                    !Object.isFrozen(ng)) {
+                    throw new Error("host capability leaked");
+                }
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    EXPECT_EQ(compiler.compile(source).source_kind(), SourceKind::JavaScript);
+}
+
+TEST(ProgramCompilerTest, JavaScriptGraphBuilderRejectsUnknownObjectsBeforeCoreAdmission) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "invalid-builder-value.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.node("work", new Date());
+                graph.entry("work");
+                return graph;
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_AMBIENT_DENIED"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSyntaxDiagnosticsCarryExactSourceSites) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "syntax.js", "export function define() {\n  const graph = ;\n  return graph;\n}\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_JS_EVALUATION";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->primary.source_id, "syntax.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_GE(it->primary.span->line_begin, 2U);
+        EXPECT_GT(it->primary.span->byte_end, it->primary.span->byte_begin);
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptBridgeDiagnosticsCarryExactSourceSites) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "bridge.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.node(\"work\", new Map());\n"
+        "  return graph;\n"
+        "}\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_JS_GRAPH_VALUE";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->primary.source_id, "bridge.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_GE(it->primary.span->line_begin, 2U);
+        EXPECT_GT(it->primary.span->byte_end, it->primary.span->byte_begin);
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSealedModuleClosureExecutesAtCompileTime) {
+    const std::string leaf_source = R"JS(
+        export const nodeType = "local-node";
+    )JS";
+    ProgramModuleData leaf_data;
+    leaf_data.owner_scope            = "tenant:sealed";
+    leaf_data.coordinate             = ModuleCoordinate{"sealed", "node-type", "1.0.0", ""};
+    leaf_data.attestation_id         = "attestation:sealed";
+    leaf_data.pure_javascript_source = leaf_source;
+    const auto leaf = ProgramModule::create(std::move(leaf_data));
+
+    const auto helper_name = ModuleCoordinate{"sealed", "stages", "1.0.0", ""}.qualified_name();
+    const std::string helper_source =
+        "import { nodeType } from \"" + leaf.coordinate().qualified_name() + "\";\n"
+        "export const stages = [[\"draft\", nodeType], [\"review\", nodeType]];\n";
+    ProgramModuleData helper_data;
+    helper_data.owner_scope            = "tenant:sealed";
+    helper_data.coordinate             = ModuleCoordinate{"sealed", "stages", "1.0.0", ""};
+    helper_data.attestation_id         = "attestation:sealed";
+    helper_data.dependencies           = {leaf.coordinate()};
+    helper_data.pure_javascript_source = helper_source;
+    const auto helper = ProgramModule::create(std::move(helper_data));
+    EXPECT_EQ(helper.coordinate().qualified_name(), helper_name);
+
+    ModuleResolution resolution;
+    resolution.root     = helper.coordinate();
+    resolution.modules  = {helper, leaf};
+    resolution.receipts = {{helper.coordinate().qualified_name(), helper.id()},
+                           {leaf.coordinate().qualified_name(), leaf.id()}};
+    ASSERT_NO_THROW(validate_module_resolution(resolution));
+
+    const auto source = ProgramSource::from_javascript(
+        "sealed-root.js",
+        "import { stages } from \"" + helper.coordinate().qualified_name() + "\";\n"
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  for (const [name, type] of stages) graph.node(name, {type});\n"
+        "  graph.entry(\"draft\");\n"
+        "  graph.edge(\"draft\", \"review\");\n"
+        "  graph.conditionalEdge(\"review\", \"local-condition\", {done: \"__end__\"});\n"
+        "  return graph;\n"
+        "}\n",
+        resolution.imports(), {},
+        {{helper.coordinate().qualified_name(), helper.id(), helper_source},
+         {leaf.coordinate().qualified_name(), leaf.id(), leaf_source}});
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto      bundle = compiler.compile(source, resolution);
+
+    EXPECT_EQ(bundle.module_dependency_merkle_root(), resolution.dependency_merkle_root());
+    ASSERT_EQ(bundle.sealed_core_definitions().size(), 1U);
+    EXPECT_EQ(bundle.sealed_core_definitions().front().definition.at("nodes").size(), 2U);
+}
+
+TEST(ProgramCompilerTest, JavaScriptAmbientImportsFailBeforeAnyDispatch) {
+    reset_dispatch_counters();
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "ambient.js",
+        "import \"std\";\n"
+        "export function define() { return ng.graph(\"main\"); }\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_IMPORT_UNRESOLVED";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->phase, CompilePhase::Resolve);
+        EXPECT_EQ(it->primary.source_id, "ambient.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.span->line_begin, 1U);
+    }
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, JavaScriptDynamicImportsFailBeforeAnyDispatch) {
+    reset_dispatch_counters();
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "dynamic.js",
+        "export function define() {\n"
+        "  import(\"module\");\n"
+        "  return ng.graph(\"main\");\n"
+        "}\n");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_IMPORT_DYNAMIC";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->phase, CompilePhase::Resolve);
+        EXPECT_EQ(it->primary.source_id, "dynamic.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->primary.span->line_begin, 2U);
+    }
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, JavaScriptBundleRoundTripPinsExactFrontendIdentity) {
+    const auto source = ProgramSource::from_javascript(
+        "identity.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.node(\"work\", {type: \"local-node\"});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto bundle  = compiler.compile(source);
+    const auto parsed  = ProgramBundle::parse(bundle.serialize_canonical());
+    const auto runtime = source.javascript_runtime_identity();
+
+    EXPECT_EQ(bundle.javascript_runtime(), runtime);
+    EXPECT_EQ(parsed.javascript_runtime(), runtime);
+    const auto encoded = json::parse(bundle.serialize_canonical());
+    EXPECT_EQ(encoded.at("quickjs_release"), runtime.quickjs_release);
+    EXPECT_EQ(encoded.at("quickjs_archive_digest"), runtime.quickjs_archive_digest);
+    EXPECT_EQ(encoded.at("quickjs_build_options"), runtime.quickjs_build_options);
+    EXPECT_EQ(encoded.at("javascript_profile"), runtime.profile);
+    EXPECT_EQ(encoded.at("javascript_profile_version"), runtime.profile_version);
+    EXPECT_EQ(encoded.at("ng_api_version"), runtime.ng_api_version);
+
+    ProgramCompilerConfig mismatch;
+    mismatch.compiler_build_id      = "program-compiler-test/javascript/v1";
+    mismatch.quickjs_build_options += ";changed";
+    ProgramCompiler incompatible(complete_snapshot(), std::move(mismatch));
+    try {
+        (void)incompatible.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RUNTIME_IDENTITY"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSourceMapRoundTripsAlongsideBundleSites) {
+    const SourceMapEntry authored{
+        "/root", {"authoring.dsl", "/graph", SourceSpan{4, 18, 2, 3, 2, 17}}};
+    const auto source = ProgramSource::from_javascript(
+        "mapped.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.node(\"work\", {type: \"local-node\"});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n",
+        {}, {authored});
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto bundle = compiler.compile(source);
+    const auto parsed = ProgramBundle::parse(bundle.serialize_canonical());
+    const auto it = std::find(parsed.source_map().begin(), parsed.source_map().end(), authored);
+    EXPECT_NE(it, parsed.source_map().end());
+}
+
+TEST(ProgramCompilerTest, JavaScriptReceiptMatchedStaticImportStillFailsBeforeEvaluation) {
+    ProgramModuleData module_data;
+    module_data.owner_scope    = "tenant:compiler";
+    module_data.coordinate     = ModuleCoordinate{"sealed", "allowed", "1.0.0", ""};
+    module_data.attestation_id = "attestation:test";
+    const auto module          = ProgramModule::create(std::move(module_data));
+    ModuleResolution resolution;
+    resolution.root = module.coordinate();
+    resolution.modules.push_back(module);
+    resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
+
+    const auto source =
+        ProgramSource::from_javascript("allowlist.js",
+                                       "import \"sealed:allowed@1.0.0\";\n"
+                                       "export function define() { return ng.graph(\"main\"); }\n",
+                                       {{module.coordinate().qualified_name(), module.id()}});
+    reset_dispatch_counters();
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    try {
+        (void)compiler.compile(source, resolution);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto it = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.code == "P_IMPORT_UNRESOLVED";
+            });
+        ASSERT_NE(it, error.diagnostics().end());
+        EXPECT_EQ(it->phase, CompilePhase::Resolve);
+        EXPECT_EQ(it->primary.source_id, "allowlist.js");
+        ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->witness.at("receipt_bound_source_available"), false);
+        EXPECT_EQ(it->primary.span->line_begin, 1U);
+    }
+    expect_dispatch_counters_zero();
+}
+#else
+TEST(ProgramCompilerTest, JavaScriptSourceRequiresQuickJSControlFeature) {
+    const auto source = ProgramSource::from_javascript(
+        "disabled.js", "export function define() { return ng.graph(\"main\"); }\n");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto diagnostic =
+            std::find_if(error.diagnostics().begin(), error.diagnostics().end(),
+                         [](const auto& value) { return value.code == "P_JS_UNAVAILABLE"; });
+        ASSERT_NE(diagnostic, error.diagnostics().end());
+        EXPECT_EQ(diagnostic->phase, CompilePhase::Source);
+        EXPECT_EQ(diagnostic->primary.source_id, "disabled.js");
+    }
+}
+#endif
+
+TEST(ProgramCompilerTest, RejectsInvalidJavaScriptCompilerLimits) {
+    ProgramCompilerConfig zero_interrupts{"program-compiler-test/javascript-limits/v1"};
+    zero_interrupts.javascript.max_interrupt_polls = 0;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_interrupts)),
+                 std::invalid_argument);
+
+    ProgramCompilerConfig zero_wall_time{"program-compiler-test/javascript-limits/v1"};
+    zero_wall_time.javascript.max_wall_time_ms = 0;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_wall_time)),
+                 std::invalid_argument);
+
+    ProgramCompilerConfig zero_document_bytes{"program-compiler-test/javascript-limits/v1"};
+    zero_document_bytes.javascript.max_generated_document_bytes = 0;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_document_bytes)),
+                 std::invalid_argument);
+
+    ProgramCompilerConfig oversized_stack{"program-compiler-test/javascript-limits/v1"};
+    oversized_stack.javascript.memory_limit_bytes = 1024;
+    oversized_stack.javascript.max_stack_bytes    = 2048;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(oversized_stack)),
+                 std::invalid_argument);
 }
 
 TEST(ProgramCompilerTest, EquivalentKeyAndRegistrationOrderProduceSameBundle) {
@@ -528,17 +1204,16 @@ TEST(ProgramCompilerTest,
 TEST(ProgramCompilerTest,
      ConfigRequirementResolverSelectsExactProviderToolAndImportedClosureDeterministically) {
     reset_dispatch_counters();
-    const auto snapshot = config_requirement_snapshot();
-    auto       selected = node_only_program("configured-node");
-    auto       config   = selected["root"]["definition"]["nodes"]["work"];
+    const auto snapshot   = config_requirement_snapshot();
+    auto       selected   = node_only_program("configured-node");
+    auto       config     = selected["root"]["definition"]["nodes"]["work"];
     config["provider_id"] = "configured-provider";
-    config["tool_ids"]    = json::array(
-        {"configured-beta", "configured-alpha", "configured-beta"});
-    config["import_id"] = "configured-import";
+    config["tool_ids"]    = json::array({"configured-beta", "configured-alpha", "configured-beta"});
+    config["import_id"]   = "configured-import";
 
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
-    const auto      bundle = compiler.compile(source_from(std::move(selected)));
-    const auto expected = std::vector<ExecutableIdentity>{
+    const auto      bundle   = compiler.compile(source_from(std::move(selected)));
+    const auto      expected = std::vector<ExecutableIdentity>{
         {ExecutableKind::Imported, "configured-import", "1.0.0", digest('9')},
         {ExecutableKind::Node, "configured-node", "1.0.0", digest('7')},
         configured_provider(),
@@ -547,11 +1222,11 @@ TEST(ProgramCompilerTest,
     };
     EXPECT_EQ(bundle.executable_registry_identities(), expected);
 
-    auto alpha_only = node_only_program("configured-node");
-    auto alpha_config = alpha_only["root"]["definition"]["nodes"]["work"];
+    auto alpha_only             = node_only_program("configured-node");
+    auto alpha_config           = alpha_only["root"]["definition"]["nodes"]["work"];
     alpha_config["provider_id"] = "configured-provider";
     alpha_config["tool_ids"]    = json::array({"configured-alpha"});
-    const auto alpha_bundle = compiler.compile(source_from(std::move(alpha_only)));
+    const auto alpha_bundle     = compiler.compile(source_from(std::move(alpha_only)));
     EXPECT_NE(alpha_bundle.executable_registry_identities(),
               bundle.executable_registry_identities());
     EXPECT_NE(alpha_bundle.core_plan_identities(), bundle.core_plan_identities());
@@ -562,13 +1237,11 @@ TEST(ProgramCompilerTest,
      ConfigRequirementResolverRejectsUnsupportedMissingAndMismatchedExactIdentity) {
     const auto compile_with = [](ExecutableIdentity returned, ExecutableIdentity registered) {
         RegistrySnapshotBuilder builder;
-        builder.add_provider(
-            executable(ExecutableKind::Provider, registered.name,
-                       registered.implementation_digest.back()),
-            ProviderMetadata{json::object(), json::object()});
+        builder.add_provider(executable(ExecutableKind::Provider, registered.name,
+                                        registered.implementation_digest.back()),
+                             ProviderMetadata{json::object(), json::object()});
         builder.add_node(executable(ExecutableKind::Node, "resolver-node", '7'), local_factory(),
-                         json{{"type", "object"}}, json::object(),
-                         [returned](const json&) {
+                         json{{"type", "object"}}, json::object(), [returned](const json&) {
                              return std::vector<ExecutableIdentity>{returned};
                          });
         auto snapshot = std::move(builder).build();
@@ -576,25 +1249,23 @@ TEST(ProgramCompilerTest,
     };
 
     reset_dispatch_counters();
-    const ExecutableIdentity registered{
-        ExecutableKind::Provider, "registered-provider", "1.0.0", digest('c')};
-    const ExecutableIdentity missing{
-        ExecutableKind::Provider, "missing-provider", "1.0.0", digest('d')};
-    const auto missing_errors = compile_with(missing, registered);
-    const auto missing_error =
-        std::find_if(missing_errors.begin(), missing_errors.end(), [](const auto& error) {
-            return error.code == "P_REGISTRY_DEPENDENCY_MISSING";
-        });
+    const ExecutableIdentity registered{ExecutableKind::Provider, "registered-provider", "1.0.0",
+                                        digest('c')};
+    const ExecutableIdentity missing{ExecutableKind::Provider, "missing-provider", "1.0.0",
+                                     digest('d')};
+    const auto               missing_errors = compile_with(missing, registered);
+    const auto               missing_error  = std::find_if(
+        missing_errors.begin(), missing_errors.end(),
+        [](const auto& error) { return error.code == "P_REGISTRY_DEPENDENCY_MISSING"; });
     ASSERT_NE(missing_error, missing_errors.end());
     EXPECT_EQ(missing_error->primary.json_pointer, "/root/definition/nodes/work");
 
-    auto mismatched = registered;
+    auto mismatched                  = registered;
     mismatched.implementation_digest = digest('d');
-    const auto mismatch_errors = compile_with(mismatched, registered);
-    const auto mismatch_error =
-        std::find_if(mismatch_errors.begin(), mismatch_errors.end(), [](const auto& error) {
-            return error.code == "P_REGISTRY_IDENTITY_MISMATCH";
-        });
+    const auto mismatch_errors       = compile_with(mismatched, registered);
+    const auto mismatch_error        = std::find_if(
+        mismatch_errors.begin(), mismatch_errors.end(),
+        [](const auto& error) { return error.code == "P_REGISTRY_IDENTITY_MISMATCH"; });
     ASSERT_NE(mismatch_error, mismatch_errors.end());
     EXPECT_EQ(mismatch_error->primary.json_pointer, "/root/definition/nodes/work");
 
@@ -607,12 +1278,11 @@ TEST(ProgramCompilerTest,
 
 TEST(ProgramCompilerTest, ConfigRequirementResolverExceptionIsPointerDiagnosticBeforeDispatch) {
     RegistrySnapshotBuilder builder;
-    builder.add_node(
-        executable(ExecutableKind::Node, "throwing-resolver-node", '7'), local_factory(),
-        json{{"type", "object"}}, json::object(),
-        [](const json&) -> std::vector<ExecutableIdentity> {
-            throw std::runtime_error("resolver failure");
-        });
+    builder.add_node(executable(ExecutableKind::Node, "throwing-resolver-node", '7'),
+                     local_factory(), json{{"type", "object"}}, json::object(),
+                     [](const json&) -> std::vector<ExecutableIdentity> {
+                         throw std::runtime_error("resolver failure");
+                     });
     auto snapshot = std::move(builder).build();
 
     reset_dispatch_counters();
@@ -628,16 +1298,15 @@ TEST(ProgramCompilerTest, ConfigRequirementResolverExceptionIsPointerDiagnosticB
 
 TEST(ProgramCompilerTest, SourceRequirementLookalikeFieldsCannotGrantExecutables) {
     reset_dispatch_counters();
-    auto snapshot = node_only_snapshot("lookalike-node");
-    auto source   = node_only_program("lookalike-node");
-    auto config  = source["root"]["definition"]["nodes"]["work"];
-    config["provider_id"] = "source-provider";
-    config["tool_ids"]    = json::array({"source-tool"});
-    config["required_executables"] =
-        json::array({json{{"kind", "provider"},
-                          {"name", "source-provider"},
-                          {"semantic_version", "1.0.0"},
-                          {"implementation_digest", digest('e')}}});
+    auto snapshot                  = node_only_snapshot("lookalike-node");
+    auto source                    = node_only_program("lookalike-node");
+    auto config                    = source["root"]["definition"]["nodes"]["work"];
+    config["provider_id"]          = "source-provider";
+    config["tool_ids"]             = json::array({"source-tool"});
+    config["required_executables"] = json::array({json{{"kind", "provider"},
+                                                       {"name", "source-provider"},
+                                                       {"semantic_version", "1.0.0"},
+                                                       {"implementation_digest", digest('e')}}});
 
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
     const auto      bundle = compiler.compile(source_from(std::move(source)));
@@ -742,11 +1411,10 @@ TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
                      {"name", "main"},
                      {"definition", document["root"]["definition"]}};
     root["children"] = json::array(
-        {json{{"op", "call_core"}},
-         json{{"op", "branch"},
-              {"condition", json{{"path", "/route"}, {"equals", "ok"}}},
-              {"then", json{{"op", "return"}, {"value", 1}}},
-              {"else", json{{"op", "return"}, {"value", 0}}}}});
+        {json{{"op", "call_core"}}, json{{"op", "branch"},
+                                         {"condition", json{{"path", "/route"}, {"equals", "ok"}}},
+                                         {"then", json{{"op", "return"}, {"value", 1}}},
+                                         {"else", json{{"op", "return"}, {"value", 0}}}}});
     document["root"] = std::move(root);
 
     const auto bundle = ProgramCompiler(snapshot, {"program-compiler-test/v1"})
@@ -775,9 +1443,9 @@ TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
 }
 
 TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild) {
-    const auto snapshot = complete_snapshot();
-    auto document = program_document();
-    auto requirements = document["declared_budget_requirements"];
+    const auto snapshot     = complete_snapshot();
+    auto       document     = program_document();
+    auto       requirements = document["declared_budget_requirements"];
     for (std::size_t index = 0; index < requirements.size(); ++index) {
         const auto resource = requirements[index]["resource"].get<std::string>();
         if (resource == "max_child_depth" || resource == "max_total_children") {
@@ -787,19 +1455,19 @@ TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild
     }
     document["declared_budget_requirements"] = std::move(requirements);
 
-    EXPECT_NO_THROW(
-        (void)ProgramCompiler(snapshot, {"program-compiler-test/v1"}).compile(source_from(document)));
+    EXPECT_NO_THROW((void)ProgramCompiler(snapshot, {"program-compiler-test/v1"})
+                        .compile(source_from(document)));
 }
 
 TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
     const auto snapshot = complete_snapshot();
     auto document = operation_document();
     const auto definition = document["root"]["definition"];
-    document["root"] = json{{"op", "await"},
-                            {"name", "main"},
-                            {"definition", definition},
-                            {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
-    auto requirements = document["declared_budget_requirements"];
+    document["root"]      = json{{"op", "await"},
+                                 {"name", "main"},
+                                 {"definition", definition},
+                                 {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    auto requirements     = document["declared_budget_requirements"];
     for (std::size_t index = 0; index < requirements.size(); ++index) {
         const auto resource = requirements[index]["resource"].get<std::string>();
         if (resource == "max_program_operations") {
@@ -823,19 +1491,17 @@ TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
     EXPECT_EQ(spawn->child_binding(), std::optional<std::string>("child"));
     EXPECT_FALSE(spawn->body().has_value());
 
-    auto unjoined = document;
-    unjoined["root"] = json{{"op", "spawn"},
-                             {"name", "main"},
-                             {"definition", definition},
-                             {"child_binding", "child"}};
+    auto unjoined    = document;
+    unjoined["root"] = json{
+        {"op", "spawn"}, {"name", "main"}, {"definition", definition}, {"child_binding", "child"}};
     EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(unjoined)), "P_PLAN_SPAWN_SHAPE"));
 
-    auto inline_spawn = document;
+    auto inline_spawn    = document;
     inline_spawn["root"] = json{{"op", "spawn"},
-                                 {"name", "main"},
-                                 {"definition", definition},
-                                 {"child_binding", "child"},
-                                 {"body", json{{"op", "call_core"}}}};
+                                {"name", "main"},
+                                {"definition", definition},
+                                {"child_binding", "child"},
+                                {"body", json{{"op", "call_core"}}}};
     EXPECT_TRUE(
         contains_code(compile_errors(snapshot, std::move(inline_spawn)), "P_PLAN_SPAWN_SHAPE"));
 }
@@ -945,24 +1611,22 @@ TEST(ProgramCompilerTest, RejectsPerItemAuthorityFieldsInsteadOfInterpretingThem
 TEST(ProgramCompilerTest, DispatchDescriptorWalkBenchmarkExcludesCoreExecution) {
     const auto plan = ProgramPlan::from_json(
         json{{"root", "root"},
-             {"operations",
-              json::array(
-                  {json{{"id", "root"},
-                        {"op", "sequence"},
-                        {"source_pointer", "/root"},
-                        {"children", json::array({"root.0", "root.1"})}},
-                   json{{"id", "root.0"},
-                        {"op", "return"},
-                        {"source_pointer", "/root/children/0"},
-                        {"value", 0}},
-                   json{{"id", "root.1"},
-                        {"op", "return"},
-                        {"source_pointer", "/root/children/1"},
-                        {"value", 1}}})}});
+             {"operations", json::array({json{{"id", "root"},
+                                              {"op", "sequence"},
+                                              {"source_pointer", "/root"},
+                                              {"children", json::array({"root.0", "root.1"})}},
+                                         json{{"id", "root.0"},
+                                              {"op", "return"},
+                                              {"source_pointer", "/root/children/0"},
+                                              {"value", 0}},
+                                         json{{"id", "root.1"},
+                                              {"op", "return"},
+                                              {"source_pointer", "/root/children/1"},
+                                              {"value", 1}}})}});
 
     constexpr std::size_t iterations = 100000;
-    std::uint64_t checksum = 0;
-    const auto started = std::chrono::steady_clock::now();
+    std::uint64_t         checksum   = 0;
+    const auto            started    = std::chrono::steady_clock::now();
     for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
         const auto* root = plan.find("root");
         ASSERT_NE(root, nullptr);
@@ -992,10 +1656,10 @@ TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
         json{{"id", "root"}, {"op", "sequence"}, {"children", json::array({"missing"})}});
     EXPECT_THROW((void)ProgramPlan::from_json(dangling), std::invalid_argument);
 
-    auto bad_condition = json{{"root", "root"}, {"operations", json::array()}};
+    auto bad_condition          = json{{"root", "root"}, {"operations", json::array()}};
     bad_condition["operations"] = json::array(
-        {json{{"id", "return"}, {"op", "return"}, {"source_pointer", "/root/then"},
-              {"value", true}},
+        {json{
+             {"id", "return"}, {"op", "return"}, {"source_pointer", "/root/then"}, {"value", true}},
          json{{"id", "root"},
               {"op", "branch"},
               {"source_pointer", "/root"},
@@ -1028,10 +1692,10 @@ TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {
     auto snapshot = complete_snapshot();
     auto document = operation_document();
     document["root"] = json{{"op", "branch"},
-                             {"name", "main"},
-                             {"definition", document["root"]["definition"]},
-                             {"condition", json{{"path", "route~2"}, {"exists", true}}},
-                             {"then", json{{"op", "call_core"}}}};
+                            {"name", "main"},
+                            {"definition", document["root"]["definition"]},
+                            {"condition", json{{"path", "route~2"}, {"exists", true}}},
+                            {"then", json{{"op", "call_core"}}}};
 
     const auto diagnostics = compile_errors(snapshot, std::move(document));
     EXPECT_TRUE(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
@@ -1044,11 +1708,10 @@ TEST(ProgramCompilerTest, RejectsCancelScopesTheRuntimeCannotEnforce) {
     auto snapshot = complete_snapshot();
     auto document = operation_document();
     document["root"] = json{{"op", "sequence"},
-                             {"name", "main"},
-                             {"definition", document["root"]["definition"]},
-                             {"children", json::array({
-                                               json{{"op", "cancel"}, {"scope", "branch"}},
-                                               json{{"op", "call_core"}}})}};
+                            {"name", "main"},
+                            {"definition", document["root"]["definition"]},
+                            {"children", json::array({json{{"op", "cancel"}, {"scope", "branch"}},
+                                                      json{{"op", "call_core"}}})}};
 
     const auto diagnostics = compile_errors(snapshot, std::move(document));
     EXPECT_TRUE(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
@@ -1074,7 +1737,8 @@ TEST(ProgramCompilerTest, RejectsMissingDuplicateAndInvalidBudgetClosure) {
 
     auto invalid = program_document();
     for (std::size_t index = 0; index < invalid["declared_budget_requirements"].size(); ++index) {
-        if (invalid["declared_budget_requirements"][index]["resource"] == "max_program_operations") {
+        if (invalid["declared_budget_requirements"][index]["resource"] ==
+            "max_program_operations") {
             invalid["declared_budget_requirements"][index]["minimum"] = 2;
             invalid["declared_budget_requirements"][index]["maximum"] = 1;
         }
@@ -1332,21 +1996,21 @@ TEST(ProgramCompilerTest, ImportMerkleRootIsOrderIndependentAndRejectsDuplicateS
 }
 
 TEST(ProgramCompilerTest, VerifiedModuleResolutionCarriesCoordinatesIntoBundle) {
-    auto snapshot = complete_snapshot();
+    auto            snapshot = complete_snapshot();
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
 
     ProgramModuleData module_data;
     module_data.owner_scope    = "tenant:compiler";
     module_data.coordinate     = ModuleCoordinate{"test", "verified", "1.0.0", ""};
     module_data.attestation_id = "attestation:test";
-    const auto module = ProgramModule::create(std::move(module_data));
+    const auto module          = ProgramModule::create(std::move(module_data));
 
     ModuleResolution resolution;
     resolution.root = module.coordinate();
     resolution.modules.push_back(module);
     resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
-    const auto source = source_from(
-        program_document(), {{module.coordinate().qualified_name(), module.id()}});
+    const auto source =
+        source_from(program_document(), {{module.coordinate().qualified_name(), module.id()}});
 
     const auto bundle = compiler.compile(source, resolution);
     ASSERT_EQ(bundle.module_coordinates(), std::vector<ModuleCoordinate>{module.coordinate()});
@@ -1440,8 +2104,7 @@ TEST(ProgramCompilerTest, EveryFailurePathLeavesDispatchCountersZero) {
         auto document = program_document();
         for (std::size_t index = 0; index < document["declared_budget_requirements"].size();
              ++index) {
-            if (document["declared_budget_requirements"][index]["resource"] ==
-                "max_child_depth")
+            if (document["declared_budget_requirements"][index]["resource"] == "max_child_depth")
                 document["declared_budget_requirements"][index]["maximum"] = 1;
         }
         return !compile_errors(snapshot, std::move(document)).empty();

@@ -85,6 +85,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delivery, concurrent resume has one CAS winner, and the PR6 slice rejects
   effectful or nonempty-schema Programs until the Core broker exists.
 
+- **QuickJS control-language frontend.** Added opt-in
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`, sealed
+  `ProgramSource::from_javascript(...)`, and a private compile-only QuickJS
+  context. The source envelope pins engine/language/host-API versions; its only
+  `ng` host surface is a versioned graph builder, and memory, stack, and
+  interrupt-poll limits fail closed. JavaScript produces one immutable
+  `call_core` Program plan and never becomes a runtime VM, bytecode artifact,
+  or Core dependency.
+
+- **A2A Agent Card compatibility candidates.** Added a one-request,
+  unauthenticated, no-redirect well-known-card collector and a factory-only
+  immutable candidate compiler. Candidates retain only digest-pinned
+  provenance, bounded protocol facts, and safe skill IDs; free-form card text,
+  advertised RPC endpoints, provider/security configuration, and credentials
+  are excluded. The Copy Ninja PoC additionally requires independently observed
+  behavior pinned to that digest and never dispatches the source agent.
+
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
   schema-versioned artifact/run persistence with immutable artifact and run-to-

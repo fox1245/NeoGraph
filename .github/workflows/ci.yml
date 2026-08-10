@@ -86,6 +86,7 @@ jobs:
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_PYBIND=ON \
             -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
@@ -389,6 +390,38 @@ jobs:
           echo "$auto_out"
           echo "$auto_out" | awk -F'\t' '$1=="config" && $2=="par_workers" && $3 ~ /^auto\(/ {found=1} END {exit !found}'
 
+  # Blocking Release gate for the preregistered QuickJS performance matrix.
+  # Enabled-but-unused Core overhead is capped at 1.10x median / 1.15x p95;
+  # one failed pass receives the documented paired 20-sample rerun. The script
+  # configures only the optional Program/QuickJS targets and their matched Core
+  # probe, keeping unrelated optional components disabled.
+  quickjs-performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential python3
+
+      - name: Run blocking QuickJS matrix (Core median 1.10x / p95 1.15x)
+        run: |
+          mkdir -p artifacts
+          scripts/build_quickjs_performance_matrix.sh \
+            "$RUNNER_TEMP/neograph-quickjs-performance" \
+            "$GITHUB_WORKSPACE/artifacts/quickjs-performance.json"
+
+      - name: Upload QuickJS performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-performance-report
+          path: artifacts/quickjs-performance.json
+          if-no-files-found: error
+          retention-days: 30
+
   # Compile + ctest under -fsanitize=address,undefined and run the
   # no-network examples in the same configuration. ASan caught a
   # false-positive in the recursion guard during the 2026-04-29 audit
@@ -441,6 +474,8 @@ jobs:
             -DNEOGRAPH_JARVIS_FORCE_MOCK=ON \
             -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
@@ -691,16 +726,16 @@ jobs:
             args: --core-only --shared
           - name: linux-program-static
             os: ubuntu-latest
-            args: --program
+            args: --program --quickjs
           - name: linux-program-shared
             os: ubuntu-latest
-            args: --program --shared
+            args: --program --quickjs --shared
           - name: macos-shared
             os: macos-latest
             args: --shared
           - name: macos-program-shared
             os: macos-latest
-            args: --program --shared
+            args: --program --quickjs --shared
           - name: windows-shared
             os: windows-2022
             args: --shared

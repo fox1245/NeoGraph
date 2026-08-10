@@ -186,6 +186,7 @@ struct AdmissionProfile::Impl {
     std::string                     registry_fingerprint;
     AdmissionMode                   mode                       = AdmissionMode::MultiTenant;
     std::uint32_t                   max_program_schema_version = 1;
+    ExecutionGuarantee               minimum_execution_guarantee = ExecutionGuarantee::Strict;
     std::vector<SourceKind>         allowed_source_kinds;
     std::vector<ExecutableIdentity> allowed_executables;
     std::vector<EffectMode>         allowed_effect_modes;
@@ -199,6 +200,7 @@ struct AdmissionProfileBuilder::Impl {
     std::optional<RegistrySnapshot> registry;
     AdmissionMode                   mode                       = AdmissionMode::MultiTenant;
     std::uint32_t                   max_program_schema_version = 1;
+    ExecutionGuarantee               minimum_execution_guarantee = ExecutionGuarantee::Strict;
     std::vector<SourceKind>         allowed_source_kinds;
     std::vector<ExecutableIdentity> allowed_executables;
     std::vector<EffectMode>         allowed_effect_modes;
@@ -215,6 +217,7 @@ struct PolicySnapshot::Impl {
     std::vector<std::string> allowed_effects;
     std::vector<std::string> allowed_module_digests;
     BudgetLimits             budget_ceiling;
+    ExecutionGuarantee       minimum_execution_guarantee = ExecutionGuarantee::Strict;
     json                     manifest;
 };
 
@@ -227,6 +230,8 @@ struct PolicySnapshotBuilder::Impl {
     std::vector<std::string>                      allowed_effects;
     std::vector<std::string>                      allowed_module_digests;
     BudgetLimits                                  budget_ceiling;
+    ExecutionGuarantee                            minimum_execution_guarantee =
+        ExecutionGuarantee::Strict;
 };
 
 AdmissionProfile::AdmissionProfile(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -248,6 +253,9 @@ AdmissionMode AdmissionProfile::mode() const noexcept {
 }
 std::uint32_t AdmissionProfile::max_program_schema_version() const noexcept {
     return impl_->max_program_schema_version;
+}
+ExecutionGuarantee AdmissionProfile::minimum_execution_guarantee() const noexcept {
+    return impl_->minimum_execution_guarantee;
 }
 std::vector<SourceKind> AdmissionProfile::allowed_source_kinds() const {
     return impl_->allowed_source_kinds;
@@ -291,6 +299,11 @@ AdmissionProfileBuilder& AdmissionProfileBuilder::max_program_schema_version(std
     impl_->max_program_schema_version = value;
     return *this;
 }
+AdmissionProfileBuilder&
+AdmissionProfileBuilder::minimum_execution_guarantee(ExecutionGuarantee value) {
+    impl_->minimum_execution_guarantee = value;
+    return *this;
+}
 AdmissionProfileBuilder& AdmissionProfileBuilder::allow_source_kind(SourceKind value) {
     impl_->allowed_source_kinds.push_back(value);
     return *this;
@@ -314,6 +327,9 @@ AdmissionProfile AdmissionProfileBuilder::build() && {
     }
     if (to_string(impl_->mode) == "unknown") {
         throw std::invalid_argument("Admission mode is unsupported");
+    }
+    if (execution_guarantee_rank(impl_->minimum_execution_guarantee) == 0) {
+        throw std::invalid_argument("Admission minimum_execution_guarantee is unsupported");
     }
     for (const auto value : impl_->allowed_source_kinds) {
         if (to_string(value) == "unknown") {
@@ -378,6 +394,8 @@ AdmissionProfile AdmissionProfileBuilder::build() && {
                     {"registry_fingerprint", impl_->registry_fingerprint},
                     {"mode", std::string(to_string(impl_->mode))},
                     {"max_program_schema_version", impl_->max_program_schema_version},
+                    {"minimum_execution_guarantee",
+                     std::string(to_string(impl_->minimum_execution_guarantee))},
                     {"allowed_source_kinds", std::move(source_kinds)},
                     {"allowed_executables", std::move(executables)},
                     {"allowed_effect_modes", std::move(effect_modes)}};
@@ -392,6 +410,7 @@ AdmissionProfile AdmissionProfileBuilder::build() && {
     result->registry_fingerprint       = std::move(impl_->registry_fingerprint);
     result->mode                       = impl_->mode;
     result->max_program_schema_version = impl_->max_program_schema_version;
+    result->minimum_execution_guarantee = impl_->minimum_execution_guarantee;
     result->allowed_source_kinds       = std::move(impl_->allowed_source_kinds);
     result->allowed_executables        = std::move(impl_->allowed_executables);
     result->allowed_effect_modes       = std::move(impl_->allowed_effect_modes);
@@ -406,8 +425,9 @@ AdmissionProfile AdmissionProfile::parse(std::string_view bytes) {
     detail::reject_unknown_fields(
         value, "Stored AdmissionProfile",
         {"format", "storage_schema_version", "fingerprint", "id", "semantic_version",
-         "registry_fingerprint", "mode", "max_program_schema_version", "allowed_source_kinds",
-         "allowed_executables", "allowed_effect_modes"});
+         "registry_fingerprint", "mode", "max_program_schema_version",
+         "minimum_execution_guarantee", "allowed_source_kinds", "allowed_executables",
+         "allowed_effect_modes"});
     if (require_string(value, "format") != "neograph-admission-profile") {
         throw std::invalid_argument("Stored AdmissionProfile has unknown format");
     }
@@ -421,7 +441,9 @@ AdmissionProfile AdmissionProfile::parse(std::string_view bytes) {
     builder.id(require_string(value, "id"))
         .semantic_version(require_string(value, "semantic_version"))
         .mode(admission_mode_from_string(require_string(value, "mode")))
-        .max_program_schema_version(require_u32(value, "max_program_schema_version"));
+        .max_program_schema_version(require_u32(value, "max_program_schema_version"))
+        .minimum_execution_guarantee(
+            execution_guarantee_from_string(require_string(value, "minimum_execution_guarantee")));
     builder.impl_->registry_fingerprint = require_string(value, "registry_fingerprint");
     require_array(value, "allowed_source_kinds");
     for (const auto& item : value["allowed_source_kinds"]) {
@@ -478,6 +500,9 @@ std::vector<std::string> PolicySnapshot::allowed_module_digests() const {
 const BudgetLimits& PolicySnapshot::budget_ceiling() const noexcept {
     return impl_->budget_ceiling;
 }
+ExecutionGuarantee PolicySnapshot::minimum_execution_guarantee() const noexcept {
+    return impl_->minimum_execution_guarantee;
+}
 json PolicySnapshot::manifest() const {
     return detail::owned_json_copy(impl_->manifest);
 }
@@ -521,6 +546,11 @@ PolicySnapshotBuilder& PolicySnapshotBuilder::budget_ceiling(BudgetLimits value)
     impl_->budget_ceiling = value;
     return *this;
 }
+PolicySnapshotBuilder&
+PolicySnapshotBuilder::minimum_execution_guarantee(ExecutionGuarantee value) {
+    impl_->minimum_execution_guarantee = value;
+    return *this;
+}
 
 PolicySnapshot PolicySnapshotBuilder::build() && {
     if (!impl_) throw std::logic_error("PolicySnapshotBuilder was already consumed");
@@ -534,6 +564,14 @@ PolicySnapshot PolicySnapshotBuilder::build() && {
     normalize_strings(impl_->allowed_effects, "allowed_effects");
     normalize_strings(impl_->allowed_module_digests, "allowed_module_digests", true);
     validate_budget(impl_->budget_ceiling);
+    if (execution_guarantee_rank(impl_->minimum_execution_guarantee) == 0) {
+        throw std::invalid_argument("Policy minimum_execution_guarantee is unsupported");
+    }
+    if (execution_guarantee_rank(impl_->minimum_execution_guarantee) <
+        execution_guarantee_rank(impl_->admission_profile->minimum_execution_guarantee)) {
+        throw std::invalid_argument(
+            "Policy minimum_execution_guarantee weakens its AdmissionProfile floor");
+    }
     const bool profile_allows_trusted =
         std::find(impl_->admission_profile->allowed_effect_modes.begin(),
                   impl_->admission_profile->allowed_effect_modes.end(),
@@ -565,7 +603,9 @@ PolicySnapshot PolicySnapshotBuilder::build() && {
                     {"allowed_capabilities", impl_->allowed_capabilities},
                     {"allowed_effects", impl_->allowed_effects},
                     {"allowed_module_digests", impl_->allowed_module_digests},
-                    {"budget_ceiling", encode_budget(impl_->budget_ceiling)}};
+                    {"budget_ceiling", encode_budget(impl_->budget_ceiling)},
+                    {"minimum_execution_guarantee",
+                     std::string(to_string(impl_->minimum_execution_guarantee))}};
     const auto fingerprint =
         detail::sha256_identity("policy-snapshot-v1", detail::canonical_json_bytes(body));
     body["fingerprint"] = fingerprint;
@@ -581,6 +621,7 @@ PolicySnapshot PolicySnapshotBuilder::build() && {
     result->allowed_effects               = std::move(impl_->allowed_effects);
     result->allowed_module_digests        = std::move(impl_->allowed_module_digests);
     result->budget_ceiling                = impl_->budget_ceiling;
+    result->minimum_execution_guarantee     = impl_->minimum_execution_guarantee;
     result->manifest                      = detail::owned_json_copy(body);
     impl_.reset();
     return PolicySnapshot(std::move(result));
@@ -593,7 +634,8 @@ PolicySnapshot PolicySnapshot::parse(std::string_view bytes) {
         value, "Stored PolicySnapshot",
         {"format", "storage_schema_version", "fingerprint", "id", "semantic_version", "owner_scope",
          "admission_profile_fingerprint", "registry_fingerprint", "allowed_capabilities",
-         "allowed_effects", "allowed_module_digests", "budget_ceiling"});
+         "allowed_effects", "allowed_module_digests", "budget_ceiling",
+         "minimum_execution_guarantee"});
     if (require_string(value, "format") != "neograph-policy-snapshot") {
         throw std::invalid_argument("Stored PolicySnapshot has unknown format");
     }
@@ -620,6 +662,8 @@ PolicySnapshot PolicySnapshot::parse(std::string_view bytes) {
         throw std::invalid_argument("Policy budget_ceiling is required");
     }
     result->budget_ceiling = parse_budget(value["budget_ceiling"]);
+    result->minimum_execution_guarantee =
+        execution_guarantee_from_string(require_string(value, "minimum_execution_guarantee"));
 
     json       body{{"format", "neograph-policy-snapshot"},
                     {"storage_schema_version", kStorageSchemaVersion},
@@ -631,7 +675,9 @@ PolicySnapshot PolicySnapshot::parse(std::string_view bytes) {
                     {"allowed_capabilities", result->allowed_capabilities},
                     {"allowed_effects", result->allowed_effects},
                     {"allowed_module_digests", result->allowed_module_digests},
-                    {"budget_ceiling", encode_budget(result->budget_ceiling)}};
+                    {"budget_ceiling", encode_budget(result->budget_ceiling)},
+                    {"minimum_execution_guarantee",
+                     std::string(to_string(result->minimum_execution_guarantee))}};
     const auto computed =
         detail::sha256_identity("policy-snapshot-v1", detail::canonical_json_bytes(body));
     if (computed != result->fingerprint) {

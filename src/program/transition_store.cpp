@@ -3,6 +3,7 @@
 #include "canonical_json.h"
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -211,6 +212,200 @@ bool effect_ids_are_unique(const std::vector<ProgramEffectOutboxEntry>& old_effe
     return true;
 }
 
+bool same_command_coordinate(const ProgramJavaScriptCommandJournalEntry& lhs,
+                             const ProgramJavaScriptCommandJournalEntry& rhs) {
+    return lhs.bundle_id() == rhs.bundle_id() &&
+           lhs.command_ordinal() == rhs.command_ordinal() &&
+           lhs.coordinate_id() == rhs.coordinate_id() &&
+           detail::canonical_json_bytes(lhs.command().to_json()) ==
+               detail::canonical_json_bytes(rhs.command().to_json()) &&
+           lhs.effect_identity() == rhs.effect_identity();
+}
+
+bool valid_command_history_append(
+    const ProgramRunRecord&                                  run,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& new_commands) {
+    if (new_commands.empty()) return true;
+
+    auto prior = old_commands;
+    std::uint64_t expected_sequence = 0;
+    std::uint64_t highest_ordinal = 0;
+    for (const auto& existing : prior) {
+        if (existing.bundle_id() != run.bundle_id() || existing.sequence() != expected_sequence + 1)
+            return false;
+        ++expected_sequence;
+        highest_ordinal = std::max(highest_ordinal, existing.command_ordinal());
+    }
+    for (const auto& entry : new_commands) {
+        if (entry.bundle_id() != run.bundle_id() ||
+            entry.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+
+        const auto found = std::find_if(
+            prior.rbegin(), prior.rend(), [&](const auto& previous) {
+                return previous.command_ordinal() == entry.command_ordinal();
+            });
+        if (found == prior.rend()) {
+            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
+                (!prior.empty() && prior.back().pending()))
+                return false;
+            highest_ordinal = entry.command_ordinal();
+            prior.push_back(entry);
+            continue;
+        }
+
+        // A command coordinate can only move once, from a durable pending
+        // head to one authoritative terminal result.  Conflicting command
+        // payloads or a second completion are rejected fail-closed.
+        if (!found->pending() || !entry.completed() ||
+            !same_command_coordinate(*found, entry)) {
+            return false;
+        }
+        prior.push_back(entry);
+    }
+    return true;
+}
+bool budget_is_empty(const RunBudget& budget) noexcept {
+    return budget == RunBudget{};
+}
+
+bool budget_increased(const RunBudget& next, const RunBudget& previous) noexcept {
+    return next.wall_time_ms > previous.wall_time_ms || next.model_tokens > previous.model_tokens ||
+           next.monetary_microunits > previous.monetary_microunits ||
+           next.max_concurrency > previous.max_concurrency ||
+           next.max_program_operations > previous.max_program_operations ||
+           next.max_core_steps > previous.max_core_steps ||
+           next.max_dynamic_compiles > previous.max_dynamic_compiles ||
+           next.max_child_depth > previous.max_child_depth ||
+           next.max_total_children > previous.max_total_children;
+}
+
+std::optional<ProgramUsage> command_terminal_usage(
+    const ProgramJavaScriptCommandJournalEntry& entry) {
+    const auto terminal_result = entry.terminal_result();
+    if (!entry.completed() || !terminal_result || !terminal_result->contains("usage") ||
+        !terminal_result->at("usage").is_object()) {
+        return std::nullopt;
+    }
+    const auto& usage = terminal_result->at("usage");
+    const auto  read  = [&](std::string_view key) -> std::optional<std::uint64_t> {
+        const std::string owned(key);
+        if (!usage.contains(owned) || !usage.at(owned).is_number_unsigned()) return std::nullopt;
+        return usage.at(owned).get<std::uint64_t>();
+    };
+    const auto wall       = read("wall_time_ms");
+    const auto model      = read("model_tokens");
+    const auto money      = read("monetary_microunits");
+    const auto operations = read("program_operations");
+    const auto steps      = read("core_steps");
+    const auto peak       = read("peak_concurrency");
+    if (!wall || !model || !money || !operations || !steps || !peak ||
+        *peak > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    // Program operations are charged before the resource reservation is staged.
+    return ProgramUsage{*wall, *model, *money, 0, *steps, static_cast<std::uint32_t>(*peak)};
+}
+
+bool checkpoint_event_matches(const std::vector<ProgramEvent>&             events,
+                              const std::optional<CoreCheckpointIdentity>& checkpoint) {
+    if (!checkpoint) return false;
+    return std::any_of(events.begin(), events.end(), [&](const auto& event) {
+        return event.kind == ProgramEventKind::CheckpointPublished &&
+               std::get<ProgramCheckpointEvent>(event.payload).checkpoint == *checkpoint;
+    });
+}
+
+bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&                     run,
+                                             const ProgramJavaScriptCommandJournalEntry& pending,
+                                             const CoreCheckpointIdentity& checkpoint) {
+    const auto thread_for = [&](std::string_view operation_id) {
+        std::string identity(run.run_id());
+        identity.push_back('\0');
+        identity.append(operation_id);
+        identity.push_back('\0');
+        identity.append(checkpoint.core_generation_id);
+        return detail::sha256_identity("program-core-thread/v1", identity);
+    };
+    std::function<bool(const JavaScriptCommand&, std::string, std::size_t)> matches;
+    matches = [&](const JavaScriptCommand& command, std::string operation_id, std::size_t depth) {
+        if (depth > 32) return false;
+        if (command.kind() == JavaScriptCommandKind::CallCore) {
+            const auto arguments = command.arguments();
+            return arguments.contains("name") && arguments.at("name").is_string() &&
+                   arguments.at("name").get<std::string>() == checkpoint.core_name &&
+                   thread_for(operation_id) == checkpoint.core_thread_id;
+        }
+        const auto arguments = command.arguments();
+        if (command.kind() == JavaScriptCommandKind::Await) {
+            return matches(JavaScriptCommand::from_json(arguments.at("command")),
+                           operation_id + "/await", depth + 1);
+        }
+        if (command.kind() == JavaScriptCommandKind::Join) {
+            const auto& members = arguments.at("members");
+            for (std::size_t index = 0; index < members.size(); ++index)
+                if (matches(JavaScriptCommand::from_json(members.at(index)),
+                            operation_id + "/member/" + std::to_string(index), depth + 1))
+                    return true;
+        }
+        return false;
+    };
+    return matches(pending.command(),
+                   "root.javascript." + std::to_string(pending.command_ordinal()), 0);
+}
+
+bool valid_command_reservation_transition(
+    const ProgramJournalRecord&                              previous_journal,
+    const ProgramJournalRecord&                              next_journal,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const ProgramTransitionPublication&                      publication) {
+    const bool increased =
+        budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
+    const bool ordinary  = is_valid_program_journal_transition(previous_journal, next_journal);
+    const auto completed = std::find_if(publication.commands.begin(), publication.commands.end(),
+                                        [](const auto& entry) { return entry.completed(); });
+    const bool checkpoint_changed =
+        previous_journal.core_checkpoint != next_journal.core_checkpoint;
+    if (completed != publication.commands.end()) {
+        if (publication.commands.size() != 1 || !budget_is_empty(next_journal.inflight_reservation))
+            return false;
+        if (checkpoint_changed &&
+            (!checkpoint_event_matches(publication.events, next_journal.core_checkpoint) ||
+             !next_journal.core_checkpoint ||
+             !javascript_call_core_checkpoint_matches(publication.run_record, *completed,
+                                                      *next_journal.core_checkpoint))) {
+            return false;
+        }
+        if (budget_is_empty(previous_journal.inflight_reservation)) return ordinary && !increased;
+        const auto usage = command_terminal_usage(*completed);
+        return usage && is_valid_program_journal_reservation_settlement(previous_journal,
+                                                                        next_journal, *usage);
+    }
+    if (!increased) return ordinary;
+
+    // A safely interrupted CallCore keeps its command coordinate Pending but
+    // may release verified unused capacity only when the exact newer
+    // checkpoint and measured terminal usage are committed in this CAS.
+    if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
+        publication.run_record.continuation().state != ContinuationState::Interrupted ||
+        !publication.run_record.terminal_result() ||
+        publication.run_record.terminal_result()->status() != ProgramTerminalStatus::Interrupted ||
+        !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
+        !publication.run_record.exact_checkpoint() ||
+        !javascript_call_core_checkpoint_matches(publication.run_record, old_commands.back(),
+                                                 *publication.run_record.exact_checkpoint()) ||
+        (previous_journal.core_checkpoint &&
+         previous_journal.core_checkpoint == next_journal.core_checkpoint)) {
+        return false;
+    }
+    auto usage               = publication.run_record.terminal_result()->usage();
+    usage.program_operations = 0;
+    return is_valid_program_journal_reservation_settlement(previous_journal, next_journal, usage);
+}
+
 std::string rs(const json& v, std::string_view key) {
     std::string k(key);
     if (!v.contains(k) || !v[k].is_string())
@@ -306,6 +501,15 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         publication.effects.back().sequence() != run.effect_sequence()) {
         throw std::invalid_argument("Program effect sequence mismatch");
     }
+    previous_sequence = 0;
+    for (const auto& command : publication.commands) {
+        if (command.bundle_id() != run.bundle_id() ||
+            command.sequence() <= previous_sequence) {
+            throw std::invalid_argument(
+                "JavaScript command journal entry does not bind snapshot");
+        }
+        previous_sequence = command.sequence();
+    }
     if (run.terminal_result() && !publication.events.empty() &&
         publication.events.back().kind == ProgramEventKind::Terminal &&
         std::get<ProgramTerminalEvent>(publication.events.back().payload).status !=
@@ -337,7 +541,13 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     std::string bytes;
     bytes.reserve(4096);
 
-    append_publication_bytes(bytes, "{\"effects\":[");
+    append_publication_bytes(bytes, "{\"commands\":[");
+    for (std::size_t index = 0; index < publication.commands.size(); ++index) {
+        if (index != 0) append_publication_bytes(bytes, ",");
+        append_publication_bytes(bytes, publication.commands[index].serialize_canonical());
+    }
+
+    append_publication_bytes(bytes, "],\"effects\":[");
     for (std::size_t index = 0; index < publication.effects.size(); ++index) {
         if (index != 0) append_publication_bytes(bytes, ",");
         append_publication_bytes(bytes, publication.effects[index].serialize_canonical());
@@ -431,7 +641,7 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     detail::reject_unknown_fields(
         v, "Stored Program publication",
         {"format", "storage_schema_version", "run_record", "journal_record", "events", "effects",
-         "migration_plan"});
+         "commands", "migration_plan"});
     if (r32(v, "storage_schema_version") != 1)
         throw std::invalid_argument("Stored Program publication schema unsupported");
     auto run = ProgramRunRecord::parse(detail::canonical_json_bytes(rv(v, "run_record")));
@@ -447,22 +657,40 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     if (!fx.is_array()) throw std::invalid_argument("Program effects must be array");
     for (const auto& e : fx)
         effects.push_back(ProgramEffectOutboxEntry::parse(detail::canonical_json_bytes(e)));
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
+    if (v.contains("commands")) {
+        const auto& encoded_commands = rv(v, "commands");
+        if (!encoded_commands.is_array())
+            throw std::invalid_argument("Program command journal must be array");
+        for (const auto& entry : encoded_commands) {
+            commands.push_back(ProgramJavaScriptCommandJournalEntry::parse(
+                detail::canonical_json_bytes(entry)));
+        }
+    }
     std::optional<MigrationPlan> migration_plan;
     if (v.contains("migration_plan")) {
         const auto& plan = rv(v, "migration_plan");
         if (!plan.is_null()) migration_plan = MigrationPlan::parse(detail::canonical_json_bytes(plan));
     }
     ProgramTransitionPublication out{std::move(run), std::move(journal), std::move(events),
-                                     std::move(effects), std::move(migration_plan)};
+                                     std::move(effects), std::move(migration_plan),
+                                     std::move(commands)};
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
+std::vector<ProgramJavaScriptCommandJournalEntry> ProgramTransitionStore::load_javascript_commands(
+    std::string_view, std::string_view, std::uint64_t) const {
+    throw std::runtime_error(
+        "ProgramTransitionStore does not support durable JavaScript command-history reads");
+}
+
 struct InMemoryProgramTransitionStore::Impl {
     struct Stored {
         ProgramRunRecord                         run;
         ProgramJournalRecord                     journal;
         std::vector<ProgramEvent>                events;
         std::vector<ProgramEffectOutboxEntry>    effects;
+        std::vector<ProgramJavaScriptCommandJournalEntry> commands;
         ProgramTransitionHistoryPtr              history;
         std::optional<MigrationPlan>             migration_plan;
         std::string                              bytes;
@@ -534,7 +762,23 @@ std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effec
     if (snapshot->history) return effect_entries_after(snapshot->history, a);
     return entries_after(snapshot->effects, a,
                          [](const ProgramEffectOutboxEntry& effect) {
-                             return effect.sequence();
+                         return effect.sequence();
+                         });
+}
+std::vector<ProgramJavaScriptCommandJournalEntry>
+InMemoryProgramTransitionStore::load_javascript_commands(std::string_view o,
+                                                         std::string_view r,
+                                                         std::uint64_t    a) const {
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return {};
+        snapshot = found->second;
+    }
+    return entries_after(snapshot->commands, a,
+                         [](const ProgramJavaScriptCommandJournalEntry& command) {
+                             return command.sequence();
                          });
 }
 std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan(
@@ -575,8 +819,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
 
     if (current != impl_->runs.end() && publication.migration_plan) {
         const auto& old_plan = current->second->migration_plan;
-        if (!old_plan || old_plan->id() != publication.migration_plan->id())
+        if (!old_plan || old_plan->id() != publication.migration_plan->id()) {
             return ProgramTransitionPublishResult::Conflict;
+        }
     }
 
     const auto new_terminal = publication.run_record.terminal_result();
@@ -585,7 +830,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
 
     if (current == impl_->runs.end()) {
         if (!expected.empty() || !publication.journal_record.previous_id.empty() ||
-            publication.journal_record.sequence != 1 || publication.events.empty() ||
+            publication.journal_record.sequence != 1 ||
+            !budget_is_empty(publication.journal_record.inflight_reservation) ||
+            publication.events.empty() ||
             publication.events.front().kind != ProgramEventKind::Started ||
             publication.run_record.event_sequence() != publication.events.size() ||
             publication.run_record.effect_sequence() != publication.effects.size() ||
@@ -610,7 +857,6 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
         // A publication may update durable run metadata (such as a child
         // relationship) without advancing the event or effect streams.
         if (old.journal.id != expected || publication.journal_record.previous_id != expected ||
-            !is_valid_program_journal_transition(old.journal, publication.journal_record) ||
             publication.run_record.created_at_ms() != old.run.created_at_ms() ||
             publication.run_record.updated_at_ms() < old.run.updated_at_ms() ||
             publication.run_record.binding_fingerprint() != old.run.binding_fingerprint() ||
@@ -630,6 +876,18 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             !effect_ids_are_unique(old.effects, old.history, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
         }
+        const bool command_history_valid =
+            valid_command_history_append(old.run, old.commands, publication.commands);
+        const bool reservation_valid = valid_command_reservation_transition(
+            old.journal, publication.journal_record, old.commands, publication);
+        if (!command_history_valid || !reservation_valid) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
+
+    if (current == impl_->runs.end() &&
+        !valid_command_history_append(publication.run_record, {}, publication.commands)) {
+        return ProgramTransitionPublishResult::Conflict;
     }
 
     const auto maybe_fail = [&](ProgramTransitionFaultPoint point) {
@@ -647,13 +905,16 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     maybe_fail(ProgramTransitionFaultPoint::AfterEventSnapshot);
     auto appended_effects = std::move(publication.effects);
     maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
+    auto appended_commands = std::move(publication.commands);
 
     std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
     ProgramTransitionHistoryPtr           history;
     if (current == impl_->runs.end()) {
         events  = std::move(appended_events);
         effects = std::move(appended_effects);
+        commands = std::move(appended_commands);
     } else {
         const auto& old = *current->second;
         if (old.history) {
@@ -666,6 +927,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             history = begin_history(old.events, old.effects, std::move(appended_events),
                                     std::move(appended_effects));
         }
+        commands = append_entries(old.commands, std::move(appended_commands));
     }
 
     auto migration_plan = current == impl_->runs.end()
@@ -673,7 +935,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                               : current->second->migration_plan;
     auto candidate = std::make_shared<const Impl::Stored>(
         Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                     std::move(effects), std::move(history), std::move(migration_plan),
+                     std::move(effects), std::move(commands), std::move(history),
+                     std::move(migration_plan),
                      std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (current == impl_->runs.end()) {

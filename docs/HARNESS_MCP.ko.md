@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=c9cfe5b49187064fd55d7ed31b96565dfe522bee91f6206498315ae79b4138dd -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=b09a63e8a367d734aa3e9a1be015fcef1bc3d3b9fe472e138e040ed6ce0f53f9 -->
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
 
 # 네오그래프 하네스 MCP
@@ -14,21 +14,130 @@ NeoGraph Harness는 실행되기 전에 제한된 다중 작업자 워크플로�
 - `neograph_resume`는 정확한 보류 중인 호스트 결과를 검증하고 제출합니다.
 - `neograph_cancel`는 대기열에 있거나 실행 중이거나 대기 중인 워크플로를 협력적으로 취소합니다.
 
-제공되는 사전 설정은 `fanout_judge`, `pr_review_panel`, `bug_triage` 및
-`research_synthesis`. 사전 설정은 일반적인 엄격한 핵심 그래프 아티팩트를 생성하므로
-동일한 진단 및 소스 맵이 사전 설정 및 DSL 요청에 적용됩니다.
+제공되는 프리셋은 `fanout_judge`, `pr_review_panel`, `bug_triage`,
+`research_synthesis`입니다. 프리셋은 strict-Core 그래프 아티팩트를 만들고,
+JavaScript 요청은 자체 `ProgramSource` 봉투와 소스 맵을 보존합니다.
 
-### 봉인된 승인 및 명시적 Core 모드
+### JavaScript 저작 경계
 
-`harness.mode`는 `preset`, `dsl` 또는 `core`를 허용합니다. `preset`과 `dsl`은 기존의 제한된 fanout/judge 호환성 계약을 유지합니다. `core`는 이미 엄격한 토폴로지(`schema_version: 1`)를 Elaborator를 거치지 않고 수락합니다. 이는 명시적으로 구성된 일반-Core 승인 프로파일을 위한 것입니다.
+새 발행에서 `harness.mode`는 `preset` 또는 `javascript`만 허용합니다.
+JavaScript 소스는 `harness.source`에 넣고, `harness.source_id`로 소스 ID를
+고정할 수 있습니다. `define()`은 봉인된 `ng` 바인딩으로 그래프 하나를
+구성하며, 선택적인 제너레이터 `main()`은 일반 JavaScript 반복과 분기를
+수행하고 `ng.callCore`, `ng.all`, `ng.any`, `ng.race` 같은 타입 명령만
+yield합니다.
 
-스키마 내보내기, 컴파일 및 시작은 이제 동일한 불변의 `HarnessAdmissionProfile`을 사용합니다. 해당 범위가 지정된 `GraphRegistry` 및 매니페스트는 모든 사용 가능한 노드, 리듀서 및 조건을 구현, 로우어링 및 호환성 메타데이터와 함께 나열합니다. 프로세스 전역 레지스트리 항목은 이 팔레트의 일부가 아니며 Harness 승인에 의해 해결될 수 없습니다. 컴파일은 검증된 선언적 `TopologySpec`에서 중단되므로, 거부된 입력 구성은 `GraphNode`를 생성하지 않으며 작업자나 효과를 디스패치하지 않습니다. 보유된 아티팩트는 프로파일 ID와 지문을 바인딩합니다. 일치하지 않거나 이전 프로파일의 아티팩트는 재해석되는 대신 시작/재개 시 실패-폐쇄됩니다.
+```json
+{
+  "harness": {
+    "mode": "javascript",
+    "source_id": "review:main.js",
+    "source": "export function define() { const g = ng.graph('main'); /* ... */ return g; }"
+  }
+}
+```
 
-C++ 임베더는 기본값이 아닌 프로파일을 생성 시 `HarnessServiceResources`를 통해 전달합니다. 이 추가 리소스 경계는 기존 `HarnessServiceConfig` 레이아웃을 보존합니다. 프로파일 지문은 매니페스트와 범위가 지정된 레지스트리의 내보낸 의미 투영을 포함합니다. 각 `implementation_identity`는 신뢰되는 선언이며 해당 호출 가능 동작이 변경될 때마다 함께 변경해야 합니다.
+#### 제어 흐름 마이그레이션 예시
 
-이는 현재의 Program 기반 Harness 호환성 어댑터입니다. 승인된 Harness 요청은 여전히 레거시 `ProgramSource`로 변환되고, `ProgramCompiler`로 컴파일되며, `ProgramCatalog`에서 승인된 뒤 `ProgramRuntime`을 통해 실행됩니다. `GraphEngine`은 여전히 유일한 노드 실행기입니다.
+`define()`은 컴파일 시점에만 실행하고, 모든 런타임 효과는 yield한 타입 명령
+뒤에 둡니다. 이 완전한 요청은 제너레이터에 연산 2개와 병렬도 2의 상한을
+부여합니다. 워커 노드는 요청에서 호스트가 봉인한 구성과 정확히 일치하며,
+터미널 반환값은 Harness 결과 형태입니다.
 
-일반 Program 저작을 위해 승인된 대체안은 임베디드 QuickJS에서 실행되는 표준 JavaScript입니다. 현재 `dsl`과 `program` 모드는 영구적으로 병존하는 언어가 아니라 마이그레이션 입력입니다. [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md)와 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)를 참조하십시오. 이 문서는 해당 전환이 구현될 때까지 배포된 호환 동작을 설명하며 새로운 레거시 DSL 의미론을 허용하지 않습니다.
+```javascript
+const source = String.raw`
+function workerConfig() {
+  return {
+    type: "neograph_harness_worker",
+    worker_id: "reviewer",
+    instructions: "Return structured findings",
+    tool_ids: [],
+    tool_descriptions: {},
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_ms: 30000,
+    max_output_tokens: 512,
+    input_token_ceiling: 16384,
+    max_retries: 1,
+    max_provider_tool_rounds: 8,
+    evidence_required: [],
+    read_only: true
+  };
+}
+
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("task", {reducer: "overwrite", initial: {}});
+  graph.channel("worker_results", {reducer: "append", initial: []});
+  graph.channel("final_result", {reducer: "overwrite", initial: null});
+  graph.node("reviewer", workerConfig());
+  graph.node("judge", {
+    type: "neograph_harness_judge",
+    barrier: {wait_for: ["reviewer"]}
+  });
+  graph.edge("__start__", "reviewer");
+  graph.edge("reviewer", "judge");
+  graph.edge("judge", "__end__");
+  return graph;
+}
+
+export function* main(input) {
+  const results = yield ng.all([
+    ng.callCore("review", {task: input.task}, "review:first"),
+    ng.callCore("review", {task: input.task}, "review:second")
+  ], {max_in_flight: 2}, "review:all");
+  return results[0].channels.final_result.value;
+}
+`;
+
+const request = {
+  task: {
+    objective: "Review the change",
+    acceptance: ["Return structured, evidence-backed findings"]
+  },
+  harness: {mode: "javascript", source_id: "review:main.js", source},
+  workers: [{
+    id: "reviewer",
+    instructions: "Return structured findings",
+    tools: [],
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  }],
+  tool_catalog: [],
+  budgets: {
+    max_steps: 40,
+    timeout_seconds: 60,
+    max_parallel_workers: 2,
+    max_program_operations: 2,
+    max_worker_retries: 1,
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  },
+  policy: {read_only: true, evidence_required: []}
+};
+```
+
+안정적인 소스 위치 문자열은 내구성 명령 좌표의 일부입니다. 재시도와 재시작
+사이에서 결정적으로 유지하십시오. `ng.any(...)`는 필요한 성공 수가 먼저
+충족될 때, `ng.race(...)`는 첫 번째 터미널 멤버가 이길 때 사용합니다. 둘 다
+구조적 동시성을 통해 남은 형제를 취소합니다. 주변 I/O, 타이머, 동적 로딩,
+`eval`, 네이티브 핸들은 계속 사용할 수 없습니다.
+
+`harness.mode`는 명시해야 합니다. `dsl`은 `H_MIGRATION_CORE_DSL`, `core`는
+`H_MIGRATION_CORE_JSON`, `program`/`program_json`은
+`H_MIGRATION_PROGRAM_JSON`으로 실패합니다. strict Core JSON과 신뢰된 C++
+구성은 내부 표현으로만 남으며 공개 Harness 저작 언어가 아닙니다.
+
+스키마 내보내기, 컴파일, 시작은 동일한 불변
+`HarnessAdmissionProfile`을 사용합니다. 범위가 지정된 `GraphRegistry`만
+해석되며 프로세스 전역 등록 항목으로 폴백하지 않습니다. 거부된 입력은
+노드, 작업자, 효과를 디스패치하지 않습니다.
+
+프리셋과 JavaScript 요청은 모두 `ProgramSource`, `ProgramCompiler`,
+`ProgramCatalog`, `ProgramRuntime` 경로를 사용하며 `GraphEngine`이 유일한
+노드 실행기입니다. 저장된 레거시 아티팩트는 `translated`, `drain_only`,
+`rejected`로 명시 분류됩니다. `drain_only`는 새 발행이나 새 실행을 허용하지
+않고 정확히 보존된 레거시 런타임에서 기존 실행만 재개합니다.
 
 ## 빌드 및 실행
 

@@ -45,6 +45,11 @@ struct ChildProgramDescriptor {
     std::vector<std::string> required_capabilities;
     std::vector<std::string> required_effects;
     BudgetLimits             budget;
+    /**
+     * Weakest child guarantee the parent explicitly accepts. A weaker child
+     * rejects before dispatch; accepting degradation is immutable module data.
+     */
+    ExecutionGuarantee       minimum_execution_guarantee = ExecutionGuarantee::Strict;
 
     bool operator==(const ChildProgramDescriptor&) const = default;
 };
@@ -55,6 +60,12 @@ struct ProgramModuleData {
     std::string                    attestation_id;
     ModuleLifecycle                lifecycle = ModuleLifecycle::Active;
     std::vector<ModuleCoordinate>  dependencies;
+    /**
+     * Optional reviewed pure JavaScript module body. When present it is part
+     * of this immutable module's content identity and may be materialized
+     * only through an exact dependency receipt.
+     */
+    std::optional<std::string>          pure_javascript_source;
     std::vector<ChildProgramDescriptor> children;
     std::vector<std::string>       allowed_capabilities;
     std::vector<std::string>       declared_effects;
@@ -78,6 +89,7 @@ public:
     ModuleLifecycle lifecycle() const noexcept;
     const std::vector<ModuleCoordinate>& dependencies() const noexcept;
     const std::vector<ChildProgramDescriptor>& children() const noexcept;
+    const std::optional<std::string>& pure_javascript_source() const noexcept;
     const std::vector<std::string>& allowed_capabilities() const noexcept;
     const std::vector<std::string>& declared_effects() const noexcept;
     const std::string& id() const noexcept;
@@ -101,6 +113,29 @@ struct ModuleResolution {
     std::string dependency_merkle_root() const;
     std::vector<ImportRef> imports() const;
     std::vector<ModuleCoordinate> coordinates() const;
+};
+
+/**
+ * Immutable allowlist view over a verified ModuleResolution.  JavaScript
+ * module lookup is by the exact receipt source id; there is no range,
+ * filesystem, process-global, or network fallback.
+ */
+class NEOGRAPH_PROGRAM_API VerifiedModuleResolver final {
+public:
+    explicit VerifiedModuleResolver(ModuleResolution resolution);
+
+    VerifiedModuleResolver(VerifiedModuleResolver&&) noexcept;
+    VerifiedModuleResolver& operator=(VerifiedModuleResolver&&) noexcept;
+    VerifiedModuleResolver(const VerifiedModuleResolver&)            = delete;
+    VerifiedModuleResolver& operator=(const VerifiedModuleResolver&) = delete;
+    ~VerifiedModuleResolver();
+
+    const ModuleResolution& resolution() const noexcept;
+    std::optional<ModuleCoordinate> resolve(std::string_view source_id) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 /** A child version and its immutable bundle, paired before dispatch. */
@@ -146,6 +181,7 @@ struct ModuleLinkReceiptData {
     std::vector<std::string> granted_capabilities;
     std::vector<std::string> granted_effects;
     BudgetLimits             budget;
+    ExecutionGuarantee       minimum_execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 class NEOGRAPH_PROGRAM_API ModuleLinkReceipt final {
@@ -166,6 +202,7 @@ public:
     const std::vector<std::string>& granted_capabilities() const noexcept;
     const std::vector<std::string>& granted_effects() const noexcept;
     const BudgetLimits& budget() const noexcept;
+    ExecutionGuarantee minimum_execution_guarantee() const noexcept;
     const std::string& id() const noexcept;
     std::string serialize_canonical() const;
 

@@ -286,7 +286,7 @@ void validate_card(const json& card, const AgentCardCollectionPolicy& policy) {
 
 std::vector<std::string> descriptor_skill_ids(const AgentCardCompatibilityCandidate& candidate) {
     try {
-        const auto& ids = candidate.descriptor.at("declared_contract").at("skill_ids");
+        const auto& ids = candidate.descriptor().at("declared_contract").at("skill_ids");
         if (!ids.is_array() || ids.empty()) throw std::out_of_range("skill_ids");
         std::vector<std::string> result;
         result.reserve(ids.size());
@@ -308,7 +308,7 @@ std::vector<std::string> descriptor_skill_ids(const AgentCardCompatibilityCandid
 std::vector<std::string> descriptor_modes(const AgentCardCompatibilityCandidate& candidate,
                                           const char*                            field) {
     try {
-        const auto& modes = candidate.descriptor.at("declared_contract").at(field);
+        const auto& modes = candidate.descriptor().at("declared_contract").at(field);
         if (!modes.is_array() || modes.empty() || modes.size() > kMaxModes) {
             throw std::out_of_range(field);
         }
@@ -332,7 +332,7 @@ std::vector<std::string> descriptor_modes(const AgentCardCompatibilityCandidate&
 
 bool descriptor_streaming(const AgentCardCompatibilityCandidate& candidate) {
     try {
-        const auto& streaming = candidate.descriptor.at("declared_contract").at("streaming");
+        const auto& streaming = candidate.descriptor().at("declared_contract").at("streaming");
         if (!streaming.is_boolean()) throw std::out_of_range("streaming");
         return streaming.get<bool>();
     } catch (const json::exception& error) {
@@ -382,6 +382,12 @@ CollectedAgentCard AgentCardCollector::collect(std::string               discove
     return collected;
 }
 
+AgentCardCompatibilityCandidate::AgentCardCompatibilityCandidate(std::string id,
+                                                                 std::string source_card_sha256,
+                                                                 json        descriptor)
+    : id_(std::move(id)),
+      source_card_sha256_(std::move(source_card_sha256)),
+      descriptor_(std::move(descriptor)) {}
 AgentCardCompatibilityCandidate AgentCardCandidateCompiler::compile(
     const CollectedAgentCard& collected) {
     if (collected.card_sha256.empty()) invalid("collected card digest is required");
@@ -400,15 +406,12 @@ AgentCardCompatibilityCandidate AgentCardCandidateCompiler::compile(
     const auto authorization_declared = declares_authorization(collected.raw_card);
     const auto id = "copy-ninja-" + collected.card_sha256.substr(std::string("sha256:").size(), 16);
 
-    AgentCardCompatibilityCandidate candidate;
-    candidate.id                 = id;
-    candidate.source_card_sha256 = collected.card_sha256;
-    candidate.descriptor         = {
+    json descriptor = {
         {"schema", "neograph/a2a-agent-card-compatibility-candidate/v1"},
         {"candidate_id", id},
         {"state", "unadmitted"},
         {"source",
-                 {
+         {
              {"card_sha256", collected.card_sha256},
              {"discovery_url", collected.provenance.discovery_url},
              {"source_url", collected.provenance.source_url},
@@ -416,7 +419,7 @@ AgentCardCompatibilityCandidate AgentCardCandidateCompiler::compile(
              {"source_license", collected.provenance.source_license},
          }},
         {"declared_contract",
-                 {
+         {
              {"a2a_jsonrpc", true},
              {"input_modes", input_modes},
              {"output_modes", output_modes},
@@ -425,7 +428,7 @@ AgentCardCompatibilityCandidate AgentCardCandidateCompiler::compile(
              {"source_declares_authorization", authorization_declared},
          }},
         {"authority",
-                 {
+         {
              {"inherits_credentials", false},
              {"inherits_network_authority", false},
              {"inherits_provider_selection", false},
@@ -434,13 +437,13 @@ AgentCardCompatibilityCandidate AgentCardCandidateCompiler::compile(
          }},
         {"behavioral_equivalence", "unproven"},
         {"execution",
-                 {
+         {
              {"enabled", false},
              {"source_card_text_is_executable", false},
              {"blocked_on_independent_behavioral_profile", true},
          }},
     };
-    return candidate;
+    return AgentCardCompatibilityCandidate(id, collected.card_sha256, std::move(descriptor));
 }
 
 CopyNinjaHarness::CopyNinjaHarness(AgentCardCompatibilityCandidate candidate,
@@ -513,7 +516,7 @@ AgentCard CopyNinjaHarness::agent_card(std::string endpoint) const {
     }
 
     json raw = {
-        {"name", candidate_.id},
+        {"name", candidate_.id()},
         {"description",
          "Independent Copy Ninja PoC candidate; not affiliated with the observed source agent."},
         {"version", "0.0.0-copy-ninja-poc"},
@@ -545,10 +548,10 @@ AgentCard CopyNinjaHarness::agent_card(std::string endpoint) const {
 
 CopyNinjaHarness materialize_copy_ninja(const AgentCardCompatibilityCandidate& candidate,
                                         CopyNinjaBehavioralProfile             profile) {
-    if (candidate.id.empty() || candidate.source_card_sha256.empty()) {
+    if (candidate.id().empty() || candidate.source_card_sha256().empty()) {
         invalid("candidate identity and source digest are required");
     }
-    if (candidate.source_card_sha256 != profile.source_card_sha256) {
+    if (candidate.source_card_sha256() != profile.source_card_sha256) {
         invalid("behavioral profile is not pinned to this collected card");
     }
     if (profile.template_id != kHelloWorldTemplate) {

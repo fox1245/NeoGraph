@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=fe44de5a1daaa7973fe032ec711d496702f2576bed6ce0431e64250b63eb676e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=0ce9d7195740e020aeb3404702dd07f670ab5c0c1048ae36e34a73f5c83a6604 -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -78,6 +78,21 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
   체크포인트/종료 이벤트 전달보다 먼저 이루어지고, 동시 재개는 CAS 승자 하나만
   허용하며, Core 브로커가 생길 때까지 효과가 있거나 비어 있지 않은 스키마를
   가진 Program을 거부한다.
+
+- **QuickJS 제어 언어 프런트엔드.** 선택형
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`, 봉인된
+  `ProgramSource::from_javascript(...)`, 그리고 비공개 컴파일 전용 QuickJS
+  컨텍스트를 추가했다. 소스 봉투는 엔진/언어/호스트 API 버전을 고정하고, 유일한
+  `ng` 호스트 표면은 버전이 지정된 그래프 빌더이며 메모리·스택·인터럽트 폴링
+  한계는 fail-closed로 처리된다. JavaScript는 불변 `call_core` Program 계획
+  하나만 만들며 런타임 VM, 바이트코드 아티팩트 또는 Core 의존성이 되지 않는다.
+
+- **A2A Agent Card 호환 후보.** 인증 헤더 없이 리디렉션을 따르지 않고 well-known
+  카드를 한 번만 수집하는 수집기와 factory-only 불변 후보 컴파일러를 추가했다.
+  후보는 다이제스트 고정 provenance, 경계가 있는 프로토콜 사실, 안전한 skill ID만
+  유지하고 free-form 카드 텍스트, 광고된 RPC endpoint, provider/security 구성,
+  credential은 제외한다. Copy Ninja PoC는 그 다이제스트에 고정된 독립 관찰 행동을
+  추가로 요구하며 원본 agent를 dispatch하지 않는다.
 
 - **SQLite Harness 레코드 저장소 (이슈 #147 후속).** WAL 지원, 스키마 버전 관리가 된 아티팩트/실행 영속성과 변경 불가능한 아티팩트 및 실행-아티팩트 바인딩을 제공하는 선택적 `neograph::mcp_sqlite` 대상과 `SqliteHarnessRecordStore` 추가. Harness MCP 바이너리가 이제 `runs.db`에 레코드를 저장하며, 체크포인트는 `checkpoints.db`에 남는다.
 - **AMD OpenMP GPU 이관 개념 증명.** 같은 숫자 팬아웃 작업에서 직렬 CPU,

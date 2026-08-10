@@ -1,8 +1,8 @@
-#include <neograph/graph/elaborator.h>
 #include <neograph/mcp/harness_program_translator.h>
 #include <neograph/mcp/json_schema.h>
 #include <neograph/program/compiler.h>
 #include "../program/canonical_json.h"
+#include "../program/javascript.h"
 
 #include <algorithm>
 #include <array>
@@ -167,6 +167,8 @@ std::uint64_t effective_budget(const json&   request,
 void validate_defaults(const HarnessTranslationDefaults& defaults) {
     if (defaults.timeout_seconds == 0 || defaults.timeout_seconds > 86400 ||
         defaults.max_parallel_workers == 0 || defaults.max_parallel_workers > 64 ||
+        defaults.max_program_operations == 0 ||
+        defaults.max_program_operations == std::numeric_limits<std::uint64_t>::max() ||
         defaults.max_core_steps == 0 || defaults.max_core_steps > 1000 ||
         defaults.max_worker_retries > 5 || defaults.provider_timeout_seconds == 0 ||
         defaults.provider_timeout_seconds > 600 || defaults.max_output_tokens == 0 ||
@@ -209,8 +211,8 @@ std::optional<program::ContractManifest> requested_contract(const json& request)
     if (!value.is_object())
         fail("H_CONTRACT_SCHEMA", pointer, "Harness contract manifest must be an object");
     try {
-        auto manifest = program::ContractManifest::parse(
-            program::detail::canonical_json_bytes(value));
+        auto manifest =
+            program::ContractManifest::parse(program::detail::canonical_json_bytes(value));
         if (manifest.lifecycle() != program::ContractManifestLifecycle::Frozen)
             fail("H_CONTRACT_NOT_FROZEN", pointer,
                  "Harness execution requires an approved frozen contract manifest");
@@ -280,6 +282,12 @@ json program_output_schema() {
     return json::object();
 }
 
+bool javascript_exports_runtime_main(const program::ProgramSource& source) {
+    return program::detail::evaluate_javascript_source(source,
+                                                       program::ProgramCompilerConfig{}.javascript)
+        .has_control_generator;
+}
+
 std::optional<json> registry_metadata(const program::RegistrySnapshot& registry,
                                       program::ExecutableKind          kind,
                                       std::string_view                 name) {
@@ -346,6 +354,7 @@ std::map<std::string, CatalogTool> validate_tool_catalog(
 struct EffectiveLimits {
     std::uint64_t timeout_seconds;
     std::uint32_t max_parallel_workers;
+    std::uint64_t max_program_operations;
     std::uint64_t max_core_steps;
     std::uint32_t max_worker_retries;
     std::uint64_t provider_timeout_seconds;
@@ -353,13 +362,15 @@ struct EffectiveLimits {
     std::uint64_t input_token_ceiling_per_round;
 };
 
-EffectiveLimits effective_limits(const json& request,
-                                 const HarnessTranslationDefaults& defaults,
+EffectiveLimits effective_limits(const json&                                     request,
+                                 const HarnessTranslationDefaults&               defaults,
                                  const std::optional<program::ContractManifest>& contract) {
     auto result = EffectiveLimits{
         effective_budget(request, "timeout_seconds", defaults.timeout_seconds, 1, 86400),
         static_cast<std::uint32_t>(effective_budget(request, "max_parallel_workers",
                                                     defaults.max_parallel_workers, 1, 64)),
+        effective_budget(request, "max_program_operations", defaults.max_program_operations, 1,
+                         defaults.max_program_operations),
         effective_budget(request, "max_steps", defaults.max_core_steps, 1, 1000),
         static_cast<std::uint32_t>(
             effective_budget(request, "max_worker_retries", defaults.max_worker_retries, 0, 5)),
@@ -371,8 +382,10 @@ EffectiveLimits effective_limits(const json& request,
     };
     if (contract) {
         const auto& retry = contract->spec().retry_policy;
-        result.max_worker_retries = std::min<std::uint32_t>(
-            result.max_worker_retries, retry.max_attempts - 1);
+        result.max_worker_retries =
+            std::min<std::uint32_t>(result.max_worker_retries, retry.max_attempts - 1);
+        result.max_program_operations =
+            std::min(result.max_program_operations, retry.max_program_operations);
     }
     return result;
 }
@@ -520,39 +533,27 @@ std::string dsl_source_pointer(const std::string& source) {
     }
     return "/harness/definition";
 }
-
 std::vector<program::SourceMapEntry> source_map(const json&                     core,
-                                                const json&                     elaborator_map,
                                                 const std::string&              source_id,
-                                                const std::string&              mode,
                                                 const std::vector<std::string>& worker_ids) {
     std::map<std::string, program::SourceCoordinate> mappings;
     mappings["/input_contract"]               = {source_id, "/task", std::nullopt};
     mappings["/output_contract"]              = {source_id, "/workers", std::nullopt};
     mappings["/declared_budget_requirements"] = {source_id, "/budgets", std::nullopt};
-    mappings["/root/definition"]              = {source_id, "/harness/definition", std::nullopt};
-    if (mode == "dsl" && elaborator_map.is_array()) {
-        for (const auto& entry : elaborator_map) {
-            if (!entry.is_object() || !entry.contains("target") || !entry.contains("source"))
-                continue;
-            mappings["/root/definition" + entry.at("target").get<std::string>()] = {
-                source_id, dsl_source_pointer(entry.at("source").get<std::string>()), std::nullopt};
-        }
+    mappings["/root/definition"]              = {source_id, "/harness/preset", std::nullopt};
+
+    std::map<std::string, std::size_t> worker_indexes;
+    for (std::size_t index = 0; index < worker_ids.size(); ++index)
+        worker_indexes.emplace(worker_ids[index], index);
+    for (const auto& [name, node] : core.at("nodes").items()) {
+        if (node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
+        const auto index = worker_indexes.find(node.value("worker_id", ""));
+        if (index != worker_indexes.end())
+            mappings["/root/definition/nodes/" + escape_pointer(name)] = {
+                source_id, "/workers/" + std::to_string(index->second), std::nullopt};
     }
-    if (mode == "preset" || mode == "dsl") {
-        std::map<std::string, std::size_t> worker_indexes;
-        for (std::size_t index = 0; index < worker_ids.size(); ++index)
-            worker_indexes.emplace(worker_ids[index], index);
-        for (const auto& [name, node] : core.at("nodes").items()) {
-            if (node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
-            const auto index = worker_indexes.find(node.value("worker_id", ""));
-            if (index != worker_indexes.end())
-                mappings["/root/definition/nodes/" + escape_pointer(name)] = {
-                    source_id, "/workers/" + std::to_string(index->second), std::nullopt};
-        }
-    }
-    if (mode == "preset")
-        mappings["/root/definition/nodes/judge"] = {source_id, "/harness/preset", std::nullopt};
+    mappings["/root/definition/nodes/judge"] = {source_id, "/harness/preset", std::nullopt};
+
     std::vector<program::SourceMapEntry> result;
     result.reserve(mappings.size());
     for (auto& [generated, authored] : mappings)
@@ -624,11 +625,8 @@ program::RunBudget derive_budget(const json&                              core,
                                  const HarnessTranslationDefaults&        defaults,
                                  const std::optional<program::ContractManifest>& contract) {
     auto wall_time_ms = checked_mul(limits.timeout_seconds, 1000, "/budgets/timeout_seconds");
-    auto max_program_operations = std::uint64_t{1};
-    if (contract) {
+    if (contract)
         wall_time_ms = std::min(wall_time_ms, contract->spec().retry_policy.max_wall_time_ms);
-        max_program_operations = contract->spec().retry_policy.max_program_operations;
-    }
     std::uint64_t model_tokens = 0;
     if (core.contains("nodes") && core["nodes"].is_object()) {
         for (const auto& [name, node] : core["nodes"].items()) {
@@ -655,8 +653,8 @@ program::RunBudget derive_budget(const json&                              core,
     return {wall_time_ms,
             model_tokens,
             defaults.monetary_microunits,
-            1,
-            max_program_operations,
+            limits.max_parallel_workers,
+            limits.max_program_operations,
             limits.max_core_steps,
             0,
             0,
@@ -784,9 +782,10 @@ json harness_program_request_schema() {
             "contract_manifest":{},
             "workspace_revision":{"type":"string"},
             "harness":{"type":"object","required":["mode"],"properties":{
-                "mode":{"enum":["preset","dsl","core","program"]},
+                "mode":{"enum":["preset","javascript"]},
                 "preset":{"type":"string"},
-                "definition":{"type":"object"}
+                "source":{"type":"string"},
+                "source_id":{"type":"string"}
             },"additionalProperties":false},
             "workers":{"type":"array","items":{"type":"object","required":["id","instructions","output_schema"],"properties":{
                 "id":{"type":"string"},
@@ -820,6 +819,7 @@ json harness_program_request_schema() {
                 "max_steps":{"type":"integer"},
                 "timeout_seconds":{"type":"integer"},
                 "max_parallel_workers":{"type":"integer"},
+                "max_program_operations":{"type":"integer"},
                 "max_worker_retries":{"type":"integer"},
                 "provider_timeout_seconds":{"type":"integer"},
                 "max_output_tokens":{"type":"integer"}
@@ -843,6 +843,24 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                                                        const program::RegistrySnapshot&  registry,
                                                        const HarnessTranslationDefaults& defaults) {
     validate_defaults(defaults);
+    if (!request.is_object() || !request.contains("harness") ||
+        !request.at("harness").is_object() || !request.at("harness").contains("mode") ||
+        !request.at("harness").at("mode").is_string()) {
+        fail(
+            "H_AUTHORING_MODE_REQUIRED", "/harness/mode",
+            "Harness authoring requires an explicit mode; no legacy compiler is selected by shape");
+    }
+    const auto mode = request.at("harness").at("mode").get<std::string>();
+    if (mode == "dsl")
+        fail("H_MIGRATION_CORE_DSL", "/harness/mode",
+             "Core DSL authoring is frozen; submit JavaScript define() source instead");
+    if (mode == "core")
+        fail("H_MIGRATION_CORE_JSON", "/harness/mode",
+             "Standalone Core JSON authoring is internal/interchange only; submit JavaScript "
+             "define() source instead");
+    if (mode == "program" || mode == "program_json")
+        fail("H_MIGRATION_PROGRAM_JSON", "/harness/mode",
+             "Program JSON authoring is frozen; submit JavaScript generator main() source instead");
     try {
         validate_json_value(request, harness_program_request_schema(), "Harness request", "$");
     } catch (const std::exception& error) {
@@ -850,59 +868,47 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     }
 
     const auto contract = requested_contract(request);
-    const auto mode = request.at("harness").at("mode").get<std::string>();
-    if (mode != "core" && request.at("workers").empty())
+    if (request.at("workers").empty())
         fail("H_WORKERS_EMPTY", "/workers", "At least one Harness worker is required");
     static const std::set<std::string> presets = {"fanout_judge", "pr_review_panel", "bug_triage",
                                                   "research_synthesis"};
     if (mode == "preset" && !presets.contains(request.at("harness").value("preset", "")))
         fail("H_PRESET", "/harness/preset", "Unknown Harness preset");
-    if ((mode == "dsl" || mode == "core" || mode == "program") &&
-        !request.at("harness").contains("definition"))
-        fail("H_DSL_DEFINITION", "/harness/definition",
-             "Harness dsl/core/program mode requires a definition");
+    if (mode == "javascript" && (!request.at("harness").contains("source") ||
+                                 !request.at("harness").at("source").is_string() ||
+                                 request.at("harness").at("source").get<std::string>().empty()))
+        fail("H_JAVASCRIPT_SOURCE", "/harness/source",
+             "Harness JavaScript mode requires non-empty UTF-8 source text");
 
     const auto limits  = effective_limits(request, defaults, contract);
     const auto tools   = validate_tool_catalog(request, registry, defaults);
     const auto workers = workers_by_id(request, tools, limits, defaults);
 
-    json core;
-    json program_root;
-    json elaborator_map = json::array();
+    json                                  core;
+    std::optional<program::ProgramSource> authored_source;
     if (mode == "preset") {
         core = preset_core(request.at("harness").at("preset").get<std::string>(),
                            request.at("workers"), workers);
-    } else if (mode == "dsl") {
-        try {
-            auto elaborated = graph::Elaborator::elaborate(request.at("harness").at("definition"));
-            core            = std::move(elaborated.core);
-            elaborator_map  = std::move(elaborated.sourcemap);
-        } catch (const std::exception& error) {
-            fail("H_ELABORATION", "/harness/definition", error.what());
-        }
-        enrich_worker_nodes(core, workers, "/harness/definition");
-    } else if (mode == "program") {
-        program_root = request.at("harness").at("definition");
-        if (!program_root.is_object() || !program_root.contains("definition")) {
-            fail("H_PROGRAM_COMPILE", "/harness/definition",
-                 "Harness program mode requires a root operation and a sealed Core definition");
-        }
-        reject_unsupported_program_operations(program_root, "/harness/definition");
-        core = program_root.at("definition");
-        enrich_worker_nodes(core, workers, "/harness/definition/definition");
     } else {
-        core = request.at("harness").at("definition");
+        const auto source_id =
+            request.at("harness").value("source_id", defaults.source_id_prefix + ":javascript");
+        try {
+            authored_source = program::ProgramSource::from_javascript(
+                source_id, request.at("harness").at("source").get<std::string>());
+        } catch (const program::ProgramDiagnosticError& error) {
+            fail("H_JAVASCRIPT_SOURCE", "/harness/source", error.what());
+        } catch (const std::exception& error) {
+            fail("H_JAVASCRIPT_SOURCE", "/harness/source", error.what());
+        }
+        // Worker bindings remain host-owned. This synthetic Core-shaped view is
+        // used only to derive finite execution budgets.
+        core = json{{"nodes", json::object()}};
+        for (const auto& [worker_id, worker_config] : workers)
+            core["nodes"]["worker:" + worker_id] = worker_config;
     }
-    const auto core_pointer = mode == "program" ? "/harness/definition/definition"
-                                                  : "/harness/definition";
-    if (!core.is_object() || core.value("schema_version", 0) != 1 || !core.contains("name") ||
-        !core.at("name").is_string()) {
-        fail("H_STRICT_CORE", core_pointer,
-             "Harness translation requires a named strict Core schema_version 1 definition");
-    }
-    reject_transport_values(mode == "program" ? program_root : core, "/harness/definition");
 
-    bool has_worker_node = false;
+
+    bool has_worker_node = mode == "javascript" && !workers.empty();
     if (core.contains("nodes") && core["nodes"].is_object()) {
         for (const auto& [name, node] : core["nodes"].items()) {
             (void)name;
@@ -921,74 +927,45 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                  "Harness Provider identity is absent or mismatched in the immutable registry");
     }
 
-    auto       budget    = derive_budget(core, limits, defaults, contract);
-    const auto source_id = defaults.source_id_prefix + ":" + mode;
-    const auto source_schema_version =
-        mode == "program" ? program::PROGRAM_SCHEMA_VERSION_V2
-                          : program::PROGRAM_SCHEMA_VERSION_V1;
-    json document;
-    std::vector<program::SourceMapEntry> program_map;
-    if (mode == "program") {
-        program_root["definition"] = core;
-        auto preflight_budget = budget;
-        preflight_budget.max_concurrency = std::numeric_limits<std::uint32_t>::max();
-        preflight_budget.max_program_operations = std::numeric_limits<std::uint64_t>::max();
-        preflight_budget.max_core_steps = std::numeric_limits<std::uint64_t>::max();
+    auto budget = derive_budget(core, limits, defaults, contract);
+    // A preset is a trusted, schema-v1 wrapper around exactly one `call_core`
+    // Program operation. Its Core graph may consume multiple Core steps, but it
+    // cannot claim an arbitrary Program-operation allowance: schema v1 fixes
+    // that resource at one. JavaScript sources retain their explicit control
+    // budget.
+    if (!authored_source) budget.max_program_operations = 1;
+    const auto source_id =
+        authored_source ? authored_source->source_id() : defaults.source_id_prefix + ":" + mode;
+    const program::ContractRecord input_contract{1, input_contract_schema()};
+    const bool                    has_runtime_main =
+        authored_source && javascript_exports_runtime_main(*authored_source);
+    const program::ContractRecord output_contract{
+        1, has_runtime_main ? final_output_schema() : core_output_schema()};
+    json document = json::object();
+    if (!authored_source) {
         document = {
-            {"program_schema_version", source_schema_version},
-            {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
-            {"output_contract", {{"schema_version", 1}, {"schema", program_output_schema()}}},
-            {"root", std::move(program_root)},
-            {"declared_budget_requirements", budget_records(preflight_budget)},
-        };
-        try {
-            const auto preflight_source = program::ProgramSource::from_cpp_builder(
-                source_id, source_schema_version, document, {}, program_preflight_source_map(source_id));
-            const program::ProgramCompiler compiler(
-                registry, {"neograph-harness-program-translator/v2"});
-            const auto preflight = compiler.compile(preflight_source);
-            const auto requirements =
-                program::derive_static_budget_requirements(preflight.typed_orchestration_plan());
-            budget = derive_program_budget(std::move(budget), requirements, limits, contract);
-            program_map = program_source_map(source_id, preflight);
-        } catch (const program::ProgramCompileError& error) {
-            const program::Diagnostic* diagnostic = nullptr;
-            for (const auto& value : error.diagnostics()) {
-                if (value.severity != program::DiagnosticSeverity::Error) continue;
-                if (!diagnostic ||
-                    value.primary.json_pointer.size() > diagnostic->primary.json_pointer.size())
-                    diagnostic = &value;
-            }
-            auto pointer = !diagnostic || diagnostic->primary.json_pointer.empty()
-                               ? std::string("/harness/definition")
-                               : diagnostic->primary.json_pointer;
-            if (pointer.starts_with("/root"))
-                pointer = std::string("/harness/definition") + pointer.substr(5);
-            std::string message = error.what();
-            for (const auto& value : error.diagnostics())
-                message += " [" + value.code + "] " + value.message;
-            fail("H_PROGRAM_COMPILE", std::move(pointer), std::move(message));
-        } catch (const std::overflow_error& error) {
-            fail("H_PROGRAM_BUDGET", "/harness/definition", error.what());
-        }
-        document["declared_budget_requirements"] = budget_records(budget);
-    } else {
-        document = {
-            {"program_schema_version", source_schema_version},
-            {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
-            {"output_contract", {{"schema_version", 1}, {"schema", core_output_schema()}}},
+            {"program_schema_version", 1},
+            {"input_contract",
+             {{"schema_version", input_contract.schema_version},
+              {"schema", input_contract.schema}}},
+            {"output_contract",
+             {{"schema_version", output_contract.schema_version},
+              {"schema", output_contract.schema}}},
             {"root",
              {{"op", "call_core"}, {"name", core.at("name")}, {"definition", std::move(core)}}},
             {"declared_budget_requirements", budget_records(budget)},
         };
     }
+
     HarnessWireReceipt wire;
-    wire.source_id = source_id;
-    wire.mode      = mode;
-    wire.preset    = request.at("harness").value("preset", "");
-    wire.workspace_revision = request.value(
-        "workspace_revision",
-        request.value("policy", json::object()).value("workspace_revision", ""));
+    wire.source_id          = source_id;
+    wire.mode               = mode;
+    wire.authoring_frontend = authored_source ? program::AuthoringFrontend::JavaScript
+                                              : program::AuthoringFrontend::TrustedCpp;
+    wire.preset             = request.at("harness").value("preset", "");
+    wire.workspace_revision =
+        request.value("workspace_revision",
+                      request.value("policy", json::object()).value("workspace_revision", ""));
     for (const auto& worker : request.at("workers"))
         wire.worker_ids.push_back(worker.at("id").get<std::string>());
     wire.projection = {
@@ -998,8 +975,7 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     if (!wire.workspace_revision.empty())
         wire.projection["workspace_revision"] = wire.workspace_revision;
     if (contract) {
-        wire.projection["contract_manifest"] =
-            json::parse(contract->serialize_canonical());
+        wire.projection["contract_manifest"]      = json::parse(contract->serialize_canonical());
         wire.projection["contract_manifest_hash"] = contract->content_hash();
     }
 
@@ -1012,8 +988,9 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         for (const auto& tool_id : worker.at("tool_ids"))
             selected.insert(tool_id.get<std::string>());
     }
-    const auto& translated_nodes =
-        document.at("root").at("definition").value("nodes", json::object());
+    const auto translated_nodes =
+        authored_source ? json::object()
+                        : document.at("root").at("definition").value("nodes", json::object());
     if (translated_nodes.is_object()) {
         for (const auto& [name, node] : translated_nodes.items()) {
             if (!node.is_object() || node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
@@ -1039,18 +1016,23 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         wire.tool_ids.push_back(id);
     }
 
-    auto map = std::move(program_map);
-    if (mode != "program")
-        map = source_map(document.at("root").at("definition"), elaborator_map, source_id, mode,
-                         wire.worker_ids);
+    auto map  = authored_source
+                    ? std::vector<program::SourceMapEntry>{}
+                    : source_map(document.at("root").at("definition"), source_id, wire.worker_ids);
     auto task = request.at("task");
-    if (contract)
-        task["contract_manifest"] = json::parse(contract->serialize_canonical());
-    auto source = program::ProgramSource::from_cpp_builder(
-        source_id, source_schema_version, std::move(document), {}, std::move(map));
+    if (contract) task["contract_manifest"] = json::parse(contract->serialize_canonical());
+    auto                      source = authored_source ? std::move(*authored_source)
+                                                       : program::ProgramSource::from_cpp_builder(
+                                        source_id, 1, std::move(document), {}, std::move(map));
     HarnessInvocationTemplate invocation_template{{{"task", std::move(task)}}, budget};
-    return {std::move(source), std::move(invocation_template), std::move(wire),
-            std::move(bindings), contract};
+    return {std::move(source),
+            std::move(invocation_template),
+            input_contract,
+            output_contract,
+            workers,
+            std::move(wire),
+            std::move(bindings),
+            contract};
 }
 
 HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotConfig config) {
@@ -1142,7 +1124,9 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
         .registry(registry)
         .mode(config.admission_mode)
         .max_program_schema_version(program::LATEST_PROGRAM_SCHEMA_VERSION)
-        .allow_source_kind(program::SourceKind::CppBuilder);
+        .allow_source_kind(program::SourceKind::CppBuilder)
+        .allow_source_kind(program::SourceKind::JavaScript)
+        .minimum_execution_guarantee(program::ExecutionGuarantee::Unmanaged);
     bool brokered = false;
     bool trusted  = false;
     for (const auto& identity : registry.identities()) {
@@ -1160,7 +1144,8 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
         .semantic_version(std::move(config.policy_semantic_version))
         .owner_scope(std::move(config.owner_scope))
         .admission_profile(admission)
-        .budget_ceiling(config.budget_ceiling);
+        .budget_ceiling(config.budget_ceiling)
+        .minimum_execution_guarantee(program::ExecutionGuarantee::Unmanaged);
     for (auto& capability : config.allowed_capabilities)
         policy_builder.allow_capability(std::move(capability));
     for (auto& effect : config.allowed_effects)

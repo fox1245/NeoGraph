@@ -56,6 +56,7 @@ using ChildLaunchCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
                                               std::string_view,
                                               std::optional<TaskGraphBudget>)>;
+using ChildBindingValidationCallback = std::function<void(std::string_view, std::string_view)>;
 
 struct AsyncWaiter {
     std::weak_ptr<asio::steady_timer> timer;
@@ -105,6 +106,7 @@ public:
     std::shared_ptr<TaskGraphFragmentStore> task_graph_fragments() const;
     std::optional<TaskGraphExpansionPolicy> task_graph_policy(
         std::string_view expansion_operation_id) const;
+    void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
 
     const std::string                                owner_scope;
     const std::string                                run_id;
@@ -140,6 +142,7 @@ public:
         std::string_view operation_id,
         std::string_view execution_key,
         std::optional<TaskGraphBudget> budget_override = std::nullopt) const;
+    void validate_child_binding(std::string_view binding_name, std::string_view operation_id) const;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
     ProgramEvent stage_event(std::string_view operation_id,
@@ -151,6 +154,18 @@ public:
                       ProgramEventKind kind,
                       ProgramEventPayload payload);
     void         complete(RunOutcome outcome) noexcept;
+    /**
+     * Atomically append one JavaScript yielded-command journal entry while
+     * the attempt remains Running.  A terminal result may complete an
+     * existing pending coordinate; the store rejects every other duplicate.
+     */
+    ProgramTransitionPublishResult publish_javascript_command(
+        std::uint64_t              command_ordinal,
+        JavaScriptCommand          command,
+        std::optional<std::string> effect_identity,
+        std::optional<json>        terminal_result,
+        std::optional<RunBudget>   remaining_budget     = std::nullopt,
+        std::optional<RunBudget>   inflight_reservation = std::nullopt);
     ProgramEvent make_event(std::string_view operation_id,
                             ProgramEventKind kind,
                             ProgramEventPayload payload);
@@ -184,18 +199,27 @@ private:
     CompletionCallback                     completion_callback_;
     mutable std::vector<AsyncWaiter>       waiters_;
     std::vector<TerminalCleanup>           terminal_cleanups_;
-    ChildLaunchCallback                    child_launch_callback_;
-    std::shared_ptr<TaskGraphFragmentStore> task_graph_fragments_;
-    TaskGraphExpansionPolicyResolver       task_graph_policy_resolver_;
-    std::uint64_t                          next_sequence_ = 1;
-    CancellationCause                      cancellation_cause_ = CancellationCause::None;
-    bool                                    terminal_decided_ = false;
-    bool                                    completion_claimed_ = false;
+    ChildLaunchCallback                     child_launch_callback_;
+    ChildBindingValidationCallback           child_binding_validation_callback_;
+    std::shared_ptr<TaskGraphFragmentStore>  task_graph_fragments_;
+    TaskGraphExpansionPolicyResolver         task_graph_policy_resolver_;
+    std::uint64_t                            next_sequence_ = 1;
+    CancellationCause                        cancellation_cause_ = CancellationCause::None;
+    bool                                     terminal_decided_ = false;
+    bool                                     completion_claimed_ = false;
     std::vector<std::weak_ptr<RunControl>> children_;
 };
+struct CommandBudgetReservation {
+    RunBudget remaining;
+    RunBudget reservation;
+};
 
-asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
-                                          json                        input,
-                                          std::optional<std::string>  checkpoint_id);
+CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept;
+
+asio::awaitable<void> execute_run_attempt(
+    std::shared_ptr<RunControl> control,
+    json                        input,
+    std::optional<std::string>  checkpoint_id,
+    std::optional<json>         javascript_core_resume_value = std::nullopt);
 
 }  // namespace neograph::program::detail

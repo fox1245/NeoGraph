@@ -65,6 +65,17 @@ JavaScript define()/main() source + sealed modules
       checkpoint / store / provider / tool / events
 ```
 
+### Bounded JavaScript contexts
+
+JavaScript authoring has two distinct execution contexts. `define()` runs only
+in the compiler's bounded compile-time QuickJS context and emits the graph that
+is normalized, sealed, and admitted. A generator `main(input)` does not run
+during structural compilation: it runs in a bounded runtime QuickJS session
+owned by one Program attempt. That session is retained only for the lifetime of
+the attempt. Every yielded typed command is durably journaled before dispatch,
+so recovery and recorded replay reconstruct behavior from the durable command
+journal rather than retaining or trusting ambient JavaScript process state.
+
 ### Durable child execution contract
 
 The terms `ControlVm` and `Durable Kernel` describe rejected *separate public
@@ -196,6 +207,18 @@ durable lifecycle state back to A2A tasks. This closes the NeoGraph-local
 Program/A2A cutover; it does not classify NeoCode or NeoProtocol as rebased
 consumers, and cross-host enablement remains gated on their explicit
 conformance evidence.
+
+A fetched A2A well-known card is discovery evidence, not admission.
+`AgentCardCollector` makes one explicit card GET with no Authorization header
+and never follows a redirect or invokes the advertised RPC endpoint.
+`AgentCardCandidateCompiler` distils the collected card into an immutable,
+digest-pinned, unadmitted candidate containing only bounded protocol facts and
+safe skill identifiers. The candidate excludes the card's free-form text,
+declared remote RPC endpoint, provider configuration, security schemes, and
+credentials; it cannot dispatch the source agent. The sole Copy Ninja PoC
+materializer additionally requires an independently observed profile pinned to
+that digest and constructs a local graph. Any other behavior still requires the
+ordinary local Program/admission path.
 
 ### Cross-repository compatibility and rebase boundary
 
@@ -348,7 +371,9 @@ and conformance gate for this contract.
   compiler and immutable artifact format.
 - Support sequence, branch, bounded loop, parallel, race, retry, cancellation,
   wait, checkpoint, child Program, and immutable version activation without a
-  general-purpose VM.
+  general-purpose node-execution VM. JavaScript `define()` is compile-time graph
+  authoring; an optional generator `main(input)` is bounded retained runtime
+  control that yields only typed Program commands.
 - Keep programs inspectable, source-mapped, reproducible, capability-scoped,
   and replayable.
 - Permit open-ended evolution as a sequence of finite admitted versions, never
@@ -358,7 +383,8 @@ and conformance gate for this contract.
 
 ## Non-goals
 
-- Executing raw model output, arbitrary C++, Python, shell, or ambient host APIs.
+- Executing raw or unsealed model output, arbitrary C++, Python, shell, or
+  ambient host APIs.
 - Mutating a live `GraphEngine` topology in place.
 - Replacing `GraphEngine` with a bytecode interpreter.
 - Inventing a new persistence engine when `CheckpointStore`, `Store`, and the
@@ -489,6 +515,34 @@ Child Programs and replacements receive a subset of the remaining budget.
 Resume, retry, fork, rollback, and child attachment never replenish it. Budget
 exhaustion is a typed terminal outcome, not a generic exception or model error.
 
+### JavaScript authoring boundary
+
+`SourceKind::JavaScript` is an opt-in authoring and bounded control frontend,
+not a second executor for Core/application nodes. `ProgramCompiler` evaluates
+the synchronous `define()` export in a private compile-time QuickJS context and
+seals exactly one Core definition into the immutable `ProgramBundle`. If the
+source also exports generator `main(input)`, `ProgramRuntime` opens a separate
+bounded QuickJS session for that run attempt. The session owns ordinary
+JavaScript control flow only; yielded typed Program commands remain subject to
+admission, budgets, the durable command journal, dispatch, and replay.
+
+The evaluated export set determines the output contract: define-only modules
+retain the Core root's channels-wrapped result, while modules with
+`main(input)` validate the generator's terminal return directly against the
+Program/Harness result schema.
+
+Both contexts expose a non-extensible, versioned `ng` surface and install no
+ambient module loader, network, provider, tool, filesystem, shell, or
+native-plugin capability. Wrong `define()` returns, top-level await, non-
+generator `main(input)`, and malformed yielded commands fail closed. Compile
+contexts cap memory, stack, wall time, output bytes, and interrupt polls.
+Runtime sessions are retained only for their attempt and are bounded by the
+admitted `RunBudget`; recovery replays durable command results instead of
+retaining JavaScript state. The source envelope pins the QuickJS
+engine/language/host-API versions. Builds without
+`NEOGRAPH_BUILD_QUICKJS_CONTROL` reject JavaScript sources rather than linking
+QuickJS into Core-only consumers.
+
 ### Host admission
 
 `RunBudget` is a durable per-Program spending limit; it is not a statement
@@ -594,9 +648,13 @@ native code is rejected or isolated outside the process.
 ### ProgramSource
 
 The authored document plus its source kind, declared schema version, imports,
-and source coordinates. Accepted initial frontends are C++ builder values and
-canonical JSON. YAML or model-specific syntax may be added later only by
-lowering to the same typed source model.
+and source coordinates. Supported frontends are C++ builder values, canonical
+JSON, and opt-in JavaScript. JavaScript source is sealed in a canonical envelope
+that pins its QuickJS engine, language, and host-API versions. `define()` lowers
+through the compile-time graph-builder boundary above; an optional generator
+`main(input)` remains sealed as runtime control source and yields only durable
+typed Program commands. YAML or model-specific syntax may be added later only
+by lowering to the same typed source model.
 
 ### ProgramBundle
 

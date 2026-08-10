@@ -2,13 +2,16 @@
 #include <neograph/program/compiler.h>
 
 #include "canonical_json.h"
+#include "javascript.h"
 #include "registry_access.h"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -27,6 +30,21 @@ constexpr std::array<std::string_view, 9> kBudgetResources = {
     "max_concurrency",      "max_program_operations", "max_core_steps",
     "max_dynamic_compiles", "max_child_depth",        "max_total_children",
 };
+
+json budget_document(const RunBudget& budget) {
+    const std::array<std::uint64_t, 9> values = {
+        budget.wall_time_ms,         budget.model_tokens,           budget.monetary_microunits,
+        budget.max_concurrency,      budget.max_program_operations, budget.max_core_steps,
+        budget.max_dynamic_compiles, budget.max_child_depth,        budget.max_total_children,
+    };
+    json result = json::array();
+    for (std::size_t index = 0; index < kBudgetResources.size(); ++index) {
+        result.push_back({{"resource", std::string(kBudgetResources[index])},
+                          {"minimum", values[index]},
+                          {"maximum", values[index]}});
+    }
+    return result;
+}
 
 std::string escape_pointer_segment(std::string_view segment) {
     std::string result;
@@ -142,7 +160,9 @@ struct PendingDiagnostic {
 class DiagnosticAccumulator {
 public:
     explicit DiagnosticAccumulator(const ProgramSource& source)
-        : source_id_(source.source_id()), mappings_(source.source_map()) {
+        : source_id_(source.source_id()),
+          javascript_source_(source.kind() == SourceKind::JavaScript),
+          mappings_(source.source_map()) {
         std::sort(mappings_.begin(), mappings_.end(), [](const auto& lhs, const auto& rhs) {
             return std::tie(lhs.generated_pointer, lhs.authored.source_id,
                             lhs.authored.json_pointer) < std::tie(rhs.generated_pointer,
@@ -156,13 +176,15 @@ public:
              DiagnosticSeverity severity,
              std::string        generated_pointer,
              std::string        message,
-             json               witness = json::object()) {
+             json               witness = json::object(),
+             std::optional<SourceSpan> span = std::nullopt) {
         PendingDiagnostic pending;
         pending.generated_pointer   = std::move(generated_pointer);
         pending.diagnostic.phase    = phase;
         pending.diagnostic.code     = std::move(code);
         pending.diagnostic.severity = severity;
         pending.diagnostic.primary  = map(pending.generated_pointer);
+        if (span) pending.diagnostic.primary.span = std::move(span);
         pending.diagnostic.message  = std::move(message);
         pending.diagnostic.witness  = detail::owned_json_copy(witness);
         pending.canonical_witness   = detail::canonical_json_bytes(pending.diagnostic.witness);
@@ -212,8 +234,11 @@ private:
                 best = &entry;
             }
         }
-        if (!best)
-            return SourceCoordinate{source_id_, std::string(generated_pointer), std::nullopt};
+        if (!best) {
+            return SourceCoordinate{
+                source_id_, javascript_source_ ? std::string{} : std::string(generated_pointer),
+                std::nullopt};
+        }
         SourceCoordinate result = best->authored;
         if (best->generated_pointer == generated_pointer) return result;
         result.span.reset();
@@ -222,6 +247,7 @@ private:
     }
 
     std::string                    source_id_;
+    bool                           javascript_source_;
     std::vector<SourceMapEntry>    mappings_;
     std::vector<PendingDiagnostic> diagnostics_;
 };
@@ -373,8 +399,8 @@ void validate_contract(const json&            document,
         try {
             validate_contract_schema(output, child_pointer(pointer, "schema"));
         } catch (const std::exception& error) {
-            diagnostics.add(CompilePhase::Schema, "P_CONTRACT_SCHEMA",
-                            DiagnosticSeverity::Error, child_pointer(pointer, "schema"),
+            diagnostics.add(CompilePhase::Schema, "P_CONTRACT_SCHEMA", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "schema"),
                             "Program contract uses an invalid or unsupported schema",
                             json{{"error", error.what()}});
         }
@@ -494,8 +520,8 @@ void validate_root(const json&            document,
                         "A call_core operation requires at least one Core node", json::object());
     }
 }
-void validate_condition(const json& value,
-                        std::string_view pointer,
+void validate_condition(const json&            value,
+                        std::string_view       pointer,
                         DiagnosticAccumulator& diagnostics) {
     if (!value.is_object()) {
         add_type(diagnostics, pointer, "object", value);
@@ -509,48 +535,44 @@ void validate_condition(const json& value,
     }
     if (value.contains("path") &&
         (!value["path"].is_string() || value["path"].get<std::string>().empty())) {
-        add_type(diagnostics, child_pointer(pointer, "path"), "nonempty string",
-                 value["path"]);
+        add_type(diagnostics, child_pointer(pointer, "path"), "nonempty string", value["path"]);
     } else if (value.contains("path")) {
         try {
             detail::validate_json_pointer(value["path"].get<std::string>());
         } catch (const std::exception& error) {
-            diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION",
-                            DiagnosticSeverity::Error, child_pointer(pointer, "path"),
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "path"),
                             "Program condition path must be a valid RFC 6901 JSON pointer",
                             json{{"error", error.what()}});
         }
     }
     if (alternatives != 1) {
         diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION", DiagnosticSeverity::Error,
-                        std::string(pointer),
-                        "A Program condition requires exactly one predicate",
+                        std::string(pointer), "A Program condition requires exactly one predicate",
                         json{{"predicates", alternatives}});
         return;
     }
-    if ((value.contains("equals") || value.contains("not_equals") ||
-         value.contains("exists")) &&
+    if ((value.contains("equals") || value.contains("not_equals") || value.contains("exists")) &&
         !value.contains("path")) {
         add_required(diagnostics, pointer, "path");
     }
     if (value.contains("exists") && !value["exists"].is_boolean())
         add_type(diagnostics, child_pointer(pointer, "exists"), "boolean", value["exists"]);
     if (value.contains("all") || value.contains("any")) {
-        const auto field = value.contains("all") ? "all" : "any";
-        const auto& list = value[field];
+        const auto  field = value.contains("all") ? "all" : "any";
+        const auto& list  = value[field];
         if (!list.is_array() || list.empty()) {
             add_type(diagnostics, child_pointer(pointer, field), "nonempty array", list);
         } else {
             for (std::size_t index = 0; index < list.size(); ++index)
-                validate_condition(list[index],
-                                   child_pointer(child_pointer(pointer, field),
-                                                 std::to_string(index)),
-                                   diagnostics);
+                validate_condition(
+                    list[index],
+                    child_pointer(child_pointer(pointer, field), std::to_string(index)),
+                    diagnostics);
         }
     }
-    if (value.contains("not")) validate_condition(value["not"],
-                                                   child_pointer(pointer, "not"),
-                                                   diagnostics);
+    if (value.contains("not"))
+        validate_condition(value["not"], child_pointer(pointer, "not"), diagnostics);
 }
 
 std::string lower_operation(const json& authored,
@@ -574,26 +596,25 @@ std::string lower_operation(const json& authored,
         return operation_id;
     }
 
-    const auto op = authored["op"].get<std::string>();
+    const auto op      = authored["op"].get<std::string>();
     const auto allowed = [&](std::initializer_list<std::string_view> fields) {
         add_unknown_fields(diagnostics, authored, pointer, fields);
     };
-    json lowered{{"id", operation_id}, {"op", op}, {"source_pointer", std::string(pointer)}};
+    json       lowered{{"id", operation_id}, {"op", op}, {"source_pointer", std::string(pointer)}};
     const auto child = [&](const json& value, std::string_view field, std::size_t index) {
         const auto child_id = operation_id + "." + std::to_string(index);
         return lower_operation(value, child_id, child_pointer(pointer, field) + "/" +
                                                std::to_string(index),
                                root_name, schema_version, false, operations, diagnostics);
     };
-    const auto singular_child = [&](const json& value, std::string_view field,
-                                    std::size_t index) {
+    const auto singular_child = [&](const json& value, std::string_view field, std::size_t index) {
         const auto child_id = operation_id + "." + std::to_string(index);
         return lower_operation(value, child_id, child_pointer(pointer, field),
                                root_name, schema_version, false, operations, diagnostics);
     };
     const auto required_object = [&](std::string_view field) -> std::optional<json> {
         const auto field_pointer = child_pointer(pointer, field);
-        const auto key = std::string(field);
+        const auto key           = std::string(field);
         if (!authored.contains(key)) {
             add_required(diagnostics, pointer, field);
             return std::nullopt;
@@ -633,8 +654,7 @@ std::string lower_operation(const json& authored,
         else
             allowed({"op", "core"});
         if (authored.contains("core") &&
-            (!authored["core"].is_string() ||
-             authored["core"].get<std::string>() != root_name)) {
+            (!authored["core"].is_string() || authored["core"].get<std::string>() != root_name)) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error,
                             child_pointer(pointer, "core"),
                             "Every call_core operation must reference the sealed root Core",
@@ -697,8 +717,7 @@ std::string lower_operation(const json& authored,
                    !maximum || *maximum == 0 || *maximum > 1000000) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
                             child_pointer(pointer, "max_iterations"),
-                            "Program loop bound must be in the range 1..1000000",
-                            json::object());
+                            "Program loop bound must be in the range 1..1000000", json::object());
         } else {
             lowered["max_iterations"] = *maximum;
         }
@@ -715,8 +734,7 @@ std::string lower_operation(const json& authored,
                    !maximum || *maximum == 0 || *maximum > 1000000) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
                             child_pointer(pointer, "max_attempts"),
-                            "Program retry bound must be in the range 1..1000000",
-                            json::object());
+                            "Program retry bound must be in the range 1..1000000", json::object());
         } else {
             lowered["max_attempts"] = *maximum;
         }
@@ -753,8 +771,8 @@ std::string lower_operation(const json& authored,
             if (!authored.contains("branches"))
                 add_required(diagnostics, pointer, "branches");
             else
-                add_type(diagnostics, child_pointer(pointer, "branches"),
-                         "array with two entries", authored["branches"]);
+                add_type(diagnostics, child_pointer(pointer, "branches"), "array with two entries",
+                         authored["branches"]);
         } else {
             json ids = json::array();
             for (std::size_t index = 0; index < authored["branches"].size(); ++index)
@@ -1101,11 +1119,11 @@ std::string lower_operation(const json& authored,
             lowered["child_binding"] = authored["child_binding"].get<std::string>();
         }
         if (authored.contains("body")) {
-            diagnostics.add(
-                CompilePhase::Normalize, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
-                child_pointer(pointer, "body"),
-                "Program spawn dispatches a separately admitted child binding; it has no inline body",
-                json::object());
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_SPAWN_SHAPE",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "body"),
+                            "Program spawn dispatches a separately admitted child binding; it has "
+                            "no inline body",
+                            json::object());
         }
     } else if (op == "await") {
         if (is_root)
@@ -1154,39 +1172,38 @@ std::string lower_operation(const json& authored,
             lowered["value"] = detail::owned_json_copy(authored["value"]);
     } else {
         diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION", DiagnosticSeverity::Error,
-                        child_pointer(pointer, "op"),
-                        "Program operation is not supported",
+                        child_pointer(pointer, "op"), "Program operation is not supported",
                         json{{"operation", op}});
     }
     operations.push_back(std::move(lowered));
     return operation_id;
 }
 
-void validate_sealed_plan_dispatch(const ProgramPlan& plan,
-                                   DiagnosticAccumulator& diagnostics) {
+void validate_sealed_plan_dispatch(const ProgramPlan& plan, DiagnosticAccumulator& diagnostics) {
     for (const auto& node : plan.nodes()) {
         const auto& dispatch = node.dispatch();
         if (dispatch.source_pointer.empty() || dispatch.source_pointer.front() != '/') {
-            diagnostics.add(CompilePhase::Seal, "P_PLAN_SOURCE_POINTER",
-                            DiagnosticSeverity::Error, node.source_pointer(),
-                            "Sealed Program operation has an invalid source pointer",
-                            json{{"operation_id", node.id()},
-                                 {"source_pointer", dispatch.source_pointer}});
+            diagnostics.add(
+                CompilePhase::Seal, "P_PLAN_SOURCE_POINTER", DiagnosticSeverity::Error,
+                node.source_pointer(), "Sealed Program operation has an invalid source pointer",
+                json{{"operation_id", node.id()}, {"source_pointer", dispatch.source_pointer}});
         }
         const auto require = [&](const std::string& referenced, std::string_view field) {
             if (plan.find(referenced)) return;
-            diagnostics.add(CompilePhase::Seal, "P_PLAN_REFERENCE",
-                            DiagnosticSeverity::Error, node.source_pointer(),
+            diagnostics.add(CompilePhase::Seal, "P_PLAN_REFERENCE", DiagnosticSeverity::Error,
+                            node.source_pointer(),
                             "Sealed Program operation has a dangling dispatch reference",
                             json{{"operation_id", node.id()},
                                  {"field", std::string(field)},
                                  {"referenced_operation_id", referenced}});
         };
-        for (const auto& child : dispatch.children) require(child, "children");
+        for (const auto& child : dispatch.children)
+            require(child, "children");
         if (dispatch.then_id) require(*dispatch.then_id, "then");
         if (dispatch.else_id) require(*dispatch.else_id, "else");
         if (dispatch.body) require(*dispatch.body, "body");
-        for (const auto& branch : dispatch.branches) require(branch, "branches");
+        for (const auto& branch : dispatch.branches)
+            require(branch, "branches");
     }
     for (const auto& node : plan.nodes()) {
         if (node.operation() != ProgramOperationKind::Spawn) continue;
@@ -1196,11 +1213,11 @@ void validate_sealed_plan_dispatch(const ProgramPlan& plan,
                        candidate.dispatch().body && *candidate.dispatch().body == node.id();
             });
         if (!is_direct_await_body) {
-            diagnostics.add(
-                CompilePhase::Seal, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
-                node.source_pointer(),
-                "Program spawn must be the direct body of await so its durable child handle is joined",
-                json{{"operation_id", node.id()}});
+            diagnostics.add(CompilePhase::Seal, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
+                            node.source_pointer(),
+                            "Program spawn must be the direct body of await so its durable child "
+                            "handle is joined",
+                            json{{"operation_id", node.id()}});
         }
     }
 }
@@ -1226,13 +1243,13 @@ OrchestrationPlanRecord lower_plan(const json& root,
             json::object());
     }
     json operation_array = json::array();
-    for (auto& operation : operations) operation_array.push_back(std::move(operation));
-    json plan = json::object();
-    plan["root"] = "root";
+    for (auto& operation : operations)
+        operation_array.push_back(std::move(operation));
+    json plan          = json::object();
+    plan["root"]       = "root";
     plan["operations"] = std::move(operation_array);
     return OrchestrationPlanRecord{1, std::move(plan)};
 }
-
 
 bool contains_operation(const json& value, std::string_view wanted) {
     if (value.is_object()) {
@@ -1356,12 +1373,11 @@ void validate_budgets(const json&            document,
             continue;
         }
         if (resource == "max_child_depth" && *maximum > MAX_SUPPORTED_CHILD_DEPTH) {
-            diagnostics.add(
-                CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
-                item_pointer, "Child depth exceeds the supported hard ceiling",
-                json{{"resource", resource},
-                     {"maximum", *maximum},
-                     {"hard_ceiling", MAX_SUPPORTED_CHILD_DEPTH}});
+            diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
+                            item_pointer, "Child depth exceeds the supported hard ceiling",
+                            json{{"resource", resource},
+                                 {"maximum", *maximum},
+                                 {"hard_ceiling", MAX_SUPPORTED_CHILD_DEPTH}});
             continue;
         }
         if (resource == "max_child_depth" || resource == "max_total_children")
@@ -1369,7 +1385,7 @@ void validate_budgets(const json&            document,
         output.budgets.push_back({resource, *minimum, *maximum});
         output.budget_pointers.emplace(resource, item_pointer);
     }
-    const auto child_depth = child_budget_maxima.find("max_child_depth");
+    const auto child_depth    = child_budget_maxima.find("max_child_depth");
     const auto total_children = child_budget_maxima.find("max_total_children");
     if (child_depth != child_budget_maxima.end() && total_children != child_budget_maxima.end() &&
         (child_depth->second == 0) != (total_children->second == 0)) {
@@ -1511,6 +1527,7 @@ std::vector<DirectReference> direct_references(const graph::TopologySpec& topolo
 struct ClosureResult {
     std::vector<ExecutableIdentity> identities;
     CapabilityEffectClosure         closure;
+    ExecutionGuarantee              execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 ClosureResult resolve_closure(const RegistrySnapshot&    registry,
@@ -1537,9 +1554,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         }
     }
     for (const auto& [node_name, definition] : topology.node_defs) {
-        const auto type = definition.at("type").get<std::string>();
-        const auto pointer =
-            "/root/definition/nodes/" + escape_pointer_segment(node_name);
+        const auto type    = definition.at("type").get<std::string>();
+        const auto pointer = "/root/definition/nodes/" + escape_pointer_segment(node_name);
         const ExecutableManifest* node_manifest = nullptr;
         try {
             node_manifest = &detail::RegistrySnapshotAccess::require_manifest(
@@ -1550,8 +1566,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
 
         std::vector<ExecutableIdentity> requirements;
         try {
-            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(
-                registry, type, definition);
+            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(registry, type,
+                                                                                     definition);
         } catch (const std::exception& error) {
             diagnostics.add(CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_RESOLVER",
                             DiagnosticSeverity::Error, pointer,
@@ -1573,9 +1589,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                 requirement.kind != ExecutableKind::Tool &&
                 requirement.kind != ExecutableKind::Imported) {
                 diagnostics.add(
-                    CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_KIND",
-                    DiagnosticSeverity::Error, pointer,
-                    "Node config resolver returned an unsupported executable kind",
+                    CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_KIND", DiagnosticSeverity::Error,
+                    pointer, "Node config resolver returned an unsupported executable kind",
                     json{{"node_type", type}, {"requirement", identity_json(requirement)}});
                 continue;
             }
@@ -1586,6 +1601,7 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     std::map<std::pair<std::string, std::string>, ExecutableIdentity> visited;
     std::set<std::string>                                             capabilities;
     std::set<std::string>                                             effects;
+    ExecutionGuarantee execution_guarantee = ExecutionGuarantee::Strict;
     for (std::size_t index = 0; index < work.size(); ++index) {
         const auto current = work[index];
         const auto key =
@@ -1633,10 +1649,15 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         effects.insert(manifest->declared_effects.begin(), manifest->declared_effects.end());
         if (manifest->effect_mode == EffectMode::TrustedNative)
             capabilities.insert(std::string(TRUSTED_NATIVE_CAPABILITY));
+        if (execution_guarantee_rank(manifest->execution_guarantee) <
+            execution_guarantee_rank(execution_guarantee)) {
+            execution_guarantee = manifest->execution_guarantee;
+        }
         for (const auto& dependency : manifest->required_executables)
             work.push_back({dependency, "/root/definition", manifest->identity});
     }
     ClosureResult result;
+    result.execution_guarantee = execution_guarantee;
     for (const auto& [key, identity] : visited) {
         (void)key;
         result.identities.push_back(identity);
@@ -1681,6 +1702,336 @@ std::string import_merkle_root(const ProgramSource& source, DiagnosticAccumulato
     return level.front();
 }
 
+struct JavaScriptImportSite {
+    std::string   specifier;
+    std::size_t   byte_begin = 0;
+    std::size_t   byte_end   = 0;
+    std::uint32_t line       = 1;
+    std::uint32_t column     = 1;
+    bool          dynamic    = false;
+};
+
+bool javascript_identifier_start(unsigned char value) noexcept {
+    return value == '_' || value == '$' || std::isalpha(value) != 0;
+}
+
+bool javascript_identifier_continue(unsigned char value) noexcept {
+    return javascript_identifier_start(value) || std::isdigit(value) != 0;
+}
+
+void skip_javascript_space(std::string_view source, std::size_t& offset) {
+    while (offset < source.size()) {
+        if (std::isspace(static_cast<unsigned char>(source[offset])) != 0) {
+            ++offset;
+            continue;
+        }
+        if (offset + 1 < source.size() && source[offset] == '/' && source[offset + 1] == '/') {
+            offset += 2;
+            while (offset < source.size() && source[offset] != '\n') ++offset;
+            continue;
+        }
+        if (offset + 1 < source.size() && source[offset] == '/' && source[offset + 1] == '*') {
+            offset += 2;
+            while (offset + 1 < source.size() &&
+                   !(source[offset] == '*' && source[offset + 1] == '/'))
+                ++offset;
+            if (offset + 1 < source.size()) offset += 2;
+            continue;
+        }
+        break;
+    }
+}
+
+std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>>
+read_javascript_string(std::string_view source, std::size_t offset) {
+    if (offset >= source.size() || (source[offset] != '\'' && source[offset] != '"'))
+        return std::nullopt;
+    const auto quote = source[offset++];
+    const auto begin = offset - 1;
+    std::string result;
+    while (offset < source.size()) {
+        const char value = source[offset++];
+        if (value == quote) return std::make_pair(std::move(result), std::make_pair(begin, offset));
+        if (value == '\\' && offset < source.size()) {
+            // Import specifiers are intentionally restricted to simple
+            // string literals. Escape sequences are decoded only for the
+            // common one-byte forms needed by a module name.
+            const char escaped = source[offset++];
+            switch (escaped) {
+                case 'n':
+                    result.push_back('\n');
+                    break;
+                case 'r':
+                    result.push_back('\r');
+                    break;
+                case 't':
+                    result.push_back('\t');
+                    break;
+                default:
+                    result.push_back(escaped);
+                    break;
+            }
+            continue;
+        }
+        if (value == '\n' || value == '\r') return std::nullopt;
+        result.push_back(value);
+    }
+    return std::nullopt;
+}
+
+std::vector<JavaScriptImportSite> javascript_import_sites(std::string_view source) {
+    std::vector<JavaScriptImportSite> result;
+    std::size_t                    offset = 0;
+    while (offset < source.size()) {
+        if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '/') {
+            skip_javascript_space(source, offset);
+            continue;
+        }
+        if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '*') {
+            skip_javascript_space(source, offset);
+            continue;
+        }
+        if (source[offset] == '\'' || source[offset] == '"' || source[offset] == '`') {
+            const auto quote = source[offset++];
+            while (offset < source.size()) {
+                if (source[offset] == '\\') {
+                    offset += std::min<std::size_t>(2, source.size() - offset);
+                } else if (source[offset++] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (!javascript_identifier_start(static_cast<unsigned char>(source[offset]))) {
+            ++offset;
+            continue;
+        }
+        const auto word_begin = offset++;
+        while (offset < source.size() &&
+               javascript_identifier_continue(static_cast<unsigned char>(source[offset])))
+            ++offset;
+        const auto word = source.substr(word_begin, offset - word_begin);
+        if (word != "import" && word != "export" && word != "require") continue;
+
+        auto cursor = offset;
+        skip_javascript_space(source, cursor);
+        if (word == "require") {
+            if (cursor >= source.size() || source[cursor] != '(') continue;
+            ++cursor;
+            skip_javascript_space(source, cursor);
+            const auto parsed = read_javascript_string(source, cursor);
+            if (!parsed) {
+                result.push_back({{}, word_begin, cursor, 1, 1, true});
+            } else {
+                result.push_back({parsed->first, word_begin, parsed->second.second, 1, 1, true});
+            }
+            continue;
+        }
+        if (word == "import" && cursor < source.size() && source[cursor] == '(') {
+            ++cursor;
+            skip_javascript_space(source, cursor);
+            const auto parsed = read_javascript_string(source, cursor);
+            if (!parsed) {
+                result.push_back({{}, word_begin, cursor, 1, 1, true});
+            } else {
+                result.push_back({parsed->first, word_begin, parsed->second.second, 1, 1, true});
+            }
+            continue;
+        }
+
+        // `import "x"`, `import {x} from "x"`, and `export ... from
+        // "x"` all resolve through the same sealed allowlist. The bounded
+        // scanner deliberately does not try to implement JavaScript syntax;
+        // QuickJS remains authoritative for malformed source.
+        const auto direct = read_javascript_string(source, cursor);
+        if (direct) {
+            result.push_back({direct->first, word_begin, direct->second.second, 1, 1, false});
+            continue;
+        }
+        const auto statement_end = source.find(';', cursor);
+        const auto end = statement_end == std::string_view::npos ? source.size() : statement_end;
+        auto       from = source.find("from", cursor);
+        if (from == std::string_view::npos || from >= end) continue;
+        if (from > cursor && javascript_identifier_continue(static_cast<unsigned char>(source[from - 1])))
+            continue;
+        auto after_from = from + 4;
+        if (after_from < source.size() &&
+            javascript_identifier_continue(static_cast<unsigned char>(source[after_from])))
+            continue;
+        skip_javascript_space(source, after_from);
+        const auto parsed = read_javascript_string(source, after_from);
+        if (parsed)
+            result.push_back({parsed->first, word_begin, parsed->second.second, 1, 1, false});
+    }
+    auto line_column = [&](std::size_t byte) {
+        std::uint32_t line = 1;
+        std::uint32_t col  = 1;
+        for (std::size_t index = 0; index < byte && index < source.size(); ++index) {
+            if (source[index] == '\n') {
+                ++line;
+                col = 1;
+            } else {
+                ++col;
+            }
+        }
+        return std::pair{line, col};
+    };
+    for (auto& site : result) {
+        const auto [line, column] = line_column(site.byte_begin);
+        site.line                 = line;
+        site.column               = column;
+    }
+    return result;
+}
+
+SourceSpan javascript_span(std::string_view source, std::size_t begin, std::size_t end) {
+    const auto line_column = [&](std::size_t byte) {
+        std::uint32_t line = 1;
+        std::uint32_t col  = 1;
+        for (std::size_t index = 0; index < byte && index < source.size(); ++index) {
+            if (source[index] == '\n') {
+                ++line;
+                col = 1;
+            } else {
+                ++col;
+            }
+        }
+        return std::pair{line, col};
+    };
+    const auto [line_begin, column_begin] = line_column(begin);
+    const auto [line_end, column_end]     = line_column(std::min(end, source.size()));
+    return SourceSpan{begin, std::min(end, source.size()), line_begin, column_begin, line_end,
+                      column_end};
+}
+
+void validate_sealed_javascript_imports(const ProgramSource&    source,
+                                        const ModuleResolution* resolution,
+                                        DiagnosticAccumulator&  diagnostics) {
+    if (source.kind() != SourceKind::JavaScript) return;
+
+    const auto document       = source.document();
+    const auto script         = document.at("source").get<std::string>();
+    const auto root_sites     = javascript_import_sites(script);
+    const auto& sealed        = source.sealed_modules();
+    const bool needs_closure  = !root_sites.empty() || !sealed.empty() || !source.imports().empty();
+    if (!needs_closure) return;
+
+    auto add = [&](std::string code,
+                   std::string message,
+                   json        witness,
+                   std::optional<SourceSpan> span = std::nullopt) {
+        diagnostics.add(CompilePhase::Resolve, std::move(code), DiagnosticSeverity::Error,
+                        "/imports", std::move(message), std::move(witness), std::move(span));
+    };
+    auto add_dynamic = [&](const JavaScriptImportSite& site, std::string_view origin) {
+        add("P_IMPORT_DYNAMIC", "Dynamic JavaScript module loading is forbidden",
+            json{{"specifier", site.specifier}, {"origin", origin}},
+            javascript_span(origin == source.source_id() ? script : std::string_view{},
+                            site.byte_begin, site.byte_end));
+    };
+
+    if (!resolution) {
+        for (const auto& site : root_sites) {
+            if (site.dynamic) {
+                add_dynamic(site, source.source_id());
+            } else {
+                add("P_IMPORT_UNRESOLVED",
+                    "Executable JavaScript import is unavailable without a verified "
+                    "receipt-bound module closure",
+                    json{{"specifier", site.specifier},
+                         {"receipt_bound_source_available", false}},
+                    javascript_span(script, site.byte_begin, site.byte_end));
+            }
+        }
+        if (root_sites.empty()) {
+            add("P_IMPORT_UNRESOLVED",
+                "Executable JavaScript imports require a verified receipt-bound module closure",
+                json{{"import_count", source.imports().size()},
+                     {"sealed_module_count", sealed.size()},
+                     {"receipt_bound_source_available", false}});
+        }
+        return;
+    }
+
+    std::map<std::string, const SealedJavaScriptModule*, std::less<>> sealed_by_source;
+    std::vector<ImportRef> sealed_imports;
+    sealed_imports.reserve(sealed.size());
+    for (const auto& module : sealed) {
+        if (!sealed_by_source.emplace(module.source_id, &module).second) {
+            add("P_IMPORT_UNRESOLVED", "JavaScript sealed module closure contains a duplicate source",
+                json{{"source_id", module.source_id}});
+        }
+        sealed_imports.push_back({module.source_id, module.content_identity});
+
+        const auto resolved = std::find_if(
+            resolution->modules.begin(), resolution->modules.end(), [&](const auto& candidate) {
+                return candidate.coordinate().qualified_name() == module.source_id &&
+                       candidate.id() == module.content_identity;
+            });
+        if (resolved == resolution->modules.end()) {
+            add("P_IMPORT_UNRESOLVED",
+                "JavaScript sealed module is absent from the verified module closure",
+                json{{"source_id", module.source_id},
+                     {"content_identity", module.content_identity}});
+        } else if (!resolved->pure_javascript_source().has_value() ||
+                   *resolved->pure_javascript_source() != module.source_text) {
+            add("P_IMPORT_UNRESOLVED",
+                "JavaScript sealed module bytes do not match the verified pure module",
+                json{{"source_id", module.source_id},
+                     {"content_identity", module.content_identity},
+                     {"has_pure_javascript_source",
+                      resolved->pure_javascript_source().has_value()}});
+        }
+    }
+    auto import_less = [](const ImportRef& lhs, const ImportRef& rhs) {
+        return std::tie(lhs.source_id, lhs.content_identity) <
+               std::tie(rhs.source_id, rhs.content_identity);
+    };
+    auto source_imports = source.imports();
+    std::sort(source_imports.begin(), source_imports.end(), import_less);
+    std::sort(sealed_imports.begin(), sealed_imports.end(), import_less);
+    if (source_imports != sealed_imports) {
+        add("P_IMPORT_UNRESOLVED",
+            "JavaScript source imports must exactly match its sealed module closure",
+            json{{"source_import_count", source_imports.size()},
+                 {"sealed_module_count", sealed_imports.size()}});
+    }
+
+    std::set<std::string, std::less<>> reachable;
+    std::function<void(std::string_view, std::string_view)> validate_script;
+    validate_script = [&](std::string_view current_source, std::string_view origin) {
+        for (const auto& site : javascript_import_sites(current_source)) {
+            const auto span = javascript_span(current_source, site.byte_begin, site.byte_end);
+            if (site.dynamic) {
+                add("P_IMPORT_DYNAMIC", "Dynamic JavaScript module loading is forbidden",
+                    json{{"specifier", site.specifier}, {"origin", origin}}, span);
+                continue;
+            }
+            const auto found = sealed_by_source.find(site.specifier);
+            if (found == sealed_by_source.end()) {
+                add("P_IMPORT_UNRESOLVED",
+                    "JavaScript import is not bound to an exact sealed module receipt",
+                    json{{"specifier", site.specifier},
+                         {"origin", origin},
+                         {"receipt_bound_source_available", false}},
+                    span);
+                continue;
+            }
+            if (reachable.insert(found->first).second) {
+                validate_script(found->second->source_text, found->first);
+            }
+        }
+    };
+    validate_script(script, source.source_id());
+    for (const auto& module : sealed) {
+        if (!reachable.contains(module.source_id)) {
+            add("P_IMPORT_UNRESOLVED",
+                "JavaScript sealed module closure contains an unreachable source",
+                json{{"source_id", module.source_id}});
+        }
+    }
+}
+
 std::vector<SourceMapEntry> generated_source_map(const ProgramSource&   source,
                                                  DiagnosticAccumulator& diagnostics) {
     auto                  result = source.source_map();
@@ -1695,7 +2046,9 @@ std::vector<SourceMapEntry> generated_source_map(const ProgramSource&   source,
     }
     for (const auto pointer : {"/root", "/root/definition", "/operations/0"}) {
         if (seen.contains(pointer)) continue;
-        result.push_back({pointer, {source.source_id(), pointer, std::nullopt}});
+        const auto authored_pointer =
+            source.kind() == SourceKind::JavaScript ? std::string{} : std::string(pointer);
+        result.push_back({pointer, {source.source_id(), authored_pointer, std::nullopt}});
         seen.insert(pointer);
     }
     return result;
@@ -1705,9 +2058,10 @@ json contract_json(const ContractRecord& contract) {
     return json{{"schema_version", contract.schema_version}, {"schema", contract.schema}};
 }
 
-std::string canonical_program_hash(const ParsedProgram&           parsed,
-                                   const OrchestrationPlanRecord& plan,
-                                   const SealedCoreDefinition&    definition) {
+std::string canonical_program_hash(const ParsedProgram&              parsed,
+                                   const OrchestrationPlanRecord&    plan,
+                                   const SealedCoreDefinition&       definition,
+                                   const std::optional<std::string>& control_source_hash) {
     json budgets = json::array();
     for (const auto& budget : parsed.budgets)
         budgets.push_back(json{{"resource", budget.resource},
@@ -1723,6 +2077,7 @@ std::string canonical_program_hash(const ParsedProgram&           parsed,
                            {"definition_hash", definition.definition_hash},
                            {"definition", definition.definition}}})},
         {"declared_budget_requirements", std::move(budgets)}};
+    if (control_source_hash) semantic["control_source_hash"] = *control_source_hash;
     return detail::sha256_identity("canonical-program/v1", detail::canonical_json_bytes(semantic));
 }
 
@@ -1741,11 +2096,80 @@ struct ProgramCompiler::Impl {
     RegistrySnapshot      registry;
     ProgramCompilerConfig config;
 
-    ProgramBundle compile(const ProgramSource& source) const {
+    JavaScriptRuntimeIdentity configured_javascript_runtime() const {
+        return {config.quickjs_release,
+                config.quickjs_archive_digest,
+                config.quickjs_build_options,
+                config.javascript_profile,
+                config.javascript_profile_version,
+                config.ng_api_version};
+    }
+
+    ProgramBundle compile(const ProgramSource&            source,
+                          const ModuleResolution*         verified_resolution = nullptr,
+                          const std::optional<RunBudget>& javascript_budget   = std::nullopt,
+                          const ContractRecord*           input_contract      = nullptr,
+                          const ContractRecord*           output_contract     = nullptr) const {
+        const bool has_host_contracts = input_contract != nullptr || output_contract != nullptr;
+        if ((javascript_budget || has_host_contracts) && source.kind() != SourceKind::JavaScript)
+            throw std::invalid_argument(
+                "Host-owned JavaScript budget and contracts require a JavaScript ProgramSource");
+        if ((input_contract == nullptr) != (output_contract == nullptr))
+            throw std::invalid_argument(
+                "Host-owned JavaScript input and output contracts must be supplied together");
         DiagnosticAccumulator diagnostics(source);
         try {
-            const json document = source.document();
-            auto       parsed   = parse_program(source, document, diagnostics);
+            if (source.kind() == SourceKind::JavaScript &&
+                source.javascript_runtime_identity() != configured_javascript_runtime()) {
+                diagnostics.add(
+                    CompilePhase::Source, "P_JS_RUNTIME_IDENTITY", DiagnosticSeverity::Error, "",
+                    "JavaScript source runtime/profile identity does not match the configured compiler",
+                    json{{"source", json{{"quickjs_release",
+                                            source.javascript_runtime_identity().quickjs_release},
+                                           {"quickjs_archive_digest",
+                                            source.javascript_runtime_identity().quickjs_archive_digest},
+                                           {"quickjs_build_options",
+                                            source.javascript_runtime_identity().quickjs_build_options},
+                                           {"javascript_profile",
+                                            source.javascript_runtime_identity().profile},
+                                           {"javascript_profile_version",
+                                            source.javascript_runtime_identity().profile_version},
+                                           {"ng_api_version",
+                                            source.javascript_runtime_identity().ng_api_version}}},
+                         {"compiler", json{{"quickjs_release", config.quickjs_release},
+                                            {"quickjs_archive_digest", config.quickjs_archive_digest},
+                                            {"quickjs_build_options", config.quickjs_build_options},
+                                            {"javascript_profile", config.javascript_profile},
+                                            {"javascript_profile_version",
+                                             config.javascript_profile_version},
+                                            {"ng_api_version", config.ng_api_version}}}});
+                diagnostics.throw_error();
+            }
+            validate_sealed_javascript_imports(source, verified_resolution, diagnostics);
+            if (diagnostics.has_errors()) diagnostics.throw_error();
+            json                         document;
+            std::optional<ProgramSource> control_source;
+            try {
+                if (source.kind() == SourceKind::JavaScript) {
+                    auto evaluation = detail::evaluate_javascript_source(source, config.javascript);
+                    document        = std::move(evaluation.document);
+                    if (javascript_budget)
+                        document["declared_budget_requirements"] =
+                            budget_document(*javascript_budget);
+                    if (input_contract) {
+                        document["input_contract"]  = contract_json(*input_contract);
+                        document["output_contract"] = contract_json(*output_contract);
+                    }
+                    if (evaluation.has_control_generator) control_source = source;
+                } else {
+                    document = source.document();
+                }
+            } catch (const detail::JavaScriptCompileError& error) {
+                diagnostics.add(CompilePhase::Source, error.code(), DiagnosticSeverity::Error, "",
+                                error.what(), error.witness(), error.source_span());
+                diagnostics.throw_error();
+            }
+            auto parsed = parse_program(source, document, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             const auto parse_report = detail::RegistrySnapshotAccess::parse_local_report(
                 registry, parsed.core_definition);
@@ -1800,28 +2224,36 @@ struct ProgramCompiler::Impl {
                 throw;
             } catch (const std::exception& error) {
                 diagnostics.add(CompilePhase::Seal, "P_PLAN_TYPED", DiagnosticSeverity::Error,
-                                "/root", "Program plan could not be sealed as typed immutable nodes",
+                                "/root",
+                                "Program plan could not be sealed as typed immutable nodes",
                                 json{{"detail", error.what()}});
                 diagnostics.throw_error();
             }
-            const auto program_hash = canonical_program_hash(parsed, orchestration, sealed);
-            const auto merkle_root  = import_merkle_root(source, diagnostics);
-            auto       source_map   = generated_source_map(source, diagnostics);
+            const auto program_hash = canonical_program_hash(
+                parsed, orchestration, sealed,
+                control_source ? std::optional<std::string>{source.source_hash()} : std::nullopt);
+            const auto merkle_root = import_merkle_root(source, diagnostics);
+            auto       source_map  = generated_source_map(source, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             ProgramBundleData data;
             data.source_kind                    = source.kind();
             data.source_hash                    = source.source_hash();
+            data.control_source                 = control_source;
             data.canonical_program_hash         = program_hash;
             data.compiler_build_id              = config.compiler_build_id;
             data.program_schema_version         = parsed.schema_version;
             data.registry_snapshot_fingerprint  = registry.fingerprint();
             data.module_dependency_merkle_root  = merkle_root;
+            if (source.kind() == SourceKind::JavaScript)
+                data.javascript_runtime = configured_javascript_runtime();
             data.input_contract                 = std::move(parsed.input_contract);
             data.output_contract                = std::move(parsed.output_contract);
             data.orchestration_plan             = std::move(orchestration);
             data.sealed_core_definitions        = {std::move(sealed)};
             data.core_plan_identities           = {{parsed.root_name, compiled_plan}};
             data.capability_effect_closure      = std::move(closure.closure);
+            data.execution_guarantee =
+                control_source ? ExecutionGuarantee::Unmanaged : closure.execution_guarantee;
             data.executable_registry_identities = std::move(closure.identities);
             data.declared_budget_requirements   = std::move(parsed.budgets);
             data.source_map                     = std::move(source_map);
@@ -1846,6 +2278,28 @@ ProgramCompiler::ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfi
     if (has_control_character(impl_->config.compiler_build_id))
         throw std::invalid_argument(
             "Program compiler_build_id must not contain control characters");
+    const auto& javascript_runtime = impl_->config;
+    if (javascript_runtime.quickjs_release.empty() ||
+        javascript_runtime.quickjs_build_options.empty() ||
+        javascript_runtime.javascript_profile.empty() ||
+        javascript_runtime.javascript_profile_version == 0 ||
+        javascript_runtime.ng_api_version == 0) {
+        throw std::invalid_argument("JavaScript runtime identity must be complete");
+    }
+    detail::validate_utf8(javascript_runtime.quickjs_release);
+    detail::validate_utf8(javascript_runtime.quickjs_build_options);
+    detail::validate_utf8(javascript_runtime.javascript_profile);
+    if (!detail::is_sha256_identity(javascript_runtime.quickjs_archive_digest))
+        throw std::invalid_argument("JavaScript QuickJS archive digest must be sha256-pinned");
+    const auto& limits = impl_->config.javascript;
+    if (limits.memory_limit_bytes == 0 || limits.max_stack_bytes == 0 ||
+        limits.max_interrupt_polls == 0 || limits.max_wall_time_ms == 0 ||
+        limits.max_generated_document_bytes == 0) {
+        throw std::invalid_argument("JavaScript compiler limits must be positive");
+    }
+    if (limits.max_stack_bytes > limits.memory_limit_bytes) {
+        throw std::invalid_argument("JavaScript compiler stack limit exceeds memory limit");
+    }
 }
 
 ProgramCompiler::ProgramCompiler(ProgramCompiler&&) noexcept            = default;
@@ -1861,19 +2315,31 @@ const std::string& ProgramCompiler::registry_snapshot_fingerprint() const noexce
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
-    return impl_->compile(source);
+    return impl_->compile(source, nullptr);
 }
 
-ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
+ProgramBundle ProgramCompiler::compile(const ProgramSource& source,
+                                       const RunBudget&          javascript_budget) const {
+    return impl_->compile(source, nullptr, javascript_budget);
+}
+
+ProgramBundle ProgramCompiler::compile(const ProgramSource&  source,
+                                       const RunBudget&      javascript_budget,
+                                       const ContractRecord& input_contract,
+                                       const ContractRecord& output_contract) const {
+    return impl_->compile(source, nullptr, javascript_budget, &input_contract, &output_contract);
+}
+
+ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,
                                        const ModuleResolution& resolution) const {
     auto fail = [&](std::string code, std::string message, json witness) -> ProgramBundle {
         Diagnostic diagnostic;
-        diagnostic.phase                = CompilePhase::Resolve;
-        diagnostic.code                 = std::move(code);
-        diagnostic.severity             = DiagnosticSeverity::Error;
-        diagnostic.primary              = {source.source_id(), "/imports", std::nullopt};
-        diagnostic.message              = std::move(message);
-        diagnostic.witness              = detail::owned_json_copy(witness);
+        diagnostic.phase    = CompilePhase::Resolve;
+        diagnostic.code     = std::move(code);
+        diagnostic.severity = DiagnosticSeverity::Error;
+        diagnostic.primary  = {source.source_id(), "/imports", std::nullopt};
+        diagnostic.message  = std::move(message);
+        diagnostic.witness  = detail::owned_json_copy(witness);
         throw ProgramCompileError({std::move(diagnostic)});
     };
     try {
@@ -1884,9 +2350,9 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
                     json{{"error", error.what()}});
     }
 
-    auto actual_imports   = source.imports();
-    auto resolved_imports = resolution.imports();
-    const auto import_less = [](const auto& lhs, const auto& rhs) {
+    auto       actual_imports   = source.imports();
+    auto       resolved_imports = resolution.imports();
+    const auto import_less      = [](const auto& lhs, const auto& rhs) {
         return std::tie(lhs.source_id, lhs.content_identity) <
                std::tie(rhs.source_id, rhs.content_identity);
     };
@@ -1898,7 +2364,7 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
                     json{{"source_import_count", actual_imports.size()},
                          {"resolved_import_count", resolved_imports.size()}});
 
-    auto compiled = compile(source);
+    auto compiled = impl_->compile(source, &resolution);
     if (compiled.module_dependency_merkle_root() != resolution.dependency_merkle_root())
         return fail("P_IMPORT_UNRESOLVED",
                     "Program module dependency root differs from the resolved closure",
@@ -1909,10 +2375,12 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
     data.source_kind                    = compiled.source_kind();
     data.source_hash                    = compiled.source_hash();
     data.canonical_program_hash         = compiled.canonical_program_hash();
+    data.control_source                 = compiled.control_source();
     data.compiler_build_id              = compiled.compiler_build_id();
     data.program_schema_version         = compiled.program_schema_version();
     data.registry_snapshot_fingerprint  = compiled.registry_snapshot_fingerprint();
     data.module_dependency_merkle_root  = compiled.module_dependency_merkle_root();
+    data.javascript_runtime             = compiled.javascript_runtime();
     data.module_coordinates             = resolution.coordinates();
     data.input_contract                 = compiled.input_contract();
     data.output_contract                = compiled.output_contract();
@@ -1920,6 +2388,7 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
     data.sealed_core_definitions        = compiled.sealed_core_definitions();
     data.core_plan_identities           = compiled.core_plan_identities();
     data.capability_effect_closure      = compiled.capability_effect_closure();
+    data.execution_guarantee            = compiled.execution_guarantee();
     data.executable_registry_identities = compiled.executable_registry_identities();
     data.declared_budget_requirements   = compiled.declared_budget_requirements();
     data.source_map                     = compiled.source_map();

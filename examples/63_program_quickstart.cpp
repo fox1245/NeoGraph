@@ -10,6 +10,7 @@
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>
+#include <neograph/program/store.h>
 
 #include <asio/awaitable.hpp>
 

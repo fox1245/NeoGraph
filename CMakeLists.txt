@@ -111,6 +111,13 @@ endif()
 # find_package() calls are skipped entirely (see line ~258).
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
+# Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
+# while it is being qualified.  It is deliberately separate from the existing
+# Program operation-tree component so Core-only and legacy Program consumers do
+# not acquire a new dependency until the JavaScript cutover is admitted.
+option(NEOGRAPH_BUILD_QUICKJS_CONTROL
+       "Build the experimental embedded QuickJS control runtime"
+       OFF)
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build MCP components (compatibility umbrella)" ON)
 set(_neograph_mcp_component_default ${NEOGRAPH_BUILD_MCP})
@@ -309,6 +316,67 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(asio INTERFACE Threads::Threads)
 
+# QuickJS 2026-06-04 — private implementation detail of the experimental
+# JavaScript control runtime.  Do not add quickjs-libc.c: it supplies the
+# standalone std/os modules, filesystem/process helpers, and module loader
+# that the sealed NeoGraph contexts must never expose.  This target is neither
+# exported nor installed; Core does not link it, directly or transitively.
+if(NEOGRAPH_BUILD_QUICKJS_CONTROL AND WIN32)
+    message(FATAL_ERROR
+        "NEOGRAPH_BUILD_QUICKJS_CONTROL is POSIX-only during Q0: the pinned "
+        "upstream QuickJS sources use POSIX timing and stack APIs. Leave it "
+        "OFF on native Windows until a separately qualified port is added.")
+endif()
+
+if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+    # Compile through source wrappers that apply a private C symbol prefix
+    # before the pristine pinned sources are preprocessed. This is portable
+    # across object formats and prevents static consumers from capturing (or
+    # colliding with) another QuickJS engine; visibility alone only protects
+    # the shared-library export table.
+    set(_neograph_quickjs_wrapper_dir ${DEPS_DIR}/quickjs/neograph)
+    add_library(neograph_quickjs OBJECT
+        ${_neograph_quickjs_wrapper_dir}/quickjs.c
+        ${_neograph_quickjs_wrapper_dir}/cutils.c
+        ${_neograph_quickjs_wrapper_dir}/dtoa.c
+        ${_neograph_quickjs_wrapper_dir}/libregexp.c
+        ${_neograph_quickjs_wrapper_dir}/libunicode.c
+    )
+    target_include_directories(neograph_quickjs PRIVATE
+        ${_neograph_quickjs_wrapper_dir}
+        ${DEPS_DIR}/quickjs)
+    target_compile_definitions(neograph_quickjs PRIVATE
+        CONFIG_VERSION=\"2026-06-04\")
+    set_target_properties(neograph_quickjs PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS ON
+        POSITION_INDEPENDENT_CODE ON
+        # CMP0063 is NEW through cmake_minimum_required(3.16), so the
+        # object files retain hidden C visibility when absorbed into a
+        # shared neograph_program. Public NeoGraph APIs are C++ symbols
+        # explicitly exported through the component API macros and remain unaffected.
+        C_VISIBILITY_PRESET hidden)
+    function(_neograph_attach_quickjs_runtime target)
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:neograph_quickjs>)
+        target_link_libraries(${target} PRIVATE Threads::Threads)
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(${target} PRIVATE m)
+        endif()
+    endfunction()
+    if(MSVC)
+        target_compile_definitions(neograph_quickjs PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    # Upstream's opcode-set mask macros intentionally pack bits into a signed
+    # int (for example M4(...) in quickjs.c). UBSan's shift check reports that
+    # representation detail even though the engine treats the result strictly
+    # as a bit mask. Keep ASan and every other UBSan check enabled; do not
+    # carry a source fork merely to rewrite upstream opcode macros.
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(neograph_quickjs PRIVATE -fno-sanitize=shift)
+    endif()
+endif()
+
 # OpenSSL — required by httplib for HTTPS, and by neograph::async
 # (asio::ssl in the async HTTP client). Conditional so a minimal-core
 # build (ASYNC/LLM/MCP/A2A all OFF) doesn't need libssl-dev on the host.
@@ -477,13 +545,19 @@ add_library(neograph::core ALIAS neograph_core)
 # ===========================================================================
 if(NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_program
+        src/program/authoring.cpp
         src/program/canonical_json.cpp
+        src/program/command.cpp
+        src/program/command_journal.cpp
         src/program/contract.cpp
         src/program/bundle.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp
         src/program/task_graph_proposal.cpp
         src/program/task_graph_fragment.cpp
+        src/program/javascript.cpp
+        src/program/native.cpp
+        src/program/bundle.cpp
         src/program/module.cpp
         src/program/version.cpp
         src/program/registry.cpp
@@ -518,6 +592,12 @@ if(NEOGRAPH_BUILD_PROGRAM)
         target_compile_definitions(neograph_program INTERFACE NEOGRAPH_STATIC_BUILD)
     endif()
     target_link_libraries(neograph_program PUBLIC neograph_core)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_include_directories(neograph_program PRIVATE
+            ${_neograph_quickjs_wrapper_dir})
+        target_compile_definitions(neograph_program PRIVATE NEOGRAPH_PROGRAM_HAS_QUICKJS=1)
+        _neograph_attach_quickjs_runtime(neograph_program)
+    endif()
     add_library(neograph::program ALIAS neograph_program)
 
     # Persistent Program lifecycle adapter. Kept separate from the core
@@ -1681,11 +1761,31 @@ option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
+    add_executable(bench_core_quickjs_probe
+        benchmarks/bench_core_quickjs_probe.cpp)
+    target_link_libraries(bench_core_quickjs_probe PRIVATE neograph::core)
+    target_compile_definitions(bench_core_quickjs_probe PRIVATE
+        NEOGRAPH_BENCH_QUICKJS_ENABLED=$<BOOL:${NEOGRAPH_BUILD_QUICKJS_CONTROL}>)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        add_executable(bench_quickjs_primitives
+            benchmarks/bench_quickjs_primitives.cpp)
+        target_include_directories(bench_quickjs_primitives PRIVATE
+            ${_neograph_quickjs_wrapper_dir})
+        target_compile_features(bench_quickjs_primitives PRIVATE cxx_std_17)
+        _neograph_attach_quickjs_runtime(bench_quickjs_primitives)
+    endif()
     if(NEOGRAPH_BUILD_PROGRAM)
         add_executable(bench_program benchmarks/bench_program.cpp)
         target_link_libraries(bench_program PRIVATE neograph::program)
         add_executable(bench_program_dispatch benchmarks/bench_program_dispatch.cpp)
         target_link_libraries(bench_program_dispatch PRIVATE neograph::program)
+        if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+            add_executable(bench_quickjs_control
+                benchmarks/bench_quickjs_control.cpp)
+            target_include_directories(bench_quickjs_control PRIVATE
+                ${PROJECT_SOURCE_DIR}/src/program)
+            target_link_libraries(bench_quickjs_control PRIVATE neograph::program)
+        endif()
         add_executable(bench_program_serialization_poc
             benchmarks/bench_program_serialization_poc.cpp)
         target_link_libraries(bench_program_serialization_poc PRIVATE neograph::program)
@@ -1843,14 +1943,20 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     if(_neograph_benchmark_build_type STREQUAL "")
         set(_neograph_benchmark_build_type "unspecified")
     endif()
-    set(_neograph_benchmark_targets bench_neograph)
+    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe)
     if(NEOGRAPH_BUILD_PROGRAM)
         list(APPEND _neograph_benchmark_targets
             bench_program bench_program_dispatch
             bench_program_serialization_poc bench_program_binary_poc)
+        if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+            list(APPEND _neograph_benchmark_targets bench_quickjs_control)
+        endif()
         if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
             list(APPEND _neograph_benchmark_targets bench_program_codec_poc)
         endif()
+    endif()
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        list(APPEND _neograph_benchmark_targets bench_quickjs_primitives)
     endif()
     foreach(_neograph_benchmark_target IN LISTS _neograph_benchmark_targets)
         target_compile_definitions(${_neograph_benchmark_target} PRIVATE

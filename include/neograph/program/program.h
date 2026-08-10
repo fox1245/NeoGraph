@@ -9,10 +9,13 @@
  */
 #pragma once
 
+#include <neograph/program/authoring.h>
 #include <neograph/graph/node.h>
 #include <neograph/program/admission.h>
 #include <neograph/program/bundle.h>
 #include <neograph/program/catalog.h>
+#include <neograph/program/command.h>
+#include <neograph/program/command_journal.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/diagnostic.h>
 #include <neograph/program/event.h>
@@ -23,6 +26,7 @@
 #include <neograph/program/migration.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/module.h>
+#include <neograph/program/native.h>
 #include <neograph/program/replay.h>
 #include <neograph/program/registry.h>
 #include <neograph/program/run_record.h>

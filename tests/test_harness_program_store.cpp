@@ -720,3 +720,35 @@ TEST(HarnessProgramStoreTest, ReopenRejectsTamperAndMissingPublishedOutbox) {
                      std::invalid_argument);
     }
 }
+
+TEST(HarnessProgramStoreTest, SqliteDurablyLoadsJavaScriptCommandJournalByOwnerAndSequence) {
+    TempDb  db;
+    Fixture fixture;
+    auto    initial = initial_publication(fixture, "run-command");
+    initial.commands.emplace_back(ProgramJavaScriptCommandJournalEntryData{
+        .sequence        = 1,
+        .bundle_id       = fixture.bundle_value.id(),
+        .command_ordinal = 1,
+        .command         = JavaScriptCommand::emit("store:command:1", json{{"value", "first"}}),
+    });
+    const auto expected = initial.commands.front().serialize_canonical();
+
+    {
+        auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+                  ProgramTransitionPublishResult::Published);
+    }
+
+    auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto transitions =
+        require_harness_program_adapter_store(reopened)->bind_program_transitions(fixture.artifact);
+    const auto commands =
+        transitions->load_javascript_commands(fixture.artifact.owner_scope(), "run-command");
+    ASSERT_EQ(commands.size(), 1U);
+    EXPECT_EQ(commands.front().serialize_canonical(), expected);
+    EXPECT_TRUE(
+        transitions->load_javascript_commands(fixture.artifact.owner_scope(), "run-command", 1)
+            .empty());
+    EXPECT_TRUE(transitions->load_javascript_commands("tenant-other", "run-command").empty());
+}

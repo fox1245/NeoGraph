@@ -98,6 +98,143 @@ bool valid_effect_outbox_binding(
     return pending && pending->state() == program::ProgramPendingState::Awaiting &&
            effects.size() == 1 && effects.front().effect() == *pending;
 }
+bool same_command_coordinate(const program::ProgramJavaScriptCommandJournalEntry& lhs,
+                             const program::ProgramJavaScriptCommandJournalEntry& rhs) {
+    return lhs.bundle_id() == rhs.bundle_id() && lhs.command_ordinal() == rhs.command_ordinal() &&
+           lhs.coordinate_id() == rhs.coordinate_id() && lhs.command() == rhs.command() &&
+           lhs.effect_identity() == rhs.effect_identity();
+}
+
+bool valid_command_history_append(
+    const program::ProgramRunRecord&                                  run,
+    const std::vector<program::ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const std::vector<program::ProgramJavaScriptCommandJournalEntry>& new_commands) {
+    if (new_commands.empty()) return true;
+    auto          prior             = old_commands;
+    std::uint64_t expected_sequence = 0;
+    std::uint64_t highest_ordinal   = 0;
+    for (const auto& existing : prior) {
+        if (existing.bundle_id() != run.bundle_id() ||
+            existing.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+        highest_ordinal = std::max(highest_ordinal, existing.command_ordinal());
+    }
+    for (const auto& entry : new_commands) {
+        if (entry.bundle_id() != run.bundle_id() || entry.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+        const auto found = std::find_if(prior.rbegin(), prior.rend(), [&](const auto& previous) {
+            return previous.command_ordinal() == entry.command_ordinal();
+        });
+        if (found == prior.rend()) {
+            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
+                (!prior.empty() && prior.back().pending())) {
+                return false;
+            }
+            highest_ordinal = entry.command_ordinal();
+            prior.push_back(entry);
+            continue;
+        }
+        if (!found->pending() || !entry.completed() || !same_command_coordinate(*found, entry)) {
+            return false;
+        }
+        prior.push_back(entry);
+    }
+    return true;
+}
+
+bool budget_is_empty(const program::RunBudget& budget) noexcept {
+    return budget == program::RunBudget{};
+}
+
+bool budget_increased(const program::RunBudget& next, const program::RunBudget& previous) noexcept {
+    return next.wall_time_ms > previous.wall_time_ms || next.model_tokens > previous.model_tokens ||
+           next.monetary_microunits > previous.monetary_microunits ||
+           next.max_concurrency > previous.max_concurrency ||
+           next.max_program_operations > previous.max_program_operations ||
+           next.max_core_steps > previous.max_core_steps ||
+           next.max_dynamic_compiles > previous.max_dynamic_compiles ||
+           next.max_child_depth > previous.max_child_depth ||
+           next.max_total_children > previous.max_total_children;
+}
+
+std::optional<program::ProgramUsage> command_terminal_usage(
+    const program::ProgramJavaScriptCommandJournalEntry& entry) {
+    const auto terminal_result = entry.terminal_result();
+    if (!entry.completed() || !terminal_result || !terminal_result->contains("usage") ||
+        !terminal_result->at("usage").is_object()) {
+        return std::nullopt;
+    }
+    const auto& usage = terminal_result->at("usage");
+    const auto  read  = [&](std::string_view key) -> std::optional<std::uint64_t> {
+        const std::string owned(key);
+        if (!usage.contains(owned) || !usage.at(owned).is_number_unsigned()) return std::nullopt;
+        return usage.at(owned).get<std::uint64_t>();
+    };
+    const auto wall       = read("wall_time_ms");
+    const auto model      = read("model_tokens");
+    const auto money      = read("monetary_microunits");
+    const auto operations = read("program_operations");
+    const auto steps      = read("core_steps");
+    const auto peak       = read("peak_concurrency");
+    if (!wall || !model || !money || !operations || !steps || !peak ||
+        *peak > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return program::ProgramUsage{*wall, *model, *money,
+                                 0,     *steps, static_cast<std::uint32_t>(*peak)};
+}
+
+bool checkpoint_event_matches(const std::vector<program::ProgramEvent>&             events,
+                              const std::optional<program::CoreCheckpointIdentity>& checkpoint) {
+    if (!checkpoint) return false;
+    return std::any_of(events.begin(), events.end(), [&](const auto& event) {
+        return event.kind == program::ProgramEventKind::CheckpointPublished &&
+               std::get<program::ProgramCheckpointEvent>(event.payload).checkpoint == *checkpoint;
+    });
+}
+
+bool valid_command_reservation_transition(
+    const program::ProgramJournalRecord&                              previous_journal,
+    const program::ProgramJournalRecord&                              next_journal,
+    const std::vector<program::ProgramJavaScriptCommandJournalEntry>& old_commands,
+    const program::ProgramTransitionPublication&                      publication) {
+    const bool increased =
+        budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
+    const bool ordinary =
+        program::is_valid_program_journal_transition(previous_journal, next_journal);
+    const auto completed = std::find_if(publication.commands.begin(), publication.commands.end(),
+                                        [](const auto& entry) { return entry.completed(); });
+    if (completed != publication.commands.end()) {
+        if (publication.commands.size() != 1 ||
+            !budget_is_empty(next_journal.inflight_reservation)) {
+            return false;
+        }
+        if (budget_is_empty(previous_journal.inflight_reservation)) return ordinary && !increased;
+        const auto usage = command_terminal_usage(*completed);
+        return usage && program::is_valid_program_journal_reservation_settlement(
+                            previous_journal, next_journal, *usage);
+    }
+    if (!increased) return ordinary;
+    if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
+        old_commands.back().command().kind() != program::JavaScriptCommandKind::CallCore ||
+        publication.run_record.continuation().state != program::ContinuationState::Interrupted ||
+        !publication.run_record.terminal_result() ||
+        publication.run_record.terminal_result()->status() !=
+            program::ProgramTerminalStatus::Interrupted ||
+        !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
+        (previous_journal.core_checkpoint &&
+         previous_journal.core_checkpoint == next_journal.core_checkpoint)) {
+        return false;
+    }
+    auto usage               = publication.run_record.terminal_result()->usage();
+    usage.program_operations = 0;
+    return program::is_valid_program_journal_reservation_settlement(previous_journal, next_journal,
+                                                                    usage);
+}
 
 program::ContractManifest contract_manifest_for_artifact(
     const HarnessProgramArtifactRecord& artifact) {
@@ -509,6 +646,19 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_effects (
     FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
         ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS neograph_harness_program_javascript_commands (
+    run_id        TEXT    NOT NULL,
+    sequence      INTEGER NOT NULL,
+    owner_scope   TEXT    NOT NULL,
+    bundle_id     TEXT    NOT NULL,
+    coordinate_id TEXT    NOT NULL,
+    record_id     TEXT    NOT NULL,
+    record_json   TEXT    NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    UNIQUE (run_id, record_id),
+    FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
+        ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
     run_id             TEXT PRIMARY KEY,
     owner_scope        TEXT NOT NULL,
@@ -666,6 +816,48 @@ public:
         }
         return values;
     }
+    std::vector<program::ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::uint64_t    after_sequence) const override {
+        if (owner_scope.empty() || run_id.empty()) return {};
+        const auto wrapper = load_wrapper(owner_scope, run_id);
+        if (!wrapper) return {};
+        if (after_sequence > static_cast<std::uint64_t>(INT64_MAX)) {
+            throw std::invalid_argument(
+                "Program JavaScript command sequence is out of SQLite range");
+        }
+        std::lock_guard lock(impl_->mutex);
+        Statement       query(impl_->db,
+                              "SELECT c.sequence, c.record_json, c.owner_scope, c.bundle_id, "
+                                    "c.coordinate_id, c.record_id "
+                                    "FROM neograph_harness_program_javascript_commands c "
+                                    "JOIN neograph_harness_runs r ON r.run_id=c.run_id "
+                                    "WHERE r.owner_scope=? AND r.run_id=? AND c.sequence>? "
+                                    "ORDER BY c.sequence");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, program_storage_run_id(owner_scope, run_id));
+        query.bind_int64(3, static_cast<std::int64_t>(after_sequence));
+        std::vector<program::ProgramJavaScriptCommandJournalEntry> values;
+        auto expected_sequence = after_sequence;
+        while (true) {
+            const auto result = query.step();
+            if (result == SQLITE_DONE) break;
+            if (result != SQLITE_ROW) {
+                throw_sqlite_error(impl_->db, "Program JavaScript command read failed");
+            }
+            auto command = program::ProgramJavaScriptCommandJournalEntry::parse(query.text(1));
+            if (expected_sequence == std::numeric_limits<std::uint64_t>::max() ||
+                command.sequence() != ++expected_sequence ||
+                command.sequence() != static_cast<std::uint64_t>(query.int64(0)) ||
+                query.text(2) != owner_scope || command.bundle_id() != query.text(3) ||
+                command.coordinate_id() != query.text(4) || command.id() != query.text(5)) {
+                throw std::invalid_argument("Stored Program JavaScript command binding is corrupt");
+            }
+            values.push_back(std::move(command));
+        }
+        return values;
+    }
 
     std::optional<program::MigrationPlan> load_migration_plan(
         std::string_view owner_scope, std::string_view run_id) const override {
@@ -718,6 +910,11 @@ public:
             }
             for (const auto& effect : publication.effects) {
                 if (effect.sequence() > static_cast<std::uint64_t>(INT64_MAX)) {
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            }
+            for (const auto& command : publication.commands) {
+                if (command.sequence() > static_cast<std::uint64_t>(INT64_MAX)) {
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
             }
@@ -813,6 +1010,8 @@ public:
                     publication.run_record.effect_sequence() != publication.effects.size() ||
                     publication.events.front().sequence != 1 ||
                     (!publication.effects.empty() && publication.effects.front().sequence() != 1) ||
+                    !valid_command_history_append(publication.run_record, {},
+                                                  publication.commands) ||
                     (new_terminal && !publishes_terminal_event) ||
                     (publication.run_record.fork_receipt() && !publication.migration_plan)) {
                     impl_->exec("ROLLBACK;");
@@ -847,7 +1046,8 @@ public:
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
-                if (publication.events.empty() && publication.effects.empty()) {
+                if (publication.events.empty() && publication.effects.empty() &&
+                    publication.commands.empty()) {
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
@@ -880,9 +1080,31 @@ public:
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
+                std::vector<program::ProgramJavaScriptCommandJournalEntry> previous_commands;
+                Statement previous_command_rows(impl_->db,
+                                                "SELECT record_json FROM "
+                                                "neograph_harness_program_javascript_commands "
+                                                "WHERE run_id=? ORDER BY sequence");
+                previous_command_rows.bind_text(1, storage_run_id);
+                while (true) {
+                    const auto command_result = previous_command_rows.step();
+                    if (command_result == SQLITE_DONE) break;
+                    if (command_result != SQLITE_ROW) {
+                        throw_sqlite_error(impl_->db,
+                                           "Program JavaScript command history read failed");
+                    }
+                    previous_commands.push_back(
+                        program::ProgramJavaScriptCommandJournalEntry::parse(
+                            previous_command_rows.text(0)));
+                }
+                if (!valid_command_history_append(previous_run, previous_commands,
+                                                  publication.commands) ||
+                    !valid_command_reservation_transition(previous, publication.journal_record,
+                                                          previous_commands, publication)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
                 if (previous.id != expected_journal_head ||
-                    !program::is_valid_program_journal_transition(previous,
-                                                                  publication.journal_record) ||
                     publication.run_record.created_at_ms() != previous_run.created_at_ms() ||
                     publication.run_record.updated_at_ms() < previous_run.updated_at_ms() ||
                     publication.run_record.binding_fingerprint() !=
@@ -973,6 +1195,9 @@ public:
                 insert_effect(storage_run_id, owner_scope, effect);
             }
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterEffectWrite);
+            for (const auto& command : publication.commands) {
+                insert_javascript_command(storage_run_id, owner_scope, command);
+            }
             maybe_fail(SqliteHarnessProgramFaultPoint::BeforeCommit);
             impl_->exec("COMMIT;");
             return program::ProgramTransitionPublishResult::Published;
@@ -1062,6 +1287,22 @@ private:
             stored.bind_text(4, run.owner_scope());
             if (stored.step() != SQLITE_ROW || stored.text(0) != effect.serialize_canonical()) {
                 throw std::invalid_argument("Stored Program publication effect is missing");
+            }
+        }
+        for (const auto& command : publication.commands) {
+            Statement stored(impl_->db,
+                             "SELECT record_json FROM neograph_harness_program_javascript_commands "
+                             "WHERE run_id=? AND sequence=? AND record_id=? AND owner_scope=? "
+                             "AND bundle_id=? AND coordinate_id=?");
+            stored.bind_text(1, storage_run_id);
+            stored.bind_int64(2, static_cast<std::int64_t>(command.sequence()));
+            stored.bind_text(3, command.id());
+            stored.bind_text(4, run.owner_scope());
+            stored.bind_text(5, run.bundle_id());
+            stored.bind_text(6, command.coordinate_id());
+            if (stored.step() != SQLITE_ROW || stored.text(0) != command.serialize_canonical()) {
+                throw std::invalid_argument(
+                    "Stored Program publication JavaScript command is missing");
             }
         }
 
@@ -1167,6 +1408,25 @@ private:
         insert.bind_text(5, effect.serialize_canonical());
         if (insert.step() != SQLITE_DONE) {
             throw_sqlite_error(impl_->db, "Program effect insert failed");
+        }
+    }
+    void insert_javascript_command(const std::string&                                   run_id,
+                                   std::string_view                                     owner_scope,
+                                   const program::ProgramJavaScriptCommandJournalEntry& command) {
+        Statement insert(
+            impl_->db,
+            "INSERT INTO neograph_harness_program_javascript_commands "
+            "(run_id, sequence, owner_scope, bundle_id, coordinate_id, record_id, record_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)");
+        insert.bind_text(1, run_id);
+        insert.bind_int64(2, static_cast<std::int64_t>(command.sequence()));
+        insert.bind_text(3, std::string(owner_scope));
+        insert.bind_text(4, command.bundle_id());
+        insert.bind_text(5, command.coordinate_id());
+        insert.bind_text(6, command.id());
+        insert.bind_text(7, command.serialize_canonical());
+        if (insert.step() != SQLITE_DONE) {
+            throw_sqlite_error(impl_->db, "Program JavaScript command insert failed");
         }
     }
 

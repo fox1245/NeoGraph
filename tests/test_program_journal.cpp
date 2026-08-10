@@ -36,7 +36,7 @@ ProgramJournalRecord start_record() {
                                  1,
                                  ProgramContinuation{"root", ContinuationState::Running, 1},
                                  remaining_budget(),
-                                 remaining_budget(),
+                                 empty_budget(),
                                  std::nullopt,
                                  10});
 }
@@ -112,7 +112,7 @@ TEST(ProgramJournalTest, ResumeTransitionPreservesCheckpointAndIncrementsAttempt
     const auto resumed = ProgramJournalRecord::create(ProgramJournalRecordData{
         interrupted.id, interrupted.run_id, interrupted.program_version_id, interrupted.bundle_id,
         3, ProgramContinuation{"root", ContinuationState::Running, 2}, interrupted.remaining_budget,
-        interrupted.remaining_budget, interrupted.core_checkpoint, 30});
+        empty_budget(), interrupted.core_checkpoint, 30});
     ASSERT_EQ(journal.compare_append(interrupted.id, resumed), JournalAppendResult::Appended);
     EXPECT_EQ(journal.compare_append(start.id, interrupted), JournalAppendResult::Conflict);
     EXPECT_EQ(journal.compare_append(interrupted.id, resumed), JournalAppendResult::AlreadyPresent);
@@ -134,20 +134,28 @@ TEST(ProgramJournalTest, ResumeTransitionPreservesCheckpointAndIncrementsAttempt
 TEST(ProgramJournalTest, RejectsInvalidSequenceBudgetAndCheckpointTransitions) {
     const auto start = start_record();
 
-    auto oversized_reservation = remaining_budget();
-    oversized_reservation.wall_time_ms += 1;
-    EXPECT_THROW((void)ProgramJournalRecord::create(ProgramJournalRecordData{
-                     {},
-                     start.run_id,
-                     start.program_version_id,
-                     start.bundle_id,
-                     1,
-                     ProgramContinuation{"root", ContinuationState::Running, 1},
-                     remaining_budget(),
-                     oversized_reservation,
-                     std::nullopt,
-                     10}),
-                 std::invalid_argument);
+    auto fully_reserved                   = remaining_budget();
+    auto unavailable                      = remaining_budget();
+    unavailable.wall_time_ms              = 0;
+    fully_reserved.model_tokens           = 0;
+    fully_reserved.monetary_microunits    = 0;
+    fully_reserved.max_concurrency        = 0;
+    fully_reserved.max_program_operations = 0;
+    fully_reserved.max_core_steps         = 0;
+    fully_reserved.max_dynamic_compiles   = 0;
+    fully_reserved.max_child_depth        = 0;
+    fully_reserved.max_total_children     = 0;
+    EXPECT_NO_THROW((void)ProgramJournalRecord::create(
+        ProgramJournalRecordData{{},
+                                 start.run_id,
+                                 start.program_version_id,
+                                 start.bundle_id,
+                                 1,
+                                 ProgramContinuation{"root", ContinuationState::Running, 1},
+                                 unavailable,
+                                 fully_reserved,
+                                 std::nullopt,
+                                 10}));
 
     EXPECT_THROW((void)ProgramJournalRecord::create(ProgramJournalRecordData{
                      start.id, start.run_id, start.program_version_id, start.bundle_id, 2,
@@ -176,6 +184,95 @@ TEST(ProgramJournalTest, RejectsInvalidSequenceBudgetAndCheckpointTransitions) {
                                  increased_budget, empty_budget(), checkpoint(), 20});
     EXPECT_EQ(journal.compare_append(start.id, replenished), JournalAppendResult::Conflict);
 }
+TEST(ProgramJournalTest, ReservationSettlementRefundRequiresMeasuredUsage) {
+    InMemoryProgramJournal journal;
+    const auto             start = start_record();
+    ASSERT_EQ(journal.compare_append({}, start), JournalAppendResult::Appended);
+
+    auto available         = remaining_budget();
+    available.wall_time_ms = 9000;
+    RunBudget reservation;
+    reservation.wall_time_ms = 1000;
+    const auto pending       = ProgramJournalRecord::create(
+        ProgramJournalRecordData{start.id, start.run_id, start.program_version_id, start.bundle_id,
+                                 2, ProgramContinuation{"root", ContinuationState::Running, 1},
+                                 available, reservation, std::nullopt, 20});
+    ASSERT_EQ(journal.compare_append(start.id, pending), JournalAppendResult::Appended);
+
+    auto refunded              = remaining_budget();
+    refunded.wall_time_ms      = 9500;
+    const auto         settled = ProgramJournalRecord::create(ProgramJournalRecordData{
+        pending.id, pending.run_id, pending.program_version_id, pending.bundle_id, 3,
+        ProgramContinuation{"root", ContinuationState::Running, 1}, refunded, empty_budget(),
+        std::nullopt, 30});
+    const ProgramUsage measured{500, 0, 0, 0, 0, 0};
+    EXPECT_FALSE(is_valid_program_journal_transition(pending, settled));
+    EXPECT_TRUE(is_valid_program_journal_reservation_settlement(pending, settled, measured));
+    EXPECT_EQ(journal.compare_append(pending.id, settled), JournalAppendResult::Conflict);
+
+    refunded.wall_time_ms    = 9501;
+    const auto over_refunded = ProgramJournalRecord::create(ProgramJournalRecordData{
+        pending.id, pending.run_id, pending.program_version_id, pending.bundle_id, 3,
+        ProgramContinuation{"root", ContinuationState::Running, 1}, refunded, empty_budget(),
+        std::nullopt, 30});
+    EXPECT_FALSE(is_valid_program_journal_reservation_settlement(pending, over_refunded, measured));
+}
+TEST(ProgramJournalTest, ReservationSettlementMayAdvanceToAnotherThreadOfSameCore) {
+    auto available         = remaining_budget();
+    available.wall_time_ms = 9000;
+    RunBudget reservation;
+    reservation.wall_time_ms    = 1000;
+    const auto first_checkpoint = checkpoint();
+    const auto pending          = ProgramJournalRecord::create(
+        ProgramJournalRecordData{{},
+                                 "run-1",
+                                 digest('1'),
+                                 digest('2'),
+                                 1,
+                                 ProgramContinuation{"root", ContinuationState::Running, 1},
+                                 available,
+                                 reservation,
+                                 first_checkpoint,
+                                 20});
+
+    auto refunded                  = remaining_budget();
+    refunded.wall_time_ms          = 9500;
+    auto next_checkpoint           = first_checkpoint;
+    next_checkpoint.core_thread_id = "core-thread-2";
+    next_checkpoint.checkpoint_id  = "checkpoint-2";
+    const auto         settled     = ProgramJournalRecord::create(ProgramJournalRecordData{
+        pending.id, pending.run_id, pending.program_version_id, pending.bundle_id, 2,
+        ProgramContinuation{"root", ContinuationState::Running, 1}, refunded, empty_budget(),
+        next_checkpoint, 30});
+    const ProgramUsage measured{500, 0, 0, 0, 0, 0};
+    EXPECT_TRUE(is_valid_program_journal_reservation_settlement(pending, settled, measured));
+
+    next_checkpoint.core_generation_id = digest('9');
+    const auto wrong_core              = ProgramJournalRecord::create(ProgramJournalRecordData{
+        pending.id, pending.run_id, pending.program_version_id, pending.bundle_id, 2,
+        ProgramContinuation{"root", ContinuationState::Running, 1}, refunded, empty_budget(),
+        next_checkpoint, 30});
+    EXPECT_FALSE(is_valid_program_journal_reservation_settlement(pending, wrong_core, measured));
+}
+TEST(ProgramJournalTest, UnresolvedExternalWorkRetainsDurableReservation) {
+    const auto start     = start_record();
+    auto       available = start.remaining_budget;
+    available.wall_time_ms -= 1000;
+    RunBudget reservation;
+    reservation.wall_time_ms = 1000;
+    const auto interrupted   = ProgramJournalRecord::create(ProgramJournalRecordData{
+        start.id, start.run_id, start.program_version_id, start.bundle_id, 2,
+        ProgramContinuation{"root", ContinuationState::Interrupted, start.continuation.attempt},
+        available, reservation, checkpoint(), 20});
+    EXPECT_TRUE(is_valid_program_journal_transition(start, interrupted));
+
+    EXPECT_THROW(
+        (void)ProgramJournalRecord::create(ProgramJournalRecordData{
+            start.id, start.run_id, start.program_version_id, start.bundle_id, 2,
+            ProgramContinuation{"root", ContinuationState::Completed, start.continuation.attempt},
+            available, reservation, checkpoint(), 20}),
+        std::invalid_argument);
+}
 
 TEST(ProgramJournalTest, RejectsDroppingPublishedCheckpointOnResumeTransition) {
     InMemoryProgramJournal journal;
@@ -188,7 +285,7 @@ TEST(ProgramJournalTest, RejectsDroppingPublishedCheckpointOnResumeTransition) {
         (void)ProgramJournalRecord::create(ProgramJournalRecordData{
             interrupted.id, interrupted.run_id, interrupted.program_version_id,
             interrupted.bundle_id, 3, ProgramContinuation{"root", ContinuationState::Running, 2},
-            interrupted.remaining_budget, interrupted.remaining_budget, std::nullopt, 30}),
+            interrupted.remaining_budget, empty_budget(), std::nullopt, 30}),
         std::invalid_argument);
 }
 
@@ -230,7 +327,7 @@ TEST(ProgramJournalTest, InterruptedEventFailureCompetesAtomicallyWithResume) {
     const auto resumed = ProgramJournalRecord::create(ProgramJournalRecordData{
         interrupted.id, interrupted.run_id, interrupted.program_version_id, interrupted.bundle_id,
         3, ProgramContinuation{"root", ContinuationState::Running, 2}, interrupted.remaining_budget,
-        interrupted.remaining_budget, interrupted.core_checkpoint, 30});
+        empty_budget(), interrupted.core_checkpoint, 30});
 
     std::barrier ready(3);
     auto         append = [&](ProgramJournalRecord record) {
@@ -298,16 +395,9 @@ TEST(ProgramJournalTest, AmbiguousEffectReconciliationPreservesExactCheckpoint) 
               JournalAppendResult::Appended);
 
     const auto resumed = ProgramJournalRecord::create(ProgramJournalRecordData{
-        unknown.id,
-        unknown.run_id,
-        unknown.program_version_id,
-        unknown.bundle_id,
-        5,
-        ProgramContinuation{"root", ContinuationState::Running, 2},
-        unknown.remaining_budget,
-        unknown.remaining_budget,
-        unknown.core_checkpoint,
-        50});
+        unknown.id, unknown.run_id, unknown.program_version_id, unknown.bundle_id, 5,
+        ProgramContinuation{"root", ContinuationState::Running, 2}, unknown.remaining_budget,
+        empty_budget(), unknown.core_checkpoint, 50});
     EXPECT_EQ(journal.compare_append(unknown.id, resumed),
               JournalAppendResult::Appended);
 }

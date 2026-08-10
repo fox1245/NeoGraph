@@ -10,13 +10,13 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
-#include <functional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -101,8 +101,7 @@ std::vector<ExecutableIdentity> runtime_binding_identities(
     const std::vector<ExecutableIdentity>& closure) {
     std::vector<ExecutableIdentity> result;
     for (const auto& identity : closure) {
-        if (identity.kind == ExecutableKind::Provider ||
-            identity.kind == ExecutableKind::Tool ||
+        if (identity.kind == ExecutableKind::Provider || identity.kind == ExecutableKind::Tool ||
             identity.kind == ExecutableKind::Imported) {
             result.push_back(identity);
         }
@@ -110,7 +109,6 @@ std::vector<ExecutableIdentity> runtime_binding_identities(
     std::sort(result.begin(), result.end(), identity_less);
     return result;
 }
-
 
 void validate_capability_binding(const std::vector<ExecutableIdentity>& requested,
                                  CatalogCapabilityBinding&              binding,
@@ -121,8 +119,7 @@ void validate_capability_binding(const std::vector<ExecutableIdentity>& requeste
             if (receipt.executable.kind != ExecutableKind::Provider &&
                 receipt.executable.kind != ExecutableKind::Tool &&
                 receipt.executable.kind != ExecutableKind::Imported) {
-                throw std::invalid_argument(
-                    "executable kind must be Provider, Tool, or Imported");
+                throw std::invalid_argument("executable kind must be Provider, Tool, or Imported");
             }
             detail::validate_token(receipt.executable.name, "Capability executable name");
             if (!detail::is_semantic_version(receipt.executable.semantic_version)) {
@@ -146,17 +143,14 @@ void validate_capability_binding(const std::vector<ExecutableIdentity>& requeste
     for (std::size_t index = 0; index < binding.receipts.size(); ++index) {
         const auto& receipt = binding.receipts[index];
         if (!detail::is_sha256_identity(receipt.binding_identity)) {
-            diagnostics.add(
-                "P_BINDING_IDENTITY", "/capability_bindings/" + std::to_string(index),
-                "Capability binding identity must be a sha256 identity",
-                json{{"executable", identity_json(receipt.executable)},
-                     {"binding_identity", receipt.binding_identity}});
+            diagnostics.add("P_BINDING_IDENTITY", "/capability_bindings/" + std::to_string(index),
+                            "Capability binding identity must be a sha256 identity",
+                            json{{"executable", identity_json(receipt.executable)},
+                                 {"binding_identity", receipt.binding_identity}});
         }
-        if (index > 0 &&
-            binding.receipts[index - 1].executable.kind == receipt.executable.kind &&
+        if (index > 0 && binding.receipts[index - 1].executable.kind == receipt.executable.kind &&
             binding.receipts[index - 1].executable.name == receipt.executable.name) {
-            diagnostics.add("P_BINDING_DUPLICATE",
-                            "/capability_bindings/" + std::to_string(index),
+            diagnostics.add("P_BINDING_DUPLICATE", "/capability_bindings/" + std::to_string(index),
                             "Capability binding contains a duplicate executable identity",
                             identity_json(receipt.executable));
         }
@@ -178,10 +172,9 @@ void validate_capability_binding(const std::vector<ExecutableIdentity>& requeste
                         json{{"expected", std::move(expected)}, {"actual", std::move(actual)}});
     }
 
-    const auto provider_count = static_cast<std::size_t>(
-        std::count_if(requested.begin(), requested.end(), [](const auto& identity) {
-            return identity.kind == ExecutableKind::Provider;
-        }));
+    const auto               provider_count = static_cast<std::size_t>(std::count_if(
+        requested.begin(), requested.end(),
+        [](const auto& identity) { return identity.kind == ExecutableKind::Provider; }));
     std::vector<std::string> expected_tool_names;
     for (const auto& identity : requested) {
         if (identity.kind == ExecutableKind::Tool) expected_tool_names.push_back(identity.name);
@@ -216,8 +209,7 @@ void validate_capability_binding(const std::vector<ExecutableIdentity>& requeste
         }
     } catch (const std::exception& error) {
         diagnostics.add("P_BINDING_TOOL", "/capability_bindings",
-                        "Owned Tool identity inspection failed",
-                        json{{"error", error.what()}});
+                        "Owned Tool identity inspection failed", json{{"error", error.what()}});
     } catch (...) {
         diagnostics.add("P_BINDING_TOOL", "/capability_bindings",
                         "Owned Tool identity inspection failed with a non-standard exception");
@@ -237,6 +229,38 @@ bool contains_effect_mode(const std::vector<EffectMode>& values, EffectMode want
 bool contains_identity(const std::vector<ExecutableIdentity>& values,
                        const ExecutableIdentity&              wanted) {
     return std::find(values.begin(), values.end(), wanted) != values.end();
+}
+std::map<std::uint32_t, detail::AdmittedNativeControlBinding> seal_native_bindings(
+    const RegistrySnapshot&                      registry,
+    const std::vector<ExecutableIdentity>&       closure,
+    const std::vector<CapabilityBindingReceipt>& receipts) {
+    std::map<std::uint32_t, detail::AdmittedNativeControlBinding> result;
+    for (auto native : detail::RegistrySnapshotAccess::native_bindings(registry)) {
+        if (!contains_identity(closure, native.executable)) continue;
+        const auto manifest = registry.find(native.executable.kind, native.executable.name);
+        if (!manifest || manifest->identity != native.executable ||
+            manifest->effect_mode != EffectMode::TrustedNative) {
+            throw std::logic_error(
+                "In-process native control bindings require a TrustedNative executable");
+        }
+        const auto receipt = std::find_if(receipts.begin(), receipts.end(),
+                                          [&](const CapabilityBindingReceipt& candidate) {
+                                              return candidate.executable == native.executable;
+                                          });
+        if (receipt == receipts.end() || !native.binding.valid()) {
+            throw std::logic_error(
+                "Admitted native control binding lacks its exact capability receipt");
+        }
+        const auto [ignored, inserted] = result.emplace(
+            native.import_slot, detail::AdmittedNativeControlBinding{native.import_slot, *receipt,
+                                                                     std::move(native.binding)});
+        (void)ignored;
+        if (!inserted) {
+            throw std::logic_error(
+                "Admitted native control bindings contain a duplicate import slot");
+        }
+    }
+    return result;
 }
 
 bool contains_string(const std::vector<std::string>& values, std::string_view wanted) {
@@ -302,6 +326,7 @@ struct ClosureResult {
     std::vector<ExecutableIdentity> identities;
     CapabilityEffectClosure         closure;
     std::vector<EffectMode>         modes;
+    ExecutionGuarantee              execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 ClosureResult resolve_closure(const RegistrySnapshot&    registry,
@@ -329,8 +354,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     }
     for (const auto& [node_name, definition] : topology.node_defs) {
         const auto type = definition.at("type").get<std::string>();
-        const auto pointer = "/sealed_core_definitions/0/definition/nodes/" +
-                             escape_pointer_segment(node_name);
+        const auto pointer =
+            "/sealed_core_definitions/0/definition/nodes/" + escape_pointer_segment(node_name);
         const ExecutableManifest* node_manifest = nullptr;
         try {
             node_manifest = &detail::RegistrySnapshotAccess::require_manifest(
@@ -341,8 +366,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
 
         std::vector<ExecutableIdentity> requirements;
         try {
-            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(
-                registry, type, definition);
+            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(registry, type,
+                                                                                     definition);
         } catch (const std::exception& error) {
             diagnostics.add("P_REGISTRY_REQUIREMENT_RESOLVER", pointer,
                             "Node executable requirement resolution failed",
@@ -350,11 +375,10 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                             CompilePhase::Resolve);
             continue;
         } catch (...) {
-            diagnostics.add(
-                "P_REGISTRY_REQUIREMENT_RESOLVER", pointer,
-                "Node executable requirement resolution failed",
-                json{{"node_type", type}, {"exception", "non-standard exception"}},
-                CompilePhase::Resolve);
+            diagnostics.add("P_REGISTRY_REQUIREMENT_RESOLVER", pointer,
+                            "Node executable requirement resolution failed",
+                            json{{"node_type", type}, {"exception", "non-standard exception"}},
+                            CompilePhase::Resolve);
             continue;
         }
         std::sort(requirements.begin(), requirements.end(), identity_less);
@@ -379,6 +403,7 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     std::set<std::string>                                             capabilities;
     std::set<std::string>                                             effects;
     std::set<EffectMode>                                              modes;
+    ExecutionGuarantee execution_guarantee = ExecutionGuarantee::Strict;
     for (std::size_t index = 0; index < work.size(); ++index) {
         const auto current = work[index];
         const auto key =
@@ -427,6 +452,10 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         if (manifest->effect_mode == EffectMode::TrustedNative) {
             capabilities.insert(std::string(TRUSTED_NATIVE_CAPABILITY));
         }
+        if (execution_guarantee_rank(manifest->execution_guarantee) <
+            execution_guarantee_rank(execution_guarantee)) {
+            execution_guarantee = manifest->execution_guarantee;
+        }
         for (const auto& dependency : manifest->required_executables) {
             work.push_back(
                 {dependency, "/sealed_core_definitions/0/definition", manifest->identity});
@@ -434,15 +463,29 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     }
 
     ClosureResult result;
+    result.execution_guarantee = execution_guarantee;
     result.identities.reserve(visited.size());
     for (const auto& [ignored, identity] : visited) {
         (void)ignored;
         result.identities.push_back(identity);
     }
+
     std::sort(result.identities.begin(), result.identities.end(), identity_less);
     result.closure.capabilities.assign(capabilities.begin(), capabilities.end());
     result.closure.effects.assign(effects.begin(), effects.end());
     result.modes.assign(modes.begin(), modes.end());
+    return result;
+}
+
+ExecutionGuarantee composed_execution_guarantee(const ProgramBundle&      parent_bundle,
+                                                const ProgramComposition& composition) {
+    auto result = parent_bundle.execution_guarantee();
+    for (const auto& child : composition.children) {
+        if (execution_guarantee_rank(child.version.execution_guarantee()) <
+            execution_guarantee_rank(result)) {
+            result = child.version.execution_guarantee();
+        }
+    }
     return result;
 }
 
@@ -469,14 +512,17 @@ std::string recompute_program_hash(const ProgramBundle&           bundle,
                            {"definition_hash", definition.definition_hash},
                            {"definition", definition.definition}}})},
         {"declared_budget_requirements", std::move(budgets)}};
+    if (const auto control_source = bundle.control_source()) {
+        semantic["control_source_hash"] = control_source->source_hash();
+    }
     return detail::sha256_identity("canonical-program/v1", detail::canonical_json_bytes(semantic));
 }
 bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                               std::string_view               core_name,
                               json&                          witness) {
-    if (plan.schema_version != 1 || !plan.plan.is_object() ||
-        !plan.plan.contains("root") || !plan.plan["root"].is_string() ||
-        !plan.plan.contains("operations") || !plan.plan["operations"].is_array()) {
+    if (plan.schema_version != 1 || !plan.plan.is_object() || !plan.plan.contains("root") ||
+        !plan.plan["root"].is_string() || !plan.plan.contains("operations") ||
+        !plan.plan["operations"].is_array()) {
         witness = json{{"reason", "plan envelope is malformed"}};
         return false;
     }
@@ -491,22 +537,20 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
 
     const auto root = plan.plan["root"].get<std::string>();
     std::map<std::string, json> operations;
-    const auto fail = [&](std::string reason, std::string id = {},
-                          std::string field = {}) {
+    const auto fail = [&](std::string reason, std::string id = {}, std::string field = {}) {
         witness = json{{"reason", std::move(reason)}};
         if (!id.empty()) witness["id"] = std::move(id);
         if (!field.empty()) witness["field"] = std::move(field);
         return false;
     };
     const auto reference = [&](const json& operation, std::string_view field,
-                              const std::string& id) {
+                               const std::string& id) {
         const auto key = std::string(field);
         if (!operation.contains(key) || !operation[key].is_string()) {
             return fail("operation reference is missing or malformed", id, key);
         }
         const auto target = operation[key].get<std::string>();
-        if (!operations.contains(target))
-            return fail("operation reference is dangling", id, key);
+        if (!operations.contains(target)) return fail("operation reference is dangling", id, key);
         return true;
     };
     const auto references = [&](const json& operation, std::string_view field,
@@ -532,9 +576,8 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
     };
 
     for (const auto& operation : plan.plan["operations"]) {
-        if (!operation.is_object() || !operation.contains("id") ||
-            !operation["id"].is_string() || !operation.contains("op") ||
-            !operation["op"].is_string()) {
+        if (!operation.is_object() || !operation.contains("id") || !operation["id"].is_string() ||
+            !operation.contains("op") || !operation["op"].is_string()) {
             return fail("operation envelope is malformed");
         }
         const auto id = operation["id"].get<std::string>();
@@ -571,14 +614,12 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                 !positive_bound(operation, "max_iterations", id))
                 return false;
         } else if (op == "retry") {
-            if (!reference(operation, "body", id) ||
-                !positive_bound(operation, "max_attempts", id))
+            if (!reference(operation, "body", id) || !positive_bound(operation, "max_attempts", id))
                 return false;
         } else if (op == "parallel") {
             if (!references(operation, "branches", id, 2)) return false;
         } else if (op == "race") {
-            if (!references(operation, "branches", id, 2) ||
-                operation["branches"].size() != 2)
+            if (!references(operation, "branches", id, 2) || operation["branches"].size() != 2)
                 return fail("race currently requires exactly two branches", id, "branches");
         } else if (op == "quorum") {
             if (!references(operation, "branches", id, 2)) return false;
@@ -611,10 +652,9 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
             if (!operation.contains("child_binding") || !operation["child_binding"].is_string() ||
                 operation["child_binding"].get<std::string>().empty())
                 return fail("spawn child binding is missing or malformed", id, "child_binding");
-            const bool directly_joined = std::any_of(
-                operations.begin(), operations.end(), [&](const auto& candidate) {
-                    return candidate.second["op"] == "await" &&
-                           candidate.second.contains("body") &&
+            const bool directly_joined =
+                std::any_of(operations.begin(), operations.end(), [&](const auto& candidate) {
+                    return candidate.second["op"] == "await" && candidate.second.contains("body") &&
                            candidate.second["body"].is_string() &&
                            candidate.second["body"].template get<std::string>() == id;
                 });
@@ -631,10 +671,10 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
         }
     }
     if (!has_execution) return fail("operation graph contains no execution operation");
-    std::set<std::string, std::less<>> active;
-    std::set<std::string, std::less<>> visited;
-    bool reachable_execution = false;
-    std::function<bool(const std::string&)> visit = [&](const std::string& id) {
+    std::set<std::string, std::less<>>      active;
+    std::set<std::string, std::less<>>      visited;
+    bool                                    reachable_execution = false;
+    std::function<bool(const std::string&)> visit               = [&](const std::string& id) {
         if (active.contains(id)) return fail("operation graph contains a cycle", id);
         if (!visited.insert(id).second) return true;
         active.insert(id);
@@ -654,8 +694,7 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                 return true;
             };
             bool valid = true;
-            if (op == "sequence" || op == "parallel" || op == "race" ||
-                op == "quorum") {
+            if (op == "sequence" || op == "parallel" || op == "race" || op == "quorum") {
                 valid = visit_many(operation.at(op == "sequence" ? "children" : "branches"));
             } else if (op == "branch") {
                 valid = visit_one(operation.at("then"));
@@ -672,8 +711,7 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
     };
     if (!operations.contains(root) || !visit(root))
         return fail("operation graph is not a finite rooted DAG", root, "root");
-    if (!reachable_execution)
-        return fail("rooted operation graph contains no execution operation");
+    if (!reachable_execution) return fail("rooted operation graph contains no execution operation");
     if (visited.size() != operations.size())
         return fail("operation graph contains unreachable operations");
     return true;
@@ -695,7 +733,7 @@ std::uint64_t policy_ceiling(std::string_view resource, const BudgetLimits& limi
 void validate_budgets(const ProgramBundle&  bundle,
                       const PolicySnapshot& policy,
                       AdmissionDiagnostics& diagnostics) {
-    const auto& budgets = bundle.declared_budget_requirements();
+    const auto&                                     budgets = bundle.declared_budget_requirements();
     std::map<std::string, const BudgetRequirement*> by_resource;
     for (const auto& budget : budgets)
         by_resource.emplace(budget.resource, &budget);
@@ -747,7 +785,6 @@ void validate_budgets(const ProgramBundle&  bundle,
                              {"required_count", kBudgetResources.size()}});
     }
 }
-
 
 void map_core_parse_diagnostics(const graph::ParseReport& report,
                                 AdmissionDiagnostics&     diagnostics) {
@@ -887,10 +924,10 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
         config.engines->impl_->scope = wanted;
     }
 
-    impl_ = std::make_unique<Impl>(
-        std::move(config.program_store), std::move(config.registry), std::move(config.engines),
-        std::move(config.compiler_build_id), std::move(config.capability_binder),
-        config.worker_count, std::move(config.module_store), std::move(config.host_identity));
+    impl_ = std::make_unique<Impl>(std::move(config.program_store), std::move(config.registry),
+                                   std::move(config.engines), std::move(config.compiler_build_id),
+                                   std::move(config.capability_binder), config.worker_count,
+                                   std::move(config.module_store), std::move(config.host_identity));
 }
 
 ProgramCatalog::ProgramCatalog(ProgramCatalog&&) noexcept            = default;
@@ -899,11 +936,12 @@ ProgramCatalog::~ProgramCatalog()                                    = default;
 
 ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                      ProgramAdmission     admission) {
-    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true);
+    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true,
+                       input_bundle.execution_guarantee());
 }
 
 ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bundle,
-                                              ProgramAdmission           admission,
+                                              ProgramAdmission          admission,
                                               const ProgramComposition& composition) {
     if (!impl_->module_store)
         throw std::invalid_argument("Composed admission requires a configured ModuleStore");
@@ -916,8 +954,8 @@ ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bu
     for (const auto& child : composition.children) {
         const auto stored_version =
             impl_->program_store->get_version(admission.owner_scope, child.version.id());
-        auto stored_bundle = impl_->program_store->get_bundle(admission.owner_scope,
-                                                              child.bundle.id());
+        auto stored_bundle =
+            impl_->program_store->get_bundle(admission.owner_scope, child.bundle.id());
         if (!stored_bundle) stored_bundle = impl_->program_store->get_bundle(child.bundle.id());
         if (!stored_version || !stored_bundle ||
             stored_version->serialize_canonical() != child.version.serialize_canonical() ||
@@ -931,15 +969,17 @@ ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bu
         throw std::invalid_argument(
             "Composed admission dependency receipts differ from the resolved module closure");
     }
-    return admit(input_bundle, std::move(admission));
+    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true,
+                       composed_execution_guarantee(input_bundle, composition));
 }
 
 ProgramVersion ProgramCatalog::materialize(
-    const ProgramBundle&                    input_bundle,
-    ProgramAdmission                        admission,
-    std::optional<CatalogCapabilityBinding> supplied_binding,
-    const ProgramVersion*                   expected_version,
-    bool                                    publish,
+    const ProgramBundle&                                input_bundle,
+    ProgramAdmission                                    admission,
+    std::optional<CatalogCapabilityBinding>             supplied_binding,
+    const ProgramVersion*                               expected_version,
+    bool                                                publish,
+    ExecutionGuarantee                                  effective_execution_guarantee,
     std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
     ProgramBundle bundle = [&]() {
         try {
@@ -954,6 +994,32 @@ ProgramVersion ProgramCatalog::materialize(
 
     AdmissionDiagnostics diagnostics(bundle.id());
     const auto           registry_fingerprint = impl_->registry.fingerprint();
+    if (execution_guarantee_rank(effective_execution_guarantee) == 0 ||
+        execution_guarantee_rank(effective_execution_guarantee) >
+            execution_guarantee_rank(bundle.execution_guarantee())) {
+        diagnostics.add("P_ADMIT_GUARANTEE", "/execution_guarantee",
+                        "Effective execution guarantee is malformed or stronger than the bundle",
+                        json{{"bundle", std::string(to_string(bundle.execution_guarantee()))},
+                             {"effective", std::string(to_string(effective_execution_guarantee))}});
+    }
+    if (execution_guarantee_rank(effective_execution_guarantee) <
+        execution_guarantee_rank(admission.profile.minimum_execution_guarantee())) {
+        diagnostics.add(
+            "P_ADMIT_GUARANTEE", "/execution_guarantee",
+            "Effective execution guarantee falls below the admission profile floor",
+            json{{"effective", std::string(to_string(effective_execution_guarantee))},
+                 {"minimum",
+                  std::string(to_string(admission.profile.minimum_execution_guarantee()))}});
+    }
+    if (execution_guarantee_rank(effective_execution_guarantee) <
+        execution_guarantee_rank(admission.policy.minimum_execution_guarantee())) {
+        diagnostics.add(
+            "P_ADMIT_GUARANTEE", "/execution_guarantee",
+            "Effective execution guarantee falls below the policy floor",
+            json{{"effective", std::string(to_string(effective_execution_guarantee))},
+                 {"minimum",
+                  std::string(to_string(admission.policy.minimum_execution_guarantee()))}});
+    }
 
     try {
         (void)bundle.typed_orchestration_plan();
@@ -1050,23 +1116,24 @@ ProgramVersion ProgramCatalog::materialize(
                 "P_ADMIT_MODULE_STORE", "/module_coordinates",
                 "Program admission with module dependencies requires an immutable ModuleStore");
         } else {
-            std::set<std::pair<std::string, std::string>> coordinate_keys;
+            std::set<std::pair<std::string, std::string>>   coordinate_keys;
             std::map<std::string, std::string, std::less<>> expected_receipts;
             for (const auto& coordinate : module_coordinates) {
-                const auto key = std::pair{coordinate.qualified_name(), coordinate.content_identity};
+                const auto key =
+                    std::pair{coordinate.qualified_name(), coordinate.content_identity};
                 if (!coordinate_keys.insert(key).second) continue;
                 expected_receipts.emplace(coordinate.qualified_name(), coordinate.content_identity);
-                const auto module = impl_->module_store->get(admission.owner_scope,
-                                                              coordinate.content_identity);
+                const auto module =
+                    impl_->module_store->get(admission.owner_scope, coordinate.content_identity);
                 if (!module) {
-                    diagnostics.add(
-                        "P_ADMIT_DEPENDENCY", "/module_coordinates",
-                        "Pinned module is unavailable in the admitting owner scope",
-                        json{{"coordinate", coordinate.qualified_name()},
-                             {"content_identity", coordinate.content_identity}});
+                    diagnostics.add("P_ADMIT_DEPENDENCY", "/module_coordinates",
+                                    "Pinned module is unavailable in the admitting owner scope",
+                                    json{{"coordinate", coordinate.qualified_name()},
+                                         {"content_identity", coordinate.content_identity}});
                     continue;
                 }
-                if (module->coordinate() != coordinate || module->owner_scope() != admission.owner_scope) {
+                if (module->coordinate() != coordinate ||
+                    module->owner_scope() != admission.owner_scope) {
                     diagnostics.add(
                         "P_ADMIT_DEPENDENCY", "/module_coordinates",
                         "Pinned module coordinate or owner scope does not match the stored module",
@@ -1081,8 +1148,10 @@ ProgramVersion ProgramCatalog::materialize(
             if (actual_receipts != expected_receipts) {
                 json expected_json = json::object();
                 json actual_json   = json::object();
-                for (const auto& [id, digest] : expected_receipts) expected_json[id] = digest;
-                for (const auto& [id, digest] : actual_receipts) actual_json[id] = digest;
+                for (const auto& [id, digest] : expected_receipts)
+                    expected_json[id] = digest;
+                for (const auto& [id, digest] : actual_receipts)
+                    actual_json[id] = digest;
                 diagnostics.add(
                     "P_ADMIT_DEPENDENCY", "/dependency_receipts",
                     "Dependency receipts must exactly cover the sealed module coordinates",
@@ -1133,15 +1202,14 @@ ProgramVersion ProgramCatalog::materialize(
 
     validate_budgets(bundle, admission.policy, diagnostics);
     const auto concurrency = std::find_if(
-        bundle.declared_budget_requirements().begin(),
-        bundle.declared_budget_requirements().end(),
+        bundle.declared_budget_requirements().begin(), bundle.declared_budget_requirements().end(),
         [](const auto& requirement) { return requirement.resource == "max_concurrency"; });
     if (concurrency != bundle.declared_budget_requirements().end() &&
         impl_->worker_count > concurrency->maximum) {
-        diagnostics.add("P_ADMIT_POLICY", "/declared_budget_requirements",
-                        "Catalog worker_count exceeds the admitted concurrency bound",
-                        json{{"worker_count", impl_->worker_count},
-                             {"max_concurrency", concurrency->maximum}});
+        diagnostics.add(
+            "P_ADMIT_POLICY", "/declared_budget_requirements",
+            "Catalog worker_count exceeds the admitted concurrency bound",
+            json{{"worker_count", impl_->worker_count}, {"max_concurrency", concurrency->maximum}});
     }
 
     const auto                         definitions = bundle.sealed_core_definitions();
@@ -1220,6 +1288,15 @@ ProgramVersion ProgramCatalog::materialize(
                 json{{"recomputed_executable_count", closure->identities.size()},
                      {"bundle_executable_count", bundle.executable_registry_identities().size()}});
         }
+        const auto expected_execution_guarantee =
+            bundle.control_source() ? ExecutionGuarantee::Unmanaged : closure->execution_guarantee;
+        if (expected_execution_guarantee != bundle.execution_guarantee()) {
+            diagnostics.add(
+                "P_ADMIT_SEMANTIC_MISMATCH", "/execution_guarantee",
+                "Bundle execution guarantee is not the exact executable/control closure floor",
+                json{{"bundle", std::string(to_string(bundle.execution_guarantee()))},
+                     {"recomputed", std::string(to_string(expected_execution_guarantee))}});
+        }
 
         const auto profile_executables = admission.profile.allowed_executables();
         const auto profile_modes       = admission.profile.allowed_effect_modes();
@@ -1230,6 +1307,20 @@ ProgramVersion ProgramCatalog::materialize(
                 diagnostics.add("P_ADMIT_POLICY", "/executable_registry_identities",
                                 "Exact executable identity is denied by the admission profile",
                                 identity_json(identity));
+            }
+        }
+        for (const auto& native :
+             detail::RegistrySnapshotAccess::native_bindings(impl_->registry)) {
+            if (!contains_identity(closure->identities, native.executable)) continue;
+            const auto manifest =
+                impl_->registry.find(native.executable.kind, native.executable.name);
+            if (!manifest || manifest->identity != native.executable ||
+                manifest->effect_mode != EffectMode::TrustedNative) {
+                diagnostics.add(
+                    "P_ADMIT_NATIVE_BOUNDARY", "/executable_registry_identities",
+                    "In-process native control bindings require TrustedNative execution; "
+                    "Brokered multi-tenant execution requires a killable process boundary",
+                    identity_json(native.executable));
             }
         }
         for (const auto mode : closure->modes) {
@@ -1298,9 +1389,9 @@ ProgramVersion ProgramCatalog::materialize(
 
     if (!diagnostics.empty()) diagnostics.throw_error();
 
-    const auto requested_bindings = runtime_binding_identities(closure->identities);
+    const auto               requested_bindings = runtime_binding_identities(closure->identities);
     CatalogCapabilityBinding binding;
-    const bool isolate_binding = supplied_binding.has_value();
+    const bool               isolate_binding = supplied_binding.has_value();
     if (supplied_binding) {
         binding = std::move(*supplied_binding);
         validate_capability_binding(requested_bindings, binding, diagnostics);
@@ -1316,8 +1407,7 @@ ProgramVersion ProgramCatalog::materialize(
                 throw;
             } catch (const std::exception& error) {
                 diagnostics.add("P_BINDING_FACTORY", "/capability_bindings",
-                                "Catalog capability binder failed",
-                                json{{"error", error.what()}});
+                                "Catalog capability binder failed", json{{"error", error.what()}});
             } catch (...) {
                 diagnostics.add("P_BINDING_FACTORY", "/capability_bindings",
                                 "Catalog capability binder failed with a non-standard exception");
@@ -1326,15 +1416,13 @@ ProgramVersion ProgramCatalog::materialize(
     }
     if (!diagnostics.empty()) diagnostics.throw_error();
 
-    CoreMaterializationReceipt receipt{impl_->compiler_build_id,
-                                           registry_fingerprint,
-                                           {*recomputed_plan},
-                                           binding.receipts};
+    CoreMaterializationReceipt receipt{
+        impl_->compiler_build_id, registry_fingerprint, {*recomputed_plan}, binding.receipts};
     ProgramVersion version = [&]() {
         try {
-            return ProgramVersion(
-                ProgramVersionData{bundle.id(), admission.profile, admission.policy,
-                                   admission.dependency_receipts, admission.owner_scope, receipt});
+            return ProgramVersion(ProgramVersionData{
+                bundle.id(), admission.profile, admission.policy, admission.dependency_receipts,
+                admission.owner_scope, receipt, effective_execution_guarantee});
         } catch (const std::exception& error) {
             AdmissionDiagnostics invalid(bundle.id());
             invalid.add("P_ADMIT_BINDING", "/admission",
@@ -1387,9 +1475,8 @@ ProgramVersion ProgramCatalog::materialize(
                 publication.throw_error();
             } catch (...) {
                 AdmissionDiagnostics publication(bundle.id());
-                publication.add(
-                    "P_ADMIT_BINDING", "/id",
-                    "Cached admission could not restore its durable Program tuple");
+                publication.add("P_ADMIT_BINDING", "/id",
+                                "Cached admission could not restore its durable Program tuple");
                 publication.throw_error();
             }
         }
@@ -1399,8 +1486,9 @@ ProgramVersion ProgramCatalog::materialize(
     const auto binding_root =
         capability_binding_receipt_root(version.core_materialization_receipt().capability_bindings);
     EngineGenerationCache::Impl::Key key{
-        bundle.id(), recomputed_plan->name, recomputed_plan->compiled_plan_identity,
-        registry_fingerprint, impl_->compiler_build_id, binding_root, impl_->worker_count};
+        bundle.id(),          recomputed_plan->name,    recomputed_plan->compiled_plan_identity,
+        registry_fingerprint, impl_->compiler_build_id, binding_root,
+        impl_->worker_count};
     auto&                                               cache = *impl_->engines->impl_;
     std::lock_guard                                     cache_lock(cache.mutex);
     auto                                                cached = cache.generations.find(key);
@@ -1411,7 +1499,7 @@ ProgramVersion ProgramCatalog::materialize(
     } else {
         try {
             graph::NodeContext context = std::move(binding.node_context);
-            auto compiled =
+            auto               compiled =
                 detail::RegistrySnapshotAccess::link_local(impl_->registry, *topology, context);
 
             AdmissionDiagnostics linked(bundle.id());
@@ -1465,8 +1553,10 @@ ProgramVersion ProgramCatalog::materialize(
         }
     }
 
+    auto native_bindings =
+        seal_native_bindings(impl_->registry, closure->identities, binding.receipts);
     auto materialized = std::make_shared<detail::MaterializedProgram>(
-        detail::MaterializedProgram{bundle, version, generation});
+        detail::MaterializedProgram{bundle, version, generation, std::move(native_bindings)});
     if (isolate_binding) {
         if (isolated_materialization) *isolated_materialization = materialized;
     } else {
@@ -1487,9 +1577,8 @@ ProgramVersion ProgramCatalog::materialize(
             impl_->materialized.erase(version.id());
             if (inserted_generation) cache.generations.erase(key);
             AdmissionDiagnostics publication(bundle.id());
-            publication.add(
-                "P_ADMIT_BINDING", "/id",
-                "Atomic ProgramStore publication failed with a non-standard exception");
+            publication.add("P_ADMIT_BINDING", "/id",
+                            "Atomic ProgramStore publication failed with a non-standard exception");
             publication.throw_error();
         }
     }
@@ -1505,43 +1594,39 @@ MigrationPlan ProgramCatalog::plan_migration(std::string_view owner_scope,
         throw std::invalid_argument("Program migration references an unpublished version");
     if (source->ownership_scope() != owner_scope || target->ownership_scope() != owner_scope)
         throw std::invalid_argument("Program migration crosses an owner scope boundary");
-    const auto source_bundle =
-        impl_->program_store->get_bundle(owner_scope, source->bundle_id());
-    const auto target_bundle =
-        impl_->program_store->get_bundle(owner_scope, target->bundle_id());
+    const auto source_bundle = impl_->program_store->get_bundle(owner_scope, source->bundle_id());
+    const auto target_bundle = impl_->program_store->get_bundle(owner_scope, target->bundle_id());
     if (!source_bundle || !target_bundle)
-        throw std::invalid_argument(
-            "Program migration references an unpublished admitted bundle");
+        throw std::invalid_argument("Program migration references an unpublished admitted bundle");
     return MigrationPlan::between(*source, *source_bundle, *target, *target_bundle);
 }
 ProgramActivationResult ProgramCatalog::activate(std::string_view owner_scope,
                                                  std::string_view version_id,
-                                                 std::uint64_t expected_generation) {
+                                                 std::uint64_t    expected_generation) {
     const auto version = resolve_version(owner_scope, version_id);
     if (!version)
-        throw std::invalid_argument("Program activation references an unknown owner-scoped version");
+        throw std::invalid_argument(
+            "Program activation references an unknown owner-scoped version");
     return impl_->program_store->compare_activate(owner_scope, expected_generation, version->id(),
                                                   version->policy_snapshot().fingerprint());
 }
 
 ProgramActivationResult ProgramCatalog::rollback(std::string_view owner_scope,
                                                  std::string_view version_id,
-                                                 std::uint64_t expected_generation) {
+                                                 std::uint64_t    expected_generation) {
     // Rollback is deliberately the same owner-scoped activation CAS: an older
     // immutable version is published for future resolutions while existing
     // runs retain their already pinned materialization.
     return activate(owner_scope, version_id, expected_generation);
 }
 
-std::optional<ProgramActivation>
-ProgramCatalog::activation(std::string_view owner_scope) const {
+std::optional<ProgramActivation> ProgramCatalog::activation(std::string_view owner_scope) const {
     detail::validate_token(owner_scope, "Program activation owner_scope");
     return impl_->program_store->get_activation(owner_scope);
 }
 
 ProgramRetentionReport ProgramCatalog::collect_retention(
-    std::string_view owner_scope,
-    const std::vector<std::string>& pinned_version_ids) {
+    std::string_view owner_scope, const std::vector<std::string>& pinned_version_ids) {
     detail::validate_token(owner_scope, "Program retention owner_scope");
     for (const auto& id : pinned_version_ids) {
         const auto version = impl_->program_store->get_version(owner_scope, id);
@@ -1551,9 +1636,8 @@ ProgramRetentionReport ProgramCatalog::collect_retention(
     return impl_->program_store->collect_garbage(owner_scope, pinned_version_ids);
 }
 
-
-std::optional<ProgramVersion> ProgramCatalog::resolve_version(
-    std::string_view owner_scope, std::string_view id) {
+std::optional<ProgramVersion> ProgramCatalog::resolve_version(std::string_view owner_scope,
+                                                              std::string_view id) {
     return resolve_version_impl(owner_scope, id, std::nullopt);
 }
 
@@ -1563,9 +1647,9 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_with_binding(
 }
 
 std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
-    std::string_view owner_scope,
-    std::string_view id,
-    std::optional<CatalogCapabilityBinding> supplied_binding,
+    std::string_view                                    owner_scope,
+    std::string_view                                    id,
+    std::optional<CatalogCapabilityBinding>             supplied_binding,
     std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
     detail::validate_token(owner_scope, "Program resolve owner_scope");
     const auto stored_value = impl_->program_store->get_version(owner_scope, id);
@@ -1592,7 +1676,7 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
 
     if (!supplied_binding) {
         std::lock_guard lock(impl_->mutex);
-        const auto known = impl_->materialized.find(stored_id);
+        const auto      known = impl_->materialized.find(stored_id);
         if (known != impl_->materialized.end() &&
             known->second->version.serialize_canonical() == stored_bytes &&
             known->second->bundle.serialize_canonical() == bundle_bytes) {
@@ -1625,20 +1709,18 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
         }
     }();
 
-    ProgramAdmission admission{stored.ownership_scope(),
-                               stored.admission_profile(),
-                               stored.policy_snapshot(),
-                               stored.dependency_receipts()};
+    ProgramAdmission admission{stored.ownership_scope(), stored.admission_profile(),
+                               stored.policy_snapshot(), stored.dependency_receipts()};
     return materialize(bundle, std::move(admission), std::move(supplied_binding), &stored, false,
-                       isolated_materialization);
+                       stored.execution_guarantee(), isolated_materialization);
 }
-
 
 std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto      known = impl_->materialized.find(std::string(id));
     if (known == impl_->materialized.end()) return std::nullopt;
-    const auto stored = impl_->program_store->get_version(known->second->version.ownership_scope(), id);
+    const auto stored =
+        impl_->program_store->get_version(known->second->version.ownership_scope(), id);
     if (!stored || stored->serialize_canonical() != known->second->version.serialize_canonical()) {
         return std::nullopt;
     }
@@ -1646,7 +1728,7 @@ std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view id) 
 }
 
 std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view owner_scope,
-                                                            std::string_view id) const {
+                                                           std::string_view id) const {
     detail::validate_token(owner_scope, "Program find owner_scope");
     std::lock_guard lock(impl_->mutex);
     const auto      known = impl_->materialized.find(std::string(id));
@@ -1675,10 +1757,10 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
         found->second->version.serialize_canonical() != version.serialize_canonical()) {
         throw ProgramDiagnosticError(start_not_admitted(version.id()));
     }
-    const auto stored_version = catalog.impl_->program_store->get_version(
-        version.ownership_scope(), version.id());
-    auto stored_bundle = catalog.impl_->program_store->get_bundle(
-        version.ownership_scope(), found->second->bundle.id());
+    const auto stored_version =
+        catalog.impl_->program_store->get_version(version.ownership_scope(), version.id());
+    auto stored_bundle = catalog.impl_->program_store->get_bundle(version.ownership_scope(),
+                                                                  found->second->bundle.id());
     if (!stored_bundle)
         stored_bundle = catalog.impl_->program_store->get_bundle(found->second->bundle.id());
     if (!stored_version || !stored_bundle ||
@@ -1688,14 +1770,14 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
     }
     return found->second;
 }
-std::shared_ptr<const detail::MaterializedProgram>
-detail::CatalogRuntimeAccess::pin_with_binding(ProgramCatalog&            catalog,
-                                               std::string_view           owner_scope,
-                                               std::string_view           version_id,
-                                               CatalogCapabilityBinding   binding) {
+std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess::pin_with_binding(
+    ProgramCatalog&          catalog,
+    std::string_view         owner_scope,
+    std::string_view         version_id,
+    CatalogCapabilityBinding binding) {
     std::shared_ptr<const detail::MaterializedProgram> isolated;
-    const auto resolved = catalog.resolve_version_impl(
-        owner_scope, version_id, std::move(binding), &isolated);
+    const auto                                         resolved =
+        catalog.resolve_version_impl(owner_scope, version_id, std::move(binding), &isolated);
     if (!resolved || !isolated || isolated->version.id() != version_id) {
         throw ProgramDiagnosticError(start_not_admitted(version_id));
     }

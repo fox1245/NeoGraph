@@ -3,10 +3,12 @@
 #include <neograph/api.h>
 #include <neograph/graph/loader.h>
 #include <neograph/program/admission.h>
+#include <neograph/program/authoring.h>
 #include <neograph/program/contract.h>
 #include <neograph/program/runtime.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -34,6 +36,7 @@ private:
 struct HarnessTranslationDefaults {
     std::uint64_t timeout_seconds              = 600;
     std::uint32_t max_parallel_workers         = 4;
+    std::uint64_t                              max_program_operations        = 64;
     std::uint64_t max_core_steps               = 40;
     std::uint32_t max_worker_retries           = 1;
     std::uint64_t provider_timeout_seconds     = 600;
@@ -77,6 +80,8 @@ bind_harness_invocation(HarnessInvocationTemplate request,
 struct HarnessWireReceipt {
     std::string              source_id;
     std::string              mode;
+    /// Explicit public authoring frontend; never inferred from document shape.
+    program::AuthoringFrontend authoring_frontend = program::AuthoringFrontend::TrustedCpp;
     std::string              preset;
     std::string              workspace_revision;
     std::vector<std::string> worker_ids;
@@ -96,10 +101,13 @@ struct HarnessCapabilityBindingRequest {
 };
 
 struct HarnessTranslation {
-    program::ProgramSource             source;
-    HarnessInvocationTemplate          invocation_template;
-    HarnessWireReceipt                 wire;
-    HarnessCapabilityBindingRequest    bindings;
+    program::ProgramSource                   source;
+    HarnessInvocationTemplate                invocation_template;
+    program::ContractRecord                  input_contract;
+    program::ContractRecord                  output_contract;
+    std::map<std::string, json>              sealed_workers;
+    HarnessWireReceipt                       wire;
+    HarnessCapabilityBindingRequest          bindings;
     std::optional<program::ContractManifest> contract;
 };
 

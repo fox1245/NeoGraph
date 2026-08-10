@@ -8,6 +8,11 @@
 #include <memory>
 
 namespace neograph::program::detail {
+struct RegistryNativeControlBinding {
+    std::uint32_t        import_slot = 0;
+    ExecutableIdentity   executable;
+    NativeControlBinding binding;
+};
 
 class RegistrySnapshotAccess {
 public:
@@ -18,6 +23,8 @@ public:
         const RegistrySnapshot& snapshot,
         std::string_view        name,
         const json&             node_config);
+    static std::vector<RegistryNativeControlBinding> native_bindings(
+        const RegistrySnapshot& snapshot);
     static std::shared_ptr<const graph::GraphRegistry> runtime_registry(
         const RegistrySnapshot& snapshot);
     static graph::TopologySpec       parse_local(const RegistrySnapshot& snapshot,

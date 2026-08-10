@@ -4,6 +4,7 @@
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
 
+#include "javascript.h"
 #include "registry_access.h"
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/steady_timer.hpp>
@@ -15,12 +16,13 @@
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <limits>
 #include <map>
 #include <memory>
-#include <string>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -206,7 +208,7 @@ private:
 
 class BlockingNode final : public GraphNode {
 public:
-    explicit BlockingNode(std::string name,
+    explicit BlockingNode(std::string               name,
                           std::chrono::milliseconds duration = std::chrono::seconds(5))
         : name_(std::move(name)), duration_(duration) {}
 
@@ -229,7 +231,7 @@ public:
     std::string get_name() const override { return name_; }
 
 private:
-    std::string name_;
+    std::string               name_;
     std::chrono::milliseconds duration_;
 };
 class BarrierNode final : public GraphNode {
@@ -303,7 +305,7 @@ public:
         }
         auto timer = asio::steady_timer(co_await asio::this_coro::executor);
         timer.expires_after(std::chrono::milliseconds(100));
-        co_await timer.async_wait(asio::use_awaitable);
+        co_await  timer.async_wait(asio::use_awaitable);
         co_return NodeOutput{};
     }
 
@@ -343,10 +345,13 @@ private:
     std::string name_;
 };
 
-RegistrySnapshot runtime_registry() {
+RegistrySnapshot runtime_registry(
+    ExecutionGuarantee completed_guarantee = ExecutionGuarantee::Strict) {
     RegistrySnapshotBuilder builder;
+    auto                    completed = manifest(ExecutableKind::Node, "runtime-completed", '1');
+    completed.execution_guarantee     = completed_guarantee;
     builder.add_node(
-        manifest(ExecutableKind::Node, "runtime-completed", '1'),
+        std::move(completed),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<CompletedNode>(name);
         },
@@ -623,22 +628,21 @@ json step_limited_program_document() {
 struct ChildBindingRegistry {
     using Key = std::pair<std::string, std::string>;
 
-    void bind(std::string parent_version_id,
-              std::string binding_name,
+    void bind(std::string                parent_version_id,
+              std::string                binding_name,
               ProgramRuntimeChildBinding binding) {
         std::lock_guard lock(mutex);
         bindings.insert_or_assign(Key{std::move(parent_version_id), std::move(binding_name)},
                                   std::move(binding));
     }
 
-    std::optional<ProgramRuntimeChildBinding> resolve(
-        std::string_view owner_scope,
-        std::string_view parent_version_id,
-        std::string_view binding_name) const {
+    std::optional<ProgramRuntimeChildBinding> resolve(std::string_view owner_scope,
+                                                      std::string_view parent_version_id,
+                                                      std::string_view binding_name) const {
         if (owner_scope != "tenant:runtime") return std::nullopt;
         std::lock_guard lock(mutex);
-        const auto found = bindings.find(
-            Key{std::string(parent_version_id), std::string(binding_name)});
+        const auto      found =
+            bindings.find(Key{std::string(parent_version_id), std::string(binding_name)});
         return found == bindings.end() ? std::nullopt
                                        : std::optional<ProgramRuntimeChildBinding>{found->second};
     }
@@ -649,8 +653,8 @@ struct ChildBindingRegistry {
     }
 
 private:
-    mutable std::mutex                              mutex;
-    std::map<Key, ProgramRuntimeChildBinding>       bindings;
+    mutable std::mutex                        mutex;
+    std::map<Key, ProgramRuntimeChildBinding> bindings;
 };
 
 struct AdmittedRuntime {
@@ -671,10 +675,12 @@ struct AdmittedRuntime {
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
                              std::shared_ptr<CheckpointStore>        checkpoint_backend = {},
                              std::shared_ptr<ProgramTransitionStore> journal_backend    = {},
-                             ProgramChildQuotaConfig                 quota              = {})
-        : registry(runtime_registry()),
-          profile(make_profile(registry)),
-          policy(make_policy(profile)),
+                             ProgramChildQuotaConfig                 quota              = {},
+                             ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict,
+                             bool               allow_javascript  = false)
+        : registry(runtime_registry(minimum_guarantee)),
+          profile(make_profile(registry, minimum_guarantee, allow_javascript)),
+          policy(make_policy(profile, minimum_guarantee, allow_javascript)),
           store(std::make_shared<InMemoryProgramStore>()),
           engines(std::make_shared<EngineGenerationCache>()),
           catalog(std::make_shared<ProgramCatalog>(
@@ -689,27 +695,39 @@ struct AdmittedRuntime {
           scheduler_thread_count(scheduler_threads),
           runtime(make_runtime()) {}
 
-    static AdmissionProfile make_profile(const RegistrySnapshot& registry) {
+    static AdmissionProfile make_profile(
+        const RegistrySnapshot& registry,
+        ExecutionGuarantee      minimum_guarantee = ExecutionGuarantee::Strict,
+        bool                    allow_javascript  = false) {
         AdmissionProfileBuilder builder;
         builder.id("runtime-profile")
             .semantic_version("1.0.0")
             .registry(registry)
             .mode(AdmissionMode::MultiTenant)
             .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V4)
+            .minimum_execution_guarantee(minimum_guarantee)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered);
+        if (allow_javascript) builder.allow_source_kind(SourceKind::JavaScript);
         for (const auto& identity : registry.identities())
             builder.allow_executable(identity);
         return std::move(builder).build();
     }
 
-    static PolicySnapshot make_policy(const AdmissionProfile& profile) {
+    static PolicySnapshot make_policy(
+        const AdmissionProfile& profile,
+        ExecutionGuarantee      minimum_guarantee = ExecutionGuarantee::Strict,
+        bool                    allow_javascript  = false) {
+        const auto            budget_ceiling = allow_javascript
+                                                   ? BudgetLimits{60000, 10000, 1000000, 4, 32, 100, 4, 4, 32}
+                                                   : BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32};
         PolicySnapshotBuilder builder;
         builder.id("runtime-policy")
             .semantic_version("1.0.0")
             .owner_scope("tenant:runtime")
             .admission_profile(profile)
-            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32});
+            .budget_ceiling(budget_ceiling)
+            .minimum_execution_guarantee(minimum_guarantee);
         return std::move(builder).build();
     }
     std::unique_ptr<ProgramRuntime> make_runtime() const {
@@ -740,17 +758,35 @@ struct AdmittedRuntime {
     }
 
     ProgramVersion admit_document(json document) {
-        ProgramCompiler compiler(registry, {"program-runtime-test/v1"});
         const auto schema_version =
             document.contains("program_schema_version") &&
                     document["program_schema_version"].is_number_unsigned()
                 ? document["program_schema_version"].get<std::uint32_t>()
                 : PROGRAM_SCHEMA_VERSION_V1;
-        auto source = ProgramSource::from_cpp_builder("test:runtime", schema_version,
-                                                      std::move(document));
+        return admit_source(ProgramSource::from_cpp_builder("test:runtime", schema_version,
+                                                            std::move(document)));
+    }
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+    ProgramVersion admit_javascript(std::string                   source,
+                                    std::optional<ContractRecord> output_contract = std::nullopt) {
+        return admit_source(
+            ProgramSource::from_javascript("test:runtime-control.js", std::move(source)),
+            std::move(output_contract));
+    }
+#endif
+
+    ProgramVersion admit_source(ProgramSource                 source,
+                                std::optional<ContractRecord> output_contract = std::nullopt) {
+        ProgramCompiler compiler(registry, {"program-runtime-test/v1"});
         std::optional<ProgramBundle> bundle;
         try {
-            bundle = compiler.compile(source);
+            if (output_contract) {
+                bundle = compiler.compile(source, RunBudget{10000, 1000, 1000, 1, 32, 20, 0, 0, 0},
+                                          ContractRecord{}, *output_contract);
+            } else {
+                bundle = compiler.compile(source);
+            }
         } catch (const ProgramCompileError& error) {
             std::string message = error.what();
             for (const auto& diagnostic : error.diagnostics()) {
@@ -771,8 +807,8 @@ struct AdmittedRuntime {
         }
     }
 
-    void bind_child(const ProgramVersion& parent,
-                    std::string           binding_name,
+    void bind_child(const ProgramVersion&      parent,
+                    std::string                binding_name,
                     ProgramRuntimeChildBinding binding) {
         child_bindings->bind(parent.id(), std::move(binding_name), std::move(binding));
     }
@@ -789,7 +825,6 @@ struct AdmittedRuntime {
     }
 };
 
-
 struct LinkedChildAdmission {
     ProgramVersion    parent_version;
     ProgramVersion    child_version;
@@ -797,10 +832,11 @@ struct LinkedChildAdmission {
 };
 
 LinkedChildAdmission link_child_versions(
-    AdmittedRuntime& fixture,
-    ProgramVersion   parent_version,
-    ProgramVersion   child_version,
-    BudgetLimits     child_budget = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1}) {
+    AdmittedRuntime&   fixture,
+    ProgramVersion     parent_version,
+    ProgramVersion     child_version,
+    BudgetLimits       child_budget       = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+    ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
     const auto child_bundle = fixture.store->get_bundle(child_version.bundle_id());
     if (!child_bundle) throw std::runtime_error("child bundle was not admitted");
 
@@ -815,25 +851,24 @@ LinkedChildAdmission link_child_versions(
                                {ModulePort{"output", child_bundle->output_contract()}},
                                child_bundle->capability_effect_closure().capabilities,
                                child_bundle->capability_effect_closure().effects,
-                               std::move(child_budget)});
+                               std::move(child_budget),
+                               accepted_guarantee});
     module_data.allowed_capabilities = child_bundle->capability_effect_closure().capabilities;
     module_data.declared_effects     = child_bundle->capability_effect_closure().effects;
-    const auto parent_module = ProgramModule::create(std::move(module_data));
+    const auto       parent_module   = ProgramModule::create(std::move(module_data));
     ModuleResolution resolution;
     resolution.root = parent_module.coordinate();
     resolution.modules.push_back(parent_module);
     auto receipt =
         link_module_child(resolution, parent_module, "child", *child_bundle, child_version);
-    fixture.bind_child(parent_version, "child",
-                       ProgramRuntimeChildBinding{receipt, child_version});
-    return LinkedChildAdmission{
-        std::move(parent_version), std::move(child_version), std::move(receipt)};
+    fixture.bind_child(parent_version, "child", ProgramRuntimeChildBinding{receipt, child_version});
+    return LinkedChildAdmission{std::move(parent_version), std::move(child_version),
+                                std::move(receipt)};
 }
 
-LinkedChildAdmission make_linked_child(
-    AdmittedRuntime& fixture,
-    std::string      parent_node_type = "runtime-blocking",
-    std::string      child_node_type  = "runtime-blocking") {
+LinkedChildAdmission make_linked_child(AdmittedRuntime& fixture,
+                                       std::string      parent_node_type = "runtime-blocking",
+                                       std::string      child_node_type  = "runtime-blocking") {
     auto parent_document = program_document(std::move(parent_node_type));
     parent_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
     parent_document["declared_budget_requirements"][4]["minimum"] = 2;
@@ -861,23 +896,21 @@ LinkedChildAdmission make_recursive_linked_child(AdmittedRuntime& fixture) {
     child_document["declared_budget_requirements"][7]["maximum"] = 4;
     child_document["declared_budget_requirements"][8]["minimum"] = 0;
     child_document["declared_budget_requirements"][8]["maximum"] = 4;
-    auto linked = link_child_versions(
-        fixture, fixture.admit_document(std::move(parent_document)),
-        fixture.admit_document(std::move(child_document)),
-        BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 4, 4});
+    auto linked = link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
+                                      fixture.admit_document(std::move(child_document)),
+                                      BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 4, 4});
     fixture.bind_child(linked.child_version, "child",
                        ProgramRuntimeChildBinding{linked.receipt, linked.child_version});
     return linked;
 }
 
-
 LinkedChildAdmission make_durable_spawn_child(
-    AdmittedRuntime& fixture,
-    std::string      parent_node_type = "runtime-completed",
-    std::string      child_node_type  = "runtime-completed",
-    std::optional<std::uint64_t> timeout_ms = std::nullopt) {
-    json await = json{{"op", "await"},
-                      {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    AdmittedRuntime&             fixture,
+    std::string                  parent_node_type   = "runtime-completed",
+    std::string                  child_node_type    = "runtime-completed",
+    std::optional<std::uint64_t> timeout_ms         = std::nullopt,
+    ExecutionGuarantee           accepted_guarantee = ExecutionGuarantee::Strict) {
+    json await = json{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
     if (timeout_ms) await["timeout_ms"] = *timeout_ms;
     auto parent_document = orchestration_document(std::move(await), std::move(parent_node_type));
     parent_document["declared_budget_requirements"][4]["minimum"] = 2;
@@ -887,7 +920,9 @@ LinkedChildAdmission make_durable_spawn_child(
     parent_document["declared_budget_requirements"][8]["minimum"] = 1;
     parent_document["declared_budget_requirements"][8]["maximum"] = 1;
     return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
-                               fixture.admit(std::move(child_node_type)));
+                               fixture.admit(std::move(child_node_type)),
+                               BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                               accepted_guarantee);
 }
 
 json parallel_map_document(json          item_source,
@@ -920,7 +955,6 @@ json parallel_map_document(json          item_source,
     document["declared_budget_requirements"][8]["maximum"] = max_items;
     return document;
 }
-
 
 RunBudget grant() {
     return RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0};
@@ -1012,6 +1046,10 @@ public:
                                                        std::uint64_t    sequence) const override {
         return inner_.load_effects(owner, run_id, sequence);
     }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -1028,14 +1066,15 @@ private:
     InMemoryProgramTransitionStore inner_;
     std::atomic<bool>              injected_{false};
 };
-class FailChildDispatchOnceJournal final : public ProgramTransitionStore {
+
+class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
 public:
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load(owner, run_id);
     }
     std::optional<ProgramJournalRecord> latest(std::string_view owner,
-                                                std::string_view run_id) const override {
+                                               std::string_view run_id) const override {
         return inner_.latest(owner, run_id);
     }
     std::vector<ProgramEvent> load_events(std::string_view owner,
@@ -1048,9 +1087,71 @@ public:
                                                        std::uint64_t    sequence) const override {
         return inner_.load_effects(owner, run_id, sequence);
     }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
     ProgramTransitionPublishResult compare_publish(
-        std::string_view owner,
-        std::string_view expected,
+        std::string_view             owner,
+        std::string_view             expected,
+        ProgramTransitionPublication publication) override {
+        const bool command_result =
+            !publication.commands.empty() && publication.commands.back().completed();
+        const auto published = inner_.compare_publish(owner, expected, std::move(publication));
+        if (!command_result || published != ProgramTransitionPublishResult::Published) {
+            return published;
+        }
+        std::unique_lock lock(mutex_);
+        observed_ = true;
+        condition_.notify_all();
+        condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
+        return published;
+    }
+    bool wait_for_result(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        return condition_.wait_for(lock, timeout, [this] { return observed_; });
+    }
+    void release_result() {
+        std::lock_guard lock(mutex_);
+        released_ = true;
+        condition_.notify_all();
+    }
+
+private:
+    InMemoryProgramTransitionStore inner_;
+    mutable std::mutex             mutex_;
+    std::condition_variable        condition_;
+    bool                           observed_ = false;
+    bool                           released_ = false;
+};
+
+class FailChildDispatchOnceJournal final : public ProgramTransitionStore {
+public:
+    std::optional<ProgramRunRecord> load(std::string_view owner,
+                                         std::string_view run_id) const override {
+        return inner_.load(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+                                               std::string_view run_id) const override {
+        return inner_.latest(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events(std::string_view owner,
+                                          std::string_view run_id,
+                                          std::uint64_t    sequence) const override {
+        return inner_.load_events(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    sequence) const override {
+        return inner_.load_effects(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
+    ProgramTransitionPublishResult compare_publish(
+        std::string_view             owner,
+        std::string_view             expected,
         ProgramTransitionPublication publication) override {
         const auto children = publication.run_record.children();
         if (children.empty() || children.back().state != ProgramChildState::Dispatched ||
@@ -1062,14 +1163,12 @@ public:
         }
         return ProgramTransitionPublishResult::Conflict;
     }
-    void allow_dispatch() noexcept {
-        block_dispatch_.store(false);
-    }
+    void allow_dispatch() noexcept { block_dispatch_.store(false); }
 
 private:
     InMemoryProgramTransitionStore inner_;
-    std::atomic<bool>             injected_{false};
-    std::atomic<bool>             block_dispatch_{true};
+    std::atomic<bool>              injected_{false};
+    std::atomic<bool>              block_dispatch_{true};
 };
 class ThrowOnLatestJournal final : public ProgramTransitionStore {
 public:
@@ -1089,6 +1188,10 @@ public:
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
         return inner_.load_effects(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
     }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
@@ -1319,19 +1422,17 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
 }
 TEST(ProgramRuntimeTest, RejectsCrossScopeStartBeforePublishingRun) {
     completed_calls.store(0);
-    AdmittedRuntime fixture;
-    const auto version = fixture.admit("runtime-completed");
+    AdmittedRuntime   fixture;
+    const auto        version = fixture.admit("runtime-completed");
     ProgramInvocation invocation{json::object(), grant(), "trace-cross-scope", {}};
     invocation.requested_run_id = "cross-scope-run";
 
-    EXPECT_THROW(
-        (void)fixture.runtime->start("tenant:other", version, std::move(invocation)),
-        ProgramDiagnosticError);
+    EXPECT_THROW((void)fixture.runtime->start("tenant:other", version, std::move(invocation)),
+                 ProgramDiagnosticError);
     EXPECT_EQ(completed_calls.load(), 0U);
     EXPECT_FALSE(fixture.journal->load("tenant:other", "cross-scope-run").has_value());
     EXPECT_FALSE(fixture.journal->load("tenant:runtime", "cross-scope-run").has_value());
 }
-
 
 TEST(ProgramRuntimeTest, RequestedRunIdIsUsedExactlyAndCollisionNeverDispatches) {
     completed_calls.store(0);
@@ -1367,7 +1468,7 @@ TEST(ProgramRuntimeTest, CanonicalRunInvocationIsRetainedExactlyAndAcceptsRuntim
     invocation.validate();
     auto sink = std::make_shared<CountingSink>();
 
-    auto handle = fixture.runtime->start(invocation, sink);
+    auto       handle = fixture.runtime->start(invocation, sink);
     const auto result = handle.wait();
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
@@ -1463,8 +1564,7 @@ TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIde
     EXPECT_EQ(pending.payload()["effect"]["tool"], "search");
     EXPECT_EQ(pending.state(), ProgramPendingState::Awaiting);
 
-    const auto effects =
-        fixture.journal->load_effects("tenant:runtime", interrupted.run_id());
+    const auto effects = fixture.journal->load_effects("tenant:runtime", interrupted.run_id());
     ASSERT_EQ(effects.size(), 1U);
     EXPECT_EQ(effects.front().sequence(), 1U);
     EXPECT_EQ(effects.front().effect(), pending);
@@ -1491,7 +1591,10 @@ TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIde
             ->resume("tenant:runtime", interrupted.run_id(),
                      resume_for(interrupted, json{{"result", "recorded"}}, "trace-effect-resume"))
             .wait();
-    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message + " " +
+                                    resumed.failure()->witness.dump()
+                              : "no failure detail");
     EXPECT_EQ(resumed.output()["channels"]["value"]["value"], "recorded");
     EXPECT_EQ(interrupt_calls.load(), 2U);
 
@@ -1506,22 +1609,23 @@ TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIde
 TEST(ProgramRuntimeTest, UnknownNonIdempotentEffectBlocksCancelAndRedispatch) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
-    const auto version = fixture.admit("runtime-effect-nonidempotent");
-    const auto interrupted = fixture.runtime->run(
+    const auto      version     = fixture.admit("runtime-effect-nonidempotent");
+    const auto      interrupted = fixture.runtime->run(
         "tenant:runtime", version,
         ProgramInvocation{json::object(), grant(), "trace-effect-ambiguous", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.interrupt().has_value());
     ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
     const auto pending = *interrupted.interrupt()->pending_effect;
-    const auto run_id = interrupted.run_id();
+    const auto run_id  = interrupted.run_id();
 
     auto ambiguous = fixture.runtime
                          ->reconcile("tenant:runtime", run_id,
                                      ProgramEffectResolution{pending.call_id(),
                                                              ProgramEffectReconciliation::Unknown,
                                                              std::nullopt,
-                                                             "trace-effect-unknown", {}})
+                                                             "trace-effect-unknown",
+                                                             {}})
                          .wait();
     EXPECT_EQ(ambiguous.status(), ProgramTerminalStatus::AmbiguousEffect);
     EXPECT_EQ(interrupt_calls.load(), 1U);
@@ -1544,7 +1648,8 @@ TEST(ProgramRuntimeTest, UnknownNonIdempotentEffectBlocksCancelAndRedispatch) {
                                      ProgramEffectResolution{pending.call_id(),
                                                              ProgramEffectReconciliation::Completed,
                                                              json{{"result", "reconciled"}},
-                                                             "trace-effect-reconciled", {}})
+                                                             "trace-effect-reconciled",
+                                                             {}})
                          .wait();
     EXPECT_EQ(completed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(completed.output()["channels"]["value"]["value"], "reconciled");
@@ -1675,6 +1780,1108 @@ TEST(ProgramRuntimeTest, ProgramEnvelopePreservesDirectCoreBehavior) {
     EXPECT_EQ(program_checkpoint->step, direct_checkpoint->step);
     EXPECT_EQ(completed_calls.load(), 2U);
 }
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, JavaScriptGeneratorPreservesLocalYieldValue) {
+    const auto source = ProgramSource::from_javascript("test:generator-lifetime.js",
+                                                       R"JS(
+            export function* main(input) {
+                const command = {protocol_version: 1, op: "call_core", name: "main",
+                                 input: {requested: input.requested}};
+                yield command;
+            }
+        )JS");
+
+    const auto step = std::async(std::launch::async, [source] {
+                          auto generator = neograph::program::detail::JavaScriptGenerator::open(
+                              source, json{{"requested", "draft"}}, JavaScriptCompileLimits{});
+                          if (!generator)
+                              throw std::runtime_error("JavaScript generator was not exported");
+                          std::optional<json> response;
+                          return generator->next(std::move(response));
+                      }).get();
+    EXPECT_FALSE(step.done);
+    EXPECT_EQ(step.value, (json{{"protocol_version", 1},
+                                {"op", "call_core"},
+                                {"name", "main"},
+                                {"input", json{{"requested", "draft"}}}}));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptGeneratorLoadsReceiptBoundSealedModule) {
+    const std::string module_name   = "sealed:command-input@1.0.0";
+    const std::string module_source = R"JS(
+        export function commandInput(input) {
+            return {requested: input.requested + "-sealed"};
+        }
+    )JS";
+    const auto source = ProgramSource::from_javascript(
+        "test:generator-sealed-module.js",
+        "import { commandInput } from \"sealed:command-input@1.0.0\";\n"
+        "export function* main(input) {\n"
+        "  yield ng.callCore(\"main\", commandInput(input), \"sealed:1\");\n"
+        "}\n",
+        {{module_name, digest('a')}}, {},
+        {{module_name, digest('a'), module_source}});
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json{{"requested", "draft"}}, JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+
+    ASSERT_TRUE(step.command.has_value());
+    EXPECT_EQ(step.command->source_site(), "sealed:1");
+    EXPECT_EQ(step.command->to_json().at("arguments").at("input"),
+              (json{{"requested", "draft-sealed"}}));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptGeneratorExposesOnlyControlCommandBinding) {
+    const auto source = ProgramSource::from_javascript("test:generator-host-surface.js",
+                                                       R"JS(
+            export function* main() {
+                return {
+                    graph: typeof ng.graph,
+                    callCore: typeof ng.callCore,
+                    frozen: Object.isFrozen(ng),
+                };
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    EXPECT_TRUE(step.done);
+    EXPECT_EQ(step.value,
+              (json{{"graph", "undefined"}, {"callCore", "function"}, {"frozen", true}}));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptGeneratorProducesSealedTypedCommandEnvelope) {
+    const auto source = ProgramSource::from_javascript("test:typed-command.js",
+                                                       R"JS(
+            export function* main() {
+                const call = ng.callCore("main", {requested: "draft"}, "main:12");
+                if (!Object.isFrozen(call)) {
+                    throw new Error("command was not sealed");
+                }
+                yield call;
+                return {};
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    ASSERT_FALSE(step.done);
+    ASSERT_TRUE(step.command.has_value());
+    EXPECT_EQ(step.command->kind(), JavaScriptCommandKind::CallCore);
+    EXPECT_EQ(step.command->import_slot(), JAVASCRIPT_IMPORT_SLOT_CALL_CORE);
+    EXPECT_EQ(step.command->source_site(), "main:12");
+    EXPECT_EQ(step.value, step.command->to_json());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRetainedCommandsShareTheQuickJsMemoryCeiling) {
+    const auto              source = ProgramSource::from_javascript("test:native-live-commands.js",
+                                                                    R"JS(
+            export function* main() {
+                const retained = [];
+                for (let index = 0; index < 100000; ++index) {
+                    retained.push(ng.callCore(
+                        "main", {index, padding: "x".repeat(64)}, "retained:" + index));
+                }
+                yield retained[0];
+            }
+        )JS");
+    JavaScriptCompileLimits limits;
+    limits.memory_limit_bytes  = 2u * 1024u * 1024u;
+    limits.max_stack_bytes     = 128u * 1024u;
+    limits.max_interrupt_polls = 100'000'000u;
+    auto generator =
+        neograph::program::detail::JavaScriptGenerator::open(source, json::object(), limits);
+    ASSERT_TRUE(generator.has_value());
+    try {
+        (void)generator->next();
+        FAIL() << "expected cumulative native-memory rejection";
+    } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+        EXPECT_EQ(error.code(), "P_JS_RESOURCE_LIMIT");
+        ASSERT_TRUE(error.witness().contains("allocator_limit_denied_count"));
+        EXPECT_GT(error.witness().at("allocator_limit_denied_count").get<std::size_t>(), 0U);
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCommandFinalizersReleaseNativeMemoryCharges) {
+    const auto source = ProgramSource::from_javascript("test:native-command-release.js",
+                                                       R"JS(
+            export function* main() {
+                for (let batch = 0; batch < 2000; ++batch) {
+                    let retained = [];
+                    for (let index = 0; index < 16; ++index) {
+                        retained.push(ng.callCore(
+                            "main", {index, padding: "x".repeat(64)}, "temporary:" + index));
+                    }
+                    retained = null;
+                }
+                yield ng.callCore("main", {}, "survived");
+            }
+        )JS");
+    JavaScriptCompileLimits limits;
+    limits.memory_limit_bytes  = 2u * 1024u * 1024u;
+    limits.max_stack_bytes     = 128u * 1024u;
+    limits.max_interrupt_polls = 100'000'000u;
+    auto generator =
+        neograph::program::detail::JavaScriptGenerator::open(source, json::object(), limits);
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    ASSERT_TRUE(step.command.has_value());
+    EXPECT_EQ(step.command->source_site(), "survived");
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRuntimeRejectsImportsBeforeQuickJsEvaluation) {
+    const auto source = ProgramSource::from_javascript(
+        "test:runtime-import.js",
+        "import \"sealed:approved@1.0.0\";\n"
+        "export function* main() { yield {}; }\n",
+        {{"sealed:approved@1.0.0", std::string("sha256:") + std::string(64, 'a')}});
+    try {
+        (void)neograph::program::detail::JavaScriptGenerator::open(source, json::object(),
+                                                                   JavaScriptCompileLimits{});
+        FAIL() << "expected pre-evaluation import rejection";
+    } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+        EXPECT_EQ(error.code(), "P_JS_IMPORT_UNAVAILABLE");
+        ASSERT_TRUE(error.source_span().has_value());
+        EXPECT_EQ(error.source_span()->line_begin, 1U);
+        EXPECT_EQ(error.witness().at("receipt_bound_source_available"), false);
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRuntimeRejectsDynamicImportsBeforeQuickJsEvaluation) {
+    const auto source = ProgramSource::from_javascript("test:runtime-dynamic-import.js",
+                                                       "export function* main() {\n"
+                                                       "  yield import(\"sealed:unknown@1.0.0\");\n"
+                                                       "}\n");
+    try {
+        (void)neograph::program::detail::JavaScriptGenerator::open(source, json::object(),
+                                                                   JavaScriptCompileLimits{});
+        FAIL() << "expected pre-evaluation dynamic import rejection";
+    } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+        EXPECT_EQ(error.code(), "P_JS_IMPORT_UNAVAILABLE");
+        ASSERT_TRUE(error.source_span().has_value());
+        EXPECT_EQ(error.source_span()->line_begin, 2U);
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptGeneratorRejectsForgedCommandEnvelope) {
+    const auto source = ProgramSource::from_javascript("test:forged-command.js",
+                                                       R"JS(
+            export function* main() {
+                yield {
+                    protocol_version: 1,
+                    kind: "call_core",
+                    import_slot: 0,
+                    source_site: "main:1",
+                    arguments: {name: "main", input: {}}
+                };
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    EXPECT_FALSE(step.done);
+    EXPECT_FALSE(step.command.has_value());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptNgExposesClosedConstructorSet) {
+    const auto source = ProgramSource::from_javascript("test:command-constructors.js",
+                                                       R"JS(
+            export function* main() {
+                const call = ng.callCore("main", {x: 1}, "call:1");
+                const spawn = ng.spawn("child", {x: 2}, "spawn:1");
+                yield call;
+                yield spawn;
+                yield ng.await(spawn, 50, "await:1");
+                yield ng.join([call, spawn], "all", undefined, "join:1");
+                yield ng.all([call, spawn], "all:1");
+                yield ng.race([call, spawn], "race:1");
+                yield ng.quorum([call, spawn], 1, "quorum:1");
+                yield ng.emit({kind: "event"}, "emit:1");
+                yield ng.checkpoint({checkpoint: true}, "checkpoint:1");
+                yield ng.cancelScope("run", "stop", "cancel:1");
+                yield ng.hostCapability(42, {request: "approved"}, "host:1");
+                return {};
+            }
+        )JS");
+
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const std::vector<JavaScriptCommandKind> expected = {
+        JavaScriptCommandKind::CallCore,      JavaScriptCommandKind::Spawn,
+        JavaScriptCommandKind::Await,         JavaScriptCommandKind::Join,
+        JavaScriptCommandKind::Join,          JavaScriptCommandKind::Join,
+        JavaScriptCommandKind::Join,          JavaScriptCommandKind::Emit,
+        JavaScriptCommandKind::Checkpoint,    JavaScriptCommandKind::CancelScope,
+        JavaScriptCommandKind::HostCapability};
+    for (const auto kind : expected) {
+        const auto step = generator->next(json::object());
+        ASSERT_FALSE(step.done);
+        ASSERT_TRUE(step.command.has_value());
+        EXPECT_EQ(step.command->kind(), kind);
+        EXPECT_EQ(step.value, step.command->to_json());
+    }
+    const auto done = generator->next(json::object());
+    EXPECT_TRUE(done.done);
+    EXPECT_EQ(done.value, json::object());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptControlCancellationInterruptsBeforeAnyLateDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main() {
+                while (true) {}
+            }
+        )JS");
+
+    auto handle = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-javascript-cancel", {}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(handle.cancel());
+    const auto result = handle.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Cancelled)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message
+                             : "no failure detail");
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CANCELLED");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptGeneratorExecutesYieldedCoreCommand) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const core = yield ng.callCore("main", {requested: input.requested});
+                return {requested: input.requested, value: core.value};
+            }
+        )JS");
+    const auto bundle = fixture.store->get_bundle("tenant:runtime", version.bundle_id());
+    ASSERT_TRUE(bundle.has_value());
+    const auto control_source = bundle->control_source();
+    ASSERT_TRUE(control_source.has_value());
+    auto restored_generator = neograph::program::detail::JavaScriptGenerator::open(
+        *control_source, json{{"requested", "draft"}}, JavaScriptCompileLimits{});
+    ASSERT_TRUE(restored_generator.has_value());
+    const auto restored_step = restored_generator->next();
+    ASSERT_FALSE(restored_step.done);
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"requested", "draft"}}, grant(), "trace-javascript-control", {}});
+
+    EXPECT_EQ(version.execution_guarantee(), ExecutionGuarantee::Unmanaged);
+    const auto failure = result.failure();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (failure ? failure->code + ": " + failure->message + " " + failure->witness.dump()
+                    : "no failure detail");
+    EXPECT_EQ(result.output(), (json{{"requested", "draft"}, {"value", "completed"}}));
+    EXPECT_EQ(result.usage().program_operations, 1U);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCommandJournalPersistsCoordinateAndResult) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const output = yield ng.callCore("main", {requested: input.requested}, "journal:1");
+                return {value: output.value};
+            }
+        )JS");
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json{{"requested", "journal"}}, grant(), "trace-javascript-command-journal", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(completed_calls.load(), 1U);
+
+    const auto entries =
+        fixture.journal->load_javascript_commands("tenant:runtime", result.run_id());
+    ASSERT_EQ(entries.size(), 2U);
+    EXPECT_EQ(entries[0].command_ordinal(), 1U);
+    EXPECT_TRUE(entries[0].pending());
+    EXPECT_EQ(entries[0].coordinate_id(), entries[1].coordinate_id());
+    EXPECT_TRUE(entries[1].completed());
+    EXPECT_EQ(entries[1].terminal_result()->at("status"), "completed");
+    EXPECT_EQ(entries[1].command().source_site(), "journal:1");
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResult) {
+    completed_calls.store(0);
+    auto            journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const output = yield ng.callCore("main", {requested: input.requested}, "crash:result");
+                return {value: output.value};
+            }
+        )JS");
+
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json{{"requested", "recorded"}}, grant(), "trace-javascript-result-crash", {}});
+    if (!journal->wait_for_result(std::chrono::seconds(2))) {
+        const auto failed = original.wait();
+        FAIL() << (failed.failure() ? failed.failure()->code + ": " + failed.failure()->message +
+                                          " " + failed.failure()->witness.dump()
+                                    : "command result was not journaled");
+    }
+    EXPECT_EQ(completed_calls.load(), 1U);
+    const auto durable_commands =
+        journal->load_javascript_commands("tenant:runtime", original.run_id(), 0);
+    ASSERT_EQ(durable_commands.size(), 2U);
+    EXPECT_TRUE(durable_commands.back().completed());
+    const auto durable_snapshot = journal->load("tenant:runtime", original.run_id());
+    ASSERT_TRUE(durable_snapshot.has_value());
+    ASSERT_TRUE(durable_snapshot->exact_checkpoint().has_value());
+    const auto durable_events = journal->load_events("tenant:runtime", original.run_id(), 0);
+    ASSERT_FALSE(durable_events.empty());
+    EXPECT_EQ(durable_snapshot->event_sequence(), durable_events.back().sequence);
+    EXPECT_TRUE(std::any_of(durable_events.begin(), durable_events.end(), [&](const auto& event) {
+        return event.kind == ProgramEventKind::CheckpointPublished &&
+               std::get<ProgramCheckpointEvent>(event.payload).checkpoint ==
+                   *durable_snapshot->exact_checkpoint();
+    }));
+
+    auto       fresh_runtime = fixture.make_runtime();
+    const auto replayed      = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
+    ASSERT_EQ(replayed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(replayed.output(), (json{{"value", "completed"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+    const auto replayed_events = journal->load_events("tenant:runtime", original.run_id(), 0);
+    for (const auto& durable_event : durable_events) {
+        EXPECT_EQ(std::count_if(replayed_events.begin(), replayed_events.end(),
+                                [&](const auto& replayed_event) {
+                                    return replayed_event.id == durable_event.id;
+                                }),
+                  1);
+    }
+
+    journal->release_result();
+    (void)original.wait();
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptPendingHeadFreshRuntimeResumesWithoutRedispatch) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-blocking"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const output = yield ng.callCore("main", {requested: input.requested}, "crash:1");
+                return {value: output.value};
+            }
+        )JS");
+
+    // Keep the first Core dispatch in flight at the crash boundary.  A second
+    // runtime is intentionally attached to the same durable transition store,
+    // as a fresh process would be after the first one stopped after publishing
+    // the yielded-command head.
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json{{"requested", "crash"}}, grant(), "trace-javascript-crash-boundary", {}});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (blocking_calls.load() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(blocking_calls.load(), 1U);
+    ASSERT_FALSE(original.try_result().has_value());
+
+    const auto pending_entries =
+        fixture.journal->load_javascript_commands("tenant:runtime", original.run_id());
+    ASSERT_EQ(pending_entries.size(), 1U);
+    ASSERT_TRUE(pending_entries.front().pending());
+
+    auto       fresh_runtime = fixture.make_runtime();
+    auto       recovered     = fresh_runtime->reconnect("tenant:runtime", original.run_id());
+    const auto interrupted   = recovered.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
+    const auto pending = *interrupted.interrupt()->pending_effect;
+    EXPECT_EQ(pending.idempotency(), ProgramEffectIdempotency::NonIdempotent);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+
+    const auto resumed = fresh_runtime
+                             ->resume("tenant:runtime", original.run_id(),
+                                      resume_for(interrupted, json{{"value", "resumed"}},
+                                                 "trace-javascript-crash-resume"))
+                             .wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message + " " +
+                                    resumed.failure()->witness.dump()
+                              : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"value", "resumed"}}));
+    EXPECT_EQ(blocking_calls.load(), 1U);
+
+    const auto entries =
+        fixture.journal->load_javascript_commands("tenant:runtime", original.run_id());
+    ASSERT_EQ(entries.size(), 2U);
+    EXPECT_EQ(entries[0].coordinate_id(), entries[1].coordinate_id());
+    EXPECT_TRUE(entries[1].completed());
+    EXPECT_EQ(entries[1].terminal_result()->at("output"), (json{{"value", "resumed"}}));
+
+    // Stop the original process simulation after the fresh runtime has
+    // durably completed.  Its result loses the transition race and must not
+    // cause a second Core dispatch.
+    EXPECT_TRUE(original.cancel());
+    (void)original.wait();
+    EXPECT_EQ(blocking_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptControlRejectsUnknownCommandFieldsBeforeDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                yield {
+                    protocol_version: 1,
+                    op: "call_core",
+                    name: "main",
+                    input: {requested: input.requested},
+                    unexpected: true,
+                };
+                return {};
+            }
+        )JS");
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"requested", "draft"}}, grant(), "trace-javascript-invalid", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_JS_CONTROL_COMMAND");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+std::string javascript_runtime_source(std::string node_type, std::string body) {
+    return "export function define() {\n"
+           "  const graph = ng.graph(\"main\");\n"
+           "  graph.channel(\"value\", {reducer: \"runtime-overwrite\", initial: \"\"});\n"
+           "  graph.node(\"work\", {type: \"" +
+           std::move(node_type) +
+           "\"});\n"
+           "  graph.entry(\"work\");\n"
+           "  graph.exit(\"work\");\n"
+           "  return graph;\n"
+           "}\n\n"
+           "export function* main(input) {\n" +
+           std::move(body) + "\n}\n";
+}
+
+RunBudget javascript_budget(std::uint64_t max_concurrency        = 2,
+                            std::uint64_t max_program_operations = 32,
+                            std::uint64_t max_child_depth        = 0,
+                            std::uint64_t max_total_children     = 0) {
+    return RunBudget{10000,
+                     1000,
+                     1000,
+                     static_cast<std::uint32_t>(max_concurrency),
+                     max_program_operations,
+                     20,
+                     0,
+                     static_cast<std::uint32_t>(max_child_depth),
+                     max_total_children};
+}
+
+TEST(ProgramRuntimeTest, JavaScriptBlockedCommandHonorsExternalCancellation) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-blocking",
+                                                                                 R"JS(
+    return yield ng.callCore("main", {}, "cancel:blocked");
+)JS"));
+
+    auto handle = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 1), "trace-js-cancel-blocked", {}});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (blocking_calls.load() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(blocking_calls.load(), 1U);
+
+    EXPECT_TRUE(handle.cancel());
+    const auto result = handle.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CANCELLED");
+    EXPECT_EQ(result.usage().program_operations, 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCrashRecoveryDoesNotRecoverReservedResourceBudget) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-blocking",
+                                                                                 R"JS(
+    const first = yield ng.callCore("main", {}, "budget:first");
+    yield ng.emit({unreachable: first.value}, "budget:second");
+    return first;
+)JS"));
+
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 1), "trace-js-budget-recovery", {}});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (blocking_calls.load() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(blocking_calls.load(), 1U);
+
+    auto       fresh_runtime = fixture.make_runtime();
+    const auto interrupted   = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+    EXPECT_EQ(interrupted.remaining_budget().wall_time_ms, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().model_tokens, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().monetary_microunits, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().max_core_steps, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().max_program_operations, 0U);
+    const auto durable = fixture.journal->latest("tenant:runtime", original.run_id());
+    ASSERT_TRUE(durable.has_value());
+    EXPECT_GT(durable->inflight_reservation.wall_time_ms, 0U);
+    EXPECT_GT(durable->inflight_reservation.model_tokens, 0U);
+    EXPECT_GT(durable->inflight_reservation.max_core_steps, 0U);
+    EXPECT_TRUE(original.cancel());
+    (void)original.wait();
+    EXPECT_EQ(blocking_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAllJoinsActuallyOverlapCoreCommands) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-short-blocking",
+                                                           R"JS(
+    const result = yield ng.all([
+        ng.callCore("main", {}, "first"),
+        ng.callCore("main", {}, "second")
+    ], {max_in_flight: 2}, "all");
+    return result;
+)JS"));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-overlap", {}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                             : "no failure detail");
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+    EXPECT_LT(elapsed, std::chrono::milliseconds(900));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinEnforcesMaxInFlightCap) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-short-blocking",
+                                                           R"JS(
+    const result = yield ng.all([
+        ng.callCore("main", {}, "first"),
+        ng.callCore("main", {}, "second"),
+        ng.callCore("main", {}, "third")
+    ], {max_in_flight: 2}, "all");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(3), "trace-js-cap", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 3U);
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinValidatesEveryMemberBeforeDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source("runtime-completed",
+                                                                            R"JS(
+    yield ng.all([
+        ng.callCore("main", {}, "valid:first"),
+        ng.callCore("not-admitted", {}, "invalid:second")
+    ], {max_in_flight: 2}, "validate");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-validate", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_JS_CONTROL_COMMAND");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinReservesAggregateOperationBudgetBeforeDispatch) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source("runtime-completed",
+                                                                            R"JS(
+    yield ng.all([
+        ng.callCore("main", {}, "budget:first"),
+        ng.callCore("main", {}, "budget:second")
+    ], {max_in_flight: 2}, "budget");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2, 2), "trace-js-budget", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_PROGRAM_OPERATION_BUDGET");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinUsesDeclarationOrderForResultsAndReadyRaceTies) {
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source("runtime-completed",
+                                                                            R"JS(
+    const all_result = yield ng.all([
+        ng.emit({id: 1}, "all:first"),
+        ng.emit({id: 2}, "all:second")
+    ], {max_in_flight: 2, collect: true}, "all");
+    const race_result = yield ng.race([
+        ng.emit({id: 1}, "race:first"),
+        ng.emit({id: 2}, "race:second")
+    ], "race");
+    return {all: all_result, race: race_result};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-order", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                             : "no failure detail");
+    EXPECT_EQ(result.output(), (json{{"all", json::array({json{{"id", 1}}, json{{"id", 2}}})},
+                                     {"race", json{{"id", 1}}}}));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptStructuredCommandReplaysAfterFreshRuntimeWithoutRedispatch) {
+    completed_calls.store(0);
+    auto            journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source("runtime-completed",
+                                                                            R"JS(
+    const results = yield ng.all([
+        ng.callCore("main", {member: 1}, "replay:first"),
+        ng.callCore("main", {member: 2}, "replay:second")
+    ], {max_in_flight: 2}, "replay:join");
+    return {values: results.map((result) => result.value)};
+)JS"));
+
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json::object(), javascript_budget(2), "trace-js-structured-result-crash", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    EXPECT_EQ(completed_calls.load(), 2U);
+
+    auto       fresh_runtime = fixture.make_runtime();
+    const auto replayed      = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
+    ASSERT_EQ(replayed.status(), ProgramTerminalStatus::Completed)
+        << (replayed.failure() ? replayed.failure()->code + ": " + replayed.failure()->message
+                               : "no failure detail");
+    EXPECT_EQ(replayed.output(), (json{{"values", json::array({"completed", "completed"})}}));
+    EXPECT_EQ(completed_calls.load(), 2U);
+
+    journal->release_result();
+    (void)original.wait();
+    EXPECT_EQ(completed_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-failing",
+                                                                                 R"JS(
+    const result = yield ng.all([
+        ng.emit({id: "ok"}, "collect:ok"),
+        ng.callCore("main", {}, "collect:failure")
+    ], {max_in_flight: 2, collect: true}, "collect");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-collect", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.output(), json::array({json{{"id", "ok"}}, nullptr}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitTimeoutCancelsDirectCoreWork) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-blocking",
+                                                                                 R"JS(
+    const result = yield ng.await(ng.callCore("main", {}, "await:core"), 10, "await");
+    return result;
+)JS"));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-await-timeout", {}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - started);
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_LT(elapsed.count(), 2);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptQuorumRunsMembersConcurrentlyAndOrdersSuccesses) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-short-blocking",
+                                                           R"JS(
+    const result = yield ng.quorum([
+        ng.callCore("main", {}, "quorum:blocked"),
+        ng.emit({id: 1}, "quorum:first"),
+        ng.emit({id: 2}, "quorum:second")
+    ], {required_successes: 2, max_in_flight: 2}, "quorum");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-quorum", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({json{{"id", 1}}, json{{"id", 2}}}));
+    EXPECT_EQ(blocking_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCancelScopeCancelsTheOwningRun) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source("runtime-completed",
+                                                                            R"JS(
+    yield ng.cancelScope("current", "stop", "scope stopped");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-cancel-scope", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CANCELLED");
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceCancelsLoserChildrenWithoutOrphans) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      parent_version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed",
+                                                           R"JS(
+    const winner = yield ng.race([
+        ng.await(ng.spawn("child", {}, "spawn"), 5000, "await"),
+        ng.emit({winner: true}, "winner")
+    ], {max_in_flight: 2}, "race");
+    return winner;
+)JS"));
+    const auto child_version = fixture.admit("runtime-blocking");
+    const auto linked        = link_child_versions(fixture, parent_version, child_version,
+                                                   BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{
+            json::object(), javascript_budget(2, 32, 1, 1), "trace-js-cancel-child", {}});
+    const auto result = parent.wait();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                             : "no failure detail");
+    EXPECT_EQ(result.output(), (json{{"winner", true}}));
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 1U);
+    EXPECT_EQ(children.front().state, ProgramChildState::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptInterruptedCallCoreResumesItsExactPendingCoordinate) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:call-core");
+    return {value: output.value};
+)JS"));
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-exact-interrupt", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+    ASSERT_TRUE(interrupted.checkpoint().has_value());
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_input.has_value());
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "approved"}},
+                                                 "trace-js-exact-resume"))
+                             .wait();
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message
+                              : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"value", "approved"}}));
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto commands =
+        fixture.journal->load_javascript_commands("tenant:runtime", interrupted.run_id());
+    ASSERT_EQ(commands.size(), 2U);
+    EXPECT_EQ(commands.front().coordinate_id(), commands.back().coordinate_id());
+    EXPECT_TRUE(commands.back().completed());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptExactResumeStillValidatesMalformedTerminalOutput) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    yield ng.callCore("main", {}, "resume:malformed-output");
+    return "not-an-object";
+)JS"),
+                                 ContractRecord{1, json{{"type", "object"}}});
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-malformed-first", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "approved"}},
+                                                 "trace-js-malformed-resume"))
+                             .wait();
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(resumed.failure().has_value());
+    EXPECT_EQ(resumed.failure()->code, "P_OUTPUT_CONTRACT");
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceSelectionDoesNotReplenishLateMembers) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", R"JS(
+    const winner = yield ng.race([
+        ng.emit({winner: 0}, "race:first"),
+        ng.emit({winner: 1}, "race:second"),
+        ng.callCore("main", {}, "race:must-not-launch")
+    ], {max_in_flight: 2}, "race:no-replenish");
+    return winner;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-race-fence", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), (json{{"winner", 0}}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptMissingSpawnBindingPreflightBlocksEverySibling) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", R"JS(
+    yield ng.all([
+        ng.callCore("main", {}, "spawn-preflight:valid"),
+        ng.spawn("missing-child", {}, "spawn-preflight:missing")
+    ], {max_in_flight: 2}, "spawn-preflight:join");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json::object(), javascript_budget(2, 32, 1, 1), "trace-js-spawn-preflight", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitedCallCoreResumesItsNestedExactCoordinate) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.await(
+        ng.callCore("main", {}, "resume:nested-call-core"),
+        undefined,
+        "resume:nested-await");
+    return {value: output.value};
+)JS"));
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-nested-interrupt", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_input.has_value());
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "nested-approved"}},
+                                                 "trace-js-nested-resume"))
+                             .wait();
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message
+                              : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"value", "nested-approved"}}));
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto events = fixture.journal->load_events("tenant:runtime", interrupted.run_id(), 0);
+    const auto checkpoint_events = std::count_if(
+        events.begin(), events.end(),
+        [](const auto& event) { return event.kind == ProgramEventKind::CheckpointPublished; });
+    EXPECT_EQ(checkpoint_events, 2);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptEventSinkFailureSettlesPublishedCommandReservation) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", R"JS(
+    yield ng.emit({published: true}, "sink:emit");
+    return {unreachable: true};
+)JS"));
+    auto sink = std::make_shared<ThrowingSink>(ProgramEventKind::Emit);
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-sink", sink});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_EVENT_SINK");
+    const auto journal = fixture.journal->latest("tenant:runtime", result.run_id());
+    ASSERT_TRUE(journal.has_value());
+    EXPECT_EQ(journal->continuation.state, ContinuationState::Failed);
+    EXPECT_EQ(journal->inflight_reservation, RunBudget{});
+    const auto commands =
+        fixture.journal->load_javascript_commands("tenant:runtime", result.run_id());
+    ASSERT_EQ(commands.size(), 2U);
+    EXPECT_TRUE(commands.back().completed());
+    EXPECT_LE(result.remaining_budget().wall_time_ms + result.usage().wall_time_ms,
+              javascript_budget(1).wall_time_ms);
+}
+#endif
 
 TEST(ProgramRuntimeTest, ProgramInterruptAndExactResumePreserveDirectCoreBehavior) {
     interrupt_calls.store(0);
@@ -2467,20 +3674,20 @@ TEST(ProgramRuntimeTest, HostAdmissionQueuesProgramAttemptsUntilLeaseRelease) {
     blocking_calls.store(0);
     followup_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto version = fixture.admit("runtime-short-blocking");
+    const auto      version = fixture.admit("runtime-short-blocking");
 
-    const auto host_profile = neograph::HostResourceProfile::create(
-        neograph::HostResourceProfileData{
+    const auto host_profile =
+        neograph::HostResourceProfile::create(neograph::HostResourceProfileData{
             "runtime-host-v1",
             neograph::HostResourceVector{.cpu_millis = 1},
             {},
-            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured,
-                                           1, false}});
+            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured, 1,
+                                           false}});
     auto host = std::make_shared<neograph::HostAdmissionController>(
         neograph::HostAdmissionControllerConfig{host_profile});
 
     RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 2};
-    config.host_admission = host;
+    config.host_admission          = host;
     config.host_admission_resolver = [](const ProgramHostAdmissionContext& context) {
         EXPECT_EQ(context.owner_scope, "tenant:runtime");
         EXPECT_EQ(context.operation_id, "root");
@@ -2491,17 +3698,17 @@ TEST(ProgramRuntimeTest, HostAdmissionQueuesProgramAttemptsUntilLeaseRelease) {
     };
     fixture.runtime = std::make_unique<ProgramRuntime>(std::move(config));
 
-    auto first = fixture.runtime->start(
-        "tenant:runtime", version,
-        ProgramInvocation{json::object(), grant(), "trace-host-first", {}});
+    auto first =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-host-first", {}});
     for (int i = 0; i < 100 && blocking_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     ASSERT_EQ(blocking_calls.load(), 1U);
 
-    auto second = fixture.runtime->start(
-        "tenant:runtime", version,
-        ProgramInvocation{json::object(), grant(), "trace-host-second", {}});
+    auto second =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-host-second", {}});
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     EXPECT_EQ(blocking_calls.load(), 1U);
     EXPECT_EQ(host->snapshot().queued, 1U);
@@ -2517,19 +3724,19 @@ TEST(ProgramRuntimeTest, HostAdmissionDeadlineCancelsQueuedAttemptBeforeCoreDisp
     blocking_calls.store(0);
     followup_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto version = fixture.admit("runtime-blocking");
+    const auto      version = fixture.admit("runtime-blocking");
 
-    const auto host_profile = neograph::HostResourceProfile::create(
-        neograph::HostResourceProfileData{
+    const auto host_profile =
+        neograph::HostResourceProfile::create(neograph::HostResourceProfileData{
             "runtime-host-timeout-v1",
             neograph::HostResourceVector{.cpu_millis = 1},
             {},
-            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured,
-                                           1, false}});
+            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured, 1,
+                                           false}});
     auto host = std::make_shared<neograph::HostAdmissionController>(
         neograph::HostAdmissionControllerConfig{host_profile});
     RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 2};
-    config.host_admission = host;
+    config.host_admission          = host;
     config.host_admission_resolver = [](const ProgramHostAdmissionContext&) {
         neograph::HostAdmissionRequest request;
         request.resources.cpu_millis = 1;
@@ -2547,7 +3754,7 @@ TEST(ProgramRuntimeTest, HostAdmissionDeadlineCancelsQueuedAttemptBeforeCoreDisp
 
     auto budget         = grant();
     budget.wall_time_ms = 30;
-    auto queued = fixture.runtime->start(
+    auto queued         = fixture.runtime->start(
         "tenant:runtime", version,
         ProgramInvocation{json::object(), budget, "trace-host-timeout-queued", {}});
     const auto queued_result = queued.wait();
@@ -2567,7 +3774,7 @@ TEST(ProgramRuntimeTest, HostAdmissionDeadlineCancelsQueuedAttemptBeforeCoreDisp
 
 TEST(ProgramRuntimeTest, HostAdmissionRequiresControllerAndResolverTogether) {
     AdmittedRuntime fixture;
-    auto host = std::make_shared<neograph::HostAdmissionController>();
+    auto            host = std::make_shared<neograph::HostAdmissionController>();
 
     RuntimeConfig controller_only{
         fixture.catalog, fixture.checkpoints, {}, fixture.journal, fixture.scheduler_thread_count};
@@ -2765,10 +3972,9 @@ TEST(ProgramRuntimeTest, RuntimeShutdownPreservesDeliveredInterruptedRun) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-interrupt");
-    auto handle =
-        fixture.runtime->start("tenant:runtime", version,
-                               ProgramInvocation{json::object(), grant(),
-                                                 "trace-shutdown-interrupt", {}});
+    auto            handle  = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-shutdown-interrupt", {}});
     const auto interrupted = handle.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
@@ -2816,7 +4022,7 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     const auto forked =
         fixture.runtime
             ->fork(ExactProgramCheckpointReference{source.run_id(),
-                                                    source.checkpoint()->checkpoint_id},
+                                                   source.checkpoint()->checkpoint_id},
                    fork_invocation,
                    ProgramResume{
                        json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
@@ -2847,8 +4053,8 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
 TEST(ProgramRuntimeTest, ForkAllowsBudgetOnlyMigrationButEnforcesTargetDeclaredBounds) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
-    const auto source_version = fixture.admit("runtime-interrupt");
-    const auto source =
+    const auto      source_version = fixture.admit("runtime-interrupt");
+    const auto      source =
         fixture.runtime
             ->start("tenant:runtime", source_version,
                     ProgramInvocation{json::object(), grant(), "trace-fork-budget-source", {}})
@@ -2861,8 +4067,8 @@ TEST(ProgramRuntimeTest, ForkAllowsBudgetOnlyMigrationButEnforcesTargetDeclaredB
     auto target_document = program_document("runtime-interrupt");
     target_document["declared_budget_requirements"][1]["maximum"] = 10;
     const auto target_version = fixture.admit_document(std::move(target_document));
-    const auto plan = fixture.catalog->plan_migration("tenant:runtime", source_version.id(),
-                                                       target_version.id());
+    const auto plan =
+        fixture.catalog->plan_migration("tenant:runtime", source_version.id(), target_version.id());
     EXPECT_TRUE(plan.is_compatible());
 
     const std::string rejected_run_id = "fork-budget-rejected";
@@ -2871,10 +4077,15 @@ TEST(ProgramRuntimeTest, ForkAllowsBudgetOnlyMigrationButEnforcesTargetDeclaredB
             "tenant:runtime",
             ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
             target_version,
-            ProgramInvocation{json::object(), source.remaining_budget(),
-                              "trace-fork-budget-target", {}, rejected_run_id},
-            ProgramResume{json{{"decision", "must-not-dispatch"}}, "trace-fork-budget-resume",
-                          {}, pending_call_id(source)});
+            ProgramInvocation{json::object(),
+                              source.remaining_budget(),
+                              "trace-fork-budget-target",
+                              {},
+                              rejected_run_id},
+            ProgramResume{json{{"decision", "must-not-dispatch"}},
+                          "trace-fork-budget-resume",
+                          {},
+                          pending_call_id(source)});
         FAIL() << "budget outside target admitted bounds unexpectedly forked";
     } catch (const std::exception& error) {
         EXPECT_NE(std::string(error.what()).find("target admitted bounds"), std::string::npos);
@@ -2900,26 +4111,29 @@ TEST(ProgramRuntimeTest, ForkRejectsSourceRunIdBeforeCloningCheckpoint) {
     ASSERT_TRUE(source.checkpoint().has_value());
     const auto before = fixture.journal->load("tenant:runtime", source.run_id());
     ASSERT_TRUE(before.has_value());
-    const auto source_thread = before->exact_checkpoint()->core_thread_id;
+    const auto source_thread             = before->exact_checkpoint()->core_thread_id;
     const auto source_checkpoints_before = fixture.checkpoints->list(source_thread, 100).size();
-    ProgramInvocation invocation{
-        json::object(), source.remaining_budget(), "trace-fork-same-run-target", {},
-        source.run_id()};
+    ProgramInvocation invocation{json::object(),
+                                 source.remaining_budget(),
+                                 "trace-fork-same-run-target",
+                                 {},
+                                 source.run_id()};
     EXPECT_THROW(
         (void)fixture.runtime->fork(
             "tenant:runtime",
             ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
             version, std::move(invocation),
-            ProgramResume{json{{"decision", "must-not-clone"}}, "trace-fork-same-run-resume",
-                          {}, before->pending_input()->call_id()}),
+            ProgramResume{json{{"decision", "must-not-clone"}},
+                          "trace-fork-same-run-resume",
+                          {},
+                          before->pending_input()->call_id()}),
         std::exception);
 
     const auto after = fixture.journal->load("tenant:runtime", source.run_id());
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(after->id(), before->id());
     EXPECT_EQ(interrupt_calls.load(), 1U);
-    EXPECT_EQ(fixture.checkpoints->list(source_thread, 100).size(),
-              source_checkpoints_before);
+    EXPECT_EQ(fixture.checkpoints->list(source_thread, 100).size(), source_checkpoints_before);
 }
 
 TEST(ProgramRuntimeTest, ForkMismatchesRejectBeforeTargetRunAndLeaveSourceUnchanged) {
@@ -3005,39 +4219,40 @@ json orchestration_document(json root, std::string node_type = "runtime-complete
     root["definition"] = std::move(document["root"]["definition"]);
     document["declared_budget_requirements"][3]["maximum"] = 4;
     document["declared_budget_requirements"][4]["maximum"] = 32;
-    document["root"] = std::move(root);
+    document["root"]                                       = std::move(root);
     return document;
 }
 
 json orchestration_document() {
     return orchestration_document(
         json{{"op", "sequence"},
-             {"children",
-              json::array({json{{"op", "call_core"}},
-                           json{{"op", "emit"}, {"value", json{{"kind", "core_done"}}}},
-                           json{{"op", "return"}, {"value", json{{"ok", true}}}}})}});
+             {"children", json::array({json{{"op", "call_core"}},
+                                       json{{"op", "emit"}, {"value", json{{"kind", "core_done"}}}},
+                                       json{{"op", "return"}, {"value", json{{"ok", true}}}}})}});
 }
 
-ProgramResult run_orchestration(AdmittedRuntime& fixture, json document, json input = json::object(),
-                                std::string trace_id = "trace-orchestration") {
+ProgramResult run_orchestration(AdmittedRuntime& fixture,
+                                json             document,
+                                json             input    = json::object(),
+                                std::string      trace_id = "trace-orchestration") {
     const auto version = fixture.admit_document(std::move(document));
-    return fixture.runtime->run(
-        "tenant:runtime", version,
-        ProgramInvocation{std::move(input),
-                           RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
-                           std::move(trace_id), {}});
+    return fixture.runtime->run("tenant:runtime", version,
+                                ProgramInvocation{std::move(input),
+                                                  RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                                                  std::move(trace_id),
+                                                  {}});
 }
 
 TEST(ProgramRuntimeTest, BranchSelectsWithoutDispatchingTheUnselectedCore) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
-    const auto result = run_orchestration(
+    const auto      result = run_orchestration(
         fixture,
         orchestration_document(
             json{{"op", "branch"},
-                 {"condition", json{{"path", "/route"}, {"equals", "then"}}},
-                 {"then", json{{"op", "call_core"}}},
-                 {"else", json{{"op", "return"}, {"value", json{{"selected", "else"}}}}}}),
+                      {"condition", json{{"path", "/route"}, {"equals", "then"}}},
+                      {"then", json{{"op", "call_core"}}},
+                      {"else", json{{"op", "return"}, {"value", json{{"selected", "else"}}}}}}),
         json{{"route", "else"}}, "trace-branch");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
@@ -3048,13 +4263,12 @@ TEST(ProgramRuntimeTest, BranchSelectsWithoutDispatchingTheUnselectedCore) {
 TEST(ProgramRuntimeTest, BoundedLoopReportsBudgetExhaustionAfterTheLastAllowedIteration) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
-    const auto result = run_orchestration(
+    const auto      result = run_orchestration(
         fixture,
-        orchestration_document(
-            json{{"op", "loop"},
-                 {"condition", json{{"path", "/never"}, {"exists", false}}},
-                 {"max_iterations", 2},
-                 {"body", json{{"op", "call_core"}}}}),
+        orchestration_document(json{{"op", "loop"},
+                                         {"condition", json{{"path", "/never"}, {"exists", false}}},
+                                         {"max_iterations", 2},
+                                         {"body", json{{"op", "call_core"}}}}),
         json::object(), "trace-loop");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
@@ -3065,11 +4279,11 @@ TEST(ProgramRuntimeTest, BoundedLoopReportsBudgetExhaustionAfterTheLastAllowedIt
 
 TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassification) {
     AdmittedRuntime fixture;
-    const auto result = run_orchestration(
-        fixture, orchestration_document(json{{"op", "retry"},
-                                             {"max_attempts", 2},
-                                             {"body", json{{"op", "call_core"}}}},
-                                        "runtime-failing"),
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "retry"}, {"max_attempts", 2}, {"body", json{{"op", "call_core"}}}},
+            "runtime-failing"),
         json::object(), "trace-retry");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
@@ -3082,19 +4296,16 @@ TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassificati
 
 TEST(ProgramRuntimeTest, DeepNestedCoreFailurePreservesOperationAndSourceCoordinate) {
     AdmittedRuntime fixture;
-    const auto nested_root =
-        json{{"op", "sequence"},
-             {"children",
-              json::array(
-                  {json{{"op", "branch"},
-                        {"condition", json{{"path", "/route"}, {"equals", "then"}}},
-                        {"then",
-                         json{{"op", "retry"},
-                              {"max_attempts", 1},
-                              {"body", json{{"op", "call_core"}}}}}}})}};
-    const auto result = run_orchestration(
-        fixture, orchestration_document(nested_root, "runtime-failing"),
-        json{{"route", "then"}}, "trace-deep-nested-failure");
+    const auto      nested_root = json{
+             {"op", "sequence"},
+             {"children", json::array({json{{"op", "branch"},
+                                            {"condition", json{{"path", "/route"}, {"equals", "then"}}},
+                                            {"then", json{{"op", "retry"},
+                                                          {"max_attempts", 1},
+                                                          {"body", json{{"op", "call_core"}}}}}}})}};
+    const auto result =
+        run_orchestration(fixture, orchestration_document(nested_root, "runtime-failing"),
+                          json{{"route", "then"}}, "trace-deep-nested-failure");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
@@ -3106,17 +4317,15 @@ TEST(ProgramRuntimeTest, DeepNestedCoreFailurePreservesOperationAndSourceCoordin
 TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2);
-    const json first{{"op", "sequence"},
-                     {"children",
-                      json::array({json{{"op", "call_core"}},
-                                   json{{"op", "return"},
-                                        {"value", json{{"branch", 1}}}}})}};
+    const json      first{
+             {"op", "sequence"},
+             {"children", json::array({json{{"op", "call_core"}},
+                                       json{{"op", "return"}, {"value", json{{"branch", 1}}}}})}};
     const json second{{"op", "return"}, {"value", json{{"branch", 2}}}};
     const auto result =
         run_orchestration(fixture,
                           orchestration_document(
-                              json{{"op", "parallel"},
-                                   {"branches", json::array({first, second})}}),
+                              json{{"op", "parallel"}, {"branches", json::array({first, second})}}),
                           json::object(), "trace-parallel");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
@@ -3124,23 +4333,40 @@ TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, ParallelImmediateBranchesRetainTheirCompletionSignal) {
+    AdmittedRuntime fixture(2);
+    const json      unreachable_core{{"op", "branch"},
+                                     {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                                     {"then", json{{"op", "call_core"}}},
+                                     {"else", json{{"op", "return"}, {"value", 3}}}};
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(json{
+                 {"op", "parallel"},
+                 {"branches", json::array({json{{"op", "return"}, {"value", 1}},
+                                           json{{"op", "return"}, {"value", 2}}, unreachable_core})}}),
+        json::object(), "trace-parallel-immediate");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({1, 2, 3}));
+}
+
 TEST(ProgramRuntimeTest, NestedParallelCannotExceedRunConcurrencyGrant) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(4);
-    const json nested{{"op", "parallel"},
-                      {"branches", json::array({json{{"op", "call_core"}},
-                                                 json{{"op", "call_core"}}})}};
-    const auto version = fixture.admit_document(
-        orchestration_document(
-            json{{"op", "parallel"},
-                 {"branches", json::array({nested, nested})}},
-            "runtime-short-blocking"));
+    const json      nested{
+             {"op", "parallel"},
+             {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}};
+    const auto version = fixture.admit_document(orchestration_document(
+        json{{"op", "parallel"}, {"branches", json::array({nested, nested})}},
+        "runtime-short-blocking"));
 
-    const auto result = fixture.runtime->run(
-        "tenant:runtime", version,
-        ProgramInvocation{json::object(),
-                           RunBudget{10000, 1000, 1000, 2, 32, 20, 0, 0, 0},
-                           "trace-nested-concurrency", {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(),
+                                               RunBudget{10000, 1000, 1000, 2, 32, 20, 0, 0, 0},
+                                               "trace-nested-concurrency",
+                                               {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
     ASSERT_TRUE(result.failure().has_value());
@@ -3151,22 +4377,36 @@ TEST(ProgramRuntimeTest, NestedParallelCannotExceedRunConcurrencyGrant) {
 
 TEST(ProgramRuntimeTest, RaceReturnsTheFirstCompletedBranchAndCancelsTheLoser) {
     AdmittedRuntime fixture(2);
-    const json first{{"op", "sequence"},
-                     {"children",
-                      json::array({json{{"op", "call_core"}},
-                                   json{{"op", "return"},
-                                        {"value", json{{"branch", 1}}}}})}};
+    const json      first{
+             {"op", "sequence"},
+             {"children", json::array({json{{"op", "call_core"}},
+                                       json{{"op", "return"}, {"value", json{{"branch", 1}}}}})}};
     const json second{{"op", "return"}, {"value", json{{"branch", 2}}}};
-    const auto result =
-        run_orchestration(fixture,
-                          orchestration_document(
-                              json{{"op", "race"},
-                                   {"branches", json::array({first, second})}},
-                              "runtime-short-blocking"),
-                          json::object(), "trace-race");
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(json{{"op", "race"}, {"branches", json::array({first, second})}},
+                               "runtime-short-blocking"),
+        json::object(), "trace-race");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json({{"branch", 2}}));
+}
+
+TEST(ProgramRuntimeTest, RaceImmediateBranchesRetainTheirCompletionSignal) {
+    AdmittedRuntime fixture(1);
+    const json      unreachable_core{{"op", "branch"},
+                                     {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                                     {"then", json{{"op", "call_core"}}},
+                                     {"else", json{{"op", "return"}, {"value", 2}}}};
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(json{
+                 {"op", "race"},
+                 {"branches", json::array({json{{"op", "return"}, {"value", 1}}, unreachable_core})}}),
+        json::object(), "trace-race-immediate");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), 1);
 }
 
 TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
@@ -3174,19 +4414,18 @@ TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
     // thread so this verifies declaration-order arbitration rather than
     // treating cross-worker completion timing as a logical tie.
     AdmittedRuntime fixture(1);
-    const auto result = run_orchestration(
+    const auto      result = run_orchestration(
         fixture,
         orchestration_document(
             json{{"op", "race"},
-                 {"branches", json::array({
-                                  json{{"op", "sequence"},
-                                       {"children", json::array({json{{"op", "call_core"}},
-                                                                  json{{"op", "return"},
-                                                                       {"value", 1}}})}},
-                                  json{{"op", "sequence"},
-                                       {"children", json::array({json{{"op", "call_core"}},
-                                                                  json{{"op", "return"},
-                                                                       {"value", 2}}})}}})}}),
+                      {"branches",
+                       json::array(
+                      {json{{"op", "sequence"},
+                                 {"children", json::array({json{{"op", "call_core"}},
+                                                           json{{"op", "return"}, {"value", 1}}})}},
+                            json{{"op", "sequence"},
+                                 {"children", json::array({json{{"op", "call_core"}},
+                                                           json{{"op", "return"}, {"value", 2}}})}}})}}),
         json::object(), "trace-race-tie");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
@@ -3196,14 +4435,13 @@ TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
 TEST(ProgramRuntimeTest, QuorumStopsAfterRequiredSuccesses) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
-    const auto result = run_orchestration(
+    const auto      result = run_orchestration(
         fixture,
-        orchestration_document(
-            json{{"op", "quorum"},
-                 {"branches", json::array({json{{"op", "return"}, {"value", 1}},
-                                            json{{"op", "return"}, {"value", 2}},
-                                            json{{"op", "call_core"}}})},
-                 {"min_success", 2}}),
+        orchestration_document(json{{"op", "quorum"},
+                                         {"branches", json::array({json{{"op", "return"}, {"value", 1}},
+                                                                   json{{"op", "return"}, {"value", 2}},
+                                                                   json{{"op", "call_core"}}})},
+                                         {"min_success", 2}}),
         json::object(), "trace-quorum");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
@@ -3214,10 +4452,10 @@ TEST(ProgramRuntimeTest, QuorumStopsAfterRequiredSuccesses) {
 TEST(ProgramRuntimeTest, MapEvaluatesEveryItemAndCollectsOutputs) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
-    const auto result = run_orchestration(
+    const auto      result = run_orchestration(
         fixture,
-        orchestration_document(
-            json{{"op", "map"},
+        orchestration_document(json{
+                 {"op", "map"},
                  {"items", json::array({1, 2})},
                  {"body", json{{"op", "sequence"},
                                {"children", json::array({json{{"op", "call_core"}},
@@ -3302,31 +4540,31 @@ TEST(ProgramRuntimeTest, MapExecutesItemsSerially) {
 
 TEST(ProgramRuntimeTest, AwaitTimeoutCancelsTheChildOperation) {
     AdmittedRuntime fixture(2);
-    const auto started = std::chrono::steady_clock::now();
-    const auto result = run_orchestration(
-        fixture, orchestration_document(json{{"op", "await"},
-                                             {"timeout_ms", 10},
-                                             {"body", json{{"op", "call_core"}}}},
-                                        "runtime-blocking"),
+    const auto      started = std::chrono::steady_clock::now();
+    const auto      result  = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "await"}, {"timeout_ms", 10}, {"body", json{{"op", "call_core"}}}},
+            "runtime-blocking"),
         json::object(), "trace-await");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
-    EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(
-                  std::chrono::steady_clock::now() - started)
-                  .count(),
-              2);
+    EXPECT_LT(
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started)
+            .count(),
+        2);
 }
 
 TEST(ProgramRuntimeTest, AwaitPropagatesChildFailureBeforeTimeout) {
     AdmittedRuntime fixture;
-    const auto started = std::chrono::steady_clock::now();
-    const auto result = run_orchestration(
-        fixture, orchestration_document(json{{"op", "await"},
-                                             {"timeout_ms", 1000},
-                                             {"body", json{{"op", "call_core"}}}},
-                                        "runtime-failing"),
+    const auto      started = std::chrono::steady_clock::now();
+    const auto      result  = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "await"}, {"timeout_ms", 1000}, {"body", json{{"op", "call_core"}}}},
+            "runtime-failing"),
         json::object(), "trace-await-failure");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
@@ -3342,12 +4580,11 @@ TEST(ProgramRuntimeTest, AwaitPropagatesChildFailureBeforeTimeout) {
 TEST(ProgramRuntimeTest, ExplicitCancelStopsTheFollowingOperation) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
-    const auto result = run_orchestration(
+    const auto      result = run_orchestration(
         fixture,
         orchestration_document(
             json{{"op", "sequence"},
-                 {"children", json::array({json{{"op", "cancel"}},
-                                            json{{"op", "call_core"}}})}}),
+                      {"children", json::array({json{{"op", "cancel"}}, json{{"op", "call_core"}}})}}),
         json::object(), "trace-cancel");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
@@ -3355,16 +4592,14 @@ TEST(ProgramRuntimeTest, ExplicitCancelStopsTheFollowingOperation) {
 }
 
 TEST(ProgramRuntimeTest, ExplicitCheckpointPublishesCheckpointEventAfterCore) {
-    auto sink = std::make_shared<CountingSink>();
+    auto            sink = std::make_shared<CountingSink>();
     AdmittedRuntime fixture;
-    const auto version = fixture.admit_document(
-        orchestration_document(json{{"op", "checkpoint"},
-                                    {"body", json{{"op", "call_core"}}}}));
+    const auto      version = fixture.admit_document(
+        orchestration_document(json{{"op", "checkpoint"}, {"body", json{{"op", "call_core"}}}}));
     const auto result = fixture.runtime->run(
         "tenant:runtime", version,
-        ProgramInvocation{json::object(),
-                           RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
-                           "trace-checkpoint", sink});
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                          "trace-checkpoint", sink});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_TRUE(result.checkpoint().has_value());
@@ -3372,12 +4607,14 @@ TEST(ProgramRuntimeTest, ExplicitCheckpointPublishesCheckpointEventAfterCore) {
 }
 TEST(ProgramRuntimeTest, SequenceEmitAndReturnHaveDeterministicTraceAndOutput) {
     AdmittedRuntime fixture;
-    const auto version = fixture.admit_document(orchestration_document());
+    const auto      version = fixture.admit_document(orchestration_document());
 
-    const auto result = fixture.runtime->run(
-        "tenant:runtime", version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
-                           "trace-orchestration", {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(),
+                                               RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                                               "trace-orchestration",
+                                               {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json({{"ok", true}}));
@@ -3388,15 +4625,15 @@ TEST(ProgramRuntimeTest, SequenceEmitAndReturnHaveDeterministicTraceAndOutput) {
 TEST(ProgramRuntimeTest, ChildStartPinsReceiptAndPropagatesParentCancellation) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked = make_linked_child(fixture);
-    auto       parent = fixture.runtime->start(
+    const auto      linked = make_linked_child(fixture);
+    auto            parent = fixture.runtime->start(
         "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent", {}});
+        ProgramInvocation{
+            json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1}, "trace-parent", {}});
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-child", {}});
+        ProgramInvocation{
+            json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, "trace-child", {}});
 
     const auto child_record = child.snapshot();
     EXPECT_EQ(child_record.invocation().parent_run_id, parent.run_id());
@@ -3429,28 +4666,37 @@ TEST(ProgramRuntimeTest, PlannerCannotOverrideResolvedChildBudget) {
 TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBoundary) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(4);
-    const auto linked = make_recursive_linked_child(fixture);
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 4, 4},
-                           "trace-recursive-parent", {}});
+    const auto      linked = make_recursive_linked_child(fixture);
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 4, 4},
+                                                 "trace-recursive-parent",
+                                                 {}});
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 3},
-                           "trace-recursive-child", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 3},
+                          "trace-recursive-child",
+                          {}});
     auto grandchild = fixture.runtime->start_child(
         "tenant:runtime", child, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 2, 2},
-                           "trace-recursive-grandchild", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 2, 2},
+                          "trace-recursive-grandchild",
+                          {}});
     auto great_grandchild = fixture.runtime->start_child(
         "tenant:runtime", grandchild, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
-                           RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
-                           "trace-recursive-great-grandchild", {}});
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                          "trace-recursive-great-grandchild",
+                          {}});
     auto leaf = fixture.runtime->start_child(
         "tenant:runtime", great_grandchild, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-recursive-leaf", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-recursive-leaf",
+                          {}});
 
     EXPECT_EQ(child.snapshot().child_depth(), 1U);
     EXPECT_EQ(grandchild.snapshot().child_depth(), 2U);
@@ -3461,8 +4707,9 @@ TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBound
         (void)fixture.runtime->start_child(
             "tenant:runtime", parent, linked.receipt, linked.child_version,
             ProgramInvocation{json::object(),
-                               RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 0},
-                               "trace-recursive-sibling-after-subtree-reservation", {}});
+                              RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 0},
+                              "trace-recursive-sibling-after-subtree-reservation",
+                              {}});
         FAIL() << "Expected the reserved descendant quota to reject a sibling";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_CHILD_COUNT");
@@ -3472,8 +4719,9 @@ TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBound
         (void)fixture.runtime->start_child(
             "tenant:runtime", leaf, linked.receipt, linked.child_version,
             ProgramInvocation{json::object(),
-                               RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                               "trace-recursive-overflow", {}});
+                              RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                              "trace-recursive-overflow",
+                              {}});
         FAIL() << "Expected recursive child depth to fail closed";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_CHILD_DEPTH");
@@ -3489,31 +4737,34 @@ TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBound
 
 TEST(ProgramRuntimeTest, GlobalChildQuotaRejectsFragmentationAndReleasesOnTerminal) {
     ProgramChildQuotaConfig quota;
-    quota.max_active_children = 1;
-    quota.max_active_children_per_owner = 1;
-    quota.max_pending_spawn_requests = 4;
+    quota.max_active_children                  = 1;
+    quota.max_active_children_per_owner        = 1;
+    quota.max_pending_spawn_requests           = 4;
     quota.max_pending_spawn_requests_per_owner = 4;
 
     blocking_calls.store(0);
     AdmittedRuntime fixture(2, {}, {}, quota);
-    const auto linked = make_recursive_linked_child(fixture);
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(),
-                           RunBudget{10000, 1000, 1000, 2, 2, 20, 0, 4, 4},
-                           "trace-global-quota-parent", {}});
-    auto child = fixture.runtime->start_child(
-        "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(),
-                           RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
-                           "trace-global-quota-child-a", {}});
+    const auto      linked = make_recursive_linked_child(fixture);
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 2, 2, 20, 0, 4, 4},
+                                                 "trace-global-quota-parent",
+                                                 {}});
+    auto child =
+        fixture.runtime->start_child("tenant:runtime", parent, linked.receipt, linked.child_version,
+                                     ProgramInvocation{json::object(),
+                                                       RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
+                                                       "trace-global-quota-child-a",
+                                                       {}});
 
     try {
         (void)fixture.runtime->start_child(
             "tenant:runtime", parent, linked.receipt, linked.child_version,
             ProgramInvocation{json::object(),
-                               RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
-                               "trace-global-quota-child-b", {}});
+                              RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
+                              "trace-global-quota-child-b",
+                              {}});
         FAIL() << "Expected the global active-child quota to reject a fragmented sibling";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_CHILD_QUOTA");
@@ -3522,11 +4773,12 @@ TEST(ProgramRuntimeTest, GlobalChildQuotaRejectsFragmentationAndReleasesOnTermin
     EXPECT_TRUE(child.cancel());
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
 
-    auto replacement = fixture.runtime->start_child(
-        "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(),
-                           RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
-                           "trace-global-quota-child-c", {}});
+    auto replacement =
+        fixture.runtime->start_child("tenant:runtime", parent, linked.receipt, linked.child_version,
+                                     ProgramInvocation{json::object(),
+                                                       RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
+                                                       "trace-global-quota-child-c",
+                                                       {}});
     EXPECT_EQ(replacement.snapshot().child_depth(), 1U);
 
     EXPECT_TRUE(parent.cancel());
@@ -3535,36 +4787,43 @@ TEST(ProgramRuntimeTest, GlobalChildQuotaRejectsFragmentationAndReleasesOnTermin
 }
 TEST(ProgramRuntimeTest, ChildResumeReclaimsGlobalQuotaAfterACompetingChildStops) {
     ProgramChildQuotaConfig quota;
-    quota.max_active_children = 1;
+    quota.max_active_children           = 1;
     quota.max_active_children_per_owner = 1;
 
     blocking_calls.store(0);
     AdmittedRuntime fixture(2, {}, {}, quota);
-    const auto interrupted_link =
+    const auto      interrupted_link =
         make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
-    const auto active_link =
-        make_linked_child(fixture, "runtime-blocking", "runtime-blocking");
+    const auto active_link = make_linked_child(fixture, "runtime-blocking", "runtime-blocking");
 
-    auto interrupted_parent = fixture.runtime->start(
-        "tenant:runtime", interrupted_link.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-quota-resume-parent", {}});
+    auto interrupted_parent =
+        fixture.runtime->start("tenant:runtime", interrupted_link.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-quota-resume-parent",
+                                                 {}});
     auto interrupted_child = fixture.runtime->start_child(
         "tenant:runtime", interrupted_parent, interrupted_link.receipt,
         interrupted_link.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-quota-resume-child", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-quota-resume-child",
+                          {}});
     const auto interrupted = interrupted_child.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
 
-    auto active_parent = fixture.runtime->start(
-        "tenant:runtime", active_link.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-quota-active-parent", {}});
+    auto active_parent =
+        fixture.runtime->start("tenant:runtime", active_link.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-quota-active-parent",
+                                                 {}});
     auto active_child = fixture.runtime->start_child(
         "tenant:runtime", active_parent, active_link.receipt, active_link.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-quota-active-child", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-quota-active-child",
+                          {}});
 
     try {
         (void)fixture.runtime->resume(
@@ -3650,22 +4909,24 @@ TEST(ProgramRuntimeTest,
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
-
 TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked = make_linked_child(fixture);
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent-duplicate", {}});
-    ProgramInvocation invocation{
-        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-        "trace-child-duplicate", {}};
-    auto first = fixture.runtime->start_child(
-        "tenant:runtime", parent, linked.receipt, linked.child_version, invocation);
-    auto duplicate = fixture.runtime->start_child(
-        "tenant:runtime", parent, linked.receipt, linked.child_version, invocation);
+    const auto      linked = make_linked_child(fixture);
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-duplicate",
+                                                 {}});
+    ProgramInvocation invocation{json::object(),
+                                 RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                                 "trace-child-duplicate",
+                                 {}};
+    auto              first = fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                           linked.child_version, invocation);
+    auto duplicate          = fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                           linked.child_version, invocation);
 
     EXPECT_EQ(duplicate.run_id(), first.run_id());
     EXPECT_EQ(duplicate.snapshot().id(), first.snapshot().id());
@@ -3677,15 +4938,19 @@ TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
 TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked = make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
-    auto       parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent-interrupted-child", {}});
+    const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-interrupted-child",
+                                                 {}});
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-child-interrupted", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-child-interrupted",
+                          {}});
 
     const auto interrupted = child.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
@@ -3716,18 +4981,21 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
-    auto journal = std::make_shared<FailChildDispatchOnceJournal>();
+    auto            journal = std::make_shared<FailChildDispatchOnceJournal>();
     AdmittedRuntime fixture(2, {}, journal);
-    const auto linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
-    auto       parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent-dispatch-recovery", {}});
-    ProgramInvocation child_invocation{
-        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-        "trace-child-dispatch-recovery", {}};
+    const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-dispatch-recovery",
+                                                 {}});
+    ProgramInvocation child_invocation{json::object(),
+                                       RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                                       "trace-child-dispatch-recovery",
+                                       {}};
     EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
-                                                     linked.child_version, child_invocation),
+                                                    linked.child_version, child_invocation),
                  ProgramDiagnosticError);
 
     const auto publishing = journal->load("tenant:runtime", parent.run_id());
@@ -3751,19 +5019,22 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
 
 TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicateDispatch) {
     completed_calls.store(0);
-    auto journal = std::make_shared<FailChildDispatchOnceJournal>();
+    auto            journal = std::make_shared<FailChildDispatchOnceJournal>();
     AdmittedRuntime fixture(2, {}, journal);
-    const auto linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                          "trace-parent-recover-children", {}});
-    ProgramInvocation child_invocation{
-        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-        "trace-child-recover-children", {}};
+    const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-recover-children",
+                                                 {}});
+    ProgramInvocation child_invocation{json::object(),
+                                       RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                                       "trace-child-recover-children",
+                                       {}};
 
     EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
-                                                     linked.child_version, child_invocation),
+                                                    linked.child_version, child_invocation),
                  ProgramDiagnosticError);
     const auto publishing = journal->load("tenant:runtime", parent.run_id());
     ASSERT_TRUE(publishing.has_value());
@@ -3787,18 +5058,20 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
 TEST(ProgramRuntimeTest, DurableDslSpawnDispatchesTheLinkedChildAndJoinsItsResult) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked = make_durable_spawn_child(fixture);
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                          "trace-durable-spawn", {}});
+    const auto      linked = make_durable_spawn_child(fixture);
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-durable-spawn",
+                                                 {}});
 
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output()["channels"]["value"]["value"], "completed");
     EXPECT_EQ(completed_calls.load(), 1U);
 
-    const auto record = parent.snapshot();
+    const auto record   = parent.snapshot();
     const auto children = record.children();
     ASSERT_EQ(children.size(), 1U);
     const auto& child = children.front();
@@ -3813,13 +5086,15 @@ TEST(ProgramRuntimeTest, DurableDslSpawnDispatchesTheLinkedChildAndJoinsItsResul
 TEST(ProgramRuntimeTest, DurableDslSpawnFailsClosedWhenItsBindingCannotBeResolved) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked = make_durable_spawn_child(fixture);
+    const auto      linked = make_durable_spawn_child(fixture);
     fixture.clear_child_bindings();
 
-    const auto result = fixture.runtime->run(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                          "trace-missing-durable-binding", {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", linked.parent_version,
+                             ProgramInvocation{json::object(),
+                                               RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                               "trace-missing-durable-binding",
+                                               {}});
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
@@ -3830,27 +5105,24 @@ TEST(ProgramRuntimeTest, DurableDslSpawnFailsClosedWhenItsBindingCannotBeResolve
 
 TEST(ProgramRuntimeTest, DurableDslSpawnRejectsAResolverReceiptForAnotherBinding) {
     completed_calls.store(0);
-    AdmittedRuntime fixture(2);
-    const auto linked = make_durable_spawn_child(fixture);
+    AdmittedRuntime         fixture(2);
+    const auto              linked     = make_durable_spawn_child(fixture);
     const ModuleLinkReceipt mismatched = ModuleLinkReceipt::create(ModuleLinkReceiptData{
-        linked.receipt.owner_scope(),
-        linked.receipt.parent_module_id(),
-        linked.receipt.dependency_merkle_root(),
-        "different-child",
-        linked.receipt.child_program_version_id(),
-        linked.receipt.child_bundle_id(),
+        linked.receipt.owner_scope(), linked.receipt.parent_module_id(),
+        linked.receipt.dependency_merkle_root(), "different-child",
+        linked.receipt.child_program_version_id(), linked.receipt.child_bundle_id(),
         linked.receipt.child_input_contract_fingerprint(),
-        linked.receipt.child_output_contract_fingerprint(),
-        linked.receipt.granted_capabilities(),
-        linked.receipt.granted_effects(),
-        linked.receipt.budget()});
+        linked.receipt.child_output_contract_fingerprint(), linked.receipt.granted_capabilities(),
+        linked.receipt.granted_effects(), linked.receipt.budget()});
     fixture.bind_child(linked.parent_version, "child",
                        ProgramRuntimeChildBinding{mismatched, linked.child_version});
 
-    const auto result = fixture.runtime->run(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                          "trace-mismatched-durable-binding", {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", linked.parent_version,
+                             ProgramInvocation{json::object(),
+                                               RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                               "trace-mismatched-durable-binding",
+                                               {}});
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
@@ -3858,27 +5130,60 @@ TEST(ProgramRuntimeTest, DurableDslSpawnRejectsAResolverReceiptForAnotherBinding
     EXPECT_EQ(completed_calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, DurableDslSpawnRejectsReceiptWhoseGuaranteeExceedsChildVersion) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Recorded);
+    const auto linked = make_durable_spawn_child(fixture, "runtime-completed", "runtime-completed",
+                                                 std::nullopt, ExecutionGuarantee::Recorded);
+    ASSERT_EQ(linked.child_version.execution_guarantee(), ExecutionGuarantee::Recorded);
+
+    const ModuleLinkReceipt forged = ModuleLinkReceipt::create(ModuleLinkReceiptData{
+        linked.receipt.owner_scope(), linked.receipt.parent_module_id(),
+        linked.receipt.dependency_merkle_root(), linked.receipt.child_name(),
+        linked.receipt.child_program_version_id(), linked.receipt.child_bundle_id(),
+        linked.receipt.child_input_contract_fingerprint(),
+        linked.receipt.child_output_contract_fingerprint(), linked.receipt.granted_capabilities(),
+        linked.receipt.granted_effects(), linked.receipt.budget(), ExecutionGuarantee::Strict});
+    fixture.bind_child(linked.parent_version, "child",
+                       ProgramRuntimeChildBinding{forged, linked.child_version});
+
+    const auto result =
+        fixture.runtime->run("tenant:runtime", linked.parent_version,
+                             ProgramInvocation{json::object(),
+                                               RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                               "trace-guarantee-mismatched-durable-binding",
+                                               {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_GUARANTEE");
+    EXPECT_EQ(result.failure()->operation_id, "root.0");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
 TEST(ProgramRuntimeTest, DurableDslAwaitTimeoutCancelsAndRecordsItsChild) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked =
+    const auto      linked =
         make_durable_spawn_child(fixture, "runtime-completed", "runtime-blocking", 10);
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                          "trace-durable-spawn-timeout", {}});
+    auto parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-durable-spawn-timeout",
+                                                 {}});
 
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
 
-    const auto pending = parent.snapshot();
+    const auto pending          = parent.snapshot();
     const auto pending_children = pending.children();
     ASSERT_EQ(pending_children.size(), 1U);
-    auto child = fixture.runtime->reconnect("tenant:runtime", pending_children.front().child_run_id);
+    auto child =
+        fixture.runtime->reconnect("tenant:runtime", pending_children.front().child_run_id);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
-    const auto settled = parent.snapshot();
+    const auto settled          = parent.snapshot();
     const auto settled_children = settled.children();
     ASSERT_EQ(settled_children.size(), 1U);
     EXPECT_EQ(settled_children.front().state, ProgramChildState::Cancelled);
@@ -3887,32 +5192,38 @@ TEST(ProgramRuntimeTest, DurableDslAwaitTimeoutCancelsAndRecordsItsChild) {
 TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(2);
-    const auto linked =
-        make_linked_child(fixture, "runtime-short-blocking", "runtime-blocking");
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent-complete", {}});
+    const auto linked = make_linked_child(fixture, "runtime-short-blocking", "runtime-blocking");
+    auto       parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-complete",
+                                                 {}});
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-child-complete", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-child-complete",
+                          {}});
 
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
     AdmittedRuntime fixture(2);
-    const auto linked =
-        make_linked_child(fixture, "runtime-short-blocking", "runtime-blocking");
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent-reopen", {}});
+    const auto linked = make_linked_child(fixture, "runtime-short-blocking", "runtime-blocking");
+    auto       parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-reopen",
+                                                 {}});
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-child-reopen", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-child-reopen",
+                          {}});
 
     ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Completed);
     ASSERT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
@@ -3923,8 +5234,8 @@ TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
     EXPECT_EQ(before.children().front().child_run_id, child_id);
 
     fixture.recreate_catalog_and_runtime();
-    auto reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
-    const auto after = reconnected.snapshot();
+    auto       reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
+    const auto after       = reconnected.snapshot();
     ASSERT_EQ(after.children().size(), 1U);
     EXPECT_EQ(after.children().front().child_run_id, child_id);
     EXPECT_EQ(after.children().front().invocation.parent_run_id, parent_id);
@@ -3932,30 +5243,36 @@ TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
 }
 TEST(ProgramRuntimeTest, FailedChildPublicationReleasesParentReservation) {
     blocking_calls.store(0);
-    AdmittedRuntime fixture(2);
-    const auto linked = make_linked_child(fixture);
-    ProgramInvocation occupied_invocation{
-        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, "trace-child-conflict", {}};
+    AdmittedRuntime   fixture(2);
+    const auto        linked = make_linked_child(fixture);
+    ProgramInvocation occupied_invocation{json::object(),
+                                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                                          "trace-child-conflict",
+                                          {}};
     occupied_invocation.requested_run_id = "run-child-conflict";
     auto occupied =
         fixture.runtime->start("tenant:runtime", linked.child_version, occupied_invocation);
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
-                           "trace-parent-reservation", {}});
+    auto parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-reservation",
+                                                 {}});
 
-    ProgramInvocation conflict_invocation{
-        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-        "trace-child-conflict", {}};
+    ProgramInvocation conflict_invocation{json::object(),
+                                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                                          "trace-child-conflict",
+                                          {}};
     conflict_invocation.requested_run_id = occupied.run_id();
-    EXPECT_THROW(
-        (void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
-                                           linked.child_version, conflict_invocation),
-        std::exception);
+    EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                    linked.child_version, conflict_invocation),
+                 std::exception);
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
-                           "trace-child-after-conflict", {}});
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-child-after-conflict",
+                          {}});
 
     EXPECT_EQ(parent.cancel(), true);
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
@@ -4026,7 +5343,8 @@ TEST(ProgramRuntimeTest, ParallelMapCollectPreservesInputOrdinalOutputOrder) {
                            "trace-parallel-map-collect-order", {}});
     const auto result = parent.wait();
 
-    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message : "");
     ASSERT_TRUE(result.output().is_array());
     ASSERT_EQ(result.output().size(), items.size());
     for (std::size_t index = 0; index < items.size(); ++index)
