@@ -57,16 +57,16 @@ completion_state:
   architecture_decision: accepted
   legacy_document_retirement: complete
   issue_cutover: complete
-  quickjs_dependency_qualification: not_started
-  javascript_graph_definition: not_started
-  javascript_source_and_admission: not_started
-  generator_command_protocol: not_started
-  structured_concurrency: not_started
-  metering_and_isolation: not_started
-  deterministic_replay: not_started
-  native_control_abi: not_started
-  authoring_cutover: not_started
-  legacy_runtime_removal: not_started
+  quickjs_dependency_qualification: implemented_linux_verified
+  javascript_graph_definition: implemented
+  javascript_source_and_admission: implemented
+  generator_command_protocol: implemented
+  structured_concurrency: implemented
+  metering_and_isolation: implemented
+  deterministic_replay: implemented
+  native_control_abi: implemented
+  authoring_cutover: implemented
+  legacy_runtime_removal: pending_final_drain
   controller_extension_architecture: accepted
   controller_extension_implementation: not_started
   controller_hypothesis_evaluation: not_started

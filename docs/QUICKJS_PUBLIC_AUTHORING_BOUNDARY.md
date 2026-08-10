@@ -1,6 +1,7 @@
 # QuickJS Public Authoring Boundary
 
-Status: Adopted architecture contract; implementation is gated  
+Status: Adopted architecture contract; base runtime implemented, final legacy drain still gates deletion
+
 Date: 2026-08-08  
 Parent architecture: [QuickJS Control Architecture](QUICKJS_CONTROL_ARCHITECTURE.md)  
 Migration plan: [QuickJS Control Runtime Migration Plan](QUICKJS_CONTROL_MIGRATION.md)  

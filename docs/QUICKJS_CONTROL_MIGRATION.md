@@ -1,6 +1,6 @@
 # QuickJS Control Runtime Migration Plan
 
-Status: Accepted execution plan; implementation not started
+Status: Base runtime implemented; final platform qualification and Q7 legacy removal remain pending
 Date: 2026-08-08
 Architecture: `QUICKJS_CONTROL_ARCHITECTURE.md`
 Public authoring boundary: [`QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)

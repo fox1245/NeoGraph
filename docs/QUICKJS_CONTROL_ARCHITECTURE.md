@@ -1,6 +1,6 @@
 # NeoGraph QuickJS Control Architecture
 
-Status: Accepted architecture direction; implementation is gated
+Status: Base runtime implemented; final legacy drain/removal remains gated
 Date: 2026-08-08
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Supersedes: user authoring through the bounded Core DSL and Program JSON operation DSL
@@ -60,11 +60,12 @@ runtime allocation ceiling, `JS_NewRuntime2()` for custom allocators, and
 `JS_SetInterruptHandler()` for execution interruption. The selected language is
 standard JavaScript rather than NeoGraph-specific syntax.
 
-The exact QuickJS release and source digest are deliberately not fixed by this
-document. The dependency qualification issue must pin an audited release and
-record its license, source digest, supported platforms, compiler matrix, binary
-size, allocation behavior, static/shared packaging behavior, and security
-configuration before implementation enters the default build.
+QuickJS is pinned at release `2026-06-04`; its audited source digest,
+license, provenance, and isolated prefixed build sources are recorded under
+[`../deps/quickjs/`](../deps/quickjs/). The default-off
+`NEOGRAPH_BUILD_QUICKJS_CONTROL` target keeps Core-only consumers independent
+of that dependency. Final cross-platform qualification and deletion of the
+drain-only legacy implementation remain explicit cutover gates.
 
 Authoritative upstream reference:
 <https://bellard.org/quickjs/quickjs.html>
