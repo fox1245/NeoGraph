@@ -1,28 +1,22 @@
-// Multi-tenant chatbot server — 진짜 OpenAI API 호출 버전.
+// Multi-tenant chatbot server — live OpenRouter DeepSeek API call version.
 //
-// server.cpp 의 Mock 노드를 LLMCallNode (NG built-in) 로 교체. 같은
-// 시나리오 (6 customer × 3 topology) 를 진짜 gpt-4o-mini 로 처리.
+// server.cpp's Mock nodes are replaced with LLMCallNode (NG built-in). The
+// same scenario (6 customers × 3 topologies) runs through OpenRouter.
 //
 // 핵심 검증:
 //   1) NG 엔진이 100 동시 실제 LLM 호출을 들고 있을 수 있나
 //   2) 메모리 / wall time / RPS 가 어떻게 변하나 (Mock 대비)
 //   3) compile cache + thread_id 격리는 그대로 유효한가
 //
-// 비용 추정: gpt-4o-mini × 100 요청 × 평균 2.3 LLM call (topology 평균)
-//          ≈ 230 call × ~$0.0002/call ≈ $0.05.
+// Cost depends on the OpenRouter model pricing and request usage.
 //
-// 빌드:
-//   g++ -std=c++20 -O2 -DNDEBUG \
-//       -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-//       -DASIO_STANDALONE \
-//       projects/multi_tenant_chatbot/server_live_llm.cpp \
-//       -Lbuild -lneograph_core -lneograph_async -lneograph_llm \
-//       -lcppdotenv -lyyjson -lssl -lcrypto \
-//       -Wl,-rpath,'$ORIGIN/build' \
-//       -pthread -o /tmp/multi_tenant_live
+// Build and run from the repository root:
+//   cmake -S . -B build-cookbook \
+//       -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON
+//   cmake --build build-cookbook --target cookbook_multi_tenant_live -j4
+//   ./build-cookbook/cookbook_multi_tenant_live
 //
-// 실행 (repo root 에 .env 가 OPENAI_API_KEY 박혀있어야):
-//   LD_LIBRARY_PATH=build /tmp/multi_tenant_live
+// Runtime requires OPENROUTER_API_KEY in the repository-root .env (or environment).
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
@@ -225,18 +219,18 @@ static long peak_rss_kb() {
 
 int main() {
     cppdotenv::auto_load_dotenv();
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "OPENAI_API_KEY 미설정. .env 에 박거나 export 필요.\n";
+        std::cerr << "OPENROUTER_API_KEY 미설정. .env 에 박거나 export 필요.\n";
         return 1;
     }
 
-    // OpenAI provider — 모든 customer 가 공유. 진짜 multi-tenant 라면
-    // customer 마다 다른 provider/모델 가능 (alice=gpt-4o-mini,
-    // bob=claude-haiku 등). 데모는 단순화.
+    // OpenRouter provider — 모든 customer 가 공유.
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
-    cfg.default_model = "gpt-4o-mini";
+    cfg.base_url = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 
     // MergeNode 만 직접 등록 (llm_call 은 built-in).
@@ -282,7 +276,7 @@ int main() {
                 const auto& rec = customers[cust];
                 NodeContext ctx;
                 ctx.provider = provider;
-                ctx.model = "gpt-4o-mini";
+                ctx.model = "deepseek/deepseek-v4-flash-0731";
                 ctx.instructions = rec.system_prompt;
                 auto engine = cache.get_or_compile(cust, rec.topology_def, ctx);
 
@@ -334,7 +328,8 @@ int main() {
     long mean_ms = ok.load() ? latency_sum_ms.load() / ok.load() : 0;
 
     std::cout << "\n=== Multi-tenant chatbot LIVE LLM demo ===\n";
-    std::cout << "Provider:         OpenAI gpt-4o-mini\n";
+    std::cout << "Provider:         OpenRouter "
+                 "deepseek/deepseek-v4-flash-0731 (ZDR)\n";
     std::cout << "Requests:         " << N_REQUESTS << " across "
               << customer_ids.size() << " customers / "
               << N_SESSIONS << " sessions\n";

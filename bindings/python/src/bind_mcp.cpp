@@ -14,15 +14,17 @@
 // The obvious route — drop them into NodeContext(tools=[...]) alongside Python
 // tools — would send them through wrap_python_tools, which wraps every entry in
 // a PyToolOwner. That compiles, runs, and passes a functional test. It also
-// costs them their concurrency: a PyToolOwner is only concurrent if it holds a
-// Python ng.AsyncTool, and an MCPTool is not one. Every MCP call would then
-// serialize, and MCP would have arrived in Python without the property that
-// makes it worth having (MCP tools are network round-trips — see #96).
-//
+// costs them their native asynchronous I/O. A PyToolOwner is only concurrent
+// if it holds a Python ng.AsyncTool, and an MCPTool is not one. Preserving the
+// C++ type means the host can deliberately opt a server-safe tool into
+// re-entrant execution through ToolExecutionPolicyRegistry. The engine remains
+// conservative by default: repeated calls to one tool name serialize until the
+// host declares otherwise.
+
 // So wrap_python_tools now recognises a bound C++ Tool and passes it through
 // behind a SharedToolRef, which keeps the Python-owned shared_ptr alive while
-// the engine holds a raw Tool*. test_http_tool_calls_overlap is what stops this
-// regressing: three 0.4 s MCP calls in ~0.4 s, not 1.2 s.
+// the engine holds a raw Tool*. test_http_tool_calls_overlap is what stops the
+// native async path or the explicit host policy from regressing.
 
 #include "json_bridge.h"
 
@@ -130,10 +132,11 @@ void init_mcp(py::module_& m) {
                std::shared_ptr<neograph::mcp::MCPTool>>(mcp, "MCPTool",
         "A tool living on an MCP server. Produced by MCPClient.get_tools(); you "
         "do not construct these yourself.\n\n"
-        "It is a C++ AsyncTool — it genuinely suspends — so several MCP calls in "
-        "one turn overlap rather than queueing. HTTP uses concurrent requests; "
-        "stdio multiplexes request IDs over its single pipe when the server can "
-        "process requests concurrently.")
+        "It is a C++ AsyncTool — it genuinely suspends. Graph dispatch keeps "
+        "repeated calls to one tool name conservative by default; after the "
+        "host marks a server-safe tool Reentrant through "
+        "ToolExecutionPolicyRegistry, HTTP requests and stdio JSON-RPC IDs can "
+        "overlap when the server supports concurrency.")
         .def("get_name", &neograph::mcp::MCPTool::get_name)
         .def("get_definition", &neograph::mcp::MCPTool::get_definition,
             "The ChatTool the model sees: name, description, parameter schema.")
@@ -212,7 +215,9 @@ void init_mcp(py::module_& m) {
             },
             "Discover the server's tools. Pass the result straight to "
             "NodeContext(tools=[...]) — mixing them with your own Python tools "
-            "is fine.")
+            "is fine. Graph dispatch serializes one named tool by default; use "
+            "ToolExecutionPolicyRegistry only when the server supports "
+            "concurrent calls.")
         .def("call_tool",
             [](neograph::mcp::MCPClient& self, const std::string& name,
                py::object arguments) {

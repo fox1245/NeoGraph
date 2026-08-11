@@ -13,15 +13,16 @@ compiles, not that it speaks the protocol.
 ON CONCURRENCY, WHICH IS WHERE #95 MEETS #96
 
 MCP tools are network round-trips, exactly the case where concurrent dispatch
-pays. But the two transports are not the same, and pretending otherwise would be
-a lie told with a passing test:
+pays. Hosts still declare that repeated calls to a named remote tool are safe:
+the default policy is keyed-exclusive, so this module explicitly marks
+``slow_echo`` re-entrant. The transports then differ:
 
   - **stdio has one pipe, multiplexed by JSON-RPC id.** Writes are framed and a
     single reader routes out-of-order replies to their callers. Calls overlap
     when the subprocess itself handles them concurrently.
 
   - **HTTP has no such bottleneck.** Each call is its own request, and MCPTool
-    is a real C++ AsyncTool, so three calls overlap.
+    is a real C++ AsyncTool, so declared re-entrant calls overlap.
 """
 
 import json
@@ -201,8 +202,21 @@ def _graph_calling(tool_name, count, arguments='{"text": "x"}'):
     }
 
 
-def _run(definition, tools, thread_id, expect_text=None):
+def _reentrant_tool_controller(*tool_names):
+    """Explicit host policy for remote tools known to support parallel calls."""
+    policies = ng.ToolExecutionPolicyRegistry()
+    policy = ng.ToolExecutionPolicy()
+    policy.concurrency = ng.ToolConcurrency.Reentrant
+    for tool_name in tool_names:
+        policies.upsert(tool_name, policy)
+    return ng.ToolExecutionController(policies)
+
+
+def _run(definition, tools, thread_id, expect_text=None, reentrant_tools=()):
     engine = ng.GraphEngine.compile(definition, ng.NodeContext(tools=tools))
+    if reentrant_tools:
+        engine.set_tool_execution_controller(
+            _reentrant_tool_controller(*reentrant_tools))
     cfg = ng.RunConfig()
     cfg.thread_id = thread_id
     started = time.perf_counter()
@@ -235,7 +249,14 @@ def test_the_module_exists():
     the honest absence."""
     assert hasattr(ng, "mcp")
     assert hasattr(ng.mcp, "MCPClient")
+    controller = ng.ToolExecutionController()
+    assert controller.policies.resolve("unknown").concurrency == (
+        ng.ToolConcurrency.KeyedExclusive)
 
+
+def test_tool_execution_policy_validates_default():
+    """The Python method crosses the core shared-library boundary."""
+    assert ng.ToolExecutionPolicy().validate() is None
 
 # ── stdio ───────────────────────────────────────────────────────────────────
 
@@ -277,7 +298,8 @@ def test_stdio_calls_overlap_when_server_is_concurrent(stdio_client):
         "slow_echo", 3, '{"text": "x", "delay": %s}' % delay)
 
     tool_msgs, elapsed = _run(definition, stdio_client.get_tools(),
-                              "mcp-stdio-concurrent", expect_text="x")
+                              "mcp-stdio-concurrent", expect_text="x",
+                              reentrant_tools=("slow_echo",))
 
     assert len(tool_msgs) == 3
     print(f"\n[MEASURE] stdio, 3 MCP calls x {delay}s: {elapsed:.2f}s "
@@ -293,7 +315,8 @@ def test_stdio_calls_wait_when_server_is_serial(serial_stdio_client):
         "slow_echo", 3, '{"text": "x", "delay": %s}' % delay)
 
     tool_msgs, elapsed = _run(definition, serial_stdio_client.get_tools(),
-                              "mcp-stdio-serial", expect_text="x")
+                              "mcp-stdio-serial", expect_text="x",
+                              reentrant_tools=("slow_echo",))
 
     assert len(tool_msgs) == 3
     print(f"\n[MEASURE] serial stdio server, 3 MCP calls x {delay}s: "
@@ -341,14 +364,31 @@ def test_http_typed_metadata_pagination_and_session(http_url):
     assert result.is_error is False
 
 
+
+def test_http_tool_calls_serialize_by_default(http_url):
+    """Async I/O does not override the host's safe named-tool default."""
+    delay = 0.25
+    client = mcp.MCPClient(http_url)
+    assert client.initialize("neograph-test")
+    definition = _graph_calling(
+        "slow_echo", 3, '{"text": "x", "delay": %s}' % delay)
+
+    tool_msgs, elapsed = _run(definition, client.get_tools(),
+                              "mcp-http-default", expect_text="x")
+
+    assert len(tool_msgs) == 3
+    assert elapsed >= 2.5 * delay, (
+        f"default named-tool policy unexpectedly overlapped calls: "
+        f"{elapsed:.2f}s")
+
+
 def test_http_tool_calls_overlap(http_url):
-    """Where #95 meets #96, and the reason anyone wants MCP bound at all.
+    """A server-safe explicit policy unlocks native MCP async overlap.
 
     Three 0.4 s round-trips take ~0.4 s, not 1.2 s. MCPTool is a real C++
-    AsyncTool — it suspends — so the dispatcher overlaps the calls. This only
-    holds because the tools reach the engine as C++ tools; had the binding
-    wrapped them as Python tools, they would have serialized and MCP would have
-    arrived without the thing that makes it worth having.
+    AsyncTool — it suspends — and the host marks this threaded test server's
+    ``slow_echo`` tool Reentrant. Preserving the tool's C++ type keeps that
+    opt-in effective; wrapping it as a Python tool would silently lose it.
     """
     delay = 0.4
     client = mcp.MCPClient(http_url)
@@ -358,7 +398,8 @@ def test_http_tool_calls_overlap(http_url):
         "slow_echo", 3, '{"text": "x", "delay": %s}' % delay)
 
     tool_msgs, elapsed = _run(definition, client.get_tools(),
-                              "mcp-http-concurrent", expect_text="x")
+                              "mcp-http-concurrent", expect_text="x",
+                              reentrant_tools=("slow_echo",))
 
     assert len(tool_msgs) == 3
     print(f"\n[MEASURE] http, 3 MCP calls x {delay}s: {elapsed:.2f}s "
@@ -367,4 +408,4 @@ def test_http_tool_calls_overlap(http_url):
 
     assert elapsed < 2 * delay, (
         f"3 HTTP MCP calls took {elapsed:.2f}s; serial is {3 * delay:.1f}s — "
-        "the tools were serialized by the binding, not by the server")
+        "the reentrant policy or native MCP async path regressed")

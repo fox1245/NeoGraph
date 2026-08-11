@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-source-v1.schema.json",
+  "title": "NeoGraph ProgramSource stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "storage_schema_version",
+    "kind",
+    "source_id",
+    "program_schema_version",
+    "document",
+    "source_hash",
+    "imports",
+    "source_map"
+  ],
+  "properties": {
+    "format": {
+      "const": "neograph-program-source"
+    },
+    "storage_schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "enum": [
+        "canonical_json",
+        "cpp_builder",
+        "javascript"
+      ]
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "program_schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "document": {
+      "type": "object"
+    },
+    "source_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "imports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id",
+          "content_identity"
+        ],
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content_identity": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "source_map": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "generated_pointer",
+          "authored"
+        ],
+        "properties": {
+          "generated_pointer": {
+            "type": "string",
+            "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+          },
+          "authored": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_id",
+              "json_pointer",
+              "span"
+            ],
+            "properties": {
+              "source_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "json_pointer": {
+                "type": "string",
+                "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+              },
+              "span": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "byte_begin",
+                      "byte_end",
+                      "line_begin",
+                      "column_begin",
+                      "line_end",
+                      "column_end"
+                    ],
+                    "properties": {
+                      "byte_begin": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      },
+                      "byte_end": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      },
+                      "line_begin": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "column_begin": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "line_end": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "column_end": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "javascript" }
+        }
+      },
+      "then": {
+        "properties": {
+          "document": { "$ref": "#/$defs/javascriptDocument" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "javascriptDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "language_version",
+        "engine",
+        "engine_version",
+        "quickjs_archive_digest",
+        "quickjs_build_options",
+        "javascript_profile",
+        "javascript_profile_version",
+        "ng_api_version",
+        "host_api_version",
+        "source"
+      ],
+      "properties": {
+        "language": { "const": "javascript" },
+        "language_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "engine": { "const": "quickjs" },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "quickjs_archive_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "quickjs_build_options": { "type": "string", "minLength": 1 },
+        "javascript_profile": { "type": "string", "minLength": 1 },
+        "javascript_profile_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "ng_api_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "host_api_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "source": { "type": "string" }
+      }
+    }
+  }
+}

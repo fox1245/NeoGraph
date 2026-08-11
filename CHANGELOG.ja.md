@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=2aec329226eb4b687367daba27af8d37f751c54aed3dc50c013cf129db79a27d -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,7 +12,132 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
 
 ## [Unreleased]
 
+
 ### 追加
+- **隔離された PostgreSQL Program-store 統合 fixture。** tmpfs storage と health
+  gate を備えた digest-pinned、loopback-only
+  `tests/fixtures/q7-postgres/compose.yaml` を追加しました。
+  `NEOGRAPH_TEST_POSTGRES_URL` が使い捨ての test database を指す場合、
+  `ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility` は
+  publish、activation、reopen、owner isolation を検証します。これは test
+  infrastructure であり、Q7 final-proof snapshot ではありません。
+
+- **fail-closed QuickJS legacy-drain 監査。**
+  `scripts/audit_legacy_drain.py` とその CTest 契約を追加しました。このツールは
+  明示的に列挙された凍結 Program/Harness ストレージスナップショットから
+  canonical かつ content-addressed な proof を生成し、不明または変更された
+  record、未分類の legacy source、drain-only record、active または
+  recoverable な legacy run を拒否します。live `-wal`、`-shm`、`-journal`
+  sidecar を伴う SQLite input は開く前に拒否するため、稼働中 WAL database の
+  raw copy は final proof になりません。これは Q7 evidence mechanism を確立
+  しますが、deployment 固有の final drain または legacy parser 削除の完了を
+  主張するものではありません。
+
+- **PostgreSQL final-drain アーカイブ走査。** legacy-drain 監査は凍結された
+  `program_postgres_dump` custom archive を受け入れ、`pg_restore` を
+  data-only、strict-table、script-output モードでのみ呼び出し、database へは
+  restore しません。Program bundle、version、activation table の persisted
+  identity を検証し、必須 table を欠くまたは変更された archive を拒否し、
+  legacy Program version を選択する activation を final-removal blocker として
+  扱います。
+
+- **no-deployment Q7 final-proof モード。** legacy-drain 監査は、pre-release
+  または production の NeoGraph deployment が一度も存在しなかった場合にのみ、
+  名前付き operator attestation を受け入れます。このモードでは storage target
+  も過去の legacy artifact も一切許可せず、生成される proof を
+  `evidence_mode: "no_deployment_attestation"` と明示し、混在または
+  attestation のない空の inventory は fail-closed になります。drain 済み、
+  削除済み、失われた、またはアクセス不能な過去 state には使えません。
+
+- **OpenRouter プロバイダールーティング。** `OpenAIProvider` は
+  `CompletionParams::extra_fields.provider` に渡されたオブジェクトを Chat
+  Completions リクエスト本文の `provider` として転送します。オブジェクト
+  以外の値は HTTP リクエスト前に失敗します。これにより OpenRouter が文書化した
+  呼び出し単位のルーティング設定を公開し、他のネイティブ `extra_fields` キーは
+  引き続き無視されます。ライブ Beast cookbook はプロバイダーを固定し、
+  4,000 トークン生成予算のために明示的な 180 秒タイムアウトを使用します。
+
+- **Copy Ninja ローカル graph-node bridge。** 別途 materialize した Copy Ninja
+  harness を包み、`prompt` を読み `response` を overwrite する transport-free
+  な `a2a::CopyNinjaNode` を追加しました。live cookbook
+  `cookbook_the_beast_copy_ninja` も追加しました。この LLM が書けるのはこの
+  固定 local node だけで、通常の Core gate の後の第四 local-binding gate を
+  通る必要があり、合成 source agent が RPC を観測すれば失敗します。Card text、
+  endpoint、credential、source は unadmitted candidate から除外されたままで、
+  caller prompt は authoring LLM request に入りません。
+
+
+- **オプションの Program コンポーネント境界。** オプトインの
+  `NEOGRAPH_BUILD_PROGRAM` スイッチ、エクスポートされる
+  `neograph::program` ターゲット、`<neograph/program/program.h>` エントリ
+  ポイントを追加しました。インストール済みパッケージのコンポーネント検出は
+  Program をビルドした場合のみ報告し、Core 専用インストールは既存の
+  `neograph::core` リンクインターフェースを維持します。
+
+- **不変 Program 値モデル。** 安定した型付き診断、深く所有される
+  canonical JSON/C++ ビルダーの `ProgramSource` 入力、不変でコンテンツ
+  アドレス可能な `ProgramBundle`/`ProgramVersion` 値、正規直列化、
+  SHA-256 アルゴリズムタグ付き識別子、ソースマップ、import、厳格な
+  バージョン付き保存値スキーマを追加しました。`neograph::program` は
+  Core のみに依存するコンパイル済みエクスポートライブラリになりました。
+  Bundle/version v1 投影では、封印済み Core 定義とプラン識別子、セマンティック
+  バージョン付き実行項目ダイジェスト、契約、クロージャ、境界、型付きの承認・
+  具現化レシートを必須にしました。識別子は形式と保存バージョンを含み、意味的
+  集合は安定順に正規化されます。診断は不正なポインター、逆順 span、不明 enum
+  を拒否し、正確なパーサーオフセットがない場合は span を空のままにします。
+
+- **封印された Program アドミッションクロージャ。** ビルダー時の callable
+  取り込み、厳格な正規マニフェスト、ドメイン分離フィンガープリントを備えた
+  不変の `RegistrySnapshot`、`AdmissionProfile`、`PolicySnapshot` を追加し、
+  `ProgramVersion` でフィンガープリント間の整合性を fail-closed で検証します。
+  Core には Program 具現化用の明示的なローカル専用 parse/link/validate
+  エントリポイントを追加し、既存のローカル優先/グローバルフォールバック
+  オーバーロードは変更していません。
+  レジストリエントリは推移的な admission closure 用の正確な実行可能オブジェクト
+  依存エッジを正規形で記録し、ローカル専用の条件検査はプロセスグローバル
+  レジストリを参照せずにレガシーのキー付き edge 文書も処理します。
+
+- **単一ルート `call_core` Program コンパイラー。** 閉じた Program-v1
+  エンベロープのみを受理し、封印前にローカル専用 Core
+  parse/round-trip/validation を純粋に実行し、RFC 6901 ポインターと
+  ソースマップ帰属を持つ集約型診断を返す `ProgramCompiler` を追加しました。
+  factory や callable を実行せず、canonical Program、レジストリ、推移的な
+  実行項目クロージャ、capability/effect、import Merkle、封印定義、Core
+  プラン識別子を決定論的に導出します。作成文書スキーマ、完全な有限予算契約、
+  zero-dispatch 拒否テスト、静的・共有インストールコンシューマー検証も追加。
+  Core には total な parse/round-trip とローカル validation レポートを追加し、
+  既存の例外送出 API の動作は維持します。
+
+- **固定 Program ランタイムの垂直スライス。** `ProgramCatalog`、
+  `EngineGenerationCache`、`ProgramRuntime`、共有 `ProgramHandle`、不変
+  `ProgramResult`、型付き Program イベントエンベロープ、インメモリ
+  `ProgramStore`、追記専用 CAS `ProgramJournal` を追加しました。Admission
+  は具現化前に未信頼バンドルの意味を再計算し、各 attempt は一つの不変 Core
+  generation を pin して既存の `GraphEngine` 非同期経路だけを呼び出します。
+  完了、中断、厳密な checkpoint resume、cancel、timeout、Core step 枯渇、
+  checkpoint 非互換、失敗を、非更新予算と checkpoint lineage を保つ型付き
+  terminal state に写像します。Journal commit は checkpoint/terminal
+  event 配信より先に行われ、同時 resume は一つの CAS 勝者だけを許可し、
+  Core broker が用意されるまで effectful または非空 schema の Program を
+  拒否します。
+
+- **QuickJS 制御言語フロントエンド。** オプトインの
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`、封印された
+  `ProgramSource::from_javascript(...)`、および非公開のコンパイル専用
+  QuickJS コンテキストを追加しました。ソースエンベロープはエンジン/言語/
+  ホスト API バージョンを固定し、唯一の `ng` ホスト表面はバージョン付きの
+  グラフビルダーです。メモリ、スタック、割り込みポーリング上限は
+  fail-closed で処理されます。JavaScript は不変の `call_core` Program
+  プラン一つだけを生成し、ランタイム VM、バイトコードアーティファクト、
+  Core 依存にはなりません。
+
+- **A2A Agent Card 互換候補。** 認証なし・リダイレクト非追従の well-known
+  カードを一度だけ収集するコレクターと、factory-only の不変候補コンパイラーを
+  追加しました。候補はダイジェストに固定された provenance、境界付き
+  プロトコル事実、安全な skill ID のみを保持し、free-form カードテキスト、
+  広告された RPC endpoint、provider/security 設定、credential を除外します。
+  Copy Ninja PoC は同じダイジェストに固定された独立観測行動を追加で要求し、
+  ソース agent を dispatch しません。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、
@@ -66,6 +191,10 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
 
 ### 修正
 
+- **QuickJS `all` join 初期化競合。** 完了ハンドラが初期メンバーの launch
+  登録中に JavaScript join を閉じないようにしました。即時完了する子が兄弟の
+  初期または置換コマンドの dispatch 前に generator を再開できた問題を防ぎ、
+  両経路を反復ランタイム回帰テストで固定しました。
 - **Harness 集約所見の出所 (issue #174)。** 詳細に既存のフラット `findings` 配列と
   整列した `finding_sources` 配列を含めるようになりました。各エントリは集約
   インデックス、ソースワーカー ID、ワーカーローカルインデックスを記録し、

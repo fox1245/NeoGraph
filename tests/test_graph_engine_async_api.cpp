@@ -15,9 +15,8 @@
 // keep passing — they encode the public contract that follow-up work
 // has to preserve.
 
-#include <gtest/gtest.h>
-#include <neograph/neograph.h>
 #include <neograph/async/http_client.h>
+#include <neograph/neograph.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -32,6 +31,7 @@
 #include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 #include <asio/write.hpp>
+#include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
@@ -46,34 +46,36 @@ using namespace neograph::graph;
 
 namespace {
 
-json minimal_graph(const std::string& node_name,
-                   const std::string& node_type = "custom") {
+json minimal_graph(const std::string& node_name, const std::string& node_type = "custom") {
     return {
         {"name", "async_api_graph"},
-        {"channels", {
-            {"messages", {{"reducer", "append"}}},
-            {"result",   {{"reducer", "overwrite"}}},
-        }},
-        {"nodes", {
-            {node_name, {{"type", node_type}}},
-        }},
-        {"edges", {
-            {{"from", "__start__"}, {"to", node_name}},
-            {{"from", node_name},   {"to", "__end__"}},
-        }},
+        {"channels",
+         {
+             {"messages", {{"reducer", "append"}}},
+             {"result", {{"reducer", "overwrite"}}},
+         }},
+        {"nodes",
+         {
+             {node_name, {{"type", node_type}}},
+         }},
+        {"edges",
+         {
+             {{"from", "__start__"}, {"to", node_name}},
+             {{"from", node_name}, {"to", "__end__"}},
+         }},
     };
 }
 
 class WriteNode : public GraphNode {
 public:
-    WriteNode(const std::string& name, std::string value)
-        : name_(name), value_(std::move(value)) {}
+    WriteNode(const std::string& name, std::string value) : name_(name), value_(std::move(value)) {}
     asio::awaitable<NodeOutput> run(NodeInput) override {
         NodeOutput out;
         out.writes.push_back(ChannelWrite{"result", json(value_)});
         co_return out;
     }
     std::string get_name() const override { return name_; }
+
 private:
     std::string name_;
     std::string value_;
@@ -87,31 +89,32 @@ public:
         co_return NodeOutput{};  // unreachable
     }
     std::string get_name() const override { return name_; }
+
 private:
     std::string name_;
 };
 
 void register_writer(const std::string& value) {
-    NodeFactory::instance().register_type("custom",
-        [value](const std::string& name, const json&, const NodeContext&) {
+    NodeFactory::instance().register_type(
+        "custom", [value](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<WriteNode>(name, value);
         });
 }
 
 void register_thrower() {
-    NodeFactory::instance().register_type("custom",
-        [](const std::string& name, const json&, const NodeContext&) {
+    NodeFactory::instance().register_type(
+        "custom", [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<ThrowingNode>(name);
         });
 }
 
 struct ReleasableHttpServer {
-    asio::io_context io;
+    asio::io_context        io;
     asio::ip::tcp::acceptor acceptor{io};
-    std::thread worker;
-    std::atomic<int> requests{0};
-    std::atomic<bool> released{false};
-    unsigned short port = 0;
+    std::thread             worker;
+    std::atomic<int>        requests{0};
+    std::atomic<bool>       released{false};
+    unsigned short          port = 0;
 
     ReleasableHttpServer() {
         acceptor.open(asio::ip::tcp::v4());
@@ -140,8 +143,7 @@ struct ReleasableHttpServer {
     asio::awaitable<void> handle(asio::ip::tcp::socket socket) {
         try {
             asio::streambuf request;
-            co_await asio::async_read_until(
-                socket, request, "\r\n\r\n", asio::use_awaitable);
+            co_await asio::async_read_until(socket, request, "\r\n\r\n", asio::use_awaitable);
             requests.fetch_add(1, std::memory_order_release);
 
             asio::steady_timer poll(co_await asio::this_coro::executor);
@@ -155,9 +157,8 @@ struct ReleasableHttpServer {
                 "Content-Length: 2\r\n"
                 "Connection: close\r\n\r\n"
                 "ok";
-            co_await asio::async_write(
-                socket, asio::buffer(response, sizeof(response) - 1),
-                asio::use_awaitable);
+            co_await asio::async_write(socket, asio::buffer(response, sizeof(response) - 1),
+                                       asio::use_awaitable);
         } catch (...) {
             // A cancelled client closes its socket before release(), which is
             // the expected fixed-path outcome.
@@ -167,9 +168,8 @@ struct ReleasableHttpServer {
     asio::awaitable<void> accept_loop() {
         for (;;) {
             asio::ip::tcp::socket socket{io};
-            asio::error_code ec;
-            co_await acceptor.async_accept(
-                socket, asio::redirect_error(asio::use_awaitable, ec));
+            asio::error_code      ec;
+            co_await acceptor.async_accept(socket, asio::redirect_error(asio::use_awaitable, ec));
             if (ec) co_return;
             asio::co_spawn(io, handle(std::move(socket)), asio::detached);
         }
@@ -177,14 +177,13 @@ struct ReleasableHttpServer {
 };
 
 struct OperationTokensSeen {
-    std::mutex mu;
+    std::mutex                mu;
     std::vector<CancelToken*> tokens;
 };
 
 class StallingHttpNode final : public GraphNode {
 public:
-    StallingHttpNode(std::string name, unsigned short port,
-                     OperationTokensSeen* seen)
+    StallingHttpNode(std::string name, unsigned short port, OperationTokensSeen* seen)
         : name_(std::move(name)), port_(port), seen_(seen) {}
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
@@ -193,17 +192,16 @@ public:
             seen_->tokens.push_back(in.ctx.cancel_token.get());
         }
         auto ex = co_await asio::this_coro::executor;
-        co_await neograph::async::async_post(
-            ex, "127.0.0.1", std::to_string(port_), "/stall", "{}",
-            {}, false, {});
+        co_await neograph::async::async_post(ex, "127.0.0.1", std::to_string(port_), "/stall", "{}",
+                                             {}, false, {});
         co_return NodeOutput{};
     }
 
     std::string get_name() const override { return name_; }
 
 private:
-    std::string name_;
-    unsigned short port_;
+    std::string          name_;
+    unsigned short       port_;
     OperationTokensSeen* seen_;
 };
 
@@ -220,7 +218,7 @@ public:
     std::string get_name() const override { return name_; }
 
 private:
-    std::string name_;
+    std::string                name_;
     std::atomic<CancelToken*>* seen_;
 };
 
@@ -234,8 +232,7 @@ public:
         }
 
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{
-            "result", in.ctx.resume_value->at("decision")});
+        out.writes.push_back(ChannelWrite{"result", in.ctx.resume_value->at("decision")});
         co_return out;
     }
 
@@ -250,16 +247,17 @@ json resume_graph() {
         {"name", "async_resume_ownership"},
         {"channels", {{"result", {{"reducer", "overwrite"}}}}},
         {"nodes", {{"approval", {{"type", "async_resume_approval"}}}}},
-        {"edges", {
-            {{"from", "__start__"}, {"to", "approval"}},
-            {{"from", "approval"}, {"to", "__end__"}},
-        }},
+        {"edges",
+         {
+             {{"from", "__start__"}, {"to", "approval"}},
+             {{"from", "approval"}, {"to", "__end__"}},
+         }},
     };
 }
 
 void register_resume_approval() {
-    NodeFactory::instance().register_type("async_resume_approval",
-        [](const std::string& name, const json&, const NodeContext&) {
+    NodeFactory::instance().register_type(
+        "async_resume_approval", [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<ResumeApprovalNode>(name);
         });
 }
@@ -270,7 +268,50 @@ void seed_interrupted_run(GraphEngine& engine, const std::string& thread_id) {
     ASSERT_TRUE(engine.run(cfg).interrupted);
 }
 
-} // namespace
+class WrongIdCheckpointStore final : public CheckpointStore {
+public:
+    void arm() noexcept { armed_.store(true); }
+
+    void save(const Checkpoint& checkpoint) override { inner_->save(checkpoint); }
+
+    std::optional<Checkpoint> load_latest(const std::string& thread_id) override {
+        return inner_->load_latest(thread_id);
+    }
+
+    std::optional<Checkpoint> load_by_id(const std::string& id) override {
+        auto checkpoint = inner_->load_by_id(id);
+        if (checkpoint && armed_.load()) checkpoint->id += "-different";
+        return checkpoint;
+    }
+
+    std::vector<Checkpoint> list(const std::string& thread_id, int limit) override {
+        return inner_->list(thread_id, limit);
+    }
+
+    void delete_thread(const std::string& thread_id) override { inner_->delete_thread(thread_id); }
+
+    void put_writes(const std::string&  thread_id,
+                    const std::string&  parent_checkpoint_id,
+                    const PendingWrite& write) override {
+        inner_->put_writes(thread_id, parent_checkpoint_id, write);
+    }
+
+    std::vector<PendingWrite> get_writes(const std::string& thread_id,
+                                         const std::string& parent_checkpoint_id) override {
+        return inner_->get_writes(thread_id, parent_checkpoint_id);
+    }
+
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id) override {
+        inner_->clear_writes(thread_id, parent_checkpoint_id);
+    }
+
+private:
+    std::shared_ptr<InMemoryCheckpointStore> inner_ = std::make_shared<InMemoryCheckpointStore>();
+    std::atomic<bool>                        armed_{false};
+};
+
+}  // namespace
 
 TEST(GraphEngineAsyncApi, RunAsyncMatchesSyncResult) {
     register_writer("hello");
@@ -282,12 +323,9 @@ TEST(GraphEngineAsyncApi, RunAsyncMatchesSyncResult) {
     auto sync_result = engine->run(cfg);
 
     asio::io_context io;
-    RunResult async_result;
+    RunResult        async_result;
     asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            async_result = co_await engine->run_async(cfg);
-        },
+        io, [&]() -> asio::awaitable<void> { async_result = co_await engine->run_async(cfg); },
         asio::detached);
     io.run();
 
@@ -311,7 +349,7 @@ TEST(GraphEngineAsyncApi, RunAsyncPropagatesNodeException) {
         EXPECT_THROW(std::rethrow_exception(e.cause()), std::runtime_error);
     }
 
-    asio::io_context io;
+    asio::io_context   io;
     std::exception_ptr captured;
     asio::co_spawn(
         io,
@@ -338,12 +376,12 @@ TEST(GraphEngineAsyncApi, RunAsyncPropagatesNodeException) {
 
 TEST(GraphEngineAsyncApi, SubgraphFailureStillHonorsOuterRetry) {
     auto calls = std::make_shared<std::atomic<int>>(0);
-    NodeFactory::instance().register_type("subgraph_transient_123",
+    NodeFactory::instance().register_type(
+        "subgraph_transient_123",
         [calls](const std::string& name, const json&, const NodeContext&) {
             class TransientNode final : public GraphNode {
             public:
-                TransientNode(std::string name,
-                              std::shared_ptr<std::atomic<int>> calls)
+                TransientNode(std::string name, std::shared_ptr<std::atomic<int>> calls)
                     : name_(std::move(name)), calls_(std::move(calls)) {}
                 asio::awaitable<NodeOutput> run(NodeInput) override {
                     if (calls_->fetch_add(1) < 2) {
@@ -352,35 +390,27 @@ TEST(GraphEngineAsyncApi, SubgraphFailureStillHonorsOuterRetry) {
                     co_return NodeOutput{};
                 }
                 std::string get_name() const override { return name_; }
+
             private:
-                std::string name_;
+                std::string                       name_;
                 std::shared_ptr<std::atomic<int>> calls_;
             };
             return std::make_unique<TransientNode>(name, calls);
         });
 
-    json inner = {
-        {"name", "inner"},
-        {"channels", json::object()},
-        {"nodes", {{"deep", {{"type", "subgraph_transient_123"}}}}},
-        {"edges", json::array({
-            {{"from", "__start__"}, {"to", "deep"}},
-            {{"from", "deep"}, {"to", "__end__"}}
-        })}
-    };
-    json outer = {
-        {"name", "outer"},
-        {"channels", json::object()},
-        {"nodes", {{"shell", {{"type", "subgraph"},
-                                {"definition", inner}}}}},
-        {"edges", json::array({
-            {{"from", "__start__"}, {"to", "shell"}},
-            {{"from", "shell"}, {"to", "__end__"}}
-        })},
-        {"retry_policy", {{"max_retries", 2}, {"initial_delay_ms", 1}}}
-    };
+    json inner = {{"name", "inner"},
+                  {"channels", json::object()},
+                  {"nodes", {{"deep", {{"type", "subgraph_transient_123"}}}}},
+                  {"edges", json::array({{{"from", "__start__"}, {"to", "deep"}},
+                                         {{"from", "deep"}, {"to", "__end__"}}})}};
+    json outer = {{"name", "outer"},
+                  {"channels", json::object()},
+                  {"nodes", {{"shell", {{"type", "subgraph"}, {"definition", inner}}}}},
+                  {"edges", json::array({{{"from", "__start__"}, {"to", "shell"}},
+                                         {{"from", "shell"}, {"to", "__end__"}}})},
+                  {"retry_policy", {{"max_retries", 2}, {"initial_delay_ms", 1}}}};
 
-    auto engine = GraphEngine::compile(outer, NodeContext{});
+    auto      engine = GraphEngine::compile(outer, NodeContext{});
     RunConfig cfg;
     cfg.thread_id = "subgraph-retry";
     EXPECT_NO_THROW(engine->run(cfg));
@@ -389,7 +419,7 @@ TEST(GraphEngineAsyncApi, SubgraphFailureStillHonorsOuterRetry) {
 
 TEST(GraphEngineAsyncApi, ResumeAsyncMatchesSyncResume) {
     register_resume_approval();
-    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
     auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
     seed_interrupted_run(*engine, "t-resume-sync");
     seed_interrupted_run(*engine, "t-resume-async");
@@ -398,12 +428,11 @@ TEST(GraphEngineAsyncApi, ResumeAsyncMatchesSyncResume) {
     auto sync_result = engine->resume("t-resume-sync", decision);
 
     asio::io_context io;
-    RunResult resumed;
+    RunResult        resumed;
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            resumed = co_await engine->resume_async(
-                "t-resume-async", decision);
+            resumed = co_await engine->resume_async("t-resume-async", decision);
         },
         asio::detached);
     io.run();
@@ -414,20 +443,19 @@ TEST(GraphEngineAsyncApi, ResumeAsyncMatchesSyncResume) {
 
 TEST(GraphEngineAsyncApi, ResumeAsyncSnapshotsThreadIdBeforeFirstResume) {
     register_resume_approval();
-    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
     auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
     seed_interrupted_run(*engine, "owned-thread-id");
 
     std::string thread_id = "owned-thread-id";
-    auto operation = engine->resume_async(
-        thread_id, json{{"decision", "approved"}});
+    auto        operation = engine->resume_async(thread_id, json{{"decision", "approved"}});
 
     // asio::awaitable is lazy. Changing the caller's source after the API
     // returns must not change which checkpoint the eventual coroutine loads.
     thread_id = "different-thread-id";
 
     asio::io_context io;
-    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    auto             future = asio::co_spawn(io, std::move(operation), asio::use_future);
     io.run();
 
     ASSERT_NO_THROW({
@@ -438,23 +466,21 @@ TEST(GraphEngineAsyncApi, ResumeAsyncSnapshotsThreadIdBeforeFirstResume) {
 
 TEST(GraphEngineAsyncApi, ResumeAsyncSnapshotsValueAndCallbackBeforeFirstResume) {
     register_resume_approval();
-    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
     auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
     seed_interrupted_run(*engine, "owned-value-callback");
 
-    json decision{{"decision", "approved"}};
-    int event_count = 0;
-    const std::string thread_id = "owned-value-callback";
-    GraphStreamCallback callback =
-        [&](const GraphEvent&) { ++event_count; };
-    auto operation = engine->resume_async(
-        thread_id, decision, callback);
+    json                decision{{"decision", "approved"}};
+    int                 event_count = 0;
+    const std::string   thread_id   = "owned-value-callback";
+    GraphStreamCallback callback    = [&](const GraphEvent&) { ++event_count; };
+    auto                operation   = engine->resume_async(thread_id, decision, callback);
 
     decision["decision"] = "mutated";
-    callback = nullptr;
+    callback             = nullptr;
 
     asio::io_context io;
-    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    auto             future = asio::co_spawn(io, std::move(operation), asio::use_future);
     io.run();
     auto result = future.get();
 
@@ -464,25 +490,116 @@ TEST(GraphEngineAsyncApi, ResumeAsyncSnapshotsValueAndCallbackBeforeFirstResume)
 
 TEST(GraphEngineAsyncApi, ResumeAsyncOwnsTemporaryArgumentsUntilDelayedSpawn) {
     register_resume_approval();
-    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
     auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
     seed_interrupted_run(*engine, "temporary-resume-input");
 
     auto event_count = std::make_shared<std::atomic<int>>(0);
-    auto operation = engine->resume_async(
-        std::string("temporary-resume-input"),
-        json{{"decision", "approved"}},
-        GraphStreamCallback([event_count](const GraphEvent&) {
-            event_count->fetch_add(1, std::memory_order_relaxed);
-        }));
+    auto operation =
+        engine->resume_async(std::string("temporary-resume-input"), json{{"decision", "approved"}},
+                             GraphStreamCallback([event_count](const GraphEvent&) {
+                                 event_count->fetch_add(1, std::memory_order_relaxed);
+                             }));
 
     asio::io_context io;
-    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    auto             future = asio::co_spawn(io, std::move(operation), asio::use_future);
     io.run();
     auto result = future.get();
 
     EXPECT_EQ(result.output["channels"]["result"]["value"], "approved");
     EXPECT_GT(event_count->load(std::memory_order_relaxed), 0);
+}
+
+TEST(GraphEngineAsyncApi, ResumeFromUsesRequestedCheckpointNotLatest) {
+    register_resume_approval();
+    auto              store     = std::make_shared<InMemoryCheckpointStore>();
+    auto              engine    = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    const std::string thread_id = "exact-checkpoint";
+    seed_interrupted_run(*engine, thread_id);
+
+    const auto interrupted = store->load_latest(thread_id);
+    ASSERT_TRUE(interrupted.has_value());
+    const auto interrupted_id = interrupted->id;
+
+    const auto first = engine->resume(thread_id, json{{"decision", "first"}});
+    EXPECT_EQ(first.output["channels"]["result"]["value"], "first");
+    const auto latest = store->load_latest(thread_id);
+    ASSERT_TRUE(latest.has_value());
+    ASSERT_NE(latest->id, interrupted_id);
+
+    RunConfig config;
+    config.thread_id  = thread_id;
+    const auto replay = engine->resume_from(config, interrupted_id, json{{"decision", "replayed"}});
+
+    EXPECT_EQ(replay.output["channels"]["result"]["value"], "replayed");
+}
+
+TEST(GraphEngineAsyncApi, ResumeFromRejectsCheckpointOwnedByAnotherThread) {
+    register_resume_approval();
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    seed_interrupted_run(*engine, "checkpoint-owner");
+    const auto interrupted = store->load_latest("checkpoint-owner");
+    ASSERT_TRUE(interrupted.has_value());
+
+    RunConfig config;
+    config.thread_id = "different-thread";
+    EXPECT_THROW((void)engine->resume_from(config, interrupted->id, json{{"decision", "invalid"}}),
+                 std::runtime_error);
+}
+
+TEST(GraphEngineAsyncApi, ResumeFromRejectsDifferentIdReturnedByCheckpointStore) {
+    register_resume_approval();
+    auto              store     = std::make_shared<WrongIdCheckpointStore>();
+    auto              engine    = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    const std::string thread_id = "checkpoint-wrong-id";
+    seed_interrupted_run(*engine, thread_id);
+    const auto interrupted = store->load_latest(thread_id);
+    ASSERT_TRUE(interrupted.has_value());
+    store->arm();
+
+    RunConfig config;
+    config.thread_id = thread_id;
+    EXPECT_THROW(
+        (void)engine->resume_from(config, interrupted->id, json{{"decision", "must-not-run"}}),
+        std::runtime_error);
+}
+
+TEST(GraphEngineAsyncApi, PerRunCheckpointStoreOwnsRunAndExactResume) {
+    register_resume_approval();
+    auto default_store   = std::make_shared<InMemoryCheckpointStore>();
+    auto operation_store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine          = GraphEngine::compile(resume_graph(), NodeContext{}, default_store);
+
+    RunConfig config;
+    config.thread_id = "per-run-store";
+    RunResources resources;
+    resources.checkpoint_store = operation_store;
+
+    asio::io_context run_io;
+    auto             interrupted_future = asio::co_spawn(
+        run_io, engine->run_stream_async(config, {}, {}, resources), asio::use_future);
+    run_io.run();
+    const auto interrupted_result = interrupted_future.get();
+    ASSERT_TRUE(interrupted_result.interrupted);
+    ASSERT_FALSE(interrupted_result.checkpoint_id.empty());
+    EXPECT_FALSE(default_store->load_by_id(interrupted_result.checkpoint_id).has_value());
+    EXPECT_TRUE(operation_store->load_by_id(interrupted_result.checkpoint_id).has_value());
+
+    EXPECT_THROW((void)engine->resume_from(config, interrupted_result.checkpoint_id,
+                                           json{{"decision", "wrong-store"}}),
+                 std::runtime_error);
+
+    asio::io_context resume_io;
+    auto             resumed_future = asio::co_spawn(
+        resume_io,
+        engine->resume_from_async(config, interrupted_result.checkpoint_id,
+                                              json{{"decision", "operation-store"}}, {}, {}, resources),
+        asio::use_future);
+    resume_io.run();
+    const auto resumed = resumed_future.get();
+
+    EXPECT_EQ(resumed.output["channels"]["result"]["value"], "operation-store");
 }
 
 TEST(GraphEngineAsyncApi, ConcurrentRunAsyncOnSharedIoContext) {
@@ -496,7 +613,7 @@ TEST(GraphEngineAsyncApi, ConcurrentRunAsyncOnSharedIoContext) {
 
     asio::io_context io;
     std::atomic<int> done{0};
-    constexpr int N = 5;
+    constexpr int    N = 5;
 
     for (int i = 0; i < N; ++i) {
         asio::co_spawn(
@@ -504,7 +621,7 @@ TEST(GraphEngineAsyncApi, ConcurrentRunAsyncOnSharedIoContext) {
             [&, i]() -> asio::awaitable<void> {
                 RunConfig cfg;
                 cfg.thread_id = "t-" + std::to_string(i);
-                auto r = co_await engine->run_async(cfg);
+                auto r        = co_await engine->run_async(cfg);
                 if (!r.interrupted) {
                     done.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -518,22 +635,21 @@ TEST(GraphEngineAsyncApi, ConcurrentRunAsyncOnSharedIoContext) {
 
 TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
     ReleasableHttpServer server;
-    OperationTokensSeen seen;
-    NodeFactory::instance().register_type("operation_cancel_http",
-        [&server, &seen](const std::string& name, const json&,
-                         const NodeContext&) {
-            return std::make_unique<StallingHttpNode>(
-                name, server.port, &seen);
+    OperationTokensSeen  seen;
+    NodeFactory::instance().register_type(
+        "operation_cancel_http",
+        [&server, &seen](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<StallingHttpNode>(name, server.port, &seen);
         });
 
-    auto engine = GraphEngine::compile(
-        minimal_graph("worker", "operation_cancel_http"), NodeContext{});
+    auto engine =
+        GraphEngine::compile(minimal_graph("worker", "operation_cancel_http"), NodeContext{});
     auto parent = std::make_shared<CancelToken>();
 
-    asio::io_context io;
-    std::atomic<int> done{0};
-    std::atomic<int> cancelled{0};
-    std::atomic<int> unexpected{0};
+    asio::io_context  io;
+    std::atomic<int>  done{0};
+    std::atomic<int>  cancelled{0};
+    std::atomic<int>  unexpected{0};
     std::atomic<bool> aborted_before_release{false};
 
     for (int i = 0; i < 2; ++i) {
@@ -541,7 +657,7 @@ TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
             io,
             [&, i]() -> asio::awaitable<void> {
                 RunConfig cfg;
-                cfg.thread_id = "shared-parent-" + std::to_string(i);
+                cfg.thread_id    = "shared-parent-" + std::to_string(i);
                 cfg.cancel_token = parent;
                 try {
                     (void)co_await engine->run_async(std::move(cfg));
@@ -556,8 +672,7 @@ TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
     }
 
     std::thread canceller([&] {
-        const auto requests_deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        const auto requests_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (server.requests.load(std::memory_order_acquire) < 2 &&
                std::chrono::steady_clock::now() < requests_deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -575,9 +690,8 @@ TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
                std::chrono::steady_clock::now() < cancel_deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        aborted_before_release.store(
-            done.load(std::memory_order_acquire) == 2,
-            std::memory_order_release);
+        aborted_before_release.store(done.load(std::memory_order_acquire) == 2,
+                                     std::memory_order_release);
         server.release();
     });
 
@@ -586,10 +700,8 @@ TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
 
     EXPECT_EQ(server.requests.load(), 2);
     EXPECT_EQ(done.load(), 2);
-    EXPECT_EQ(cancelled.load(), 2)
-        << "one parent cancel must abort both child-bound HTTP awaits";
-    EXPECT_EQ(unexpected.load(), 0)
-        << "operation_aborted must surface as CancelledException";
+    EXPECT_EQ(cancelled.load(), 2) << "one parent cancel must abort both child-bound HTTP awaits";
+    EXPECT_EQ(unexpected.load(), 0) << "operation_aborted must surface as CancelledException";
     EXPECT_TRUE(aborted_before_release.load())
         << "run_async cancellation must abort the socket await without the "
            "mock server releasing a response";
@@ -604,16 +716,17 @@ TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
 
 TEST(GraphEngineAsyncApi, RunUsesOperationChild) {
     std::atomic<CancelToken*> seen{nullptr};
-    NodeFactory::instance().register_type("operation_cancel_run_sync",
+    NodeFactory::instance().register_type(
+        "operation_cancel_run_sync",
         [&seen](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<TokenObserverNode>(name, &seen);
         });
 
-    auto engine = GraphEngine::compile(
-        minimal_graph("worker", "operation_cancel_run_sync"), NodeContext{});
-    auto parent = std::make_shared<CancelToken>();
+    auto engine =
+        GraphEngine::compile(minimal_graph("worker", "operation_cancel_run_sync"), NodeContext{});
+    auto      parent = std::make_shared<CancelToken>();
     RunConfig cfg;
-    cfg.thread_id = "run-operation-child-sync";
+    cfg.thread_id    = "run-operation-child-sync";
     cfg.cancel_token = parent;
 
     (void)engine->run(cfg);
@@ -624,17 +737,17 @@ TEST(GraphEngineAsyncApi, RunUsesOperationChild) {
 
 TEST(GraphEngineAsyncApi, RunStreamUsesOperationChild) {
     std::atomic<CancelToken*> seen{nullptr};
-    NodeFactory::instance().register_type("operation_cancel_stream_sync",
+    NodeFactory::instance().register_type(
+        "operation_cancel_stream_sync",
         [&seen](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<TokenObserverNode>(name, &seen);
         });
 
-    auto engine = GraphEngine::compile(
-        minimal_graph("worker", "operation_cancel_stream_sync"),
-        NodeContext{});
-    auto parent = std::make_shared<CancelToken>();
+    auto      engine = GraphEngine::compile(minimal_graph("worker", "operation_cancel_stream_sync"),
+                                            NodeContext{});
+    auto      parent = std::make_shared<CancelToken>();
     RunConfig cfg;
-    cfg.thread_id = "stream-operation-child-sync";
+    cfg.thread_id    = "stream-operation-child-sync";
     cfg.cancel_token = parent;
 
     (void)engine->run_stream(cfg, [](const GraphEvent&) {});
@@ -645,27 +758,26 @@ TEST(GraphEngineAsyncApi, RunStreamUsesOperationChild) {
 
 TEST(GraphEngineAsyncApi, RunStreamAsyncUsesOperationChild) {
     std::atomic<CancelToken*> seen{nullptr};
-    NodeFactory::instance().register_type("operation_cancel_stream_async",
+    NodeFactory::instance().register_type(
+        "operation_cancel_stream_async",
         [&seen](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<TokenObserverNode>(name, &seen);
         });
 
-    auto engine = GraphEngine::compile(
-        minimal_graph("worker", "operation_cancel_stream_async"),
-        NodeContext{});
+    auto engine = GraphEngine::compile(minimal_graph("worker", "operation_cancel_stream_async"),
+                                       NodeContext{});
     auto parent = std::make_shared<CancelToken>();
     RunConfig cfg;
-    cfg.thread_id = "stream-operation-child-async";
+    cfg.thread_id    = "stream-operation-child-async";
     cfg.cancel_token = parent;
 
-    asio::io_context io;
+    asio::io_context   io;
     std::exception_ptr error;
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
             try {
-                (void)co_await engine->run_stream_async(
-                    cfg, [](const GraphEvent&) {});
+                (void)co_await engine->run_stream_async(cfg, [](const GraphEvent&) {});
             } catch (...) {
                 error = std::current_exception();
             }

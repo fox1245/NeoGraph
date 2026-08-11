@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/spec/neograph-example-disposition-v1.schema.json",
+  "title": "NeoGraph P8 example and cookbook disposition",
+  "type": "object",
+  "required": [
+    "format",
+    "schema_version",
+    "status",
+    "authority",
+    "disposition_enum",
+    "entries"
+  ],
+  "properties": {
+    "format": {
+      "const": "neograph-example-disposition-v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority": {
+      "type": "string",
+      "minLength": 1
+    },
+    "disposition_enum": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "Core-kept",
+          "Program-ported",
+          "protocol-adapter-ported",
+          "historical-only",
+          "removed"
+        ]
+      },
+      "minItems": 5,
+      "uniqueItems": true
+    },
+    "proof_policy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "documentation": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "path",
+          "target",
+          "disposition",
+          "requires",
+          "rationale",
+          "proof"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9_\\-]+$"
+          },
+          "kind": {
+            "enum": [
+              "example",
+              "cookbook"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1
+          },
+          "disposition": {
+            "enum": [
+              "Core-kept",
+              "Program-ported",
+              "protocol-adapter-ported",
+              "historical-only",
+              "removed"
+            ]
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "proof": {
+            "type": "object",
+            "required": [
+              "status",
+              "build",
+              "run",
+              "expected"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "verified",
+                  "pending-component-smoke",
+                  "historical",
+                  "removed"
+                ]
+              },
+              "build": {
+                "type": "string",
+                "minLength": 1
+              },
+              "run": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
+

@@ -4,7 +4,7 @@
 // compacts them: when the estimated token count exceeds a budget,
 // older turns are summarized by one LLM call and only the last N
 // messages are kept verbatim. It also repairs tool-call/response pairs
-// that a window/truncation can break (OpenAI 400s on a dangling pair).
+// that a window/truncation can break (provider 400s on a dangling pair).
 //
 // Offline: a MockProvider returns a canned summary — no API key.
 //
@@ -20,7 +20,7 @@
 using neograph::ChatMessage;
 
 // Canned-summary provider so the example runs with no network/key.
-// A real run would pass an OpenAIProvider here unchanged.
+// A real run would pass an OpenAI-compatible Provider here unchanged.
 class SummaryMock : public neograph::Provider {
 public:
     neograph::ChatCompletion
@@ -110,7 +110,7 @@ int main() {
 
     auto out = neograph::async::run_sync(
         neograph::history::compact_history(
-            hist, mock, "gpt-4o-mini",
+            hist, mock, "deepseek/deepseek-v4-flash-0731",
             /*max_tokens=*/200, /*recent_keep=*/4));
 
     std::printf("  compacted: %s\n", out.compacted ? "yes" : "no");

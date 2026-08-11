@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": "research-a",
+      "template": "researcher/v3",
+      "input_bindings": [],
+      "depends_on": ["research-b"],
+      "budget": {"wall_time_ms": 1, "model_tokens": 1}
+    },
+    {
+      "id": "research-b",
+      "template": "researcher/v3",
+      "input_bindings": [],
+      "depends_on": ["research-a"],
+      "budget": {"wall_time_ms": 1, "model_tokens": 1}
+    }
+  ],
+  "join": {"kind": "all"}
+}

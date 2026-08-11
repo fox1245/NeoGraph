@@ -45,12 +45,10 @@ IntentRouterNode::IntentRouterNode(std::string             name,
     , dispatcher_(dispatcher)
     , provider_(std::move(provider))
 {
-    // cfg 에서 설정값 추출 — 없으면 안전한 기본값 사용
-    model_          = cfg.value("model",          "gpt-4o-mini");
-    // JARVIS_ROUTER_MODEL — 그래프 JSON 재작성 없이 라우터 모델 교체
-    if (const char* m = std::getenv("JARVIS_ROUTER_MODEL"); m && m[0]) {
-        model_ = m;
-    }
+    // The live Jarvis profile is intentionally pinned to one OpenRouter model.
+    // This prevents graph JSON or process environment overrides from routing
+    // a supposedly equivalent example through a different provider/model.
+    model_ = "deepseek/deepseek-v4-flash-0731";
     output_channel_ = cfg.value("output_channel", "route_decision");
     prompt_file_    = cfg.value("prompt_file",    "config/persona.txt");
     prompt_section_ = cfg.value("prompt_section", "router");

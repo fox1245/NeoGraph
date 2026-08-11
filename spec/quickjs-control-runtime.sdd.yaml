@@ -1,0 +1,728 @@
+# Executable base migration contract for docs/QUICKJS_CONTROL_ARCHITECTURE.md.
+# The dependent self-evolving controller extension is specified separately in
+# spec/self-evolving-agent-controller.sdd.yaml.
+
+spec:
+  id: quickjs-control-runtime
+  revision: 6
+  created: "2026-08-08"
+  owner: fox1245
+  status: accepted
+  priority: P0
+  kind: architecture-migration
+  visibility: repository
+  methodology: [SDD, TDD, EDD]
+  source_baseline: 61661e9ad1fc386b5142139c48c327ede7464633
+  canonical_design: docs/QUICKJS_CONTROL_ARCHITECTURE.md
+  migration_plan: docs/QUICKJS_CONTROL_MIGRATION.md
+  completion_runbook: docs/QUICKJS_MIGRATION_COMPLETION.md
+  completion_execution_spec: spec/quickjs-control-migration-completion.sdd.yaml
+  controller_extension:
+    canonical_design: docs/SELF_EVOLVING_AGENT_CONTROLLER.md
+    executable_contract: spec/self-evolving-agent-controller.sdd.yaml
+    tracking_epic: 29
+    role: post_cutover_dependent_extension
+    base_cutover_blocking: false
+    language_runtime_reuse: required
+    second_execution_stack: forbidden
+  execution_profile_design: docs/QUICKJS_EXECUTION_PROFILES.md
+  execution_profile_tracking_issue: 35
+  runtime_selection:
+    language: javascript
+    engine: quickjs
+    selection: final
+    alternatives_are_product_modes: false
+  supersedes_direction:
+    - user-authored bounded Core DSL and Core elaborator growth
+    - general Program authoring through NeoGraph Program JSON operation trees
+    - extending ProgramOperationKind as a general-purpose language
+    - VM-free direct dispatch as the permanent general Program execution model
+    - permanent parallel Core DSL and Program DSL product evolution
+  product_objectives:
+    easy_adoption: >-
+      Standard JavaScript and its established tooling replace two
+      NeoGraph-specific authoring languages; users learn only the ng domain API
+      and NeoGraph authority and durability rules.
+    stable_program_performance: >-
+      One measured QuickJS-to-command-to-ProgramRuntime execution path has
+      explicit cold and warm regression thresholds. This is a stability
+      requirement, not an assumption that QuickJS is inherently faster.
+    maintainability: >-
+      ECMAScript owns general computation and composition while NeoGraph owns
+      typed Core IR, admission, effects, durability, and GraphEngine dispatch;
+      duplicate grammar, schema, lowering, and dispatcher paths are removed.
+    controller_extensibility: >-
+      The one JavaScript runtime, ProgramRuntime, GraphEngine, capability
+      registry, journal, version catalog, and activation model can support
+      developer-authorized capability discovery and immutable self-evolution
+      without another source language or execution stack.
+
+completion_state:
+  architecture_decision: accepted
+  legacy_document_retirement: complete
+  issue_cutover: complete
+  quickjs_dependency_qualification: implemented_linux_verified
+  javascript_graph_definition: implemented
+  javascript_source_and_admission: implemented
+  generator_command_protocol: implemented
+  structured_concurrency: implemented
+  metering_and_isolation: implemented
+  deterministic_replay: implemented
+  native_control_abi: implemented
+  authoring_cutover: implemented
+  legacy_drain_proof: passed_no_deployment_attestation
+  legacy_runtime_removal: pending_platform_qualification
+  controller_extension_architecture: accepted
+  controller_extension_implementation: not_started
+  controller_hypothesis_evaluation: not_started
+
+blocking_invariants:
+  one_node_executor:
+    statement: GraphEngine remains the only executor of Core/application nodes.
+    proof:
+      - QuickJS yields commands and never owns GraphNode readiness or Core checkpoints
+      - ProgramRuntime validates and dispatches pinned Core invocations
+      - direct Core and JavaScript-wrapped Core equivalence tests cover shared behavior
+  core_optional_program:
+    statement: Core-only users pay no QuickJS dependency, symbol, allocation, branch, or binary-size cost.
+    proof:
+      - NEOGRAPH_BUILD_PROGRAM=OFF installed-consumer build and run
+      - QuickJS absent from the Core link interface and transitive package metadata
+      - enabled-but-unused and disabled Core benchmark comparison
+  stable_program_performance:
+    statement: >-
+      The fixed QuickJS-to-command-to-ProgramRuntime path remains within
+      preregistered cold and warm regression thresholds.
+    proof:
+      - representative workloads and thresholds are fixed before optimization
+      - repeated distributions cover runtime creation, compilation, first command, warm command, hostcall, replay growth, allocation, and concurrency
+      - framework overhead is isolated from GraphEngine, provider, tool, journal, and persistence time
+      - direct Core and JavaScript-wrapped Core are reported separately
+  one_authoring_language:
+    statement: JavaScript is the sole source authoring language after cutover.
+    proof:
+      - no new bounded Core DSL definitions after the freeze
+      - no new Program JSON operation versions after the freeze
+      - Lua and Janet are not public source kinds or runtime modes
+      - Harness Core and Program publication resolve to JavaScript profiles
+      - strict Core JSON remains validated interchange rather than a programming language
+  no_language_reinvention:
+    statement: NeoGraph does not define a second expression, function, scope, loop, exception, class, module, or macro language.
+    proof:
+      - no ng.if, ng.loop, ng.map, or custom JavaScript syntax
+      - new domain behavior enters through a versioned host binding
+      - ordinary computation uses standard JavaScript semantics
+  host_owned_structured_concurrency:
+    statement: >-
+      Actual parallel, race, quorum, and bounded fan-out are C++ ProgramRuntime
+      scheduling semantics. QuickJS and JavaScript Promise machinery never own
+      external concurrency, child lifecycle, or join completion.
+    proof:
+      - ng.parallel, ng.race, and ng.quorum lower to one typed join command
+      - standard JavaScript array mapping constructs member descriptors without dispatch
+      - QuickJS command constructors and native bindings perform zero dispatch and never block
+      - ProgramRuntime validates the complete group and reserves admitted budget before launching new work
+      - C++ scheduling enforces max_in_flight, failure policy, output bounds, deterministic ordering, cancellation, and drain
+      - race ties use declaration order and every loser observes cancellation before the join completes
+      - quorum launches admitted members concurrently and reports a stable unreachable outcome
+      - multi-step concurrent branches use pinned child Programs rather than concurrent callbacks into one QuickJS context
+      - crash and replay fixtures preserve each member identity and never repeat a completed effect
+  no_raw_execution:
+    statement: Raw or unadmitted JavaScript and modules perform zero dispatch.
+    proof:
+      - syntax, module, entry-point, schema, binding, policy, and budget rejection fixtures
+      - dispatch counters remain zero for every rejected fixture
+  closed_host_surface:
+    statement: User JavaScript cannot access arbitrary C FFI or ambient host resources.
+    proof:
+      - allowlisted context excludes QuickJS std and os modules
+      - dynamic native modules, files, network, processes, environment, workers, clocks, and random values are unavailable
+      - only sealed import slots can yield executable commands
+  exact_runtime_identity:
+    statement: Every admitted JavaScript source pins the exact runtime, profile, source, module, Core, and native binding semantics.
+    proof:
+      - QuickJS release, build options, and implementation digest enter Core and Program bundle identity
+      - JavaScript profile and ng API versions enter bundle identity
+      - mismatch fails before replay or dispatch
+  deterministic_recovery:
+    statement: Recovery replays source against exact recorded commands and never depends on a raw QuickJS heap snapshot.
+    proof:
+      - command kind, slot, site, arguments, effect coordinate, and sequence are compared
+      - exact history returns recorded results with zero external dispatch
+      - mismatch transitions to a stable nondeterminism failure
+  nonrenewable_budget:
+    statement: Resume, replay, retry, child, fork, and replacement never replenish admitted budget.
+    proof:
+      - one durable budget ledger remains authoritative
+      - replay work is reported separately and cannot increase remaining execution grants
+      - crash/restart and concurrent decrement tests
+  durable_effect_boundary:
+    statement: Native bindings cannot bypass journal, outbox, cancellation, or reconciliation.
+    proof:
+      - effectful work starts only after a yielded command is durably admitted
+      - completion publishes before generator resume
+      - completed non-idempotent replay has zero external dispatch
+      - ambiguous outcomes block for explicit reconciliation
+  stable_native_abi:
+    statement: External native extensions use a versioned C ABI; C++ object layouts and exceptions do not cross it.
+    proof:
+      - ABI/version/ownership/allocator/cancellation/destruction conformance tests
+      - C++ wrapper lowers to the same C registration contract
+      - semantic version and implementation digest bind every callback
+  clean_cutover:
+    statement: Compatibility is temporary and no second source compiler or Program runtime remains.
+    proof:
+      - every stored legacy Core definition and Program version is translated, drain_only, or rejected
+      - no new legacy Core or Program publication after the announced boundary
+      - Core DSL elaborator and Harness DSL translation are deleted; the remaining Program parser/dispatcher is deleted after its final drain gate
+
+selected_upstream_contract:
+  canonical_docs: https://bellard.org/quickjs/quickjs.html
+  required_capabilities:
+    - C embedding API
+    - JS_NewCFunction native bindings
+    - JS_SetMemoryLimit allocation ceiling
+    - JS_NewRuntime2 custom allocator
+    - JS_SetInterruptHandler execution interruption
+    - static C module integration
+  pinning_rule: >-
+    The exact QuickJS release, source digest, license, build options, supported
+    platform matrix, and security configuration must be recorded by the
+    dependency qualification issue before source integration.
+  bytecode_rule: >-
+    QuickJS bytecode is an internal cache unless a stable validated storage
+    contract is independently proven. Durable authority remains source plus
+    exact runtime/compiler identity.
+
+javascript_profile:
+  baseline_profile: restricted_durable
+  execution_profiles:
+    restricted_durable:
+      status: implemented
+      main: synchronous_generator
+      durable_boundary: yielded_opaque_typed_command
+      ng_namespace: non_extensible_command_kernel
+    trusted_direct:
+      status: planned_issue_35
+      main: synchronous_or_async_function
+      authority: explicit_developer_grant_and_identity
+      ng_namespace: extensible_with_non_writable_non_configurable_kernel_members
+      guarantee_floor: unmanaged_for_the_entire_direct_execution
+      recovery: no_exact_replay_or_duplicate_prevention_claim_across_the_direct_execution
+    durable_async:
+      status: deferred_separate_scheduler_design
+      entry: async_main_with_durable_command_promises
+      requirement: journal_before_dispatch_owner_thread_settlement_recorded_ordering_and_restart_reconstruction
+  entry_contracts:
+    core_definition:
+      export: define
+      kind: function
+      context: bounded_dispatch_free_compile
+      output: sealed_typed_graph_builder
+    program_control:
+      export: main
+      kind: generator_function
+      input: canonical_json_compatible_value
+      output: canonical_json_compatible_value
+  contexts:
+    definition:
+      permits:
+        - deterministic_computation
+        - sealed_pure_modules
+        - sealed_graph_builder
+      denies:
+        - command_yield
+        - program_import_slot_invocation
+        - native_host_binding_invocation
+        - external_effect
+      completion: return_exactly_one_builder_owned_by_the_same_context
+    program:
+      permits:
+        - deterministic_computation
+        - sealed_pure_modules
+        - ng_command_construction
+        - admitted_pure_native_intrinsics
+      denies:
+        - direct_GraphEngine_execution
+        - direct_effect_commit
+        - ambient_host_access
+      completion: generator_return_or_typed_terminal_failure
+  allowed:
+    - standard deterministic JavaScript computation
+    - closures and generators
+    - arrays and plain data objects
+    - sealed graph builder composition
+    - reviewed sealed pure modules
+    - ng command constructors
+    - admitted pure native intrinsics
+  denied:
+    - quickjs_std_module
+    - quickjs_os_module
+    - dynamic_native_modules
+    - arbitrary_ffi
+    - ambient_filesystem
+    - ambient_network
+    - process_and_signal_access
+    - environment_access
+    - wall_clock
+    - unrecorded_random
+    - workers_and_shared_memory
+    - unsealed_module_resolution
+    - planner_selected_credentials_endpoints_providers_or_models
+  build_time_disable_when_supported:
+    - eval
+    - Function_constructor_equivalent_dynamic_compilation
+  bridge_rejections:
+    - functions
+    - symbols
+    - cyclic_values
+    - live_host_objects
+    - raw_pointers
+    - values_without_canonical_encoding
+
+graph_definition_protocol:
+  source_profile: javascript_profile.entry_contracts.core_definition
+  builder:
+    representation: opaque_context_owned_host_value
+    copyable: false
+    serializable_before_seal: false
+    usable_after_context_teardown: false
+  required_representational_surface:
+    - graph_identity_and_entrypoints
+    - static_channels_and_reducers
+    - registered_nodes_and_configuration
+    - edges_and_conditional_edges
+    - barriers
+    - static_interrupts
+    - retry_policy
+  mutation_rules:
+    - only the owning definition context may mutate an open builder
+    - handles from another context, graph, or generation are rejected
+    - the first successful return seals the builder permanently
+    - exceptions, interruption, limit exhaustion, or validation failure discard the builder
+    - definition evaluation cannot dispatch nodes, commands, host bindings, or effects
+  preseal_checks:
+    - exactly_one_builder_result
+    - value_and_handle_ownership
+    - registered_node_identity_and_schema
+    - channel_port_and_edge_compatibility
+    - condition_reducer_barrier_interrupt_and_retry_validity
+    - source_coordinate_coverage
+    - canonical_size_and_depth_limits
+  resource_limits:
+    source: admitted_compile_budget_with_nonzero_platform_ceiling
+    dimensions:
+      - instruction_fuel
+      - wall_time
+      - runtime_heap_bytes
+      - native_builder_bytes
+      - stack_depth
+      - module_count_and_source_bytes
+      - graph_nodes_edges_and_canonical_output_bytes
+    exhaustion: stable_compile_limit_failure_with_zero_dispatch
+  lowering:
+    target: existing_typed_strict_Core_definition
+    canonicalization: existing_canonical_Core_rules
+    identity_inputs:
+      - JavaScript_source_and_module_Merkle_root
+      - QuickJS_runtime_compiler_and_profile_identity
+      - ng_graph_API_version
+      - registry_snapshot_and_executable_receipts
+      - canonical_strict_Core_bytes
+    output_before_admission:
+      - immutable_Core_definition
+      - source_map
+      - diagnostics
+      - capability_and_effect_inputs
+  equivalence_gate:
+    compare:
+      - direct_Cpp_Core_builder
+      - legacy_Core_DSL_when_translation_is_claimed
+      - JavaScript_define
+    require:
+      - canonical_Core_equivalence_or_documented_identity_migration
+      - observable_GraphEngine_behavior_equivalence
+      - stable_diagnostic_and_source_map_expectations
+      - zero_dispatch_during_all_definition_evaluation
+
+command_protocol:
+  required_fields:
+    - protocol_version
+    - kind
+    - import_slot
+    - source_site
+    - arguments
+  initial_kinds:
+    - call_core
+    - spawn
+    - await
+    - join
+    - emit
+    - checkpoint
+    - cancel_scope
+    - host_capability
+  structured_concurrency:
+    canonical_kind: join
+    import_slot: sealed_builtin_join_slot_pinned_by_ng_API_version
+    execution_owner: Cpp_ProgramRuntime
+    quickjs_role: immutable_command_construction_only
+    frontend_lowering:
+      ng_parallel: join_mode_all
+      ng_race: join_mode_race
+      ng_quorum: join_mode_quorum
+      parallel_map: standard_JavaScript_Array_map_plus_bounded_join
+    member_sources:
+      - immutable_admitted_deferred_command_descriptors
+      - durable_child_handles_owned_or_joinable_by_the_run
+    member_rejections:
+      - JavaScript_functions_or_closures
+      - symbols_or_cyclic_values
+      - live_JSValue_or_host_object_references
+      - unsealed_imports
+      - handles_without_join_authority
+    multi_step_branch_rule: use_an_admitted_pinned_child_Program
+    modes:
+      all:
+        result_order: declaration_order
+        failure_policies: [fail_fast, collect]
+      race:
+        winner: first_terminal_member
+        same_turn_tie_break: declaration_order
+        loser_rule: cancel_and_drain_before_join_completion
+      quorum:
+        required_successes: positive_integer_not_greater_than_member_count
+        scheduling: actual_concurrent_launch_within_max_in_flight
+        impossible_outcome: stable_quorum_unreachable_failure
+        remainder_rule: cancel_and_drain_when_policy_terminates_the_group
+    immutable_bounds:
+      - admitted_member_count_ceiling
+      - max_in_flight
+      - max_output_bytes
+      - timeout_when_present
+      - admitted_budget_reservation
+    pre_dispatch_atomicity:
+      - validate_every_member_schema_slot_identity_capability_effect_owner_and_replay_coordinate
+      - reserve_all_budget_required_for_new_group_work
+      - dispatch_zero_members_when_group_validation_or_reservation_fails
+      - existing_child_handles_retain_their_original_budget_and_lineage
+    durability:
+      - publish_group_and_member_identities_before_dispatch
+      - record_each_terminal_member_outcome
+      - record_winner_or_quorum_selection_before_generator_resume
+      - recover_the_exact_pending_members_after_process_restart
+      - replay_completed_members_from_recorded_results_with_zero_external_dispatch
+  quickjs_binding_boundary:
+    module: sealed_versioned_ng_control_module
+    c_function_role: bounded_synchronous_command_construction
+    before_yield: no_dispatch_no_wait_no_journal_publication
+    at_yield: copy_to_canonical_host_owned_command
+    resume: serialized_on_the_owning_QuickJS_executor
+    forbidden:
+      - blocking_for_Cpp_async_completion_inside_a_QuickJS_callback
+      - retaining_JSValue_or_JSContext_borrowed_state_in_async_work
+      - resuming_or_calling_one_QuickJS_context_from_worker_threads
+      - executing_JavaScript_from_a_native_finalizer
+      - passing_a_JavaScript_closure_to_the_Cpp_scheduler
+  pre_dispatch_checks:
+    - protocol_and_kind
+    - import_slot
+    - input_schema
+    - executable_identity
+    - capability_and_effect_closure
+    - owner_and_tenant
+    - budget_reservation
+    - replay_coordinate
+  result_contract:
+    success: canonical_value
+    failure: stable_typed_failure
+    pending: durable_journal_head
+
+performance_contract:
+  status: blocking_preregistration_before_default_enablement
+  owner_issue: 25
+  baseline_artifact:
+    location: version_controlled_machine_readable_result
+    required_metadata:
+      - source_commit_and_dirty_state
+      - QuickJS_release_digest_and_build_options
+      - compiler_build_type_and_link_mode
+      - operating_system_architecture_and_hardware
+      - workload_profile_and_input_digest
+      - repetition_warmup_and_process_isolation
+  measurements:
+    - runtime_creation_cold
+    - source_and_module_compilation_cold
+    - define_evaluation_validation_and_Core_lowering
+    - first_generator_command
+    - warm_generator_command
+    - typed_hostcall_bridge_round_trip
+    - replay_cost_by_recorded_command_count
+    - runtime_and_builder_peak_memory
+    - concurrent_invocation_throughput_and_tail_latency
+    - structured_join_overhead_by_mode_member_count_and_max_in_flight
+    - JavaScript_wrapped_Core_overhead_against_direct_Core
+    - Program_enabled_but_unused_against_disabled_Core
+  method:
+    cold_case: fresh_process_and_empty_QuickJS_cache
+    warm_case: fixed_documented_preparation_without_measured_warmup_samples
+    minimum_valid_samples_per_case: 30
+    report:
+      - median
+      - p95
+      - median_absolute_deviation
+      - peak_allocated_bytes
+    isolate:
+      - JavaScript_and_bridge
+      - Program_scheduling
+      - GraphEngine
+      - provider_and_tool
+      - journal_and_persistence
+  gate:
+    threshold_source: accepted_version_controlled_preregistration
+    missing_threshold: fail
+    one_off_result: never_sufficient
+    noisy_or_inconclusive_result: rerun_and_record_without_relaxing_threshold_silently
+    required_outcome: every_blocking_cold_warm_memory_and_overhead_threshold_passes
+
+native_control_abi:
+  base: C_v1
+  cpp_surface: convenience_wrapper_only
+  quickjs_binding_role: command_constructor_only
+  scheduler_execution_site: outside_the_QuickJS_stack
+  threading_rule: one_owning_executor_serializes_each_QuickJS_context
+  async_value_rule: canonical_host_owned_bytes_replace_borrowed_JSValue_state_before_dispatch
+  required_metadata:
+    - executable_identity
+    - input_schema
+    - output_schema
+    - effect_mode
+    - idempotency
+    - required_capabilities
+    - declared_effects
+    - replay_behavior
+    - budget_cost
+  required_callbacks:
+    - invoke
+    - cancel
+    - destroy
+  forbidden_across_boundary:
+    - C++_exceptions
+    - std_string
+    - std_function
+    - project_json_object_layout
+    - compiler_specific_vtables
+  registry_reuse:
+    - ExecutableManifest
+    - ExecutableKind_Imported
+    - EffectMode
+    - AdmissionProfile
+    - CatalogCapabilityBinder
+    - CapabilityBindingReceipt
+
+authoring_cutover_contract:
+  public_authoring_frontends:
+    direct_Core_Cpp:
+      role: trusted_embeddable_host_API
+      persisted_user_source_format: false
+      requires_QuickJS: false
+    JavaScript_QuickJS:
+      role: sole_user_authored_graph_and_Program_language
+      binding: profile_governed_ng_control_module
+      default_profile: restricted_durable_sealed_command_kernel
+      trusted_direct_profile: planned_issue_35
+    standalone_Core_or_Program_JSON:
+      role: forbidden_public_authoring_input
+      fallback_compiler_selection: forbidden
+  retained:
+    strict_Core_JSON:
+      role: canonical_serialization_and_low_level_interchange
+      programming_language: false
+    direct_Core_Cpp:
+      role: embeddable_host_API
+      requires_QuickJS: false
+  in_process_json_rule:
+    statement: >-
+      Direct C++ APIs may use JSON values as in-process validated data without
+      creating a standalone public JSON authoring protocol.
+  removed:
+    - bounded_Core_DSL
+    - graph_Elaborator_authoring
+    - Harness_mode_dsl
+  frozen:
+    - Program_v2_v3_v4_operation_tree_authoring
+    - Harness_mode_program
+    - standalone_Core_JSON_public_authoring
+    - standalone_Program_JSON_public_authoring
+  stored_source_classification:
+    translated:
+      rule: deterministic_translation_and_equivalence_evidence_accepted
+      new_runs: JavaScript_only
+    drain_only:
+      rule: exact_legacy_runtime_remains_available_for_already_pinned_runs
+      new_publication: false
+      new_runs: false
+    rejected:
+      rule: exact_semantics_identity_authority_or_state_cannot_be_preserved
+      behavior: explicit_terminal_migration_diagnostic
+  completed_removals:
+    - Core_DSL_parser_and_elaborator
+    - Harness_Core_DSL_translation
+    - Core_DSL_only_examples_fixtures_docs_and_tests
+  removal_targets:
+    - Program_source_schemas_and_operation_tree_parser
+    - legacy_Program_operation_tree_lowering_and_dispatch
+    - Harness_Program_JSON_translation
+    - legacy_syntax_only_docs_examples_and_tests
+    - public_legacy_JSON_source_constructors_schemas_and_transport_routes
+  rollback_rule: never_reopen_legacy_authoring_or_create_a_permanent_dual_stack
+
+final_drain_proof:
+  tool: scripts/audit_legacy_drain.py
+  input:
+    format: neograph-legacy-drain-inventory
+    schema_version: 1
+    storage_boundary: frozen_read_only_snapshot
+    inventory_complete: explicit_operator_attestation_required
+    no_deployment_exception:
+      exact_statement: no_pre_release_or_production_deployment_has_ever_existed
+      exact_scope: all_neograph_program_and_harness_durable_state
+      requires:
+        - named_operator_attestation
+        - empty_stores
+        - empty_legacy_artifacts
+      prohibited_for:
+        - drained_deleted_lost_or_inaccessible_historical_state
+        - any_pre_release_or_production_deployment_that_ever_existed
+    supported_store_snapshots:
+      - program_sqlite
+      - program_postgres_dump
+      - program_transitions_sqlite
+      - harness_sqlite
+      - harness_file
+  verification:
+    - every_scanned_input_has_stable_pre_and_post_content_identity
+    - sqlite_snapshots_have_no_live_wal_shm_or_rollback_journal_sidecars
+    - postgres_dump_scans_exact_public_Program_COPY_tables_with_pg_restore_data_only_strict_names
+    - no_deployment_attestation_is_named_and_emits_a_distinct_proof_mode
+    - no_deployment_attestation_permits_no_store_or_legacy_artifact
+    - every_discovered_legacy_source_has_exactly_one_terminal_classification
+    - translated_source_has_scanned_replacement_and_sha256_equivalence_evidence
+    - rejected_source_has_explicit_terminal_reason
+    - drain_only_source_is_a_hard_final_removal_blocker
+    - active_recoverable_interrupted_unknown_or_activated_legacy_Program_is_a_hard_blocker
+    - unscanned_bundle_or_artifact_reference_is_a_hard_blocker
+  output:
+    format: neograph-legacy-drain-proof
+    proof_identity: canonical_sha256
+    evidence_mode: storage_snapshot_or_no_deployment_attestation
+  release_gate:
+    command: >-
+      python3 scripts/audit_legacy_drain.py --inventory <inventory.json>
+      --root <frozen-export-root> --output <proof.json> --require-final
+    pass_condition: final_drain.passed_is_true
+    non_substitute: source_checkout_synthetic_fixture_or_unattested_empty_inventory
+
+phases:
+  Q0_dependency_qualification:
+    deliver:
+      - exact release and source digest
+      - license and provenance record
+      - optional default-off build integration
+      - platform/static/shared/installed-consumer evidence
+      - sanitizer, binary-size, startup, and allocation evidence
+    gate: QuickJS is absent from the disabled Core consumer and all dependency evidence is accepted.
+  Q1_authoring_and_admission:
+    deliver:
+      - owned JavaScript source with define and main profiles
+      - bounded dispatch-free graph definition context
+      - sealed typed graph builder and canonical strict Core lowering
+      - sealed module resolver
+      - restricted contexts
+      - exact Core and Program bundle identity
+      - stable syntax, graph-validation, and source-map diagnostics
+    gate: Valid graph and Program source seal immutably and every invalid class dispatches zero work.
+  Q2_command_execution:
+    deliver:
+      - canonical command schema
+      - sealed ng module constructors
+      - import-slot resolution
+      - generator resume with typed outcomes
+      - C++ ProgramRuntime join handler
+      - ng.parallel, ng.race, and ng.quorum lowering to join
+      - bounded JavaScript map-to-command construction with C++ max_in_flight enforcement
+    gate: >-
+      Representative control programs invoke only admitted Core and host
+      bindings, structured groups run with actual C++ concurrency, and every
+      rejected group dispatches zero members.
+  Q3_metering_and_isolation:
+    deliver:
+      - memory ceiling
+      - interrupt quantum
+      - nonrenewable budget accounting
+      - cancellation propagation
+      - hostile-source isolation corpus
+    gate: Infinite or hostile programs terminate without forbidden access or late dispatch.
+  Q4_replay_and_recovery:
+    deliver:
+      - command journal coordinates
+      - deterministic source replay
+      - mismatch failure
+      - pending-head recovery
+      - canonical explicit checkpoint state
+      - durable join group and member coordinates
+      - winner, quorum, cancellation, and drain recovery
+    gate: >-
+      Crash injection at every command and join publication boundary loses or
+      duplicates no command, group member, child, or external effect.
+  Q5_native_abi:
+    deliver:
+      - versioned C ABI
+      - C++ wrapper
+      - existing registry integration
+      - ownership/cancellation/destruction conformance
+    gate: Supported native plugins pass static/shared/compiler boundary tests.
+  Q6_authoring_cutover:
+    deliver:
+      - JavaScript public Core graph and Program authoring
+      - Harness and direct publication convergence
+      - stored Core definition and Program version classification
+      - legacy publication rejection diagnostics
+    gate: Every new authored source is JavaScript and no adapter silently selects legacy semantics.
+  Q7_legacy_removal:
+    deliver:
+      - final stored-definition and stored-version drain proof
+      - Core DSL elaborator deletion (completed) and remaining Program schema/parser/dispatcher deletion
+      - compatibility dependency removal
+      - full graph-equivalence, migration, replay, sanitizer, consumer, and performance evidence
+    gate: One source authoring language, one canonical Core IR, and one durable effect model remain.
+
+issue_plan:
+  epic: 23
+  dependency_qualification: 24
+  javascript_runtime_and_replay: 25
+  native_control_abi: 26
+  legacy_authoring_cutover: 27
+  trusted_execution_profiles: 35
+  javascript_graph_definition: 28
+
+acceptance:
+  - QuickJS is the sole selected JavaScript runtime.
+  - Standard JavaScript owns source composition and general computation; NeoGraph owns only its domain API and execution invariants.
+  - JavaScript define evaluation lowers to validated canonical Core IR without dispatch.
+  - Core-only C++ consumers remain independent of QuickJS.
+  - Adversarial source cannot reach ungranted host authority.
+  - Replay after process death reaches the exact pending command without repeating completed effects.
+  - Parallel, race, quorum, and bounded fan-out execute in C++ ProgramRuntime and never inside a blocking QuickJS callback.
+  - Restricted ng structured-concurrency constructors perform zero dispatch until their typed join command is yielded and durably admitted.
+  - Structured joins preserve admitted bounds, deterministic selection, cancellation drain, child lineage, and exact replay across process death.
+  - Native extension behavior is exact-bound, cancellable, durable, and ABI-versioned.
+  - Stored legacy Core definitions and Programs have an explicit terminal migration classification.
+  - Legacy DSL direction documents and open issues are superseded by the QuickJS issue tree.
+  - No permanent Core DSL implementation remains; Program DSL removal remains a final-drain gate.
+
+documentation:
+  execution_profiles: docs/QUICKJS_EXECUTION_PROFILES.md
+  update_rule: >-
+    Architecture and migration contracts may precede implementation. Public API,
+    reference, example, and changelog claims update only after the corresponding
+    behavior is smoke-tested.

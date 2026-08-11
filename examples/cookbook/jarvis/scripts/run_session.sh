@@ -5,7 +5,7 @@
 #   3) 자비스 본체 띄움 (음성 대기)
 #   4) Ctrl-C 시 전부 깔끔하게 종료
 #
-# .env 에 OPENAI_API_KEY 가 있어야 풀 시연. 없으면 라우터/합성기가 MockProvider
+# .env 에 OPENROUTER_API_KEY 가 있어야 풀 시연. 없으면 라우터/합성기가 MockProvider
 # 로 동작 (도구 호출 흐름은 그대로 검증 가능, 응답 품질만 떨어짐).
 
 set -euo pipefail

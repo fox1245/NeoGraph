@@ -20,7 +20,10 @@
     "stream_field": "stream",
     "extra_fields": {
       "tool_choice": "auto"
-    }
+    },
+    "per_call_fields": [
+      "provider"
+    ]
   },
   "system_prompt": {
     "strategy": "top_level",

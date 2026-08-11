@@ -6,10 +6,12 @@
  * editor↔language-server communication: JSON-RPC over stdio (local
  * agents) or HTTP/WebSocket (remote). NeoGraph implements the
  * **agent** side — exposing a compiled graph as an ACP server that an
- * editor like Zed or Neovim can drive.
+ * Spec: https://agentclientprotocol.com/protocol/v1/schema
  *
- * Spec: https://agentclientprotocol.com/protocol/schema.md
- *
+ * The wire contract audited here is ACP protocol version 1 against the
+ * official schema fetched 2026-08-05. ProtocolVersion remains an integer;
+ * optional fields are omitted when unsupported and unknown fields are kept
+ * in raw JSON where this API exposes a pass-through object.
  * Coverage in this header:
  *   - Capabilities (Agent / Client / Prompt / Mcp / Fs)
  *   - Initialize request / response
@@ -34,8 +36,10 @@
 #include <neograph/api.h>
 #include <neograph/json.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace neograph::acp {
@@ -150,7 +154,10 @@ struct NEOGRAPH_API McpServerConfig {
 };
 
 struct NEOGRAPH_API NewSessionRequest {
-    std::string                 cwd;          ///< working dir for fs/terminal calls
+    std::string                  cwd;  ///< working dir for fs/terminal calls
+    /// Additional absolute workspace roots. ACP clients may omit this field;
+    /// the baseline server does not use it but preserves it on the wire.
+    std::vector<std::string>     additional_directories;
     std::vector<McpServerConfig> mcp_servers;
 };
 
@@ -171,6 +178,8 @@ struct NEOGRAPH_API NewSessionResponse {
 struct NEOGRAPH_API ResumeSessionRequest {
     std::string                  session_id;
     std::string                  cwd;
+    /// Complete replacement list of additional workspace roots.
+    std::vector<std::string>     additional_directories;
     std::vector<McpServerConfig> mcp_servers;
 };
 
@@ -245,20 +254,17 @@ NEOGRAPH_API void from_json(const json& j, WriteTextFileRequest& r);
 // ToolCallUpdate — name matches the official ACP schema
 // (`session/request_permission.toolCall: ToolCallUpdate`). Modeled
 // minimally: spec carries more fields, preserved verbatim in `raw`.
-//
-// Renamed from `ToolCall` (which collided with the LLM-side
-// `neograph::ToolCall` in `<neograph/types.h>` whenever both
-// namespaces were brought in via `using namespace`). The two are
-// genuinely different concepts — keep them under distinct names.
-// ---------------------------------------------------------------------------
-
 struct NEOGRAPH_API ToolCallUpdate {
     std::string tool_call_id;   ///< toolCallId — REQUIRED
-    std::string tool_name;      ///< toolName  — REQUIRED
-    json        input;          ///< tool input (free-form object)
-    std::string kind;           ///< optional: "execute"|"read"|"edit"|"think"|"search"|...
-    std::string status;         ///< optional: "pending"|"in_progress"|"completed"|"failed"
-    std::vector<ContentBlock> content;  ///< optional: tool output blocks
+    /// Compatibility fields retained for older ACP peers; current ACP
+    /// ToolCallUpdate has no toolName/input members, so they are emitted only
+    /// when explicitly populated and preserved in raw.
+    std::string tool_name;
+    json        input;
+    std::string title;          ///< optional human-readable title
+    std::string kind;           ///< optional ToolKind
+    std::string status;         ///< optional ToolCallStatus
+    std::vector<ContentBlock> content;  ///< optional tool output blocks
     /// Full original JSON for forward-compat (locations, rawInput, etc.).
     json        raw;
 };

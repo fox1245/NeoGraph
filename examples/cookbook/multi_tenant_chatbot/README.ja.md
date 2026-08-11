@@ -81,15 +81,15 @@ cmake --build build --target cookbook_multi_tenant_mock
 OpenAI キーなしで動作します。 NG エンジンの容量を測定 (同時リクエスト 1000 /
 コンパイル キャッシュ ヒット率 / メモリ)。
 
-### ライブ LLM バージョン (実際の OpenAI gpt-4o-mini)
+### ライブ LLM バージョン (OpenRouter DeepSeek)
 
 ```bash
-# .env must contain OPENAI_API_KEY at repo root
+# リポジトリルートの .env に OPENROUTER_API_KEY が必要
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
 ```
 
-**コスト ≈ $0.06 / 1000 リクエスト** (2330 LLM コール × gpt-4o-mini レート)。
+**コストは provider と使用量に依存**（固定 DeepSeek ルート経由の LLM 呼び出し 2330 回）。
 
 ## 測定
 
@@ -103,9 +103,8 @@ cmake --build build --target cookbook_multi_tenant_live
 | **ピーク RSS** | **5.25 MB** | **21.9 MB** | **29.25 MB** |
 |コンパイルキャッシュヒット率 | 99.7% | 94% | **99.4%** |
 |特徴的なエンジン | 3 | 6 | 6 |
-
-**測定環境**: WSL2 / 32スレッドasioスレッドプール / シングルホスト / リアル
-OpenAI API 呼び出し。
+**測定環境**: WSL2 / 32-thread asio thread pool / single host /
+実際の OpenRouter DeepSeek API 呼び出し。
 
 キー番号:
 
@@ -147,8 +146,7 @@ SaaS運用。
 |同時飛行数 100,000 + … | ~800MB | ⚠️ RAM がほぼ使い果たされています |
 
 * 仮定: 接続あたり最大 8 KB + コンパイル キャッシュ エントリあたり最大 10 KB + ベース 5 MB。
-
-もちろん、t2.micro 1 vCPU と OpenAI 層の RPM 制限は *スループット* 上限です。
+もちろん、OpenRouter のレート制限がスループットの上限です。
 **重要な点は、顧客の限界費用が ~0 であるということです**。
 
 > t2.micro 上の LangGraph 100 人の顧客に対して 1 GB = 100 プロセス =
@@ -167,8 +165,8 @@ SaaS運用。
 
 - **CheckpointStore の統合** — 現在、リクエストごとに履歴を入力として渡します。
   Postgres CheckpointStore を使用すると、thread_id ごとに自動永続化が行われます。
-- **顧客ごとのプロバイダー** — alice=gpt-4o-mini、bob=claude-haiku style
-  顧客ごとに異なるモデル/プロバイダー。 NodeContext::provider は顧客ごとに変更されます。
+- **固定 Provider** — すべての顧客が同じ OpenRouter DeepSeek モデルを使用し、
+  `NodeContext::provider` には顧客ごとのコンテキストを保持できます。
 - **ストリーミング応答** — トークンレベルの `input.stream_cb` + SSE を使用した `run(input)`
   ストリーミング。 NG の `run(NodeInput)` パスをストリーム コールバックで直接使用します。
 - **A/B 実験フレームワーク** —graph_def ハッシュ + customer_id スティッキー分割によるトラフィック分割。

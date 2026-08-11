@@ -11,7 +11,7 @@
 // 사용:
 //   ./cookbook_jarvis_specialist_coder [port]    (기본값 8210)
 //
-// .env 또는 환경변수에 OPENAI_API_KEY 가 없으면 MockProvider 로 대체.
+// .env 또는 환경변수에 OPENROUTER_API_KEY 가 없으면 MockProvider 로 대체.
 //
 // ai-assembly/member_server.cpp 와 동일한 패턴으로 구성.
 
@@ -124,7 +124,7 @@ public:
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
         CompletionParams p;
-        p.model       = "gpt-4o-mini";
+        p.model       = "deepseek/deepseek-v4-flash-0731";
         p.temperature = 0.7f;
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user",   user_text});
@@ -196,7 +196,7 @@ private:
 // main
 // ──────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    // .env 로드 (OPENAI_API_KEY 등)
+    // .env 로드 (OPENROUTER_API_KEY 등)
     cppdotenv::auto_load_dotenv();
 
     int port = (argc >= 2) ? std::atoi(argv[1]) : 8210;
@@ -240,16 +240,18 @@ int main(int argc, char** argv) {
         std::cerr << "[coder-specialist] persona.txt 를 찾지 못해 기본 프롬프트 사용\n";
     }
 
-    // Provider 결정: API 키 있으면 OpenAI, 없으면 Mock
+    // Provider: OpenRouter when configured, otherwise MockProvider.
     std::shared_ptr<Provider> provider;
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (api_key && *api_key) {
         llm::OpenAIProvider::Config cfg;
         cfg.api_key       = api_key;
-        cfg.default_model = "gpt-4o-mini";
+        cfg.base_url      = "https://openrouter.ai/api";
+        cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+        cfg.provider_routing = {{"zdr", true}};
         provider = llm::OpenAIProvider::create_shared(cfg);
     } else {
-        std::cerr << "[coder-specialist] OPENAI_API_KEY 없음 — MockProvider 로 동작\n";
+        std::cerr << "[coder-specialist] OPENROUTER_API_KEY 없음 — MockProvider 로 동작\n";
         provider = std::make_shared<MockProvider>();
     }
 

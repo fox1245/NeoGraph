@@ -57,7 +57,7 @@ T0→T8 是 JARVIS 的感知响应时间。目标分布：
 - 有固定成本，始终在 graph 开始时运行
 
 ### router (`intent_classifier`)
-- 小 LLM（gpt-4o-mini，~200-400ms）
+- 固定 DeepSeek 模型（OpenRouter，~200-400ms）
 - System prompt = persona.txt [router] + MCP catalog text + agent registry text
 - 输出 JSON validation：parse failure → fallback（mode=chat）。Tool/agent names 会对 catalog·registry 验证；如果不真实，则降级到 chat（防止 LLM 编造的 `delegate_to:"null"` 流向下游）。
 - Chat mode 直接进入 response_synth，不使用工具/委派 — 用于问候、自我介绍、对话回忆
@@ -78,7 +78,7 @@ T0→T8 是 JARVIS 的感知响应时间。目标分布：
 - 先从响应中提取 `[SUMMARY]` 行 → 保存到 `delegated_reply`
 
 ### response_synth (`llm_call`)
-- 大 LLM（gpt-4o，~800-1500ms）
+- 固定 DeepSeek 模型（OpenRouter，~800-1500ms）
 - System prompt = persona.txt [synth]（+ 语言指令 + 会话边界注释）
 - Conversation history（memory_context.recent_turns）以 user/assistant role turns 的 **messages array** 传入 — 之前把 inline JSON 放进 user message 会导致模型把过去答案当作内容逐字复读（memory parrot）。
 - Current turn user message = user_text + 附加 tool_results / delegated_reply

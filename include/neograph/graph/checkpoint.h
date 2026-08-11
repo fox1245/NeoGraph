@@ -265,13 +265,11 @@ public:
 
     // ── Sync API ────────────────────────────────────────────────────────
     //
-    // Stage 3 / Semester 3.1: each sync method is now non-pure with a
-    // default implementation that bridges to its async peer via
-    // `neograph::async::run_sync`. The legacy stores (InMemory, SQLite,
-    // Postgres) still override these directly. Async-native stores can
-    // override only the *_async() variants and inherit these as facades.
-    // Override at least one side per method — overriding neither yields
-    // infinite mutual recursion at call time.
+    // Stage 3 / Semester 3.1: each pair has a crossover default. Sync
+    // calls use `neograph::async::run_sync`; async calls that must invoke a
+    // legacy synchronous implementation offload it to a bounded process-wide
+    // pool and resume on the caller's executor. Subclasses may override
+    // either side. Overriding neither fails closed with std::logic_error.
 
     /**
      * @brief Save a checkpoint.
@@ -308,11 +306,9 @@ public:
      */
     virtual void delete_thread(const std::string& thread_id);
 
-    // ── Async API ───────────────────────────────────────────────────────
-    //
-    // Each method's default body co_returns the matching sync call. Real
-    // async stores (libpq pipeline in Sem 3.3) override these to perform
-    // non-blocking I/O.
+    // Async defaults offload the matching synchronous operation instead of
+    // blocking the caller's Asio executor. Async-native stores should override
+    // these methods to avoid the blocking pool entirely.
 
     virtual asio::awaitable<void> save_async(const Checkpoint& cp);
     virtual asio::awaitable<std::optional<Checkpoint>>
@@ -396,8 +392,8 @@ public:
  * derives from AsyncCheckpointStore or PendingWritesCheckpointStore, the
  * adapter detects and delegates those optional capabilities. If it already
  * implements CheckpointStore, the original shared object is returned. Without
- * AsyncCheckpointStore, async calls execute the synchronous core operation on
- * the caller's coroutine thread, matching the legacy CheckpointStore fallback;
+ * AsyncCheckpointStore, async calls run the synchronous core operation on the
+ * shared bounded blocking pool and resume on the caller's executor;
  * I/O-bound backends should implement the async capability.
  *
  * @throws std::invalid_argument If core is null.
@@ -435,8 +431,22 @@ public:
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override;
     std::optional<Checkpoint> load_by_id(const std::string& id) override;
     std::vector<Checkpoint> list(const std::string& thread_id,
-                                  int limit = 100) override;
+                                 int limit = 100) override;
     void delete_thread(const std::string& thread_id) override;
+
+    // The exact in-memory concrete type has no I/O boundary, so its async
+    // operations stay on the caller executor instead of paying a legacy
+    // blocking-pool handoff for each mutex-protected map operation. Derived
+    // stores retain the base fallback unless they explicitly override async.
+    asio::awaitable<void> save_async(const Checkpoint& cp) override;
+    asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id) override;
+    asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id) override;
+    asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit = 100) override;
+    asio::awaitable<void>
+    delete_thread_async(const std::string& thread_id) override;
 
     void put_writes(const std::string& thread_id,
                     const std::string& parent_checkpoint_id,
@@ -446,6 +456,17 @@ public:
         const std::string& parent_checkpoint_id) override;
     void clear_writes(const std::string& thread_id,
                       const std::string& parent_checkpoint_id) override;
+
+    asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write) override;
+    asio::awaitable<std::vector<PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
+    asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
 
     /**
      * @brief Get the total number of stored checkpoints (test helper).

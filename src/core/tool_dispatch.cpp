@@ -73,20 +73,31 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
         tool_msg.role         = "tool";
         tool_msg.tool_call_id = tc.id;
         tool_msg.tool_name    = tc.name;
+        const auto set_failure = [&tool_msg](ToolTerminalStatus status,
+                                             std::string error,
+                                             bool retryable = false,
+                                             bool uncertain = false) {
+            tool_msg.tool_status = std::string(to_string(status));
+            tool_msg.tool_retryable = retryable;
+            tool_msg.tool_effect_uncertain = uncertain;
+            tool_msg.content = json{{"error", std::move(error)},
+                                    {"status", tool_msg.tool_status},
+                                    {"retryable", retryable},
+                                    {"effect_uncertain", uncertain}}
+                                   .dump();
+        };
 
         // A denial is a result, not an error and not silence: the model has to
         // see it, or it will simply ask for the same tool again next turn.
         if (decision && decision->kind == ToolDecision::Kind::Deny) {
-            json denied;
-            denied["denied"] = decision->reason;
-            tool_msg.content = denied.dump();
+            set_failure(ToolTerminalStatus::Rejected, decision->reason);
             co_return tool_msg;
         }
 
         auto it = std::find_if(tools.begin(), tools.end(),
             [&](Tool* t) { return t->get_name() == tc.name; });
         if (it == tools.end()) {
-            tool_msg.content = R"({"error": "Tool not found: )" + tc.name + "\"}";
+            set_failure(ToolTerminalStatus::Rejected, "Tool not found: " + tc.name);
             co_return tool_msg;
         }
         try {
@@ -96,10 +107,26 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             json args = (decision && decision->args)
                             ? *decision->args
                             : json::parse(tc.arguments);
-            if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(*it)) {
-                tool_msg.content = co_await contextual->execute_async(args, execution);
+            auto call_execution = execution;
+            call_execution.identity.request_id = tc.id;
+            auto controller = call_execution.controller
+                            ? call_execution.controller
+                            : default_tool_execution_controller();
+            const auto result = co_await controller->execute_result_async(
+                **it, std::move(args), std::move(call_execution));
+            tool_msg.tool_status = std::string(to_string(result.status));
+            tool_msg.tool_retryable = result.retryable;
+            tool_msg.tool_effect_uncertain = result.effect_uncertain;
+            if (result.succeeded()) {
+                tool_msg.content = result.output;
             } else {
-                tool_msg.content = co_await (*it)->execute_async(args);
+                tool_msg.content = json{
+                    {"error", result.error},
+                    {"status", tool_msg.tool_status},
+                    {"retryable", result.retryable},
+                    {"effect_uncertain", result.effect_uncertain},
+                    {"output", result.output}}
+                    .dump();
             }
             if (execution.cancel_token) {
                 execution.cancel_token->throw_if_cancelled("after tool execution");
@@ -113,9 +140,9 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                 && error.code() == asio::error::operation_aborted) {
                 throw graph::CancelledException("tool operation aborted");
             }
-            tool_msg.content = std::string(R"({"error": ")") + error.what() + "\"}";
+            set_failure(ToolTerminalStatus::Failed, error.what());
         } catch (const std::exception& e) {
-            tool_msg.content = std::string(R"({"error": ")") + e.what() + "\"}";
+            set_failure(ToolTerminalStatus::Failed, e.what());
         }
         co_return tool_msg;
     };

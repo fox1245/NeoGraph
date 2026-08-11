@@ -851,8 +851,8 @@ JSON는 더 이상 입력과 일치하지 않습니다. 컴파일러가 손실�
   조용히 바꾸는 대신 마이그레이션 진단과 함께 거부합니다.
 - C++ 입력은 `GraphCompiler::upgrade_to_latest()`, Python 입력은
   `ng.upgrade_topology()`로 업그레이드합니다. 무시되던 레거시 데이터는 충돌을
-  피하는 `x-upgraded-*` 주석으로 보존됩니다. DSL 소스는 elaborator를 다시 실행해
-  lockfile과 source map을 함께 재생성합니다.
+  피하는 `x-upgraded-*` 주석으로 보존됩니다. strict Core JSON은 유지되는 교환
+  아티팩트이며 JavaScript 소스는 QuickJS `define()`으로 다시 컴파일합니다.
 
 ---
 

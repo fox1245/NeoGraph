@@ -121,7 +121,7 @@ A2A 엔드포인트로.
 
 ## 라우터(의도 분류) — JARVIS의 두뇌
 
-small/fast LLM(예: `gpt-4o-mini` 또는 로컬 `llama-3.2-1b`)에 대한 단일 호출은 다음을 반환합니다.
+고정된 DeepSeek 모델(`deepseek/deepseek-v4-flash-0731`)에 대한 단일 호출은 다음을 반환합니다.
 
 ```json
 {
@@ -225,7 +225,7 @@ cmake --build build-jarvis --target cookbook_jarvis -j
 
 # 3a. Run — text/wav input (Korean line-edit REPL recommended)
 cd examples/cookbook/jarvis
-python3 scripts/jarvis_repl.py                 # Automatically loads OPENAI_API_KEY from .env
+python3 scripts/jarvis_repl.py                 # Automatically loads OPENROUTER_API_KEY from .env
 #   Tony ▸ Hello?                                # Text
 #   Tony ▸ wav:/path/to/audio.wav                # Audio file → STT
 
@@ -237,9 +237,9 @@ JARVIS_MIC=1 bash scripts/run_jarvis.sh config-demo/real-tools
 python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ```
 
-`.env`(직접 OpenAI)에서 `OPENAI_API_KEY`가 선택한 LLM 공급자 또는
-`OPENAI_BASE_URL`+`JARVIS_ROUTER_MODEL`/`JARVIS_SYNTH_MODEL` (Groq/Cerebras/etc.
-OpenAI 호환). 이것이 없으면 MockProvider(echo)를 사용하여 오프라인으로 실행됩니다.
+라이브 공급자는 고정된 DeepSeek 모델을 사용하는 OpenRouter이며 `.env`의
+`OPENROUTER_API_KEY`로 활성화됩니다. 키가 없으면 MockProvider(echo)를
+사용하여 오프라인으로 실행됩니다.
 
 ## 보이스 스택 세부정보
 
@@ -270,13 +270,13 @@ LangGraph(Python Twin `langgraph_twin.py`)에서 동일한 제약 조건을 측�
 (`--cpus=2 --memory=2g`) 컨테이너.
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
 ## 이행현황
 
-**완벽한 기능** — 검증된 실시간 음성 단일 턴이 실제 하드웨어(실제 LLM Groq)에서 실행됩니다.
-마이크→VAD→STT→라우터→4방향→신디사이저→TTS 풀 체인 + 메모리 지속성 + A2A 셀프 서버.
+**완벽한 기능** — 실제 하드웨어(OpenRouter DeepSeek)에서 실시간 음성 단일 턴을
+검증했습니다. 마이크→VAD→STT→라우터→4방향→신디사이저→TTS 풀 체인 +
 
 알려진 제한 사항/다음 버전:
 - **참여 지원되지 않음** — TTS 재생 중 발언은 백프레셔를 통해 삭제됩니다.

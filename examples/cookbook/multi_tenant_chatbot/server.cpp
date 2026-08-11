@@ -9,17 +9,11 @@
 //   3) Per-session isolation — thread_id 격리 + history 누적.
 //   4) 메모리 / 시간 측정 — 1000 동시 요청.
 //
-// 빌드 (repo root 에서):
-//   g++ -std=c++20 -O2 -DNDEBUG \
-//       -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-//       -DASIO_STANDALONE \
-//       projects/multi_tenant_chatbot/server.cpp \
-//       -Lbuild -lneograph_core -lyyjson \
-//       -Wl,-rpath,'$ORIGIN/../../build' \
-//       -pthread -o /tmp/multi_tenant_server
-//
-// 실행:
-//   LD_LIBRARY_PATH=build /tmp/multi_tenant_server
+// Build and run from the repository root:
+//   cmake -S . -B build-cookbook \
+//       -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON
+//   cmake --build build-cookbook --target cookbook_multi_tenant_mock -j4
+//   ./build-cookbook/cookbook_multi_tenant_mock
 
 #include <neograph/neograph.h>
 

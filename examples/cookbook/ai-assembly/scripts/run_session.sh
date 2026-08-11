@@ -27,12 +27,12 @@ if [ ! -x "$BUILD/cookbook_ai_assembly_member" ] || [ ! -x "$BUILD/cookbook_ai_a
     exit 1
 fi
 
-# Load OPENAI_API_KEY from .env (cwd or NeoGraph root) if present.
+# Load OPENROUTER_API_KEY from .env (cwd or NeoGraph root) if present.
 for envf in "$ROOT/.env" "$NG_ROOT/.env"; do
     if [ -n "$envf" ] && [ -f "$envf" ]; then set -a; . "$envf"; set +a; break; fi
 done
-if [ -z "$OPENAI_API_KEY" ]; then
-    echo "OPENAI_API_KEY not set"; exit 2
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    echo "OPENROUTER_API_KEY not set"; exit 2
 fi
 
 PIDS=()

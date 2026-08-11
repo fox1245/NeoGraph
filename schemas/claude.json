@@ -20,7 +20,10 @@
     "max_tokens_required": true,
     "max_tokens_default": 4096,
     "stream_field": "stream",
-    "extra_fields": {}
+    "extra_fields": {},
+    "per_call_fields": [
+      "provider"
+    ]
   },
   "system_prompt": {
     "strategy": "top_level",

@@ -95,7 +95,7 @@ void clay_build_layout(void) {
             .cornerRadius = CLAY_CORNER_RADIUS(8)
         }) {
             if (s_is_live)
-                CLAY_TEXT(CLAY_STRING("NeoGraph Chatbot (gpt-4o-mini)"),
+                CLAY_TEXT(CLAY_STRING("NeoGraph Chatbot (OpenRouter DeepSeek)"),
                     CLAY_TEXT_CONFIG({ .textColor = {80, 140, 255, 255}, .fontId = FONT_ID_BODY, .fontSize = 24 }));
             else
                 CLAY_TEXT(CLAY_STRING("NeoGraph Chatbot (Mock)"),

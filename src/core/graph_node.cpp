@@ -190,6 +190,10 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     gctx.step         = in.ctx.step;
     ToolExecutionContext execution;
     execution.cancel_token = in.ctx.cancel_token;
+    execution.controller = in.ctx.tool_execution_controller;
+    execution.identity = in.ctx.tool_execution_identity;
+    execution.identity.thread_id = in.ctx.thread_id;
+    execution.deadline = in.ctx.deadline;
     auto tool_msgs = co_await dispatch_tool_calls(
         assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx),
         std::move(execution));
@@ -349,6 +353,8 @@ asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     config.input        = build_subgraph_input(in.state);
     config.stream_mode  = in.ctx.stream_mode;
     config.cancel_token = in.ctx.cancel_token;
+    config.model_token_budget = in.ctx.model_token_budget;
+    config.budget_exhausted   = in.ctx.budget_exhausted;
     // #88: hand the parent's accumulator down. A subgraph runs on its own engine
     // with its own RunConfig, so without this a graph that delegates its LLM work
     // to a subgraph reports zero tokens — which reads as "this run was free".

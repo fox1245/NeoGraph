@@ -849,8 +849,8 @@ JSON は入力と一致しなくなりました: コンパイラーが失われ�
   ルーティングや解析の意味を暗黙に変えず、移行診断とともに拒否します。
 - C++ 入力は `GraphCompiler::upgrade_to_latest()`、Python 入力は
   `ng.upgrade_topology()` で更新します。無視されていたレガシーデータは衝突を
-  避ける `x-upgraded-*` 注釈として保持されます。DSL ソースは elaborator を
-  再実行し、lockfile と source map を一緒に再生成してください。
+  避ける `x-upgraded-*` 注釈として保持されます。strict Core JSON は保持される
+  交換成果物であり、JavaScript ソースは QuickJS `define()` で再コンパイルします。
 
 ---
 

@@ -30,7 +30,8 @@ static json reducer_overwrite(const json& /*current*/, const json& incoming) {
 static json reducer_append(const json& current, const json& incoming) {
     json result = current.is_array() ? current : json::array();
     if (incoming.is_array()) {
-        for (const auto& item : incoming) result.push_back(item);
+        for (const auto& item : incoming)
+            result.push_back(item);
     } else {
         result.push_back(incoming);
     }
@@ -63,7 +64,8 @@ template <typename Map>
 static std::vector<std::string> registry_names(const Map& m) {
     std::vector<std::string> names;
     names.reserve(m.size());
-    for (const auto& kv : m) names.push_back(kv.first);
+    for (const auto& kv : m)
+        names.push_back(kv.first);
     std::sort(names.begin(), names.end());
     return names;
 }
@@ -84,9 +86,11 @@ static std::string registry_name_list(const Map& m) {
 ReducerFn ReducerRegistry::get(const std::string& name) const {
     auto it = registry_.find(name);
     if (it == registry_.end()) {
-        throw std::runtime_error(
-            "Unknown reducer: '" + name + "'. "
-            "Available: " + registry_name_list(registry_) + ". "
+        throw std::runtime_error("Unknown reducer: '" + name +
+                                 "'. "
+                                 "Available: " +
+                                 registry_name_list(registry_) +
+                                 ". "
             "Register a custom reducer before compile via "
             "ReducerRegistry::instance().register_reducer(name, fn). "
             "See docs/troubleshooting.md \"Unknown reducer\".");
@@ -109,7 +113,8 @@ ConditionRegistry& ConditionRegistry::instance() {
 
 ConditionRegistry::ConditionRegistry() {
     // Built-in: has_tool_calls — closed contract: exactly true/false.
-    register_condition("has_tool_calls",
+    register_condition(
+        "has_tool_calls",
         [](const GraphState& state) -> std::string {
             auto messages = state.get_messages();
             for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
@@ -127,7 +132,8 @@ ConditionRegistry::ConditionRegistry() {
     // Open contract: returns arbitrary channel content — but "default"
     // is a KNOWN label (returned whenever __route__ is missing or not
     // a string), so the validator can warn when it is unrouted.
-    register_condition("route_channel",
+    register_condition(
+        "route_channel",
         [](const GraphState& state) -> std::string {
             auto route = state.get("__route__");
             if (route.is_string()) return route.get<std::string>();
@@ -141,14 +147,14 @@ void ConditionRegistry::register_condition(const std::string& name, ConditionFn 
     specs_.erase(name);   // re-registration without a spec clears the old one
 }
 
-void ConditionRegistry::register_condition(const std::string& name, ConditionFn fn,
+void ConditionRegistry::register_condition(const std::string& name,
+                                           ConditionFn        fn,
                                            ConditionSpec spec) {
     registry_[name] = std::move(fn);
     specs_[name]    = std::move(spec);
 }
 
-std::optional<ConditionSpec> ConditionRegistry::condition_spec(
-    const std::string& name) const {
+std::optional<ConditionSpec> ConditionRegistry::condition_spec(const std::string& name) const {
     auto it = specs_.find(name);
     if (it == specs_.end()) return std::nullopt;
     return it->second;
@@ -157,9 +163,11 @@ std::optional<ConditionSpec> ConditionRegistry::condition_spec(
 ConditionFn ConditionRegistry::get(const std::string& name) const {
     auto it = registry_.find(name);
     if (it == registry_.end()) {
-        throw std::runtime_error(
-            "Unknown condition: '" + name + "'. "
-            "Available: " + registry_name_list(registry_) + ". "
+        throw std::runtime_error("Unknown condition: '" + name +
+                                 "'. "
+                                 "Available: " +
+                                 registry_name_list(registry_) +
+                                 ". "
             "Register a custom condition before compile via "
             "ConditionRegistry::instance().register_condition(name, fn). "
             "See docs/troubleshooting.md \"Unknown condition\".");
@@ -181,11 +189,10 @@ NodeFactory& NodeFactory::instance() {
 }
 
 NodeFactory::NodeFactory() {
-    register_type("llm_call",
-        [](const std::string& name, const json& /*config*/,
-           const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
-            return std::make_unique<LLMCallNode>(name, ctx);
-        },
+    register_type(
+        "llm_call",
+        [](const std::string& name, const json& /*config*/, const NodeContext& ctx)
+            -> std::unique_ptr<GraphNode> { return std::make_unique<LLMCallNode>(name, ctx); },
         json::parse(R"JSON({
             "type": "object",
             "properties": {},
@@ -193,11 +200,10 @@ NodeFactory::NodeFactory() {
         })JSON"),
         json::parse(R"JSON({"reads":["messages"],"writes":["messages"]})JSON"));
 
-    register_type("tool_dispatch",
-        [](const std::string& name, const json& /*config*/,
-           const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
-            return std::make_unique<ToolDispatchNode>(name, ctx);
-        },
+    register_type(
+        "tool_dispatch",
+        [](const std::string& name, const json& /*config*/, const NodeContext& ctx)
+            -> std::unique_ptr<GraphNode> { return std::make_unique<ToolDispatchNode>(name, ctx); },
         json::parse(R"JSON({
             "type": "object",
             "properties": {},
@@ -206,7 +212,8 @@ NodeFactory::NodeFactory() {
         json::parse(R"JSON({"reads":["messages"],"writes":["messages"]})JSON"));
 
     // intent_classifier: LLM-based intent routing
-    register_type("intent_classifier",
+    register_type(
+        "intent_classifier",
         [](const std::string& name, const json& config,
            const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
             std::string prompt = config.value("prompt", "");
@@ -216,8 +223,7 @@ NodeFactory::NodeFactory() {
                     routes.push_back(r.get<std::string>());
                 }
             }
-            return std::make_unique<IntentClassifierNode>(
-                name, ctx, prompt, std::move(routes));
+            return std::make_unique<IntentClassifierNode>(name, ctx, prompt, std::move(routes));
         },
         json::parse(R"JSON({
             "type": "object",
@@ -240,12 +246,13 @@ NodeFactory::NodeFactory() {
     // Supports both inline JSON and external file path:
     //   "definition": { ... }           (inline)
     //   "definition": "path/to/file.json"  (external file)
-    register_type("subgraph",
+    register_type(
+        "subgraph",
         [](const std::string& name, const json& config,
            const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
             if (!config.contains("definition")) {
-                throw std::runtime_error(
-                    "subgraph node '" + name + "': missing 'definition' field");
+                throw std::runtime_error("subgraph node '" + name +
+                                         "': missing 'definition' field");
             }
 
             // Load definition: inline JSON or external file path
@@ -254,8 +261,8 @@ NodeFactory::NodeFactory() {
                 std::string path = config["definition"].get<std::string>();
                 std::ifstream f(path);
                 if (!f.is_open()) {
-                    throw std::runtime_error(
-                        "subgraph node '" + name + "': cannot open file: " + path);
+                    throw std::runtime_error("subgraph node '" + name +
+                                             "': cannot open file: " + path);
                 }
                 definition = json::parse(f);
             } else {
@@ -278,11 +285,9 @@ NodeFactory::NodeFactory() {
                 }
             }
 
-            return std::make_unique<SubgraphNode>(
-                name,
+            return std::make_unique<SubgraphNode>(name,
                 std::shared_ptr<GraphEngine>(inner.release()),
-                std::move(input_map),
-                std::move(output_map));
+                                                  std::move(input_map), std::move(output_map));
         },
         json::parse(R"JSON({
             "type": "object",
@@ -310,22 +315,22 @@ void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn) {
     // Permissive default: any config object accepted. Tooling that
     // consumes export_schema() will render a free-form config for a
     // type registered without a declared schema.
-    register_type(type, std::move(fn),
-                  json::parse(R"JSON({
+    register_type(type, std::move(fn), json::parse(R"JSON({
                       "type": "object",
                       "description": "No declared config schema; any object accepted."
                   })JSON"));
 }
 
-void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn,
-                                json config_schema) {
+void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn, json config_schema) {
     registry_[type] = std::move(fn);
     schemas_[type]  = std::move(config_schema);
     effects_.erase(type);   // re-registration without effects clears them
 }
 
-void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn,
-                                json config_schema, json effects) {
+void NodeFactory::register_type(const std::string& type,
+                                NodeFactoryFn      fn,
+                                json               config_schema,
+                                json               effects) {
     registry_[type] = std::move(fn);
     schemas_[type]  = std::move(config_schema);
     effects_[type]  = std::move(effects);
@@ -344,7 +349,8 @@ std::vector<std::string> NodeFactory::registered_types() const {
 json NodeFactory::config_schema(const std::string& type) const {
     auto it = schemas_.find(type);
     if (it != schemas_.end()) return it->second;
-    return json::parse(R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+    return json::parse(
+        R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
 }
 
 json NodeFactory::export_schema() const {
@@ -433,9 +439,11 @@ json NodeFactory::export_schema() const {
     json node_types = json::object();
     for (const auto& kv : registry_) {
         auto sit = schemas_.find(kv.first);
-        node_types[kv.first] = (sit != schemas_.end())
+        node_types[kv.first] =
+            (sit != schemas_.end())
             ? sit->second
-            : json::parse(R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+                : json::parse(
+                      R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
     }
 
     // Per-type channel-effect contracts (only types that declared one).
@@ -454,17 +462,16 @@ json NodeFactory::export_schema() const {
     for (const auto& cname : creg.names()) {
         if (auto spec = creg.condition_spec(cname)) {
             json labels = json::array();
-            for (const auto& l : spec->labels) labels.push_back(l);
-            condition_specs[cname] = json{{"labels", std::move(labels)},
-                                          {"open", spec->open}};
+            for (const auto& l : spec->labels)
+                labels.push_back(l);
+            condition_specs[cname] = json{{"labels", std::move(labels)}, {"open", spec->open}};
         }
     }
 
     json doc;
     doc["neograph_version"] = NEOGRAPH_VERSION_STR;
     doc["$schema"]          = "https://json-schema.org/draft/2020-12/schema";
-    doc["compiler_validation_keywords"] =
-        json::array({"required", "type", "enum"});
+    doc["compiler_validation_keywords"] = json::array({"required", "type", "enum"});
     doc["topology"]         = json::parse(kTopologySchema);
     doc["node_types"]       = std::move(node_types);
     doc["node_effects"]     = std::move(node_effects);
@@ -474,17 +481,17 @@ json NodeFactory::export_schema() const {
     return doc;
 }
 
-std::unique_ptr<GraphNode> NodeFactory::create(
-    const std::string& type,
+std::unique_ptr<GraphNode> NodeFactory::create(const std::string& type,
     const std::string& name,
     const json& config,
     const NodeContext& ctx) const {
-
     auto it = registry_.find(type);
     if (it == registry_.end()) {
-        throw std::runtime_error(
-            "Unknown node type: '" + type + "' (referenced by node '" + name + "'). "
-            "Available: " + registry_name_list(registry_) + ". "
+        throw std::runtime_error("Unknown node type: '" + type + "' (referenced by node '" + name +
+                                 "'). "
+                                 "Available: " +
+                                 registry_name_list(registry_) +
+                                 ". "
             "Register a custom type before compile via "
             "NodeFactory::instance().register_type(type, factory). "
             "See docs/troubleshooting.md \"Unknown node type\".");
@@ -582,6 +589,60 @@ json GraphRegistry::node_effects(const std::string& type) const {
     return it != node_effects_.end() ? it->second : json();
 }
 
+ReducerFn GraphRegistry::local_reducer(const std::string& name) const {
+    const auto it = reducers_.find(name);
+    if (it == reducers_.end()) {
+        throw std::out_of_range("Local graph registry has no reducer '" + name + "'");
+    }
+    return it->second;
+}
+
+ConditionFn GraphRegistry::local_condition(const std::string& name) const {
+    const auto it = conditions_.find(name);
+    if (it == conditions_.end()) {
+        throw std::out_of_range("Local graph registry has no condition '" + name + "'");
+    }
+    return it->second;
+}
+
+std::optional<ConditionSpec> GraphRegistry::local_condition_spec(const std::string& name) const {
+    if (!conditions_.contains(name)) {
+        throw std::out_of_range("Local graph registry has no condition '" + name + "'");
+    }
+    const auto it = condition_specs_.find(name);
+    return it == condition_specs_.end() ? std::nullopt : std::optional<ConditionSpec>(it->second);
+}
+
+std::unique_ptr<GraphNode> GraphRegistry::create_local(const std::string& type,
+                                                       const std::string& name,
+                                                       const json&        config,
+                                                       const NodeContext& ctx) const {
+    const auto it = node_factories_.find(type);
+    if (it == node_factories_.end()) {
+        throw std::out_of_range("Local graph registry has no node type '" + type + "'");
+    }
+    return it->second(name, config, ctx);
+}
+
+json GraphRegistry::local_config_schema(const std::string& type) const {
+    if (!node_factories_.contains(type)) {
+        throw std::out_of_range("Local graph registry has no node type '" + type + "'");
+    }
+    const auto it = node_schemas_.find(type);
+    return it != node_schemas_.end()
+               ? it->second
+               : json::parse(
+                     R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+}
+
+json GraphRegistry::local_node_effects(const std::string& type) const {
+    if (!node_factories_.contains(type)) {
+        throw std::out_of_range("Local graph registry has no node type '" + type + "'");
+    }
+    const auto it = node_effects_.find(type);
+    return it != node_effects_.end() ? it->second : json();
+}
+
 bool GraphRegistry::contains_reducer(const std::string& name) const noexcept {
     return reducers_.count(name) != 0;
 }
@@ -606,7 +667,8 @@ json GraphRegistry::export_schema() const {
     for (const auto& [type, factory] : node_factories_) {
         (void)factory;
         auto schema = node_schemas_.find(type);
-        node_types[type] = schema != node_schemas_.end()
+        node_types[type] =
+            schema != node_schemas_.end()
                                ? schema->second
                                : json::parse(
                                      R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
@@ -617,7 +679,8 @@ json GraphRegistry::export_schema() const {
     json condition_specs = json::object();
     for (const auto& [name, spec] : condition_specs_) {
         json labels = json::array();
-        for (const auto& label : spec.labels) labels.push_back(label);
+        for (const auto& label : spec.labels)
+            labels.push_back(label);
         condition_specs[name] = {{"labels", std::move(labels)}, {"open", spec.open}};
     }
 

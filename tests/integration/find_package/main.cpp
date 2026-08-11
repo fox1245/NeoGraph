@@ -13,6 +13,14 @@
 #ifdef NEOGRAPH_CONSUMER_HAS_MCP_SQLITE
 #include <neograph/mcp/sqlite_harness_store.h>
 #endif
+#ifdef NEOGRAPH_CONSUMER_HAS_A2A
+#include <neograph/a2a/collaboration.h>
+#include <neograph/a2a/types.h>
+#include <neograph/a2a/agent_card_candidate.h>
+#endif
+#ifdef NEOGRAPH_CONSUMER_HAS_ACP
+#include <neograph/acp/types.h>
+#endif
 
 #include <cstdlib>
 #include <iostream>
@@ -75,6 +83,33 @@ int main() {
     });
     if (records.load_run("run_installed")->value("status", "") != "completed") {
         std::cerr << "installed SqliteHarnessRecordStore failed\n";
+        return EXIT_FAILURE;
+    }
+#endif
+
+#ifdef NEOGRAPH_CONSUMER_HAS_A2A
+    neograph::a2a::CollaborationLinkSpec link_spec;
+    if (link_spec.schema_version != 2 ||
+        neograph::a2a::CollaborationLink::STORAGE_SCHEMA_VERSION != 2) {
+        std::cerr << "installed A2A collaboration schema is stale\n";
+        return EXIT_FAILURE;
+    }
+    const auto a2a_part = neograph::a2a::Part::text_part("installed-a2a");
+    if (a2a_part.text != "installed-a2a") {
+        std::cerr << "installed A2A type surface failed\n";
+        return EXIT_FAILURE;
+    }
+    // Constructing the collector proves the installed A2A candidate surface
+    // resolves its exported implementation without making any network call.
+    neograph::a2a::AgentCardCollector candidate_collector;
+    (void)candidate_collector;
+#endif
+
+#ifdef NEOGRAPH_CONSUMER_HAS_ACP
+    neograph::acp::InitializeRequest acp_request;
+    const auto acp_part = neograph::acp::ContentBlock::text_block("installed-acp");
+    if (acp_request.protocol_version != 1 || acp_part.text != "installed-acp") {
+        std::cerr << "installed ACP type surface failed\n";
         return EXIT_FAILURE;
     }
 #endif

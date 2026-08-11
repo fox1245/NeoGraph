@@ -12,8 +12,8 @@ NeoGraph cookbook_jarvis(mock 빌드, 텍스트 모드)와 **동일 토폴로지
 
 모드 (env BENCH_MODE):
   mock — LLM 0ms 스텁 (C++ MockProvider 와 동일 응답) → 순수 프레임워크 오버헤드
-  api  — OpenAI 호환 엔드포인트 (OPENAI_API_KEY / OPENAI_BASE_URL /
-         JARVIS_ROUTER_MODEL / JARVIS_SYNTH_MODEL) — Groq/Cerebras 등
+  api  — OpenRouter의 DeepSeek API (OPENROUTER_API_KEY) → 실제 네트워크 경로
+
 
 프로토콜: stdin 한 줄 = 한 턴. 기동 완료 시 "[jarvis] 온라인." 라인,
 턴 완료 시 "[jarvis:tts][<lang>] <final_text>" 라인 출력 (C++ 와 동일 마커).
@@ -92,9 +92,7 @@ def store_put(key: str, value) -> None:
         json.dump(data, f, ensure_ascii=False)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM 어댑터 — mock(0ms 스텁, C++ MockProvider 동일) / api(OpenAI 호환)
-# ─────────────────────────────────────────────────────────────────────────────
+# LLM 어댑터 — mock(0ms 스텁, C++ MockProvider 동일) / api(OpenRouter)
 
 MOCK_ROUTER_JSON = ('{"mode":"direct","tool_calls":[],"delegate_to":null,'
                     '"skip_synthesis":true,"reasoning_short":"mock router"}')
@@ -102,16 +100,25 @@ MOCK_ROUTER_JSON = ('{"mode":"direct","tool_calls":[],"delegate_to":null,'
 if BENCH_MODE == "api":
     from langchain_openai import ChatOpenAI
 
-    def _mk(model_env: str, default: str, temp: float, max_tok: int):
-        base = os.environ.get("OPENAI_BASE_URL", "")
-        kwargs = dict(model=os.environ.get(model_env) or default,
-                      temperature=temp, max_tokens=max_tok, timeout=120)
-        if base:
-            kwargs["base_url"] = base.rstrip("/") + "/v1"
-        return ChatOpenAI(**kwargs)
+    OPENROUTER_MODEL = "deepseek/deepseek-v4-flash-0731"
 
-    ROUTER_LLM = _mk("JARVIS_ROUTER_MODEL", "gpt-4o-mini", 0.1, 300)
-    SYNTH_LLM = _mk("JARVIS_SYNTH_MODEL", "gpt-4o", 0.4, 220)
+    def _mk(temp: float, max_tok: int):
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is required when BENCH_MODE=api")
+        return ChatOpenAI(
+            model=OPENROUTER_MODEL,
+            api_key=api_key,
+            base_url=os.environ.get(
+                "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            temperature=temp,
+            max_tokens=max_tok,
+            timeout=120,
+            extra_body={"provider": {"zdr": True}},
+        )
+
+    ROUTER_LLM = _mk(0.1, 300)
+    SYNTH_LLM = _mk(0.4, 220)
 
     def call_router(system: str, user: str) -> str:
         return ROUTER_LLM.invoke([("system", system), ("human", user)]).content

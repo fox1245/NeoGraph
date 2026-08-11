@@ -3,9 +3,9 @@
  * @brief Harness evolution loop — compiler as evolutionary oracle (issue #80).
  *
  * Three layers:
- *   1. **Mutation operators** — DSL-level (M4) topology mutations that
- *      preserve schema validity. Each operator takes a core topology JSON
- *      and a deterministic seed, returns a mutated core, or nullopt when
+ *   1. **Mutation operators** — strict Core topology mutations that preserve
+ *      schema validity. Each operator takes a strict Core JSON topology
+ *      and a deterministic seed, returns a mutated Core document, or nullopt when
  *      the mutation cannot be applied to the given graph.
  *   2. **Task + Scorer** — a fixed-input → expected-output contract, with
  *      a scoring function that executes a CompiledGraph against it.
@@ -14,18 +14,16 @@
  *
  * ## Genealogy
  *
- * Every evolutionary run produces a diffable lockfile (the core topology
- * JSON) + a source map (from M4 elaboration). Together they form a
- * lineage that can be git-committed, diffed, and rolled back. The source
- * map ties every generated construct back to the DSL coordinate that
- * produced it.
+ * Every evolutionary run produces a diffable strict Core JSON lockfile.
+ * It is suitable for canonical interchange, git review, and rollback without
+ * a separate source-language map.
  *
  * ## Design constraints
  *
- * - **Non-Turing-complete mutation space**: raw JSON mutation is forbidden.
- *   All operators work on M4 DSL concepts (subgraph, template, use,
- *   conditional_edges, barrier toggle). This guarantees a high ratio of
- *   structurally valid offspring.
+ * - **Core-owned mutation space**: operators mutate only known strict Core
+ *   fields (conditional edges, barriers, and graph edges). This keeps source
+ *   language semantics out of the evolutionary API while retaining a high
+ *   ratio of structurally valid offspring.
  * - **Deterministic**: same seed → same mutation sequence. Crucial for
  *   bisection and A/B comparison.
  * - **Zero-cost gate first**: every mutation passes through
@@ -39,7 +37,6 @@
 #include <neograph/graph/types.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/validator.h>
-#include <neograph/graph/elaborator.h>
 
 #include <functional>
 #include <optional>
@@ -70,17 +67,8 @@ using MutationOp = std::function<MutationResult(const json& core, std::mt19937& 
 
 /// Catalog of built-in mutation operators, returned by all_operators().
 enum class MutationKind : uint8_t {
-    /// Swap one template instantiation for another (same interface).
-    /// Picks a `use` entry and changes its `template` reference.
-    SWAP_TEMPLATE = 0,
-    /// Add a new `use` instantiation of an existing template.
-    ADD_USE,
-    /// Remove one `use` instantiation (leaving at least one node).
-    REMOVE_USE,
-    /// Tweak a template parameter (`args` value) within the JSON type.
-    TUNE_PARAM,
     /// Add or remove a conditional_edges entry on a node.
-    TOGGLE_CONDITIONAL_EDGE,
+    TOGGLE_CONDITIONAL_EDGE = 0,
     /// Toggle a barrier on/off for a fan-in node (add or remove the
     /// barrier spec).
     TOGGLE_BARRIER,
@@ -164,10 +152,8 @@ struct NEOGRAPH_API EvolutionConfig {
 
 /// One individual in the population.
 struct NEOGRAPH_API Individual {
-    /// Core topology JSON (the "lockfile").
+    /// Strict Core topology JSON (the canonical interchange lockfile).
     json core;
-    /// Source map from elaboration, if available.
-    json sourcemap;
     /// Generation this individual was born in.
     int generation = 0;
     /// Parent index within the previous generation (-1 = seed).

@@ -1,0 +1,30 @@
+# Offline restore target for a frozen PostgreSQL export.
+# This is deliberately separate from compose.yaml, which is a disposable
+# integration-test fixture. Never bind-mount a live PostgreSQL PGDATA directory.
+name: neograph-q7-postgres-audit
+
+services:
+  postgres:
+    image: postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+    environment:
+      POSTGRES_DB: neograph_q7_audit
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: neograph-q7-audit-only
+    # The restore target is disposable. The source export remains outside the
+    # container and is mounted read-only below.
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - type: bind
+        source: ${NEOGRAPH_Q7_POSTGRES_SNAPSHOT_DIR:?Set NEOGRAPH_Q7_POSTGRES_SNAPSHOT_DIR to the frozen export directory}
+        target: /snapshot
+        read_only: true
+        bind:
+          create_host_path: false
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -U postgres -d neograph_q7_audit"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 5s

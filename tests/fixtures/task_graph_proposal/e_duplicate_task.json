@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": "research-api",
+      "template": "researcher/v3",
+      "input_bindings": [],
+      "depends_on": [],
+      "budget": {"wall_time_ms": 1, "model_tokens": 1}
+    },
+    {
+      "id": "research-api",
+      "template": "researcher/v3",
+      "input_bindings": [],
+      "depends_on": [],
+      "budget": {"wall_time_ms": 1, "model_tokens": 1}
+    }
+  ],
+  "join": {"kind": "all"}
+}

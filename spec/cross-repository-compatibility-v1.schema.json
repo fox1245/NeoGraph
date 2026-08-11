@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fox1245.github.io/NeoGraph/spec/cross-repository-compatibility-v1.schema.json",
+  "title": "NeoGraph cross-repository compatibility metadata v1",
+  "description": "A fail-closed compatibility declaration for historical NeoCode/NeoProtocol references and the current Program, RunInvocation, and A2A surfaces.",
+  "type": "object",
+  "required": [
+    "format",
+    "schema_version",
+    "issue",
+    "status",
+    "contract_revision",
+    "authority",
+    "policy",
+    "current_surfaces",
+    "historical_references",
+    "consumers"
+  ],
+  "properties": {
+    "$schema": {"type": "string"},
+    "format": {"const": "neograph-cross-repository-compatibility-v1"},
+    "schema_version": {"const": 1},
+    "issue": {"const": 7},
+    "status": {"enum": ["rebase_required", "current"]},
+    "contract_revision": {"$ref": "#/$defs/nonempty"},
+    "authority": {"$ref": "#/$defs/nonempty"},
+    "policy": {"$ref": "#/$defs/policy"},
+    "current_surfaces": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/currentSurface"}
+    },
+    "historical_references": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/historicalReference"}
+    },
+    "consumers": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/consumer"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^(?:include|schemas|spec|docs|src|bindings)/[^\\u0000]*$"
+    },
+    "revision": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["id", "status", "description"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"enum": ["not_available", "pending", "verified"]},
+        "description": {"$ref": "#/$defs/nonempty"},
+        "artifact": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "historical_reference_status",
+        "historical_conformance",
+        "current_consumer_status",
+        "required_current_metadata",
+        "reject_without_explicit_rebase"
+      ],
+      "properties": {
+        "historical_reference_status": {"const": "historical_only"},
+        "historical_conformance": {"const": false},
+        "current_consumer_status": {"const": "rebased_current"},
+        "required_current_metadata": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonempty"}
+        },
+        "reject_without_explicit_rebase": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "surfaceComparison": {
+      "type": "object",
+      "required": ["reference_id", "classification", "reason"],
+      "properties": {
+        "reference_id": {"$ref": "#/$defs/nonempty"},
+        "classification": {
+          "enum": ["not_equivalent", "requires_adapter", "target_contract"]
+        },
+        "reason": {"$ref": "#/$defs/nonempty"}
+      },
+      "additionalProperties": false
+    },
+    "currentSurface": {
+      "type": "object",
+      "required": [
+        "id",
+        "api",
+        "owner",
+        "source_paths",
+        "contract_revision",
+        "schema_versions",
+        "implementation_state",
+        "current_conformance",
+        "comparison_to_historical"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "api": {"$ref": "#/$defs/nonempty"},
+        "owner": {"$ref": "#/$defs/nonempty"},
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/path"}
+        },
+        "contract_revision": {"$ref": "#/$defs/nonempty"},
+        "schema_versions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "implementation_state": {
+          "enum": [
+            "implemented",
+            "implemented_core_boundary",
+            "implemented_program_boundary",
+            "implemented_program_adapter",
+            "compatibility_adapter_pending_program_cutover"
+          ]
+        },
+        "current_conformance": {"const": true},
+        "comparison_to_historical": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/surfaceComparison"}
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"id": {"const": "a2a_collaboration"}},
+            "required": ["id"]
+          },
+          "then": {
+            "properties": {"schema_versions": {"const": [2]}}
+          }
+        }
+      ]
+    },
+    "historicalReference": {
+      "type": "object",
+      "required": [
+        "id",
+        "repository",
+        "reference_kind",
+        "source",
+        "legacy_surface",
+        "status",
+        "current_conformance",
+        "admission_disposition",
+        "current_surface_ids",
+        "required_rebase_evidence",
+        "evidence"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "repository": {"enum": ["NeoCode", "NeoProtocol"]},
+        "reference_kind": {"enum": ["recorded_harness_contract", "federated_acp_reference"]},
+        "source": {
+          "type": "object",
+          "required": ["document", "anchor"],
+          "properties": {
+            "document": {"$ref": "#/$defs/path"},
+            "anchor": {"$ref": "#/$defs/nonempty"}
+          },
+          "additionalProperties": false
+        },
+        "legacy_surface": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "historical_only"},
+        "current_conformance": {"const": false},
+        "admission_disposition": {"const": "blocked_until_rebased"},
+        "current_surface_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonempty"}
+        },
+        "required_rebase_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonempty"}
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "consumer": {
+      "type": "object",
+      "required": [
+        "id",
+        "reference_id",
+        "status",
+        "current_conformance",
+        "declared_contract_revision",
+        "program_schema_version",
+        "run_invocation_contract_revision",
+        "a2a_contract_revision",
+        "rebase_commit",
+        "conformance_evidence"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "reference_id": {"$ref": "#/$defs/nonempty"},
+        "status": {"enum": ["historical_reference", "rebased_current"]},
+        "current_conformance": {"type": "boolean"},
+        "declared_contract_revision": {"$ref": "#/$defs/revision"},
+        "program_schema_version": {"type": ["integer", "null"], "minimum": 1},
+        "run_invocation_contract_revision": {"$ref": "#/$defs/revision"},
+        "a2a_contract_revision": {"$ref": "#/$defs/revision"},
+        "rebase_commit": {"$ref": "#/$defs/revision"},
+        "conformance_evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "historical_reference"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "current_conformance": {"const": false},
+              "declared_contract_revision": {"type": "null"},
+              "program_schema_version": {"type": "null"},
+              "run_invocation_contract_revision": {"type": "null"},
+              "a2a_contract_revision": {"type": "null"},
+              "rebase_commit": {"type": "null"},
+              "conformance_evidence": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "rebased_current"}},
+            "required": ["status"]
+          },
+          "then": {"properties": {"current_conformance": {"const": true}}}
+        }
+      ]
+    }
+  }
+}

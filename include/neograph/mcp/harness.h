@@ -6,14 +6,24 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/cancel.h>
-#include <neograph/graph/checkpoint.h>
 #include <neograph/json.h>
+#include <neograph/mcp/harness_program_translator.h>
+#include <neograph/program/catalog.h>
+#include <neograph/program/compiler.h>
+#include <neograph/program/runtime.h>
+#include <neograph/program/store.h>
+#include <neograph/graph/store.h>
+#include <neograph/types.h>
+#include <neograph/tool_set.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -21,8 +31,8 @@
 
 namespace neograph {
 class Provider;
-namespace graph {
-class GraphRegistry;
+namespace program {
+class ProgramRuntime;
 }
 }
 
@@ -50,10 +60,16 @@ struct HarnessWorkerCall {
     std::size_t attempt = 1;
     std::string repair_feedback;
     std::optional<json> resume_value;
+    /// Program-scoped accounting and cancellation budget supplied by the host node.
+    /// Durable Program run identity for effect journaling and pending records.
+    std::string run_id;
+    std::shared_ptr<UsageAccumulator> usage;
+    std::uint64_t                     model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
 };
 
 /** Typed worker response; failure classes never masquerade as valid output. */
-struct NEOGRAPH_MCP_SERVER_API HarnessWorkerResponse {
+struct NEOGRAPH_HARNESS_API HarnessWorkerResponse {
     HarnessWorkerResponseKind kind = HarnessWorkerResponseKind::VALUE;
     json value;
     std::string message;
@@ -83,11 +99,11 @@ struct HarnessProviderExecutorConfig {
 };
 
 /// Build a worker executor that calls a NeoGraph Provider directly.
-NEOGRAPH_MCP_SERVER_API HarnessWorkerExecutor
+NEOGRAPH_HARNESS_API HarnessWorkerExecutor
 make_provider_harness_executor(HarnessProviderExecutorConfig config);
 
 /** Append-only causal event boundary, separate from mutable run snapshots. */
-class NEOGRAPH_MCP_SERVER_API HarnessJournal {
+class NEOGRAPH_HARNESS_API HarnessJournal {
 public:
     virtual ~HarnessJournal() = default;
 
@@ -98,7 +114,7 @@ public:
 };
 
 /** Durable storage boundary for retained Harness artifacts and run records. */
-class NEOGRAPH_MCP_SERVER_API HarnessRecordStore {
+class NEOGRAPH_HARNESS_API HarnessRecordStore {
 public:
     virtual ~HarnessRecordStore() = default;
 
@@ -123,14 +139,14 @@ struct HarnessRetentionResult {
 };
 
 /** Optional sibling boundary; HarnessRecordStore's stable vtable remains unchanged. */
-class NEOGRAPH_MCP_SERVER_API HarnessRetentionStore {
+class NEOGRAPH_HARNESS_API HarnessRetentionStore {
 public:
     virtual ~HarnessRetentionStore()                                                      = default;
     virtual HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) = 0;
 };
 
 /** Atomic JSON-file implementation suitable for local process restarts. */
-class NEOGRAPH_MCP_SERVER_API FileHarnessRecordStore final : public HarnessRecordStore {
+class NEOGRAPH_HARNESS_API FileHarnessRecordStore final : public HarnessRecordStore {
 public:
     explicit FileHarnessRecordStore(std::string root_directory);
     ~FileHarnessRecordStore() override;
@@ -145,64 +161,77 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-/**
- * Immutable admission inputs shared by schema export, compile, and start.
- *
- * `registry` contains executable factories/functions. `manifest` is the
- * machine-readable closed-world declaration that classifies those local
- * entries. Programmable Harness admission never consults process-global
- * fallback entries. Each manifest implementation_identity is a trusted
- * embedding declaration and must change whenever its callable behavior
- * changes.
- */
-struct HarnessAdmissionProfile {
-    std::string                                id;
-    std::shared_ptr<const graph::GraphRegistry> registry;
-    json                                       manifest;
+struct HarnessServiceResources;
+
+struct HarnessProgramHostConfig {
+    HarnessWorkerExecutor                    worker_executor;
+    HarnessCapabilityExecutor                capability_executor;
+    HarnessProgramSnapshotConfig             snapshots;
+    std::shared_ptr<graph::CheckpointStore>  checkpoints;
+    std::shared_ptr<graph::Store>            state_store;
+    std::shared_ptr<program::EngineGenerationCache> engines;
+    std::string                              compiler_build_id;
+    std::string                              provider_binding_identity;
+    /// Non-secret installed Provider route settings bound into Program receipts.
+    json                                     provider_host_configuration = json::object();
+    std::map<std::string, std::string>       tool_binding_identities;
+    std::size_t                              scheduler_threads = 1;
 };
 
-/** Current sealed compatibility profile for preset/dsl/core Harness sources. */
-NEOGRAPH_MCP_SERVER_API std::shared_ptr<const HarnessAdmissionProfile>
-make_default_harness_admission_profile();
+NEOGRAPH_HARNESS_API HarnessServiceResources
+make_harness_program_service_resources(HarnessProgramHostConfig config);
+
+using HarnessProgramCatalogFactory = std::function<std::shared_ptr<program::ProgramCatalog>(
+    std::shared_ptr<program::ProgramStore>,
+    const HarnessCapabilityBindingRequest&)>;
+
+using HarnessProgramRuntimeFactory = std::function<std::shared_ptr<program::ProgramRuntime>(
+    std::shared_ptr<program::ProgramCatalog>,
+    std::shared_ptr<program::ProgramTransitionStore>)>;
+using HarnessRecordedBindingFactory = std::function<program::RecordedBindingSet(
+    const program::ProgramVersion&,
+    const HarnessCapabilityBindingRequest&,
+    const std::vector<program::ProgramEvent>&)>;
 
 /**
- * Owned construction resources kept beside HarnessServiceConfig so extending
- * sealed admission does not change the existing public config layout.
+ * Immutable host-owned Program control/data-plane resources.
+ *
+ * The factories capture only owned Provider/Tool routes and runtime stores.
+ * Harness owns no raw Provider, Tool, executor, registry, or callback target.
  */
 struct HarnessServiceResources {
-    explicit HarnessServiceResources(
-        std::shared_ptr<const HarnessAdmissionProfile> profile)
-        : admission_profile(std::move(profile)) {}
-
-    HarnessServiceResources() = delete;
-
-    std::shared_ptr<const HarnessAdmissionProfile> admission_profile;
+    HarnessProgramSnapshots                   snapshots;
+    std::shared_ptr<program::ProgramCompiler> compiler;
+    HarnessProgramCatalogFactory              make_program_catalog;
+    HarnessProgramRuntimeFactory              make_program_runtime;
+    HarnessRecordedBindingFactory             make_recorded_binding;
+    std::string                               owner_scope;
+    /// Host configuration identity that makes an artifact safe to reconnect.
+    std::string                               artifact_binding_identity;
 };
 
 struct HarnessServiceConfig {
-    HarnessWorkerExecutor worker_executor;
-    std::shared_ptr<graph::CheckpointStore> checkpoint_store;
-    std::shared_ptr<HarnessRecordStore>     record_store;
-    std::size_t max_artifacts = 128;
-    std::size_t max_runs = 128;
-    std::chrono::milliseconds               poll_interval{1000};
-    std::chrono::milliseconds               run_ttl{std::chrono::hours(24)};
-    bool                                    enable_experimental_tasks = false;
+    std::shared_ptr<HarnessRecordStore> record_store;
+    HarnessTranslationDefaults          translation_defaults;
+    std::size_t                         max_artifacts = 128;
+    std::size_t                         max_runs = 128;
+    std::chrono::milliseconds           poll_interval{1000};
+    std::chrono::milliseconds           run_ttl{std::chrono::hours(24)};
+    bool                                enable_experimental_tasks = false;
 };
 
 /**
- * Compile, run, inspect, and cancel immutable Harness artifacts.
+ * Strict MCP adapter over ProgramCompiler -> ProgramCatalog -> ProgramRuntime.
  *
- * `register_tools()` captures this service by reference; the service must
- * outlive the MCPServer and be destroyed only after the server has stopped.
+ * Registered callbacks retain shared adapter state. The service object itself
+ * may be destroyed before MCPServer; runtime resources drain only after the
+ * server releases its callbacks.
  */
-class NEOGRAPH_MCP_SERVER_API HarnessService {
+class NEOGRAPH_HARNESS_API HarnessService {
 public:
-    explicit HarnessService(HarnessServiceConfig config = {});
-    HarnessService(HarnessServiceConfig config, std::shared_ptr<HarnessJournal> journal);
-    HarnessService(HarnessServiceConfig               config,
-                   std::shared_ptr<HarnessJournal>    journal,
-                   HarnessServiceResources            resources);
+    HarnessService(HarnessServiceConfig             config,
+                   std::shared_ptr<HarnessJournal>  journal,
+                   HarnessServiceResources          resources);
     ~HarnessService();
 
     HarnessService(const HarnessService&) = delete;
@@ -240,7 +269,7 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace neograph::mcp

@@ -1,0 +1,190 @@
+{
+  "$schema": "cross-repository-compatibility-v1.schema.json",
+  "format": "neograph-cross-repository-compatibility-v1",
+  "schema_version": 1,
+  "issue": 7,
+  "status": "rebase_required",
+  "contract_revision": "neograph-cross-repository-v1",
+  "authority": "Issue #7 compatibility gate: a historical reference is evidence of an old integration shape, never proof of current NeoGraph conformance.",
+  "policy": {
+    "historical_reference_status": "historical_only",
+    "historical_conformance": false,
+    "current_consumer_status": "rebased_current",
+    "required_current_metadata": [
+      "declared_contract_revision",
+      "program_schema_version",
+      "run_invocation_contract_revision",
+      "a2a_contract_revision",
+      "rebase_commit",
+      "conformance_evidence"
+    ],
+    "reject_without_explicit_rebase": true
+  },
+  "current_surfaces": [
+    {
+      "id": "program_version",
+      "api": "neograph::program::ProgramVersion",
+      "owner": "NeoGraph Program",
+      "source_paths": [
+        "include/neograph/program/version.h",
+        "schemas/program-version-v1.schema.json"
+      ],
+      "contract_revision": "neograph-program-v1",
+      "schema_versions": [1],
+      "implementation_state": "implemented",
+      "current_conformance": true,
+      "comparison_to_historical": [
+        {
+          "reference_id": "neocode_harness_sidecar",
+          "classification": "requires_adapter",
+          "reason": "A pinned Harness artifact is not an admitted immutable ProgramVersion; import requires exact identity or an explicit conversion/drain decision."
+        },
+        {
+          "reference_id": "neoprotocol_federated_acp",
+          "classification": "requires_adapter",
+          "reason": "The historical ACP reference names a transport surface, not a ProgramVersion admission receipt."
+        }
+      ]
+    },
+    {
+      "id": "run_invocation",
+      "api": "neograph::program::RunInvocation",
+      "owner": "NeoGraph Program invocation boundary",
+      "source_paths": [
+        "include/neograph/program/invocation.h",
+        "include/neograph/program/runtime.h"
+      ],
+      "contract_revision": "neograph-run-invocation-v1",
+      "schema_versions": [1],
+      "implementation_state": "implemented_program_boundary",
+      "current_conformance": true,
+      "comparison_to_historical": [
+        {
+          "reference_id": "neocode_harness_sidecar",
+          "classification": "requires_adapter",
+          "reason": "The local JSON-lines sidecar owns a legacy process boundary and does not prove RunInvocation identity, cancellation, ordered events, or terminal-state parity."
+        },
+        {
+          "reference_id": "neoprotocol_federated_acp",
+          "classification": "requires_adapter",
+          "reason": "Historical ACP request/session lifecycle must map through the owned invocation boundary before it can claim current conformance."
+        }
+      ]
+    },
+    {
+      "id": "a2a_collaboration",
+      "api": "neograph::a2a::CollaborationLink + CollaborationEnvelope",
+      "owner": "NeoGraph A2A adapter / Program collaboration contract",
+      "source_paths": [
+        "include/neograph/a2a/collaboration.h",
+        "include/neograph/a2a/types.h",
+        "include/neograph/a2a/program_adapter.h",
+        "docs/V1_ARCHITECTURE.md"
+      ],
+      "contract_revision": "neograph-a2a-collaboration-v1",
+      "schema_versions": [2],
+      "implementation_state": "implemented_program_adapter",
+      "current_conformance": true,
+      "comparison_to_historical": [
+        {
+          "reference_id": "neocode_harness_sidecar",
+          "classification": "not_equivalent",
+          "reason": "A local stdio sidecar has no owner-scoped collaboration link, consent, capability/effect/artifact/message-kind allowlists, or idempotent A2A envelope."
+        },
+        {
+          "reference_id": "neoprotocol_federated_acp",
+          "classification": "target_contract",
+          "reason": "NeoProtocol transport and consent responsibilities can rebase onto the current envelope, but the historical ACP surface is not itself A2A conformance evidence."
+        }
+      ]
+    }
+  ],
+  "historical_references": [
+    {
+      "id": "neocode_harness_sidecar",
+      "repository": "NeoCode",
+      "reference_kind": "recorded_harness_contract",
+      "source": {
+        "document": "docs/V1_ARCHITECTURE.md",
+        "anchor": "Cross-repository compatibility and rebase boundary"
+      },
+      "legacy_surface": "Pinned older NeoGraph commit plus local JSON-lines-over-stdio sidecar",
+      "status": "historical_only",
+      "current_conformance": false,
+      "admission_disposition": "blocked_until_rebased",
+      "current_surface_ids": ["program_version", "run_invocation", "a2a_collaboration"],
+      "required_rebase_evidence": [
+        "declared_contract_revision",
+        "program_schema_version",
+        "run_invocation_contract_revision",
+        "a2a_contract_revision",
+        "rebase_commit",
+        "conformance_evidence"
+      ],
+      "evidence": [
+        {
+          "id": "neocode_issue7_reference",
+          "status": "not_available",
+          "description": "The recorded NeoCode contract is retained as historical reference; no current adapter rebase evidence is present in this checkout.",
+          "artifact": null
+        }
+      ]
+    },
+    {
+      "id": "neoprotocol_federated_acp",
+      "repository": "NeoProtocol",
+      "reference_kind": "federated_acp_reference",
+      "source": {
+        "document": "docs/V1_ARCHITECTURE.md",
+        "anchor": "Cross-repository compatibility and rebase boundary"
+      },
+      "legacy_surface": "Federated ACP reference naming the historical neograph::acp surface",
+      "status": "historical_only",
+      "current_conformance": false,
+      "admission_disposition": "blocked_until_rebased",
+      "current_surface_ids": ["program_version", "run_invocation", "a2a_collaboration"],
+      "required_rebase_evidence": [
+        "declared_contract_revision",
+        "program_schema_version",
+        "run_invocation_contract_revision",
+        "a2a_contract_revision",
+        "rebase_commit",
+        "conformance_evidence"
+      ],
+      "evidence": [
+        {
+          "id": "neoprotocol_issue7_reference",
+          "status": "not_available",
+          "description": "The federated ACP reference is retained as historical context; no current adapter rebase or two-runtime conformance evidence is present in this checkout.",
+          "artifact": null
+        }
+      ]
+    }
+  ],
+  "consumers": [
+    {
+      "id": "neocode",
+      "reference_id": "neocode_harness_sidecar",
+      "status": "historical_reference",
+      "current_conformance": false,
+      "declared_contract_revision": null,
+      "program_schema_version": null,
+      "run_invocation_contract_revision": null,
+      "a2a_contract_revision": null,
+      "rebase_commit": null,
+      "conformance_evidence": []
+    },
+    {
+      "id": "neoprotocol",
+      "reference_id": "neoprotocol_federated_acp",
+      "status": "historical_reference",
+      "current_conformance": false,
+      "declared_contract_revision": null,
+      "program_schema_version": null,
+      "run_invocation_contract_revision": null,
+      "a2a_contract_revision": null,
+      "rebase_commit": null,
+      "conformance_evidence": []
+    }
+  ]
+}

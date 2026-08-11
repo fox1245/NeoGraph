@@ -1,13 +1,13 @@
-// NeoGraph Example 13: OpenAI Responses API via SchemaProvider
+// NeoGraph Example 13: OpenRouter Responses API via SchemaProvider
 //
-// Same ReAct loop as example 01, but wired to the OpenAI /v1/responses
+// Same ReAct loop as example 01, but wired to OpenRouter's `/api/v1/responses`
 // endpoint through the schema-driven SchemaProvider. Demonstrates that a
-// completely different OpenAI API (input[] instead of messages[], flat
+// completely different Responses API (input[] instead of messages[], flat
 // function_call items, output[] response, SSE event streaming) is supported
 // by swapping one built-in schema name — no provider subclass required.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_openai_responses
 // (auto-loads .env from the cwd or any parent directory.)
 
@@ -47,20 +47,20 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set OPENAI_API_KEY environment variable "
+        std::cerr << "Set OPENROUTER_API_KEY environment variable "
                      "(or put it in .env beside the binary)\n";
         return 1;
     }
 
-    // SchemaProvider with the built-in "openai_responses" schema.
-    // This routes every request through /v1/responses and parses the
-    // output[] array response format.
+    // SchemaProvider with the OpenRouter-compatible Responses schema.
     neograph::llm::SchemaProvider::Config config;
     config.schema_path = "openai_responses";
     config.api_key = api_key;
-    config.default_model = "gpt-4o-mini";
+    config.base_url_override = "https://openrouter.ai/api";
+    config.default_model = "deepseek/deepseek-v4-flash-0731";
+    config.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::SchemaProvider::create(config);
 
     std::vector<std::unique_ptr<neograph::Tool>> tools;

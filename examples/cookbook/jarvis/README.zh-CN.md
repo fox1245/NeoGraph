@@ -120,7 +120,7 @@ A2A bot、另一个 NeoGraph 实例等 — 只要把 URL 加到这个 JSON，
 
 ## Router（意图分类）— JARVIS 的大脑
 
-对小而快的 LLM（例如 `gpt-4o-mini` 或本地 `llama-3.2-1b`）的一次调用会返回：
+对固定的 DeepSeek 模型（`deepseek/deepseek-v4-flash-0731`）进行一次调用会返回：
 
 ```json
 {
@@ -224,7 +224,7 @@ cmake --build build-jarvis --target cookbook_jarvis -j
 
 # 3a. Run — text/wav input (Korean line-edit REPL recommended)
 cd examples/cookbook/jarvis
-python3 scripts/jarvis_repl.py                 # Automatically loads OPENAI_API_KEY from .env
+python3 scripts/jarvis_repl.py                 # Automatically loads OPENROUTER_API_KEY from .env
 #   Tony ▸ Hello?                                # Text
 #   Tony ▸ wav:/path/to/audio.wav                # Audio file → STT
 
@@ -236,9 +236,8 @@ JARVIS_MIC=1 bash scripts/run_jarvis.sh config-demo/real-tools
 python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ```
 
-LLM provider 由 `.env` 中的 `OPENAI_API_KEY`（直连 OpenAI）或
-`OPENAI_BASE_URL`+`JARVIS_ROUTER_MODEL`/`JARVIS_SYNTH_MODEL`（Groq/Cerebras/etc.
-OpenAI 兼容）选择。没有它时，会使用 MockProvider（echo）离线运行。
+实时 provider 固定为使用 DeepSeek 模型的 OpenRouter，由 `.env` 中的
+`OPENROUTER_API_KEY` 启用。没有 key 时使用 MockProvider（echo）离线运行。
 
 ## 语音栈详情
 
@@ -268,13 +267,13 @@ OpenAI 兼容）选择。没有它时，会使用 MockProvider（echo）离线�
 并在相同约束（`--cpus=2 --memory=2g`）容器中测量。
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
 ## 实现状态
 
-**完全可用** — 已在真实硬件上验证实时语音单轮运行（真实 LLM Groq）。
-麦克风→VAD→STT→router→4-way→synth→TTS 全链路 + 记忆持久化 + A2A 自身服务器。
+**完全可用** — 已在真实硬件上验证 OpenRouter DeepSeek 的实时语音单轮。
+麦克风→VAD→STT→router→4-way→synth→TTS 全链路 +
 
 已知限制 / 下一版本：
 - **不支持打断** — TTS 播放期间的发言会通过背压丢弃

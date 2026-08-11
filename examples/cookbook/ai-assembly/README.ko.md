@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=828f35d27b957d55c8c766d3ce714ae4094397f9f2d4f0cabea710750619cb9a -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=4fc02b6c921618283b005ec1a6e8819e815c28840f34ad72b347d1ad86ff4e4b -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # AI 국회
@@ -14,10 +14,9 @@ A2A가 실제 다중 인물 시나리오에서 작동함을 증명하고
 
 네 명의 국회의원이 서로 다른 항구에 앉아 있는데,
 각각은 고유한 페르소나 프롬프트로 지원되는 A2A 엔드포인트이며
-동일한 OpenAI 모델(`gpt-5.4-mini`). 국회의장(국회의장)은 별도이다.
-모든 회원에게 동시에 법안을 방송하는 프로그램
-NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
-결과를 선언합니다.
+고정 DeepSeek 모델을 사용하는 동일한 OpenRouter 경로입니다. 국회의장은 별도
+프로그램으로, NeoGraph의 `A2AClient`를 통해 모든 회원에게 법안을 병렬 방송하고
+응답에서 투표를 분석하여 결과를 선언합니다.
 
 ```
                           ┌──────────────────┐
@@ -29,7 +28,7 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
             ▼          ▼                       ▼          ▼
        :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
        Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
-       (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
+       (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
 각 구성원은 1노드 NeoGraph(`__start__ → persona → __end__`)입니다.
@@ -37,7 +36,7 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
 `response` 채널을 작성합니다. A2A 서버의 기본값
 `GraphAgentAdapter`는 JSON-RPC 이상의 항목을 표면화합니다.
 
-## 실시간 대본(gpt-5.4-mini, 2026-04-29)
+## 실시간 대본(DeepSeek via OpenRouter, 2026-04-29)
 
 청구서: [`bills/basic_income.txt`](bills/basic_income.txt) — 범용
 기본소득, 500,000 won/month, 토지 + 탄소 + 누진세로 자금 지원.
@@ -62,25 +61,31 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
 ## 빌드 + 실행(NeoGraph 트리에서)
 
 ```bash
-# from NeoGraph repo root
-cmake --build build-pybind --target \
+# from NeoGraph repo root; A2A and LLM are optional build components
+cmake -S . -B build-cookbook \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_A2A=ON \
+    -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
+멤버 서버는 OpenRouter를 호출하므로 `OPENROUTER_API_KEY`와 네트워크가
+필요합니다. 컴파일 자체는 오프라인으로 검증할 수 있습니다.
+
 ## Python 스피커 변형(v0.2.1+, 교차 언어 A2A)
 
-Python의 최대 100줄에 있는 동일한 스피커 논리와 동일한 스피커 논리
-C++ 멤버 서버 — A2A 프로토콜 브리지 언어를 증명합니다.
-깨끗하게:
+동일한 C++ 멤버 서버에 연결하는 약 100줄의 Python 스피커입니다.
 
 ```bash
-pip install neograph-engine          # >= 0.2.1
+pip install 'neograph-engine>=0.2.1'
 # (start the C++ members in another terminal as above)
-PYTHONPATH=build-pybind python3 examples/cookbook/ai-assembly/speaker.py \
+PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
     http://127.0.0.1:8103 http://127.0.0.1:8104
@@ -90,9 +95,6 @@ Python A2A 바인딩(`neograph_engine.a2a`)은 v0.2.1에 제공됩니다.
 서버 측(graph-as-A2A-endpoint)은 현재 C++ 전용으로 유지됩니다.
 
 ## 마찰 저널 — 새로운 NeoGraph 사용자가 넘어진 것
-
-이것은 이것을 만드는 동안 발견된 거친 가장자리입니다. **네 가지 모두
-v0.2.1**에서 수정되었습니다 — 여기에 기록으로 남겨두었습니다.
 
 ### 1. A2A는 C++ 전용이었습니다. Python 바인딩에서는 이를 노출하지 않았습니다(v0.2.1의 FIXED).
 
@@ -135,20 +137,15 @@ HTTP가 필요합니다.
 클라이언트 측 잠금, 공유 세션 상태 없음. A2A 사양 /
 NeoGraph는 둘 다 병렬 클라이언트 요청을 깔끔하게 처리합니다.
 상자.
-- 자유 형식 한국어 텍스트의 `parse_vote` 정규식은 다음과 같은 이유로 작동합니다.
-요청 시 `vote: support/oppose/abstain`를 안정적으로 적용합니다. 페르소나 출력
-형식 안에 머무르면 5줄 집계 기능이 됩니다.
-- 빌드가 깔끔했습니다. FetchContent가 v0.2.0을 가져왔고 수동 설정이 없습니다.
-설치. 재고 우분투의 OpenSSL/CURL로 충분했습니다.
-
+- 인트리 CMake 빌드는 자체 포함되어 있습니다. 위와 같이
+  `NEOGRAPH_BUILD_A2A=ON`, `NEOGRAPH_BUILD_LLM=ON`으로 구성하세요.
 ## 파일
 
 ```
-ai-national-assembly/
-├── CMakeLists.txt              # FetchContent NeoGraph v0.2.0
-├── src/
-│   ├── member_server.cpp       # one binary, configurable persona
-│   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
+ai-assembly/
+├── member_server.cpp           # one configurable persona server
+├── speaker.cpp                 # orchestrator, broadcasts bill, tallies
+├── speaker.py                  # Python A2A client variant
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)

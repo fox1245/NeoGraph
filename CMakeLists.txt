@@ -110,6 +110,14 @@ endif()
 # **no OpenSSL** on the build host. With ASYNC=OFF the OpenSSL / libcurl
 # find_package() calls are skipped entirely (see line ~258).
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
+option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
+# Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
+# while it is being qualified.  It is deliberately separate from the existing
+# Program operation-tree component so Core-only and legacy Program consumers do
+# not acquire a new dependency until the JavaScript cutover is admitted.
+option(NEOGRAPH_BUILD_QUICKJS_CONTROL
+       "Build the experimental embedded QuickJS control runtime"
+       OFF)
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build MCP components (compatibility umbrella)" ON)
 set(_neograph_mcp_component_default ${NEOGRAPH_BUILD_MCP})
@@ -308,6 +316,67 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(asio INTERFACE Threads::Threads)
 
+# QuickJS 2026-06-04 — private implementation detail of the experimental
+# JavaScript control runtime.  Do not add quickjs-libc.c: it supplies the
+# standalone std/os modules, filesystem/process helpers, and module loader
+# that the sealed NeoGraph contexts must never expose.  This target is neither
+# exported nor installed; Core does not link it, directly or transitively.
+if(NEOGRAPH_BUILD_QUICKJS_CONTROL AND WIN32)
+    message(FATAL_ERROR
+        "NEOGRAPH_BUILD_QUICKJS_CONTROL is POSIX-only during Q0: the pinned "
+        "upstream QuickJS sources use POSIX timing and stack APIs. Leave it "
+        "OFF on native Windows until a separately qualified port is added.")
+endif()
+
+if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+    # Compile through source wrappers that apply a private C symbol prefix
+    # before the pristine pinned sources are preprocessed. This is portable
+    # across object formats and prevents static consumers from capturing (or
+    # colliding with) another QuickJS engine; visibility alone only protects
+    # the shared-library export table.
+    set(_neograph_quickjs_wrapper_dir ${DEPS_DIR}/quickjs/neograph)
+    add_library(neograph_quickjs OBJECT
+        ${_neograph_quickjs_wrapper_dir}/quickjs.c
+        ${_neograph_quickjs_wrapper_dir}/cutils.c
+        ${_neograph_quickjs_wrapper_dir}/dtoa.c
+        ${_neograph_quickjs_wrapper_dir}/libregexp.c
+        ${_neograph_quickjs_wrapper_dir}/libunicode.c
+    )
+    target_include_directories(neograph_quickjs PRIVATE
+        ${_neograph_quickjs_wrapper_dir}
+        ${DEPS_DIR}/quickjs)
+    target_compile_definitions(neograph_quickjs PRIVATE
+        CONFIG_VERSION=\"2026-06-04\")
+    set_target_properties(neograph_quickjs PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS ON
+        POSITION_INDEPENDENT_CODE ON
+        # CMP0063 is NEW through cmake_minimum_required(3.16), so the
+        # object files retain hidden C visibility when absorbed into a
+        # shared neograph_program. Public NeoGraph APIs are C++ symbols
+        # explicitly exported through the component API macros and remain unaffected.
+        C_VISIBILITY_PRESET hidden)
+    function(_neograph_attach_quickjs_runtime target)
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:neograph_quickjs>)
+        target_link_libraries(${target} PRIVATE Threads::Threads)
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(${target} PRIVATE m)
+        endif()
+    endfunction()
+    if(MSVC)
+        target_compile_definitions(neograph_quickjs PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    # Upstream's opcode-set mask macros intentionally pack bits into a signed
+    # int (for example M4(...) in quickjs.c). UBSan's shift check reports that
+    # representation detail even though the engine treats the result strictly
+    # as a bit mask. Keep ASan and every other UBSan check enabled; do not
+    # carry a source fork merely to rewrite upstream opcode macros.
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(neograph_quickjs PRIVATE -fno-sanitize=shift)
+    endif()
+endif()
+
 # OpenSSL — required by httplib for HTTPS, and by neograph::async
 # (asio::ssl in the async HTTP client). Conditional so a minimal-core
 # build (ASYNC/LLM/MCP/A2A all OFF) doesn't need libssl-dev on the host.
@@ -406,14 +475,18 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 add_library(neograph_core
     src/core/json.cpp
     src/core/cancel.cpp
+    src/core/graph_invocation.cpp
     src/core/provider.cpp
     src/core/completion_provider.cpp
+    src/core/artifact_provider.cpp
     src/core/tool.cpp
+    src/core/tool_execution.cpp
+    src/core/host_admission.cpp
+    src/core/evidence_ledger.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
     src/core/graph_validator.cpp
-    src/core/elaborator.cpp
     src/core/graph_coordinator.cpp
     src/core/graph_executor.cpp
     src/core/node_cache.cpp
@@ -465,6 +538,107 @@ target_link_libraries(neograph_core
 target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 add_library(neograph::core ALIAS neograph_core)
+
+# ===========================================================================
+# neograph::program — optional Program durable values
+# ===========================================================================
+if(NEOGRAPH_BUILD_PROGRAM)
+    add_library(neograph_program
+        src/program/authoring.cpp
+        src/program/canonical_json.cpp
+        src/program/command.cpp
+        src/program/command_journal.cpp
+        src/program/contract.cpp
+        src/program/bundle.cpp
+        src/program/diagnostic.cpp
+        src/program/source.cpp
+        src/program/task_graph_proposal.cpp
+        src/program/task_graph_fragment.cpp
+        src/program/javascript.cpp
+        src/program/native.cpp
+        src/program/bundle.cpp
+        src/program/module.cpp
+        src/program/version.cpp
+        src/program/registry.cpp
+        src/program/admission.cpp
+        src/program/compiler.cpp
+        src/program/plan.cpp
+        src/program/result.cpp
+        src/program/event.cpp
+        src/program/pending.cpp
+        src/program/fork.cpp
+        src/program/replay.cpp
+        src/program/store.cpp
+        src/program/activation.cpp
+        src/program/migration.cpp
+        src/program/journal.cpp
+        src/program/run_record.cpp
+        src/program/transition_store.cpp
+        src/program/catalog.cpp
+        src/program/runtime.cpp
+        src/program/core_progress.cpp
+        src/program/run_attempt.cpp
+        src/program/invocation.cpp
+    )
+    target_include_directories(neograph_program
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_features(neograph_program PUBLIC cxx_std_20)
+    target_compile_definitions(neograph_program PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+    if(NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(neograph_program INTERFACE NEOGRAPH_STATIC_BUILD)
+    endif()
+    target_link_libraries(neograph_program PUBLIC neograph_core)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_include_directories(neograph_program PRIVATE
+            ${_neograph_quickjs_wrapper_dir})
+        target_compile_definitions(neograph_program PRIVATE NEOGRAPH_PROGRAM_HAS_QUICKJS=1)
+        _neograph_attach_quickjs_runtime(neograph_program)
+    endif()
+    add_library(neograph::program ALIAS neograph_program)
+
+    # Persistent Program lifecycle adapter. Kept separate from the core
+    # SQLite checkpoint target so consumers can opt into the dependency.
+    if(NEOGRAPH_BUILD_SQLITE)
+        add_library(neograph_program_sqlite
+            src/program/sqlite_store.cpp
+            src/program/sqlite_transition_store.cpp
+        )
+        target_include_directories(neograph_program_sqlite
+            PUBLIC
+                $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+        )
+        target_compile_features(neograph_program_sqlite PUBLIC cxx_std_20)
+        target_compile_definitions(neograph_program_sqlite PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+        target_link_libraries(neograph_program_sqlite
+            PUBLIC neograph_program
+            PRIVATE SQLite::SQLite3
+        )
+        add_library(neograph::program_sqlite ALIAS neograph_program_sqlite)
+    endif()
+    # PostgreSQL-backed Program lifecycle adapter. It shares libpq with the
+    # checkpoint adapter but keeps Program persistence as a separate target.
+    if(NEOGRAPH_BUILD_POSTGRES)
+        add_library(neograph_program_postgres
+            src/program/postgres_store.cpp
+        )
+        target_include_directories(neograph_program_postgres
+            PUBLIC
+                $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+        )
+        target_compile_features(neograph_program_postgres PUBLIC cxx_std_20)
+        target_compile_definitions(neograph_program_postgres PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+        target_link_libraries(neograph_program_postgres
+            PUBLIC neograph_program
+            PRIVATE PostgreSQL::PostgreSQL
+        )
+        add_library(neograph::program_postgres ALIAS neograph_program_postgres)
+    endif()
+endif()
 
 # ===========================================================================
 # neograph::async — asio-based async runtime (PoC stage)
@@ -581,6 +755,8 @@ endif()
 if(NEOGRAPH_BUILD_SQLITE)
     add_library(neograph_sqlite
         src/core/sqlite_checkpoint.cpp
+        src/core/sqlite_evidence_ledger.cpp
+        src/core/research_task_board.cpp
     )
 
     target_include_directories(neograph_sqlite
@@ -604,6 +780,7 @@ endif()
 if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm
         src/llm/openai_provider.cpp
+        src/llm/schema_strategy_registry.cpp
         src/llm/schema_provider.cpp
         src/llm/rate_limited_provider.cpp
         src/llm/agent.cpp
@@ -650,7 +827,6 @@ endif()
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     add_library(neograph_mcp
         src/mcp/client.cpp
-        src/mcp/harness_mcp_backend.cpp
     )
 
     target_include_directories(neograph_mcp
@@ -671,9 +847,6 @@ endif()
 if(NEOGRAPH_BUILD_MCP_SERVER)
     add_library(neograph_mcp_server
         src/mcp/server.cpp
-        src/mcp/harness.cpp
-        src/mcp/harness_journal.cpp
-        src/mcp/harness_provider.cpp
     )
     target_include_directories(neograph_mcp_server
         PUBLIC
@@ -687,8 +860,44 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
     )
     add_library(neograph::mcp_server ALIAS neograph_mcp_server)
 endif()
+if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
+    add_library(neograph_harness
+        src/mcp/harness.cpp
+        src/mcp/harness_file_store.cpp
+        src/mcp/harness_journal.cpp
+        src/mcp/harness_provider.cpp
+        src/mcp/harness_program_translator.cpp
+        src/mcp/harness_program_store.cpp
+        src/mcp/harness_program_host.cpp
+        src/harness/contract.cpp
+    )
+    if(NEOGRAPH_BUILD_MCP_CLIENT)
+        target_sources(neograph_harness PRIVATE src/mcp/harness_mcp_backend.cpp)
+    endif()
+    if(NEOGRAPH_BUILD_A2A)
+        target_sources(neograph_harness PRIVATE src/a2a/harness_backend.cpp)
+    endif()
+    target_include_directories(neograph_harness
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_harness PRIVATE
+        NEOGRAPH_BUILDING_LIBRARY NEOGRAPH_BUILDING_HARNESS)
+    target_link_libraries(neograph_harness
+        PUBLIC neograph_program neograph_mcp_server
+    )
+    if(NEOGRAPH_BUILD_MCP_CLIENT)
+        target_link_libraries(neograph_harness PUBLIC neograph_mcp)
+    endif()
+    if(NEOGRAPH_BUILD_A2A)
+        target_link_libraries(neograph_harness PUBLIC neograph_a2a)
+    endif()
+    add_library(neograph::harness ALIAS neograph_harness)
+endif()
 
-if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_SQLITE)
+
+if(TARGET neograph_harness AND NEOGRAPH_BUILD_SQLITE)
     add_library(neograph_mcp_sqlite
         src/mcp/sqlite_harness_store.cpp
     )
@@ -698,8 +907,11 @@ if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_SQLITE)
             $<INSTALL_INTERFACE:include>
     )
     target_compile_definitions(neograph_mcp_sqlite PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    if(NEOGRAPH_BUILD_TESTS)
+        target_compile_definitions(neograph_mcp_sqlite PRIVATE NEOGRAPH_TESTING)
+    endif()
     target_link_libraries(neograph_mcp_sqlite
-        PUBLIC  neograph_mcp_server
+        PUBLIC neograph_harness
         PRIVATE SQLite::SQLite3
     )
     add_library(neograph::mcp_sqlite ALIAS neograph_mcp_sqlite)
@@ -734,11 +946,18 @@ endif()
 if(NEOGRAPH_BUILD_A2A)
     add_library(neograph_a2a
         src/a2a/types.cpp
+        src/a2a/collaboration.cpp
         src/a2a/client.cpp
         src/a2a/server.cpp
         src/a2a/a2a_caller_node.cpp
-        src/a2a/harness_backend.cpp
+        src/a2a/agent_card_candidate.cpp
     )
+
+    if(NEOGRAPH_BUILD_PROGRAM)
+        target_sources(neograph_a2a PRIVATE src/a2a/program_adapter.cpp)
+        target_compile_features(neograph_a2a PUBLIC cxx_std_20)
+        target_compile_definitions(neograph_a2a PUBLIC NEOGRAPH_A2A_PROGRAM)
+    endif()
 
     target_include_directories(neograph_a2a
         PUBLIC
@@ -751,9 +970,17 @@ if(NEOGRAPH_BUILD_A2A)
         PUBLIC  neograph_core
         PRIVATE neograph_async httplib OpenSSL::SSL OpenSSL::Crypto
     )
+    if(NEOGRAPH_BUILD_PROGRAM)
+        target_link_libraries(neograph_a2a PUBLIC neograph_program)
+    endif()
 
     add_library(neograph::a2a ALIAS neograph_a2a)
 endif()
+if(TARGET neograph_harness AND NEOGRAPH_BUILD_A2A)
+    target_sources(neograph_harness PRIVATE src/a2a/harness_backend.cpp)
+    target_link_libraries(neograph_harness PUBLIC neograph_a2a)
+endif()
+
 
 # ===========================================================================
 # neograph::acp — Agent Client Protocol server (JSON-RPC over stdio)
@@ -871,6 +1098,9 @@ endif()
 # archives and applies the platform-appropriate convention to shared libraries.
 set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
     neograph_core
+    neograph_program
+    neograph_program_postgres
+    neograph_program_sqlite
     neograph_async
     neograph_postgres
     neograph_sqlite
@@ -878,6 +1108,7 @@ set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
     neograph_mcp_types
     neograph_mcp
     neograph_mcp_server
+    neograph_harness
     neograph_mcp_sqlite
     neograph_mcp_http_server
     neograph_a2a
@@ -904,16 +1135,17 @@ unset(_NEOGRAPH_LIBRARY_INSTALL_RPATH)
 # not silently gain an executable or provider/runtime dependencies.
 # ===========================================================================
 if(NEOGRAPH_BUILD_HARNESS_MCP_BINARY)
-    if(NOT NEOGRAPH_BUILD_MCP_SERVER OR NOT NEOGRAPH_BUILD_LLM)
+    if(NOT TARGET neograph_harness OR NOT NEOGRAPH_BUILD_LLM)
         message(FATAL_ERROR
             "NEOGRAPH_BUILD_HARNESS_MCP_BINARY=ON requires "
-            "NEOGRAPH_BUILD_MCP_SERVER=ON and NEOGRAPH_BUILD_LLM=ON")
+            "NEOGRAPH_BUILD_PROGRAM=ON, NEOGRAPH_BUILD_MCP_SERVER=ON, and "
+            "NEOGRAPH_BUILD_LLM=ON")
     endif()
     add_executable(neograph_harness_mcp examples/60_harness_mcp_server.cpp)
     set_target_properties(neograph_harness_mcp PROPERTIES
         OUTPUT_NAME neograph-harness-mcp)
     target_link_libraries(neograph_harness_mcp PRIVATE
-        neograph::mcp_server neograph::llm)
+        neograph::harness neograph::llm)
     if(NEOGRAPH_BUILD_SQLITE)
         target_link_libraries(neograph_harness_mcp PRIVATE
             neograph::sqlite neograph::mcp_sqlite)
@@ -934,6 +1166,17 @@ endif()
 # Examples
 # ===========================================================================
 if(NEOGRAPH_BUILD_EXAMPLES)
+    # P8 public SDK quickstarts.  Keep the Core example outside the LLM gate so
+    # a minimal Core-only build remains a valid first build; Program is opt-in
+    # and follows the existing NEOGRAPH_BUILD_PROGRAM boundary.
+    add_executable(example_core_quickstart examples/62_core_quickstart.cpp)
+    target_link_libraries(example_core_quickstart PRIVATE neograph::core)
+
+    if(NEOGRAPH_BUILD_PROGRAM)
+        add_executable(example_program_quickstart examples/63_program_quickstart.cpp)
+        target_link_libraries(example_program_quickstart PRIVATE neograph::program)
+    endif()
+
     if(NEOGRAPH_BUILD_LLM)
         add_executable(example_react_agent examples/01_react_agent.cpp)
         target_link_libraries(example_react_agent PRIVATE neograph::core neograph::llm cppdotenv)
@@ -1164,11 +1407,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 neograph::core neograph::llm cppdotenv)
 
             # "The Beast" — a self-evolving agent that WRITES its own
-            # harness in the DSL surface, gates it through the three
-            # coherence gates (elaborate → strict compile + TV →
-            # validate), and spawns the survivor as a disposable
+            # harness as strict Core JSON, gates it through strict compile +
+            # TV → validate, and spawns the survivor as a disposable
             # sub-agent. The category only NeoGraph makes safe: the
-            # authored topology is data, and the DSL compiler proves it
+            # authored topology is canonical data and the compiler proves it
             # coherent before a single node runs. Offline, no provider
             # (deterministic stub nodes).
             add_executable(cookbook_the_beast
@@ -1183,6 +1425,20 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/the-beast/the_beast_live.cpp)
             target_link_libraries(cookbook_the_beast_live PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Copy Ninja bridge: a live Beast authors a topology that is
+            # constrained to one digest-pinned, behaviorally verified local
+            # A2A compatibility node. The source card is collected only; its
+            # endpoint and text never become executable graph behavior.
+            if(NEOGRAPH_BUILD_A2A)
+                add_executable(cookbook_the_beast_copy_ninja
+                    examples/cookbook/the-beast/the_beast_copy_ninja.cpp)
+                target_compile_definitions(cookbook_the_beast_copy_ninja PRIVATE
+                    CPPHTTPLIB_OPENSSL_SUPPORT)
+                target_link_libraries(cookbook_the_beast_copy_ninja PRIVATE
+                    neograph::core neograph::llm neograph::a2a cppdotenv httplib
+                    OpenSSL::SSL OpenSSL::Crypto)
+            endif()
 
             # Apex variant: the model devours a tool catalog and authors a
             # ReAct tool-calling agent (llm_call <-> tool_dispatch). Gated
@@ -1427,13 +1683,8 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_export_schema examples/52_export_schema.cpp)
         target_link_libraries(example_export_schema PRIVATE neograph::core)
 
-        # DSL -> core topology expander (issue #75 M4). The lockfile
-        # workflow: `./example_elaborate harness.dsl.json > harness.json`.
-        add_executable(example_elaborate examples/53_elaborate.cpp)
-        target_link_libraries(example_elaborate PRIVATE neograph::core)
-
         # Harness evolution loop (issue #80). Example 54: reproduce the
-        # README evolution benchmark from a DSL seed + task fixture.
+        # README evolution benchmark from a strict Core seed + task fixture.
         #   ./example_evolution seed.json task.json > lineage.json
         add_executable(example_evolution examples/54_evolution.cpp)
         target_link_libraries(example_evolution PRIVATE neograph::core)
@@ -1470,11 +1721,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     if(NEOGRAPH_BUILD_MCP_SERVER)
         add_executable(example_mcp_server examples/59_mcp_server.cpp)
         target_link_libraries(example_mcp_server PRIVATE neograph::mcp_server)
-        if(NEOGRAPH_BUILD_LLM)
+        if(NEOGRAPH_BUILD_LLM AND TARGET neograph_harness)
             add_executable(example_harness_mcp_server
                 examples/60_harness_mcp_server.cpp)
             target_link_libraries(example_harness_mcp_server PRIVATE
-                neograph::mcp_server neograph::llm)
+                neograph::harness neograph::llm)
             if(NEOGRAPH_BUILD_SQLITE)
                 target_link_libraries(example_harness_mcp_server PRIVATE
                     neograph::sqlite neograph::mcp_sqlite)
@@ -1495,9 +1746,217 @@ endif()
 # Benchmarks (opt-in)
 # ===========================================================================
 option(NEOGRAPH_BUILD_BENCHMARKS "Build micro/load benchmark binaries" OFF)
+# Transport-only codec benchmark. Default OFF: it probes optional protobuf and
+# Cap'n Proto dependencies only when explicitly requested.
+option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
+       "Build protobuf/Cap'n Proto Program publication transport benchmark"
+       OFF)
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
+    add_executable(bench_core_quickjs_probe
+        benchmarks/bench_core_quickjs_probe.cpp)
+    target_link_libraries(bench_core_quickjs_probe PRIVATE neograph::core)
+    target_compile_definitions(bench_core_quickjs_probe PRIVATE
+        NEOGRAPH_BENCH_QUICKJS_ENABLED=$<BOOL:${NEOGRAPH_BUILD_QUICKJS_CONTROL}>)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        add_executable(bench_quickjs_primitives
+            benchmarks/bench_quickjs_primitives.cpp)
+        target_include_directories(bench_quickjs_primitives PRIVATE
+            ${_neograph_quickjs_wrapper_dir})
+        target_compile_features(bench_quickjs_primitives PRIVATE cxx_std_17)
+        _neograph_attach_quickjs_runtime(bench_quickjs_primitives)
+    endif()
+    if(NEOGRAPH_BUILD_PROGRAM)
+        add_executable(bench_program benchmarks/bench_program.cpp)
+        target_link_libraries(bench_program PRIVATE neograph::program)
+        add_executable(bench_program_dispatch benchmarks/bench_program_dispatch.cpp)
+        target_link_libraries(bench_program_dispatch PRIVATE neograph::program)
+        if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+            add_executable(bench_quickjs_control
+                benchmarks/bench_quickjs_control.cpp)
+            target_include_directories(bench_quickjs_control PRIVATE
+                ${PROJECT_SOURCE_DIR}/src/program)
+            target_link_libraries(bench_quickjs_control PRIVATE neograph::program)
+        endif()
+        add_executable(bench_program_serialization_poc
+            benchmarks/bench_program_serialization_poc.cpp)
+        target_link_libraries(bench_program_serialization_poc PRIVATE neograph::program)
+        add_executable(bench_program_binary_poc
+            benchmarks/bench_program_binary_poc.cpp)
+        target_link_libraries(bench_program_binary_poc PRIVATE neograph::program)
+        if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
+            find_package(Protobuf REQUIRED)
+            find_package(CapnProto CONFIG REQUIRED)
+            if(NOT TARGET protobuf::libprotobuf)
+                message(FATAL_ERROR
+                    "Program codec PoC requires the protobuf::libprotobuf target")
+            endif()
+            if(NOT TARGET CapnProto::capnp OR NOT TARGET CapnProto::kj)
+                message(FATAL_ERROR
+                    "Program codec PoC requires the Cap'n Proto and KJ runtime targets")
+            endif()
+
+            set(_ng_program_codec_generated
+                "${CMAKE_CURRENT_BINARY_DIR}/generated/program_codec_poc")
+            set(_ng_program_codec_proto
+                "${PROJECT_SOURCE_DIR}/benchmarks/program_publication_poc.proto")
+            set(_ng_program_codec_capnp
+                "${PROJECT_SOURCE_DIR}/benchmarks/program_publication_poc.capnp")
+            set(_ng_program_codec_pb_cc
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.pb.cc")
+            set(_ng_program_codec_pb_h
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.pb.h")
+            set(_ng_program_codec_capnp_cc
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.capnp.c++")
+            set(_ng_program_codec_capnp_h
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.capnp.h")
+            if(TARGET protobuf::protoc)
+                set(_ng_program_codec_protoc "$<TARGET_FILE:protobuf::protoc>")
+                set(_ng_program_codec_protoc_dep protobuf::protoc)
+            elseif(Protobuf_PROTOC_EXECUTABLE)
+                set(_ng_program_codec_protoc "${Protobuf_PROTOC_EXECUTABLE}")
+                set(_ng_program_codec_protoc_dep)
+            else()
+                message(FATAL_ERROR "Program codec PoC requires protoc")
+            endif()
+            get_target_property(_ng_program_codec_capnp_library_path
+                CapnProto::capnp IMPORTED_LOCATION)
+            if(NOT _ng_program_codec_capnp_library_path)
+                message(FATAL_ERROR
+                    "Program codec PoC could not locate the Cap'n Proto C++ runtime")
+            endif()
+            get_filename_component(_ng_program_codec_capnp_library_dir
+                "${_ng_program_codec_capnp_library_path}" DIRECTORY)
+            get_filename_component(_ng_program_codec_capnp_library_parent
+                "${_ng_program_codec_capnp_library_dir}" DIRECTORY)
+            get_filename_component(_ng_program_codec_capnp_prefix
+                "${_ng_program_codec_capnp_library_parent}" DIRECTORY)
+
+            set(_ng_program_codec_capnp_tool_path)
+            if(TARGET CapnProto::capnp_tool)
+                get_target_property(_ng_program_codec_capnp_tool_path
+                    CapnProto::capnp_tool IMPORTED_LOCATION)
+            endif()
+            if(NOT EXISTS "${_ng_program_codec_capnp_tool_path}")
+                unset(_ng_program_codec_capnp_tool_path)
+                find_program(_ng_program_codec_capnp_tool_path NAMES capnp
+                    PATHS "${_ng_program_codec_capnp_library_parent}/bin"
+                          "${_ng_program_codec_capnp_prefix}/bin"
+                    NO_DEFAULT_PATH)
+            endif()
+
+            set(_ng_program_codec_capnpc_cpp_path)
+            if(TARGET CapnProto::capnpc_cpp)
+                get_target_property(_ng_program_codec_capnpc_cpp_path
+                    CapnProto::capnpc_cpp IMPORTED_LOCATION)
+            endif()
+            if(NOT EXISTS "${_ng_program_codec_capnpc_cpp_path}")
+                unset(_ng_program_codec_capnpc_cpp_path)
+                find_program(_ng_program_codec_capnpc_cpp_path NAMES capnpc-c++
+                    PATHS "${_ng_program_codec_capnp_library_parent}/bin"
+                          "${_ng_program_codec_capnp_prefix}/bin"
+                    NO_DEFAULT_PATH)
+            endif()
+            if(NOT _ng_program_codec_capnp_tool_path OR
+               NOT _ng_program_codec_capnpc_cpp_path)
+                message(FATAL_ERROR
+                    "Program codec PoC requires capnp and capnpc-c++ tools near its runtime")
+            endif()
+
+            set(_ng_program_codec_capnp_includes)
+            if(EXISTS "${_ng_program_codec_capnp_prefix}/include/capnp/c++.capnp")
+                list(APPEND _ng_program_codec_capnp_includes
+                    "${_ng_program_codec_capnp_prefix}/include")
+            endif()
+            get_target_property(_ng_program_codec_capnp_target_includes
+                CapnProto::capnp INTERFACE_INCLUDE_DIRECTORIES)
+            list(APPEND _ng_program_codec_capnp_includes
+                ${_ng_program_codec_capnp_target_includes})
+            if(NOT _ng_program_codec_capnp_includes)
+                message(FATAL_ERROR
+                    "Program codec PoC could not locate Cap'n Proto schema imports")
+            endif()
+            list(REMOVE_DUPLICATES _ng_program_codec_capnp_includes)
+            set(_ng_program_codec_capnp_import_args)
+            foreach(_ng_program_codec_capnp_include
+                    IN LISTS _ng_program_codec_capnp_includes)
+                list(APPEND _ng_program_codec_capnp_import_args
+                    "-I${_ng_program_codec_capnp_include}")
+            endforeach()
+
+            add_custom_command(
+                OUTPUT "${_ng_program_codec_pb_cc}" "${_ng_program_codec_pb_h}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${_ng_program_codec_generated}/benchmarks"
+                COMMAND "${_ng_program_codec_protoc}"
+                    "--proto_path=${PROJECT_SOURCE_DIR}"
+                    "--cpp_out=${_ng_program_codec_generated}"
+                    "${_ng_program_codec_proto}"
+                DEPENDS "${_ng_program_codec_proto}" ${_ng_program_codec_protoc_dep}
+                COMMENT "Generating Protocol Buffers Program codec PoC schema"
+                VERBATIM)
+            add_custom_command(
+                OUTPUT "${_ng_program_codec_capnp_cc}" "${_ng_program_codec_capnp_h}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${_ng_program_codec_generated}/benchmarks"
+                COMMAND "${_ng_program_codec_capnp_tool_path}" compile
+                    ${_ng_program_codec_capnp_import_args}
+                    "-o${_ng_program_codec_capnpc_cpp_path}:${_ng_program_codec_generated}"
+                    "--src-prefix=${PROJECT_SOURCE_DIR}"
+                    "${_ng_program_codec_capnp}"
+                DEPENDS "${_ng_program_codec_capnp}"
+                    "${_ng_program_codec_capnp_tool_path}"
+                    "${_ng_program_codec_capnpc_cpp_path}"
+                COMMENT "Generating Cap'n Proto Program codec PoC schema"
+                VERBATIM)
+            set_source_files_properties(
+                "${_ng_program_codec_pb_cc}" "${_ng_program_codec_pb_h}"
+                "${_ng_program_codec_capnp_cc}" "${_ng_program_codec_capnp_h}"
+                PROPERTIES GENERATED TRUE)
+            add_executable(bench_program_codec_poc
+                benchmarks/bench_program_codec_poc.cpp
+                "${_ng_program_codec_pb_cc}" "${_ng_program_codec_capnp_cc}")
+            target_include_directories(bench_program_codec_poc PRIVATE
+                "${_ng_program_codec_generated}")
+            # A private shared Cap'n Proto prefix needs KJ as a direct ELF dependency:
+            # DT_RUNPATH is not searched for Cap'n Proto's transitive dependencies.
+            # Keep the linker scope narrow so normal target dependencies retain their defaults.
+            if(UNIX AND NOT APPLE)
+                target_link_libraries(bench_program_codec_poc PRIVATE
+                    neograph::program protobuf::libprotobuf CapnProto::capnp
+                    "-Wl,--no-as-needed" CapnProto::kj "-Wl,--as-needed")
+            else()
+                target_link_libraries(bench_program_codec_poc PRIVATE
+                    neograph::program protobuf::libprotobuf CapnProto::capnp CapnProto::kj)
+            endif()
+        endif()
+    endif()
+    set(_neograph_benchmark_build_type "${CMAKE_BUILD_TYPE}")
+    if(_neograph_benchmark_build_type STREQUAL "")
+        set(_neograph_benchmark_build_type "unspecified")
+    endif()
+    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe)
+    if(NEOGRAPH_BUILD_PROGRAM)
+        list(APPEND _neograph_benchmark_targets
+            bench_program bench_program_dispatch
+            bench_program_serialization_poc bench_program_binary_poc)
+        if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+            list(APPEND _neograph_benchmark_targets bench_quickjs_control)
+        endif()
+        if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
+            list(APPEND _neograph_benchmark_targets bench_program_codec_poc)
+        endif()
+    endif()
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        list(APPEND _neograph_benchmark_targets bench_quickjs_primitives)
+    endif()
+    foreach(_neograph_benchmark_target IN LISTS _neograph_benchmark_targets)
+        target_compile_definitions(${_neograph_benchmark_target} PRIVATE
+            NEOGRAPH_BENCH_BUILD_TYPE="${_neograph_benchmark_build_type}")
+    endforeach()
+    unset(_neograph_benchmark_targets)
+    unset(_neograph_benchmark_build_type)
 
     # OpenMP target-offload PoC. The target still builds without a device
     # backend so the executable can report host fallback explicitly.
@@ -1547,26 +2006,26 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
         endif()
     endif()
 
-    # async-runtime PoC: pure-timer fan-out to compare thread-per-agent
-    # vs io_context + coroutines at 100/1K/10K concurrency. No HTTP in
-    # this cut — measures the scheduling primitive in isolation.
-    add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
-    target_link_libraries(bench_async_fanout PRIVATE neograph::async)
-    target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
+    if(NEOGRAPH_BUILD_ASYNC)
+        # async-runtime PoC: pure-timer fan-out to compare thread-per-agent
+        # vs io_context + coroutines at 100/1K/10K concurrency. No HTTP in
+        # this cut — measures the scheduling primitive in isolation.
+        add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
+        target_link_libraries(bench_async_fanout PRIVATE neograph::async)
+        target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
 
-    # async-runtime PoC stage 2: mock HTTP server + sync/async clients.
-    # Confirms the timer-only advantage survives real TCP / HTTP parse
-    # / socket setup overhead.
-    add_executable(bench_async_http benchmarks/bench_async_http.cpp)
-    target_link_libraries(bench_async_http PRIVATE
-        neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
-    target_compile_features(bench_async_http PRIVATE cxx_std_20)
-    # bench_async_http 가 conn_pool.h → httplib.h 를 끌어들이는데, neograph
-    # 의 번들 cpp-httplib 는 TLS=ON 으로 빌드되므로 매크로 일관성
-    # (issue #16) 가드가 같은 정의를 요구한다. PRIVATE 으로 추가.
-    target_compile_definitions(bench_async_http PRIVATE
-        CPPHTTPLIB_OPENSSL_SUPPORT)
-
+        # async-runtime PoC stage 2: mock HTTP server + sync/async clients.
+        # Confirms the timer-only advantage survives real TCP / HTTP parse
+        # / socket setup overhead.
+        add_executable(bench_async_http benchmarks/bench_async_http.cpp)
+        target_link_libraries(bench_async_http PRIVATE
+            neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_features(bench_async_http PRIVATE cxx_std_20)
+        # bench_async_http includes httplib.h with TLS enabled, so keep the
+        # feature macro consistent with the bundled library.
+        target_compile_definitions(bench_async_http PRIVATE
+            CPPHTTPLIB_OPENSSL_SUPPORT)
+    endif()
     # Sustained-burst stress harness — Phase 3 operational-readiness
     # gate. Holds N runs in flight for M wall-clock seconds, samples
     # RSS + per-window p99 latency at fixed intervals, and exits 1 if
@@ -1603,6 +2062,22 @@ if(NEOGRAPH_BUILD_TESTS)
 
     enable_testing()
     add_subdirectory(tests)
+
+    # Focused P8 smoke tests only; the full example matrix remains opt-in and
+    # is not pulled into CTest.  Targets are absent when examples or Program
+    # are disabled, so each smoke follows the same existing build options.
+    if(TARGET example_core_quickstart)
+        add_test(NAME Quickstart.Core COMMAND example_core_quickstart)
+        set_tests_properties(Quickstart.Core PROPERTIES
+            LABELS "quickstart;p8"
+            PASS_REGULAR_EXPRESSION "HELLO")
+    endif()
+    if(TARGET example_program_quickstart)
+        add_test(NAME Quickstart.Program COMMAND example_program_quickstart)
+        set_tests_properties(Quickstart.Program PROPERTIES
+            LABELS "quickstart;p8"
+            PASS_REGULAR_EXPRESSION "1")
+    endif()
 endif()
 
 # Fuzz targets — libFuzzer-driven, Clang only. Separate flag so
@@ -1728,8 +2203,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     if(TARGET neograph_mcp_types)
         list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
     endif()
-
-    foreach(_comp async llm mcp mcp_server mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
+    foreach(_comp program program_sqlite program_postgres async llm mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})
@@ -1762,10 +2236,10 @@ if(NEOGRAPH_INSTALL_EXPORT)
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
-    if(TARGET neograph_postgres)
+    if(TARGET neograph_postgres OR TARGET neograph_program_postgres)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(PostgreSQL)")
     endif()
-    if(TARGET neograph_sqlite)
+    if(TARGET neograph_sqlite OR TARGET neograph_program_sqlite)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(SQLite3)")
     endif()
     if(NEOGRAPH_USE_LIBCURL AND CURL_FOUND)

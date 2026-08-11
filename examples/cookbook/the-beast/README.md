@@ -2,8 +2,8 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-> A self-evolving agent that writes its own harness, evolves it under the
-> DSL compiler, and rewinds its execution through the checkpointer.
+> A self-evolving agent that writes its own harness as strict Core JSON, evolves
+> it under the Core compiler, and rewinds its execution through the checkpointer.
 > **Generated. Evolved. Rewound. The Beast remains.**
 
 Most "agent frameworks" let you *build* a graph. The Beast does three
@@ -18,9 +18,9 @@ deterministic** in this one program (no API key):
    checkpointer — genuine time-travel, not a replay.
 
 That is only safe because in NeoGraph a harness is **data** — a topology
-described in JSON (issue #56) — and the DSL compiler (issue #75) can
-*prove a harness coherent before it runs*. Take that away and "an agent
-that writes its own graph" is just a machine for producing broken graphs.
+described in strict Core JSON (issue #56) — and the Core compiler can *prove a
+harness coherent before it runs*. Strict Core JSON is an interchange artifact,
+not a second source language.
 The compiler is what turns the monster from a liability into a category.
 
 ## Run it
@@ -32,8 +32,8 @@ $ ./build/cookbook_the_beast
 
 ```
 ── ACT I · generate a harness, prove it coherent ──
-  ACCEPTED — 3 gates passed. Core lockfile nodes: s1_n s2_n s3_n
-  (DSL surface expanded away: vars/templates/use gone.)
+  ACCEPTED — strict compile and validation gates passed. Core nodes: s1_n s2_n s3_n
+  (strict Core JSON is already the canonical interchange representation.)
 
 ── ACT II · evolve the harness (compiler = fitness) ──
   generations: 4 · offspring: 36 · survived compile gate: 36 · rejected (invalid, never run): 0
@@ -57,32 +57,30 @@ Generated. Evolved. Rewound. The Beast remains.
 
 ## Act I — generate + gate
 
-The Beast authors a harness in the DSL **surface** (`vars` / `templates` /
-`use`) and forces it through three coherence gates, in order. A harness
-that fails any gate is **discarded**.
+The Beast authors a harness directly as strict Core JSON and forces it through
+the compiler and validation gates, in order. A harness that fails any gate is
+**discarded**.
 
 | Gate | API | Catches |
 |---|---|---|
-| **1. Elaborate** | `Elaborator::elaborate` | Surface errors against DSL coordinates — unknown template, missing/extra `use` args, variable cycle, node-name collision. Total & deterministic: the same DSL always yields byte-identical core, so gates 2–3 reason about a fixed artifact. |
-| **2. Compile + TV** | `GraphCompiler::compile` (strict, `schema_version: 1`) + `verify_roundtrip` | A typo'd or unsupported key is a *hard error* (consumed-key accounting), not a silent drop. Translation validation then asserts `canon(source) == canon(compile(source).to_json())` — the compiler cannot have quietly rewired anything. |
-| **3. Validate** | `GraphValidator::validate` | What the graph **means**: dangling edges (E3), barriers that can never fire (E8), incomplete route maps (E10), channel-effect violations (E4/E6). Errors only for constructs that can *never* be right; the rest are lint. |
+| **1. Compile + TV** | `GraphCompiler::compile` (strict, `schema_version: 1`) + `verify_roundtrip` | A typo'd or unsupported key is a *hard error* (consumed-key accounting), not a silent drop. Translation validation asserts `canon(source) == canon(compile(source).to_json())`. |
+| **2. Validate** | `GraphValidator::validate` | What the graph **means**: dangling edges (E3), barriers that can never fire (E8), incomplete route maps (E10), channel-effect violations (E4/E6). |
 
-The seed is one `stage` template instantiated three times via `use`;
-elaboration expands it into a core chain `s1_n → s2_n → s3_n`.
+The seed contains three explicit nodes wired as the core chain
+`s1_n → s2_n → s3_n`.
 
 ## Act II — evolve (the compiler is the fitness function)
 
 `neograph::graph::evolve()` (issue #80) runs **real mutation operators**
-over the seed — `swap_template`, `add_use`, `remove_use`, `tune_param`,
-`toggle_conditional_edge`, `toggle_barrier`, `add_edge`, `remove_edge`.
+over the seed — `toggle_conditional_edge`, `toggle_barrier`, `add_edge`, and
+`remove_edge`.
 Every offspring passes the **compile gate first**: invalid offspring die
 for free, without ever executing. The rejection rate is itself a health
 metric on the operators.
 
-The key design choice: the mutation space is the **DSL (M4), not raw
-JSON**, so offspring are structurally valid *by construction* — which is
-why the reject count here is 0. The gate is the safety net that makes
-unconstrained evolution safe, and it stays armed on every child.
+The mutation space is the bounded strict Core topology, not a source language.
+Offspring remain in the canonical interchange representation, while the
+compiler gate stays armed on every child.
 
 Each run emits a diffable genealogy via `to_json(result)`: every
 individual's parent, generation, mutation, and core lockfile. That
@@ -109,21 +107,36 @@ state at the end of every super-step. Afterwards:
 is the real thing: a live LLM is handed `NodeFactory::export_schema()`
 (the exact palette this engine build accepts — it cannot drift because it
 *is* the engine's schema, see [`../../52_export_schema.cpp`](../../52_export_schema.cpp))
-and asked to author a harness in the DSL surface. Whatever it returns
-goes through the same three gates; on rejection the gate's diagnostics
+and asked to author a harness as strict Core JSON. Whatever it returns goes
+through the same compiler and validation gates; on rejection diagnostics
 are fed straight back into the conversation and the model rewrites — a
 genuine self-repair loop.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
+`the_beast_live.cpp` pins `deepseek/deepseek-v4-flash-0731` to
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`.
+At the time of verification, OpenRouter listed Morph's datacenters as US and
+listed that model/provider endpoint as ZDR-capable. This is a strict provider
+selection, not OpenRouter's in-region residency guarantee: its documented
+in-region guarantee is currently the enterprise EU route. If Morph's eligible
+endpoint is unavailable, the request fails rather than sending the prompt to a
+different provider.
+
+The live cookbook sets its provider timeout to 180 seconds: this reasoning
+model's 4,000-token generation budget can legitimately outlast the generic
+60-second default.
+
+
+
 ```
 ── Attempt #1: asking the model to write a harness ──
   model returned 663 chars of JSON.
-  ACCEPTED — all three gates passed.
+  ACCEPTED — strict compile and validation gates passed.
   Core lockfile nodes: r_stage c_stage s_stage
 
 ── Spawning the model's harness (checkpointed) ──
@@ -146,6 +159,42 @@ past the compiler** — creativity is unbounded, coherence is proven.
 The nodes here are deterministic `beast_node` workers so a live run costs
 one LLM call (the authoring) and executes for free; swap them for
 `llm_call` and each node becomes a live call too.
+
+## Copy Ninja — a verified local capability becomes a graph node
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) makes one narrow
+capability-to-harness path executable. It does **not** turn an A2A card
+into code:
+
+1. a synthetic loopback server exposes one well-known Agent Card; collection
+   performs exactly that GET and never follows the card's advertised RPC URL;
+2. `AgentCardCandidateCompiler` produces an immutable, **unadmitted**
+   descriptor, excluding free-form card text, endpoint, credentials, and
+   executable source;
+3. an independently supplied, digest-pinned behavioral profile verifies the
+   sole `copy-ninja.hello-world-echo.v1` template, then materializes it as a
+   local `CopyNinjaNode`; and
+4. the live Beast authors only a two-channel, one-node topology. The normal
+   strict compile/round-trip → validate gates run first; a fourth local
+   binding gate then requires exactly `copy_ninja_local` between `__start__`
+   and `__end__`.
+
+The caller's prompt is deliberately absent from the LLM messages: the model
+authors topology, while the local graph alone consumes the prompt. The run
+also fails if the synthetic source server observes any RPC. This is evidence
+for one fixed local behavior, **not** source-code transfer, delegation,
+admission, or general behavioral equivalence.
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+Observed live result on 2026-08-08: the authoring model passed all four gates
+on its first attempt; the graph returned
+`Hello, World! I have received your request (Grace)` with one discovery GET
+and zero source-agent RPCs.
 
 ## Apex — the harness devours the tools
 
@@ -246,9 +295,9 @@ Honestly: NeoGraph node **types** are C++ classes registered through
 C++ node type at runtime. But the intent is covered three ways that the
 Beast *can* drive from data:
 
-- **Composite nodes** — the DSL's `templates` / `use` (M4) let the model
-  define reusable node/topology units purely in data; that is exactly
-  what `the_beast.cpp`'s seed does.
+- **Composite nodes** — explicit Core nodes and edges let the model define
+  reusable topology units purely in data; that is exactly what
+  `the_beast.cpp`'s seed does.
 - **Recursion** — a `subgraph` node embeds a whole harness as one node,
   so a Beast-authored harness can contain Beast-authored sub-harnesses
   (N-level self-proliferation).
@@ -275,8 +324,8 @@ graph. The model defines a node's behavior *and* the graph's flow, in
 data, with no recompile.
 
 Coherence stays non-negotiable. The script declares its contract in config
-(`reads` / `writes` / `goto_targets`); the harness passes the three DSL
-gates PLUS a Beast-layer **contract check** (declared writes must be
+(`reads` / `writes` / `goto_targets`); the harness passes the strict Core
+compiler/validation gates PLUS a Beast-layer **contract check** (declared writes must be
 declared channels; goto targets must be real nodes) PLUS a **runtime
 wrapper** that rejects any write/goto outside the declaration. That
 restores the effect/route guarantees at the Beast layer with **zero change
@@ -688,7 +737,6 @@ runtime-backstop pattern), left as the obvious next node to add.
   (`channel_values["channels"]["trail"]["value"]`), not flat — the demo's
   `channel_of()` helper unwraps it. Same shape `RunResult::channel`
   reads.
-- The core lockfile keeps `schema_version: 1` through elaboration, which
-  is what opts gate 2 into strict mode — authoring in the DSL surface
-  never silently downgrades the coherence guarantees the evolution loop
-  depends on.
+- The core lockfile keeps `schema_version: 1` throughout validation, which
+  keeps the canonical interchange representation strict and prevents the
+  evolution loop from silently downgrading its coherence guarantees.

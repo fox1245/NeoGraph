@@ -76,6 +76,10 @@ struct EngineConfig {
     /// Engine-wide tool policy, preserved across run() and resume().
     ToolGate tool_gate;
 
+    /// Shared host admission boundary for every tool call made by this engine.
+    /// Empty uses the conservative process-default controller.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+
     /// Fan-out worker count. One preserves the historical no-pool fast path.
     std::size_t worker_count = 1;
 
@@ -99,6 +103,20 @@ struct EngineConfig {
 struct EngineResources {
     ToolSet                              tools;
     std::shared_ptr<const GraphRegistry> registry;
+};
+
+/**
+ * @brief Optional persistence resources scoped to one run or resume call.
+ *
+ * Non-null members override the engine's configured persistence instance for
+ * this operation only. Tools, registries, nodes, and engine configuration are
+ * never changed.
+ */
+struct RunResources {
+    std::shared_ptr<CheckpointStore> checkpoint_store;
+    std::shared_ptr<Store> store;
+    /// Optional invocation-scoped gate composed before the engine gate.
+    std::optional<ToolGate> tool_gate;
 };
 
 /**
@@ -130,6 +148,11 @@ struct RunConfig {
     /// per-tenant budget that spans a whole conversation rather than one turn.
     /// Whatever ends up here is what ``RunResult::usage`` reports.
     std::shared_ptr<UsageAccumulator> usage;
+
+    /// Optional hard model-token ceiling enforced by budget-aware nodes.
+    std::uint64_t model_token_budget = 0;
+    /// Set by a node that crossed model_token_budget so the enclosing runtime can classify it.
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
 
     /**
      * @brief Auto-resume from latest checkpoint for ``thread_id`` (v0.3.1+).
@@ -172,6 +195,12 @@ struct RunConfig {
 struct RunMetadata {
     std::optional<std::chrono::steady_clock::time_point> deadline;
     std::string trace_id;
+    /// Durable Program run identity copied into RunContext for host journaling.
+    std::string run_id;
+    /// Stable owner/tenant scope copied into ToolExecutionContext identity.
+    std::string owner_scope;
+    /// Shared sibling-cancellation scope for budget-aware nodes.
+    std::shared_ptr<CancelToken> budget_cancel_token;
 };
 
 /// @brief Normal, paused, or step-limited outcome of a successful run call.
@@ -235,10 +264,8 @@ struct RunResult {
     /// member so adding this query does not change RunResult's binary layout.
     inline bool max_steps_exhausted() const noexcept {
         if (!output.is_object()) return false;
-        auto* metadata = yyjson_mut_obj_get(output.raw_val(), "_neograph");
-        if (!yyjson_mut_is_obj(metadata)) return false;
-        auto* marker = yyjson_mut_obj_get(metadata, "max_steps_exhausted");
-        return yyjson_mut_is_bool(marker) && yyjson_mut_get_bool(marker);
+        const auto metadata = output["_neograph"];
+        return metadata.is_object() && metadata.value("max_steps_exhausted", false);
     }
 
     /// @brief Return a typed outcome without changing the legacy result layout.
@@ -553,6 +580,13 @@ public:
     asio::awaitable<RunResult> run_stream_async(
         RunConfig config, GraphStreamCallback cb, RunMetadata metadata);
 
+    /// Async streaming peer with per-operation persistence overrides.
+    asio::awaitable<RunResult> run_stream_async(
+        RunConfig config,
+        GraphStreamCallback cb,
+        RunMetadata metadata,
+        RunResources resources);
+
     /**
      * @brief Resume execution from a HITL interrupt.
      *
@@ -600,11 +634,42 @@ public:
                                              json                resume_value = json(),
                                              GraphStreamCallback cb           = nullptr);
 
-    /// Async resume peer with metadata for this new execution attempt.
+    /// Async resume peer with caller-supplied execution metadata.
     asio::awaitable<RunResult> resume_async(RunConfig           config,
                                              json                resume_value,
                                              GraphStreamCallback cb,
                                              RunMetadata          metadata);
+
+    /// Async resume peer with metadata and invocation-scoped resources.
+    asio::awaitable<RunResult> resume_async(RunConfig           config,
+                                             json                resume_value,
+                                             GraphStreamCallback cb,
+                                             RunMetadata          metadata,
+                                             RunResources        resources);
+
+
+    /**
+     * @brief Resume from one exact checkpoint ID.
+     *
+     * The requested checkpoint must exist and belong to config.thread_id.
+     * This path never substitutes a newer checkpoint.
+     */
+    RunResult resume_from(
+        RunConfig config,
+        std::string checkpoint_id,
+        json resume_value = {},
+        GraphStreamCallback cb = {},
+        RunMetadata metadata = {},
+        RunResources resources = {});
+
+    /// Async exact-checkpoint resume. Every argument is owned by its coroutine.
+    asio::awaitable<RunResult> resume_from_async(
+        RunConfig config,
+        std::string checkpoint_id,
+        json resume_value = {},
+        GraphStreamCallback cb = {},
+        RunMetadata metadata = {},
+        RunResources resources = {});
 
     /// @brief Borrow the state-administration facade for this engine.
     GraphAdmin admin() noexcept;
@@ -723,6 +788,13 @@ public:
      * @endcode
      */
     void set_tool_gate(ToolGate gate) { tool_gate_ = std::move(gate); }
+
+    /// Set the shared host resource-admission boundary for tools. Like the
+    /// gate, this survives run() and resume(); configure before concurrent use.
+    void set_tool_execution_controller(
+        std::shared_ptr<ToolExecutionController> controller) {
+        tool_execution_controller_ = std::move(controller);
+    }
 
     /**
      * @brief Get the cross-thread shared memory store.
@@ -858,13 +930,20 @@ private:
     /// survives resume(), which builds its own RunConfig internally.
     ToolGate tool_gate_;
 
+    /// Host-shared resource admission for tool calls. Empty defers to the
+    /// conservative process default in dispatch_tool_calls().
+    std::shared_ptr<ToolExecutionController> tool_execution_controller_;
+
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;
 
-    asio::awaitable<RunResult> resume_async_owned(
-        std::string thread_id,
+    asio::awaitable<RunResult> resume_execute_async(
+        RunConfig config,
         json resume_value,
-        GraphStreamCallback cb);
+        GraphStreamCallback cb,
+        RunMetadata metadata,
+        RuntimeResources resources,
+        std::optional<std::string> checkpoint_id);
 
     asio::awaitable<RunResult> run_async_with_runtime(
         RunConfig config,
@@ -877,7 +956,8 @@ private:
         json resume_value,
         GraphStreamCallback cb,
         RunMetadata metadata,
-        RuntimeResources resources);
+        RuntimeResources resources,
+        std::optional<std::string> checkpoint_id = std::nullopt);
 
     asio::awaitable<SubgraphRunResult> run_subgraph_async(
         RunConfig config,
@@ -892,7 +972,7 @@ private:
     asio::awaitable<RunResult> execute_graph_async(
         const RunConfig& config,
         const GraphStreamCallback& cb,
-        const std::vector<std::string>& resume_from = {},
+        std::optional<ResumeContext> resume_context = std::nullopt,
         const json* resume_value = nullptr,
         const RunMetadata& metadata = {},
         const RuntimeResources* resources = nullptr);

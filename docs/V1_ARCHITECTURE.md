@@ -1,11 +1,21 @@
 # NeoGraph v1 Core + Program Architecture
 
-Status: Proposed architecture decision
+Status: Accepted Core architecture; source-language direction amended 2026-08-10
 Date: 2026-07-31
 Source baseline: `d80c316de1f3a10f0948477c3689a0b1b80d771b`
-Revisit trigger: a measured workload requires a second execution engine, or the
-Core execution path cannot satisfy the Program contract without per-step
-interpretation overhead.
+Source-language amendment:
+[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) supersedes
+this document wherever it defines JavaScript authoring or removes legacy
+source-language implementations. The bounded Core authoring DSL/elaborator is
+deleted; strict Core JSON, typed Core IR, and trusted C++ embedding remain.
+The typed Core IR, GraphEngine, catalog, activation, authority, durability, and
+tenant boundaries below remain in force.
+Post-cutover controller extension:
+[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
+defines developer-authorized profiles, machine-readable capability compilation,
+immutable self-evolution, reusable Harness memory, and the evidence boundary for
+any general-agent-controller claim. It reuses, rather than replaces, the
+retained boundaries in this document.
 
 ## Decision
 
@@ -14,38 +24,274 @@ NeoGraph v1 has two public layers and one execution engine:
 1. **Core** is the embeddable graph engine. The installed target remains
    `neograph::core`; the C++ graph types remain in `neograph::graph` so existing
    code is not renamed merely for branding.
-2. **Program** is the optional agent-program layer. It compiles declarative
-   orchestration into immutable, versioned plans that invoke pinned Core graph
-   generations.
-3. **GraphEngine remains the only node-execution engine.** Program does not add
-   a bytecode VM, a second node scheduler, or a separate durable kernel.
+2. **Program** is the optional agent-program layer. General Program source is
+   standard JavaScript executed by embedded QuickJS; Program admission binds it
+   to immutable versions, sealed native/Core imports, and nonrenewable budgets.
+3. **GraphEngine remains the only node-execution engine.** QuickJS interprets
+   Program control code and yields typed commands to `ProgramRuntime`; it does
+   not execute Core/application nodes or own Core scheduling, persistence, or
+   effect commit.
 
 The architectural boundary is therefore:
 
 ```text
-C++ builder / JSON / model-authored source
-                  |
-                  v
-        ProgramCompiler (structural compile)
-                  |
-                  v
-             ProgramBundle
-                  |
-                  v
- ProgramCatalog (publish/admit/activate/materialize)
-                  |
-                  v
- ProgramVersion + sealed Core generations
-                  |
-                  v
-       ProgramRuntime (orchestration)
-                  |
-                  v
-      GraphEngine (node execution)
-                  |
-                  v
- checkpoint / store / provider / tool / events
+JavaScript define()/main() source + sealed modules
+                       |
+                       v
+      bounded QuickJS contexts + admission
+                 /                 \
+                v                   v
+ define(): validated strict     main(): ProgramBundle
+ Core definition                     |
+        |                             v
+        |                ProgramCatalog (publish/admit/
+        |                  activate/materialize)
+        |                             |
+        |                             v
+        |                ProgramVersion + sealed Core/
+        |                    native bindings
+        |                             |
+        |                             v
+        |                QuickJS generator -> typed command
+        |                             |
+        |                             v
+        |                 ProgramRuntime (durability/replay)
+        |                             |
+        +-----------------------------+
+                       |
+                       v
+         GraphEngine / admitted host binding
+                       |
+                       v
+      checkpoint / store / provider / tool / events
 ```
+
+### Bounded JavaScript contexts
+
+JavaScript authoring has two distinct execution contexts. `define()` runs only
+in the compiler's bounded compile-time QuickJS context and emits the graph that
+is normalized, sealed, and admitted. A generator `main(input)` does not run
+during structural compilation: it runs in a bounded runtime QuickJS session
+owned by one Program attempt. That session is retained only for the lifetime of
+the attempt. Every yielded typed command is durably journaled before dispatch,
+so recovery and recorded replay reconstruct behavior from the durable command
+journal rather than retaining or trusting ambient JavaScript process state.
+
+### Durable child execution contract
+
+The terms `ControlVm` and `Durable Kernel` describe rejected *separate public
+execution-engine designs*, not responsibilities that disappear. The default
+contract is:
+
+- `ProgramCompiler` emits a typed immutable orchestration plan;
+  `ProgramRuntime` schedules that plan; and `GraphEngine` remains the only
+  executor of Core/application nodes.
+- Inline plan composition may execute inside one Program run. It is an
+  optimization for bounded local orchestration and is not a durable
+  sub-agent.
+- A durable `spawn` creates a separately admitted and pinned child Program
+  run through `ProgramRuntime` and returns a `ProgramHandle`. It must not be
+  implemented as recursive execution of the child body inside the parent's
+  `RunControl`.
+- Parent/child identity, budget reservation and attenuation, lifecycle,
+  `await`/join state, cancellation, retry/resume, and lineage are durable
+  Program state. In-memory weak links and caches may accelerate this path but
+  are never its source of truth.
+- The publication/dispatch boundary is crash-safe and idempotent. Unknown
+  non-idempotent external effects use the Program effect outbox and explicit
+  reconciliation rather than an implicit retry.
+- Any durable child supervisor or worker dispatcher is an internal Program
+  component behind the existing public Program API. Adapters must not gain a
+  second `ControlVm`/`DurableKernel` execution surface or select different
+  semantics.
+
+`ProgramRuntime::start_child()` and the typed DSL `spawn` now implement this
+contract. `spawn` resolves an admitted `ModuleLinkReceipt`, durably records
+`Publishing -> Dispatched -> terminal` child state, and `recover_children()`
+reconstructs unfinished children from the parent record. The legacy inline
+path remains only for operations that are not a durable `spawn`.
+
+### Durable research evidence coordination
+
+Large research Harnesses use a durable `EvidenceLedger`, not all-to-all chat, as
+their authoritative coordination state. `SourceIdentity` keys one immutable
+source version by canonical locator, version, and content hash; aliases resolve
+to that identity without collapsing a later version. A task is either a primary
+extraction or an explicitly marked independent review, reproduction, or
+rebuttal. The ledger rejects accidental duplicate primary work but never
+mistakes an intentional review for duplicate work.
+
+`SqliteEvidenceLedger` serializes task claims, expiry, and publication with
+SQLite transactions. A lease includes the task generation, worker, and
+owner scope, so an expired or superseded worker cannot renew or publish.
+Publication atomically stores a typed artifact and the task's terminal state;
+retrying the same artifact is idempotent, while a different artifact is
+rejected. Negative/no-support evidence records its exact searched scope and
+remains evidence rather than a global source closure. Conflicting evidence
+coexists and deterministically asks for reconciliation rather than
+last-writer-wins.
+
+All task, lease-expiry, claim-resolution, source-lifecycle, and evidence reads
+are owner-scoped. The authenticated Program/A2A admission boundary supplies
+that scope; callers cannot use a known task id to acquire, inspect, or publish
+another owner's work. Source identity is a shared immutable registry only;
+artifact visibility and task authority remain local to the owner.
+
+The ledger is deliberately a coordination substrate, not a second scheduler or
+node executor. Program admission, child lineage, owner/host resource ceilings,
+capabilities, effects, and A2A authorization remain enforced by the existing
+Program and host-admission contracts. A directed A2A message can ask for a
+review or report a finding, but it changes allocation or acceptance only after
+a typed artifact is durably committed.
+
+### Remote collaborative agent network
+
+A2A is not only a compatibility transport for one remote agent. It is also the
+network boundary for collaboration between independently operated NeoGraph
+runtimes, including agents owned by different users.
+
+The collaboration contract has one semantic surface and two transport paths:
+
+```text
+same owner / same runtime  -> typed Program port or in-process mailbox
+different process / owner  -> A2A adapter over the network
+```
+
+Both paths carry the same logical message contract. The transport may differ,
+but compilation, admission, budget, capability, lifecycle, cancellation,
+replay, and terminal-state semantics remain Program semantics.
+
+A task-specific coordinator may therefore compile and admit a bounded group of
+Programs such as:
+
+- a **supervisor** that observes progress, evidence, policy violations, and
+  declared failure signals;
+- an **executor** that owns the task-specific Core graphs, tools, and effects;
+- an optional **reviewer** that checks artifacts and requests a bounded
+  correction or retry.
+
+The coordinator may spawn same-owner children through the durable child
+contract. A remote collaborator owned by another user is not implicitly a child
+under the caller's owner scope. It requires an explicit collaboration
+invitation/link that records both owner scopes, the permitted capabilities and
+artifacts, expiry, cancellation rights, and the correlation between local
+Program runs and the remote A2A task.
+
+Every collaboration message must be attributable and idempotent. Its logical
+envelope includes:
+
+```text
+collaboration_link_id, sender_owner_scope, receiver_owner_scope,
+sender_run_id, receiver_run_id, a2a_task_id, a2a_context_id,
+message_id, correlation_id, sequence, kind, idempotency_key, payload/artifacts
+```
+
+The local `ProgramTransitionStore` remains the source of truth for each
+runtime. A2A retries, acknowledgements, task snapshots, and stream events are
+transport evidence; they do not replace local Program journal or terminal
+publication. Unknown remote terminal or diagnostic codes must remain explicit
+unknown values and must never be converted to success.
+
+Remote collaboration is therefore a valid reason for a meaningful A2A network
+path, but not for a second node executor or a second public VM. The A2A server
+and client are adapters around the Program contract. A same-host pair may use a
+typed mailbox for the low-latency path and use the identical envelope through
+A2A when the pair is moved to separate processes or hosts. Metrics must
+separate network, queue, Program scheduling, Core execution, provider, and
+artifact-publication time.
+
+The legacy A2A `GraphEngine` constructor and in-memory task store remain
+source-compatible compatibility surfaces. The Program-backed A2A adapter now
+binds a `RunInvocation` and an accepted collaboration mailbox record before
+admission, reconnects the exact run after publication crashes, and projects
+durable lifecycle state back to A2A tasks. This closes the NeoGraph-local
+Program/A2A cutover; it does not classify NeoCode or NeoProtocol as rebased
+consumers, and cross-host enablement remains gated on their explicit
+conformance evidence.
+
+A fetched A2A well-known card is discovery evidence, not admission.
+`AgentCardCollector` makes one explicit card GET with no Authorization header
+and never follows a redirect or invokes the advertised RPC endpoint.
+`AgentCardCandidateCompiler` distils the collected card into an immutable,
+digest-pinned, unadmitted candidate containing only bounded protocol facts and
+safe skill identifiers. The candidate excludes the card's free-form text,
+declared remote RPC endpoint, provider configuration, security schemes, and
+credentials; it cannot dispatch the source agent. The sole Copy Ninja PoC
+materializer additionally requires an independently observed profile pinned to
+that digest and constructs a local graph. Any other behavior still requires the
+ordinary local Program/admission path.
+
+### Cross-repository compatibility and rebase boundary
+
+The [NeoProtocol](https://github.com/fox1245/NeoProtocol) and
+[NeoCode](https://github.com/fox1245/NeoCode) repositories are historical
+integration/reference snapshots, not current NeoGraph v1 compatibility
+guarantees. NeoCode's recorded harness contract pins an older NeoGraph commit
+and a local JSON-lines-over-stdio sidecar. NeoProtocol's federated ACP
+reference likewise names the historical `neograph::acp` surface. Those
+integrations must be rebased after the current Program contract is frozen;
+compiling an old adapter is not compatibility evidence.
+
+The ownership boundary remains:
+
+- NeoGraph owns ProgramVersion, RunInvocation, admission, budgets,
+  capabilities, lifecycle, journal, checkpoint/recovery, effect
+  reconciliation, and owner isolation.
+- NeoCode owns the user-facing session, workspace, tool, permission, and
+  harness surfaces.
+- NeoProtocol owns wire envelopes, capability/consent exchange, signaling,
+  and remote collaboration transport.
+
+The rebase sequence is deliberately one-way:
+
+1. Freeze the ProgramVersion, RunInvocation, CollaborationLink, message,
+   artifact, cancellation, and idempotency contracts.
+2. Replace NeoCode's historical sidecar assumptions with a thin adapter to
+   current Program lifecycle operations.
+3. Rebase NeoProtocol's Task Offer, ACP, WebRTC, and workspace adapters onto
+   the same invocation and collaboration contracts.
+4. Add explicit protocol, schema, and NeoGraph contract-revision metadata;
+   reject incompatible combinations before execution.
+5. Run the two-runtime owner-isolation and restart/retry conformance scenario
+   before enabling cross-host transport.
+
+Old pinned bundles and sidecar records receive an explicit exact-import,
+converted, drain-only, or rejected classification. They must never be
+silently accepted as current Program versions. Issue #7 tracks this
+cross-repository rebase gate. The machine-readable declaration in
+`spec/cross-repository-compatibility-v1.json` records the comparison between
+the current `ProgramVersion`, `RunInvocation`, and A2A collaboration surfaces
+and those historical references. Its metadata/source check is intentionally
+fail-closed: NeoCode and NeoProtocol remain `historical_only` until a consumer
+declares every current contract revision and verified conformance evidence;
+changing a label alone cannot make a consumer current. Run the focused check
+with `python3 scripts/check_cross_repository_compatibility.py` (also wired as
+`CrossRepositoryCompatibility.Metadata` when tests are enabled).
+
+### Execution strategy: embedded JavaScript with a sealed command boundary
+
+The bounded typed-plan dispatcher remains the current legacy implementation,
+but it is no longer the target general authoring model. Standard JavaScript on
+embedded QuickJS owns expressions, functions, closures, branches, loops, and
+ordinary local computation.
+
+- Admission compiles pinned JavaScript source and sealed modules with an exact
+  QuickJS build and binds every Core/native import to an immutable slot.
+- A generator yields typed commands; `ProgramRuntime` validates, budgets,
+  journals, dispatches, and resumes those commands.
+- QuickJS never reaches into `GraphEngine` readiness or checkpoint state and
+  never commits an external effect directly.
+- Recovery replays pinned source against exact recorded command outcomes.
+  Completed effects are not redispatched; any command mismatch fails closed.
+- Memory limits, execution interruption, cancellation, and nonrenewable budgets
+  bound every admitted production run even though the language is general.
+- QuickJS and the native binding layer remain optional Program dependencies.
+  Core-only users pay no dependency, allocation, symbol, branch, or binary-size
+  cost.
+
+The authoritative language, sandbox, ABI, replay, and cutover contracts are in
+[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) and
+[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md).
 
 Program is optional. A user who only needs a static graph links
 `neograph::core`, builds a `GraphEngine`, and pays no Program dependency,
@@ -68,6 +314,56 @@ This contract separates two claims:
 - neither compiler nor admission can prove that a model answer is factually
   correct. Behavioral evaluation and evidence gates remain runtime concerns.
 
+### Contract-driven multi-model implementation
+
+NeoGraph and NeoCode may use different model roles for one implementation
+request, but the roles must share one immutable contract rather than an
+implicit conversation. A frontier model may propose and review the contract;
+it is not an execution authority or a correctness oracle. A lower-cost
+implementation worker may perform the bounded code changes; it is not allowed
+to redefine the task while implementing it.
+
+The planner output is a typed manifest with these required semantic sections:
+
+- `assumptions`: premises that must be true for the plan to be valid;
+- `requirements`: observable behavior that must be delivered;
+- `non_goals`: explicit scope exclusions;
+- `acceptance`: stable identifiers, expected outcomes, and required evidence;
+- `fixed_test_vectors`: values or fixtures that the worker cannot rewrite;
+- `independent_oracles`: reference implementations, standards, hidden fixtures,
+  or human decisions that do not derive their expected result from the worker;
+- `risk_register`: known uncertainty, contradiction, and escalation points;
+- `retry_policy`: bounded attempts, time, cost, and failure escalation.
+
+The manifest lifecycle is `proposed -> reviewed -> frozen`. Only a frozen
+manifest may select implementation work. Review must check premise completeness,
+requirement consistency, acceptance observability, and whether every required
+element has an oracle or an explicit human gate. The implementation worker
+receives the frozen manifest and scoped workspace context. It may report a
+contract gap, but it must not change requirements, expected values, permissions,
+scope, retry limits, or completion status.
+
+Verification is a separate authority from the worker's self-report. The
+deterministic runner executes the declared build and test commands, and
+independent or reference-based checks are used where available. Evidence is
+valid only when bound to the manifest hash, Program/version identity, workspace
+revision, command, toolchain, and artifact hash. Missing acceptance evidence,
+unresolved blocking diagnostics, failed independent checks, or exhausted
+budgets produce `blocked` or `failed`, never `completed`.
+
+This flow is intended to reduce senior-engineer toil—context recovery,
+repetitive patching, known-check reruns, and regression archaeology—while
+keeping premise decisions, ambiguous trade-offs, and release approval under
+senior control. It does not promise perfect software: a wrong premise can
+still produce a perfectly implemented wrong result. Subjective work therefore
+ends at a human decision gate with candidates and evidence rather than a false
+automatic correctness claim.
+
+This is a Harness/Program orchestration contract over the existing typed
+dispatch path. It does not introduce a second execution engine, generic
+bytecode VM, or permission-escalation path. Issue #8 records the implementation
+and conformance gate for this contract.
+
 ## Goals
 
 - Preserve the low-overhead Core path and its current graph semantics.
@@ -76,7 +372,9 @@ This contract separates two claims:
   compiler and immutable artifact format.
 - Support sequence, branch, bounded loop, parallel, race, retry, cancellation,
   wait, checkpoint, child Program, and immutable version activation without a
-  general-purpose VM.
+  general-purpose node-execution VM. JavaScript `define()` is compile-time graph
+  authoring; an optional generator `main(input)` is bounded retained runtime
+  control that yields only typed Program commands.
 - Keep programs inspectable, source-mapped, reproducible, capability-scoped,
   and replayable.
 - Permit open-ended evolution as a sequence of finite admitted versions, never
@@ -86,7 +384,8 @@ This contract separates two claims:
 
 ## Non-goals
 
-- Executing raw model output, arbitrary C++, Python, shell, or ambient host APIs.
+- Executing raw or unsealed model output, arbitrary C++, Python, shell, or
+  ambient host APIs.
 - Mutating a live `GraphEngine` topology in place.
 - Replacing `GraphEngine` with a bytecode interpreter.
 - Inventing a new persistence engine when `CheckpointStore`, `Store`, and the
@@ -132,9 +431,11 @@ generation to run or resume and consumes the resulting typed outcome and events.
 
 ### Adapters
 
-Harness MCP, HTTP, CLI, Python, A2A, and future language frontends are adapters.
-They translate their transport or language contract into the public Program API.
-They do not own separate compilation, admission, execution, or persistence
+Harness C++, MCP, HTTP, CLI, selected Python bindings, A2A, ACP, and gRPC are
+adapters. A2A, ACP, and MCP retain their protocol-owned JSON-RPC envelopes;
+NeoGraph does not create a second generic JSON-RPC execution API. Every adapter
+translates its transport or language contract into the public Program API. No
+adapter owns separate compilation, admission, execution, or persistence
 semantics.
 
 Adapter wire schemas are versioned independently. An adapter must preserve an
@@ -162,13 +463,21 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 - `return`: produce the Program output.
 
 `map`, `retry`, `quorum`, reviewer/fixer loops, and other conveniences are
-compiler expansions over this vocabulary. They do not add feature-specific
-branches to Core or ProgramRuntime.
+compiler expansions or bounded compatibility sugar over this vocabulary. They
+do not add feature-specific branches to Core or GraphEngine.
 
-This plan is not bytecode. It is a typed, immutable orchestration graph whose
-nodes retain source coordinates and directly reference compiled Core generations
-or other Program nodes. ProgramRuntime schedules that graph; GraphEngine remains
-the only executor of application nodes.
+The current implementation uses a typed immutable operation graph whose nodes
+retain source coordinates and directly reference compiled Core generations or
+other Program nodes. It directly schedules `sequence`, `branch`, `return`,
+bounded `loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`,
+`checkpoint`, `map`, `quorum`, and bounded child operations.
+
+That vocabulary is now a frozen legacy implementation and migration input. New
+general computation constructs do not extend `ProgramOperationKind` or the
+Program-v2/v3/v4 JSON schemas. JavaScript expresses ordinary control flow and
+yields only NeoGraph domain commands. Legacy operations remain available only
+for correctness fixes, stored-version drain, and equivalence/migration
+evidence until the announced cutover removes them.
 
 ProgramRuntime is therefore an intentional second **scheduling domain**, but not
 a second node executor. It owns readiness and joins for Program operations,
@@ -179,6 +488,11 @@ result/event stream. Contract tests must cover cancellation propagation in both
 directions, destruction with losing race children, checkpoint ordering, budget
 debits, and equivalence with direct Core execution. ProgramRuntime may not reach
 inside GraphEngine's ready queue or checkpoint state.
+
+The current source-level compatibility boundary is code, schemas, and tests.
+The replacement authoring and removal sequence is defined only by
+[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md); the retired DSL
+roadmaps are not future implementation authority.
 
 ### Boundedness
 
@@ -201,6 +515,64 @@ RunBudget
 Child Programs and replacements receive a subset of the remaining budget.
 Resume, retry, fork, rollback, and child attachment never replenish it. Budget
 exhaustion is a typed terminal outcome, not a generic exception or model error.
+
+### JavaScript authoring boundary
+
+`SourceKind::JavaScript` is an opt-in authoring and bounded control frontend,
+not a second executor for Core/application nodes. `ProgramCompiler` evaluates
+the synchronous `define()` export in a private compile-time QuickJS context and
+seals exactly one Core definition into the immutable `ProgramBundle`. If the
+source also exports generator `main(input)`, `ProgramRuntime` opens a separate
+bounded QuickJS session for that run attempt. The session owns ordinary
+JavaScript control flow only; yielded typed Program commands remain subject to
+admission, budgets, the durable command journal, dispatch, and replay.
+
+The evaluated export set determines the output contract: define-only modules
+retain the Core root's channels-wrapped result, while modules with
+`main(input)` validate the generator's terminal return directly against the
+Program/Harness result schema.
+
+Both contexts expose a non-extensible, versioned `ng` surface and install no
+ambient module loader, network, provider, tool, filesystem, shell, or
+native-plugin capability. Wrong `define()` returns, top-level await, non-
+generator `main(input)`, and malformed yielded commands fail closed. Compile
+contexts cap memory, stack, wall time, output bytes, and interrupt polls.
+Runtime sessions are retained only for their attempt and are bounded by the
+admitted `RunBudget`; recovery replays durable command results instead of
+retaining JavaScript state. The source envelope pins the QuickJS
+engine/language/host-API versions. Builds without
+`NEOGRAPH_BUILD_QUICKJS_CONTROL` reject JavaScript sources rather than linking
+QuickJS into Core-only consumers.
+
+### Host admission
+
+`RunBudget` is a durable per-Program spending limit; it is not a statement
+that the current machine can safely run every admitted Program at once.
+`HostResourceProfile` is the separate host-owned, versioned capacity snapshot.
+It records measured, estimated, or conservative-fallback evidence, subtracts a
+non-admitted safety reserve, and never treats an unknown component as
+unlimited.
+
+`HostAdmissionController` atomically reserves a vector of CPU, memory, GPU,
+process, thread, file-descriptor, disk, network, tool, provider, token, cost,
+and wall-time components. It gives feasible queued work aging-priority/FIFO
+order; changing a profile never revokes a held lease, but blocks new grants
+while the profile is overcommitted.
+
+Program host admission is opt-in as an all-or-nothing pair in `RuntimeConfig`:
+a shared controller plus a request resolver. The resolver sees only immutable
+attempt context and chooses resource quantities and scheduling hints. The
+runtime stamps the owner and a unique per-attempt operation identity, clamps
+the queue timeout to the Program deadline, and starts Core only after a lease
+is granted. A user cancellation, runtime shutdown, or wall-time expiry removes
+a queued request without dispatching Core. The lease is terminal cleanup: it is
+released before a completed handle becomes observable, including failed,
+cancelled, and timed-out attempts.
+
+This is a host safety envelope, not another node engine, durable budget ledger,
+or hidden cross-operation lock. Hosts may leave the pair unset to preserve
+legacy direct Program dispatch, and may share one controller across Program
+runtimes, Engine tool dispatch, and other local work.
 
 ### Authority
 
@@ -232,6 +604,31 @@ publish non-idempotent effects through the broker's
 `prepare/commit/ambiguous` protocol. The same durable parent ledger is shared by
 retries, resumes, forks, and child Programs.
 
+### Tool execution admission
+
+Every Engine and standalone `Agent` tool call enters the same
+`ToolExecutionController`. A host can share one controller across engines so
+resource limits remain process-wide instead of silently becoming per-engine
+limits. An unclassified tool defaults to one keyed-exclusive resource,
+`tool:{tool}`: calls to one tool serialize, while distinct tools may overlap.
+
+`ToolExecutionPolicy` is a versioned host value. It selects the native
+awaitable entry or the bounded blocking-thread bridge, one of `reentrant`,
+`keyed-exclusive`, or finite `capacity` concurrency, a pending limit, queue
+deadline, result-size limit, and a canonical resource-key template. Templates
+accept only `{tool}`, `{owner}`, `{root}`, `{thread}`, and scalar
+`{arg:name}` substitutions; missing, structured, or malformed components fail
+closed rather than collapsing two resources into the same key.
+
+Non-reentrant calls acquire an RAII `ResourceLease` from the shared FIFO
+`ResourceArbiter` before invoking the tool. Queue cancellation and expiry
+remove the waiter; scope exit returns a granted slot. The blocking bridge uses
+one bounded worker pool and posts completion back to the caller executor, so a
+legacy synchronous `Tool::execute` never pins an I/O or Core scheduler thread.
+The lease spans only one tool invocation and is released before dispatch
+returns. Composite spawn, handoff, and join operations must own their complete
+lifecycle explicitly; the arbiter never hides a cross-operation lock.
+
 Native C++ cannot be sandboxed by this library. Every executable registry entry
 must therefore declare `brokered` or `trusted_native` effect mode.
 Multi-tenant/model-authored admission rejects `trusted_native`; an embedding
@@ -252,9 +649,15 @@ native code is rejected or isolated outside the process.
 ### ProgramSource
 
 The authored document plus its source kind, declared schema version, imports,
-and source coordinates. Accepted initial frontends are C++ builder values and
-canonical JSON. YAML or model-specific syntax may be added later only by
-lowering to the same typed source model.
+and source coordinates. New sources use trusted C++ builder values or sealed
+JavaScript. Canonical JSON remains a storage identity for already-retained
+legacy artifacts, but is not a source constructor or a compilation frontend.
+JavaScript source is sealed in a canonical envelope that pins its QuickJS
+engine, language, and host-API versions. `define()` lowers through the
+compile-time graph-builder boundary above; an optional generator `main(input)`
+remains sealed as runtime control source and yields only durable typed Program
+commands. YAML or model-specific syntax may be added later only by lowering to
+the same typed source model.
 
 ### ProgramBundle
 
@@ -539,12 +942,12 @@ neograph::core
     ^
     |
 neograph::program
-    ^             ^
-    |             |
-neograph::program_sqlite   neograph::harness
-                              ^
-                              |
-                    MCP / HTTP / CLI adapters
+    ^             ^              ^
+    |             |              |
+program_sqlite  program_postgres  neograph::harness
+                                      ^
+                                      |
+                         MCP / HTTP / CLI / protocol adapters
 ```
 
 Rules:
@@ -552,7 +955,8 @@ Rules:
 - `NEOGRAPH_BUILD_PROGRAM=OFF` is supported and leaves the Core binary and public
   link interface unchanged.
 - `neograph::program` links Core, but Core never links Program.
-- SQLite/PostgreSQL Program stores are separate targets.
+- SQLite and PostgreSQL Program stores are separate optional targets and must
+  pass the same persistence contract suite before v1 when enabled.
 - Harness becomes a Program service, not the owner of Program semantics.
 - MCP client/server types remain transport components and do not leak into
   Program headers.
@@ -561,19 +965,27 @@ Rules:
   checkpoint, activation, or lineage value; Python-standard alternatives remain
   preferred for generic JSON/schema manipulation.
 
+Dependency selection is not part of the Core/Program redesign. The preserved
+baseline is yyjson, cpp-httplib, standalone Asio, concurrentqueue, cppdotenv,
+SQLite3, libpq, and opt-in protobuf/gRPC and libcurl. Substituting any of these
+requires a separate architecture decision with performance, allocation,
+binary-size, compile-time, ABI, license, security, supported-platform, and
+static/shared installed-consumer evidence, plus removal of the replaced stack.
+Heavy optional dependencies remain default-off.
+
 ## Performance contract
 
-Baseline Core hot path was remeasured from `d80c316` in a fresh GNU 13.3
-Release build. The command was CPU-pinned, each process ran the benchmark's hot
-loop, two process runs were discarded as warm-up, and ten process samples were
-retained:
+Baseline Core hot path was remeasured from
+`24cbd86d80815b2c2b46aacb02cbf5a570503262` in a GNU 13.3 Release build. The
+command was CPU-pinned, each process ran the benchmark's hot loop, two process
+runs were discarded as warm-up, and ten process samples were retained:
 
-- built-in `seq` workload (three incrementing nodes): median `6.4103 us`,
-  nearest-rank empirical p95 `8.00288 us`, population standard deviation
-  `0.5706 us`;
+- built-in `seq` workload (three incrementing nodes): median `5.923925 us`,
+  nearest-rank empirical p95 `6.27868 us`, population standard deviation
+  `0.132166 us`;
 - built-in `par` workload (five-way fan-out plus join, `worker_count=1`):
-  median `14.70705 us`, nearest-rank empirical p95 `16.2286 us`, population
-  standard deviation `0.90167 us`.
+  median `13.45285 us`, nearest-rank empirical p95 `14.0613 us`, population
+  standard deviation `0.248471 us`.
 
 These measurements are local WSL2 evidence, not cross-machine release promises.
 They establish the comparison protocol and show that Program must not tax
@@ -637,6 +1049,9 @@ silently retried; it enters `ambiguous_effect` until reconciled.
   revalidates transitive dependencies, effects, and policy.
 - Replay identifies exact Program/Core/module/provider/tool versions and performs
   no unrecorded live effect.
+- Remote descriptors, generated source, retrieved Harnesses, children, and
+  candidates request authority but cannot grant it. Any stronger successor
+  requires an explicit control-plane grant and new immutable admission.
 
 ## Observability
 
@@ -653,34 +1068,75 @@ Metrics separate compile, queue, Program scheduling, Core execution, provider,
 tool, checkpoint, and journal time so framework overhead is measurable rather
 than inferred from wall time.
 
+The controller extension additionally correlates descriptor, behavioral
+fingerprint, evolution proposal, candidate, evaluation, authority grant,
+effective guarantee, promotion, and activation identities. These fields add
+lineage; they do not replace the base run and effect coordinates.
+
+## Post-cutover controller extension
+
+After the one-language QuickJS cutover, NeoGraph may close an outer controller
+loop around this architecture:
+
+```text
+observe capability and outcome evidence
+  -> synthesize bounded immutable candidate Programs
+  -> compile and admit through the same Program path
+  -> evaluate in simulation, shadow, and authorized canary modes
+  -> publish and compare-and-swap activate a passing successor
+```
+
+The extension supports explicit developer grants for filesystem, network,
+process, environment, credential, provider/model, dynamic-child, native, and
+unmanaged effects. Default programs retain no ambient authority. Effective
+execution guarantees are labeled `strict`, `recorded`, or `unmanaged` and
+degrade to the weakest reachable closure; broad authority never silently
+inherits a strict replay claim.
+
+OpenAPI, A2A, MCP, and JSON Schema descriptions enter as untrusted declarations.
+Generated adapters and Harnesses use the same sealed JavaScript source,
+capability/effect closure, budget, admission, journal, catalog, and activation
+contracts as handwritten Programs.
+
+Self-evolution creates new versions only. It never mutates a running Program,
+live Core generation, journal history, effect record, budget ledger, or active
+version in place. The complete protocol and falsifiable claim ladder are defined
+in [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md).
+
 ## Compatibility and cutover
 
-The current Harness DSL, strict Core documents, retained artifacts, and MCP
-methods are migration inputs, not parallel permanent architectures.
+Strict Core documents, retained artifacts, and MCP methods remain compatibility
+surfaces, while source authoring has one public language: JavaScript.
 
-- Existing strict Core JSON remains a supported Core input.
-- Existing bounded Harness DSL is translated to `ProgramSource` and compiled by
-  `ProgramCompiler`.
-- Existing retained Harness artifacts are imported into `ProgramBundle` only
-  when their hashes, registry/admission profile, and executable semantics can be
-  preserved exactly. Otherwise they drain on the pinned legacy path or fail with
-  an explicit compatibility classification.
-- Existing MCP method names may remain as transport compatibility during the
-  pre-v1 window, but their implementation delegates to Program. No second
-  Harness-only compiler/runtime remains after cutover.
-- The historical `ControlVm` and VM integration schemas are archived or removed
-  once the Program vertical slice proves equivalent behavior and the canonical
-  documents are updated.
+- Existing strict Core JSON remains validated low-level interchange and
+  canonical serialization, not a second programming language.
+- The bounded Core topology elaborator, Harness `mode: "dsl"`, and their
+  source-authoring tests/examples are deleted. New requests using that mode
+  fail with an explicit migration diagnostic rather than selecting a fallback.
+- New Core graph definitions use JavaScript `define()` evaluation or the
+  trusted C++ embedding API; new Programs use JavaScript generator `main()`.
+  Both retain the same validation, admission, activation, durability, effect,
+  and GraphEngine boundaries.
+- Program-v2/v3/v4 operation-tree authoring and Harness `mode: "program"` remain
+  frozen migration surfaces under the separate Program drain plan.
+- Existing MCP method names may remain as transport compatibility, but adapters
+  do not own another compiler or runtime.
+- The Core elaborator is deleted; legacy Program parser/dispatcher removal
+  remains governed by the stored-version drain plan.
+- Superseded DSL and Control-VM studies are removed from the live documentation;
+  repository history remains the historical record.
 
 ## Acceptance gates
 
 The architecture is implemented only when all are true:
 
 1. A Core-only installed consumer builds and runs without Program enabled.
-2. A developer can build and run the same static graph through Core directly.
-3. A developer can compile a Program containing branch, bounded loop, parallel,
-   race, retry sugar, checkpoint, and child Program, then execute it through
-   pinned Core generations.
+2. A developer can build and run the same static graph through Core directly
+   and through bounded JavaScript `define()`, with canonical Core and observable
+   behavior equivalence.
+3. A developer can compile and run a JavaScript generator containing functions,
+   closures, branches, loops, checkpoints, and child commands through pinned
+   native and Core bindings.
 4. Invalid types, unknown imports, excess budgets, capability expansion, and
    unsupported runtime constructs fail before any worker/provider/tool dispatch.
 5. New-run activation is atomic and generation-checked; in-flight runs remain
@@ -693,19 +1149,37 @@ The architecture is implemented only when all are true:
    allocations, and persistence growth meet preregistered budgets.
 9. Full available tests, ASan/UBSan, applicable TSan stress, persistence restart,
    replay, installed-consumer, and supported-platform builds pass.
-10. Public headers, CMake components, schemas, examples, MCP adapters, Python
-    binding decisions, changelog, and translated user documentation agree.
+10. Public headers, CMake components, schemas, changelog, and translated user
+    documentation agree; every existing example and cookbook entry has an
+    explicit Core, Program, protocol-adapter, historical, or removal
+    disposition. The machine-readable disposition and proof inventory is
+    `spec/neograph-example-disposition-v1.json`; entries marked
+    `pending-component-smoke` are explicit remaining P8 work, not current
+    compatibility claims.
+11. MCP, HTTP, CLI, selected Python bindings, A2A, ACP, and gRPC have explicit
+    cutover dispositions; every supported surface passes the shared Program
+    conformance suite plus protocol-specific wire tests.
+12. SQLite and opt-in PostgreSQL Program stores pass one backend-neutral
+    restart, atomicity, owner-isolation, tamper, retention, and GC suite.
+13. QuickJS and every other dependency change has the separate decision and
+    evidence required by the package-boundary policy.
+14. Two independently owned Program runtimes can collaborate through the A2A
+   adapter with explicit consent, owner isolation, task/artifact correlation,
+   cancellation semantics, restart-safe duplicate handling, and no capability
+   leakage.
+15. NeoCode and NeoProtocol consumers declare a current NeoGraph Program
+   contract revision and pass the legacy-integration rebase/conformance gate
+   before claiming v1 compatibility.
 
 ## Rejected alternatives
 
-### Sole Control VM + Durable Kernel
+### VM-owned node execution or durability
 
-Rejected as the default architecture. The measured reference path added about
-`58.7 us` around a `4.3 us` VM operation and was roughly `13x` slower than the
-current integrated Core path in the recorded strict-linear experiment. More
-importantly, it duplicated scheduling, checkpoint, and execution ownership.
-A future VM requires a concrete workload that Core + Program cannot express and
-must beat explicit performance and correctness gates.
+Rejected. QuickJS is accepted only as a Program control interpreter behind a
+sealed yielded-command boundary. It does not replace `GraphEngine`, schedule
+Core nodes, own journals/checkpoint stores, or commit effects. The earlier sole
+Control VM plus separate Durable Kernel design duplicated scheduling,
+checkpoint, and execution ownership; that design remains rejected.
 
 ### One enlarged GraphEngine API
 
@@ -720,8 +1194,11 @@ Rejected. Harness is a useful application and transport service, but keeping
 its compiler, retained artifacts, and lifecycle as MCP-only concepts prevents
 normal C++ users from using the same capabilities and encourages duplicate APIs.
 
-### Mutable live graphs
+### Mutable live graphs or Programs
 
-Rejected. In-place topology mutation makes checkpoint, pending work, retry,
-cancellation, effect, and authority semantics ambiguous. Immutable generations
-plus explicit migration are safer and keep ordinary execution lock-free.
+Rejected. In-place topology or Program mutation makes checkpoint, pending work,
+retry, cancellation, effect, budget, lineage, and authority semantics
+ambiguous. Immutable generations and Program versions plus explicit migration
+or activation are safer and keep ordinary execution lock-free. Self-evolution
+therefore proposes, evaluates, publishes, and activates a successor instead of
+rewriting an active object.

@@ -14,10 +14,9 @@
 // Bypasses SchemaProvider on purpose — this is a wire-level peek.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_responses_envelope
 //   ./example_responses_envelope "What's the weather in Tokyo?"
-//   MODEL=gpt-5.4-mini ./example_responses_envelope "..."
 
 #include <neograph/neograph.h>
 #include <neograph/async/http_client.h>
@@ -63,14 +62,13 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     try {
-        const char* api_key = std::getenv("OPENAI_API_KEY");
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENAI_API_KEY environment variable "
+            std::cerr << "Set OPENROUTER_API_KEY environment variable "
                          "(or put it in .env beside the binary)\n";
             return 1;
         }
-        const char* model_env = std::getenv("MODEL");
-        std::string model = model_env ? model_env : "gpt-5.4-mini";
+        const std::string model = "deepseek/deepseek-v4-flash-0731";
 
         std::string question = (argc >= 2)
             ? argv[1]
@@ -79,7 +77,7 @@ int main(int argc, char** argv) {
 
         // One function tool so the model has a non-trivial choice between
         // {"answer directly"} and {"call the tool"}. Hand-shaped to match
-        // OpenAI Responses' flat-function tool definition.
+        // OpenRouter Responses-compatible flat-function tool definition.
         json tools = json::array({
             json{
                 {"type",        "function"},
@@ -102,11 +100,11 @@ int main(int argc, char** argv) {
         body["model"] = model;
         body["input"] = question;
         body["tools"] = tools;
+        body["provider"] = {{"zdr", true}};
 
-        auto endpoint = async::split_async_endpoint("https://api.openai.com");
+        auto endpoint = async::split_async_endpoint("https://openrouter.ai/api");
         auto resp = async::run_sync(post_responses(
             endpoint, body.dump(), "Bearer " + std::string(api_key)));
-
         if (resp.status != 200) {
             std::cerr << "HTTP " << resp.status << ": "
                       << resp.body.substr(0, 1000) << "\n";

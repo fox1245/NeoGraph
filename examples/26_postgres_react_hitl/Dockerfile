@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.6
 #
 # Multi-stage build for the example_postgres_react_hitl binary.
-# Build stage compiles the binary against libpqxx-dev + libssl-dev;
-# runtime stage carries only the libpqxx7/libssl3/CA-certs needed to
+# Build stage compiles the binary against libpq-dev + libsqlite3-dev + libssl-dev;
+# runtime stage carries only libpq5/libsqlite3-0/libssl3/CA-certs needed to
 # actually run it. Final image weighs ~80 MB (vs ~700 MB for the build
 # stage).
 #
@@ -19,7 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
         git \
-        libpqxx-dev \
+        libpq-dev \
+        libsqlite3-dev \
         libssl-dev \
         pkg-config \
         python3 \
@@ -29,16 +30,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-# Build only what we need: the example, its core deps, and Postgres.
-# Tests and Clay/raylib examples stay off so build time stays under a
-# minute on a warm cache.
+# Build only what we need: the example, its core deps, and Postgres. Tests
+# and Clay/raylib stay off so build time stays under a minute on a warm cache.
+# The example uses SchemaProvider's default ConnPool HTTP/1.1 transport;
+# exclude unused CurlH2Pool so this slim image needs no libcurl development package.
 RUN cmake -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DNEOGRAPH_BUILD_POSTGRES=ON \
         -DNEOGRAPH_BUILD_TESTS=OFF \
         -DNEOGRAPH_BUILD_LLM=ON \
         -DNEOGRAPH_BUILD_MCP=OFF \
-        -DNEOGRAPH_BUILD_UTIL=OFF \
+        -DNEOGRAPH_BUILD_UTIL=ON \
+        -DNEOGRAPH_USE_LIBCURL=OFF \
         -DNEOGRAPH_BUILD_EXAMPLES=ON \
     && cmake --build build --target example_postgres_react_hitl -j$(nproc)
 
@@ -48,7 +51,8 @@ FROM debian:bookworm-slim AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpqxx-7.7 \
+        libpq5 \
+        libsqlite3-0 \
         libssl3 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*

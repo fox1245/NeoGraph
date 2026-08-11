@@ -23,12 +23,15 @@ add_executable(neograph_tests
     test_scheduler.cpp
     test_node_execution.cpp
     test_tool_dispatch_parity.cpp
+    test_tool_execution.cpp
+    test_host_admission.cpp
     test_compiler.cpp
     test_compiler_strict.cpp
+    test_graph_upgrade.cpp
     test_validator.cpp
+    test_graph_registry_local.cpp
     test_pbt_roundtrip.cpp
     test_corpus.cpp
-    test_elaborator.cpp
     test_evolution.cpp
     test_harness_bench.cpp
     test_schema_evolution.cpp
@@ -60,6 +63,7 @@ add_executable(neograph_tests
     test_provider_async_default.cpp
     test_provider_invoke_default.cpp
     test_completion_provider.cpp
+    test_artifact_provider.cpp
     test_run_context_store.cpp
     test_run_result_channel.cpp
     test_typed_events.cpp
@@ -78,7 +82,84 @@ add_executable(neograph_tests
     test_concurrent_stress.cpp
     test_openinference_cpp.cpp
     test_schema_provider_stream_async_outer_io.cpp
+    test_graph_invocation.cpp
 )
+if(NEOGRAPH_BUILD_PROGRAM)
+    add_executable(neograph_program_tests
+        test_program_authoring.cpp
+        test_program_values.cpp
+        test_program_command.cpp
+        test_program_native.cpp
+        native_abi_c_smoke.c
+        test_program_registry.cpp
+        test_program_admission.cpp
+        test_program_compiler.cpp
+        test_program_catalog.cpp
+        test_program_module.cpp
+        test_program_contract.cpp
+        test_program_journal.cpp
+        test_program_pending.cpp
+        test_program_fork_replay.cpp
+        test_program_transition_store.cpp
+        test_program_runtime.cpp
+        test_program_invocation.cpp
+        test_program_task_graph_proposal.cpp
+    )
+    target_include_directories(neograph_program_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program
+    )
+    target_link_libraries(neograph_program_tests PRIVATE
+        neograph::program
+        GTest::gtest_main
+    )
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_program_tests PRIVATE
+            NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
+        )
+    endif()
+    if(TARGET neograph_program_sqlite)
+        target_compile_definitions(neograph_program_tests PRIVATE
+            NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        )
+        target_link_libraries(neograph_program_tests PRIVATE
+            neograph::program_sqlite
+            SQLite::SQLite3
+        )
+    endif()
+    if(TARGET neograph_program_postgres)
+        target_compile_definitions(neograph_program_tests PRIVATE
+            NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        )
+        target_link_libraries(neograph_program_tests PRIVATE
+            neograph::program_postgres
+        )
+    endif()
+endif()
+
+if(TARGET neograph_quickjs)
+    add_executable(neograph_quickjs_tests
+        test_quickjs_runtime.cpp
+    )
+    target_include_directories(neograph_quickjs_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
+    )
+    target_compile_features(neograph_quickjs_tests PRIVATE cxx_std_17)
+    _neograph_attach_quickjs_runtime(neograph_quickjs_tests)
+    target_link_libraries(neograph_quickjs_tests PRIVATE
+        GTest::gtest_main
+    )
+
+    add_executable(neograph_quickjs_c_smoke
+        quickjs_c_smoke.c
+    )
+    target_include_directories(neograph_quickjs_c_smoke PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
+    )
+    set_target_properties(neograph_quickjs_c_smoke PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON)
+    _neograph_attach_quickjs_runtime(neograph_quickjs_c_smoke)
+endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     # A stdio MCP tool used from inside a graph run — the combination nothing
@@ -93,17 +174,31 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
+    target_sources(neograph_tests PRIVATE test_mcp_server.cpp)
+endif()
+
+if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
-        test_mcp_server.cpp
-        test_harness_service.cpp
+        test_harness_contract.cpp
     )
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_sources(neograph_tests PRIVATE
+            test_harness_program_translator.cpp
+            test_harness_program_cutover.cpp
+        )
+    endif()
+endif()
+if(TARGET neograph_mcp_sqlite)
+    target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTING)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
     target_sources(neograph_tests PRIVATE test_mcp_http_server.cpp)
 endif()
 
-if(NEOGRAPH_BUILD_MCP_CLIENT AND NEOGRAPH_BUILD_MCP_SERVER)
+if(NEOGRAPH_BUILD_MCP_CLIENT AND TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE test_harness_mcp_backend.cpp)
 endif()
 
@@ -111,8 +206,25 @@ if(NEOGRAPH_BUILD_A2A)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_A2A_TESTING)
     target_sources(neograph_tests PRIVATE
         test_a2a_types.cpp
+        test_a2a_collaboration.cpp
         test_a2a_client.cpp
         test_a2a_server.cpp
+    )
+endif()
+
+# The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote
+# agent dependency. Keep its end-to-end loopback test independently runnable
+# in the minimal A2A configuration.
+if(NEOGRAPH_BUILD_A2A)
+    add_executable(neograph_a2a_agent_card_candidate_tests
+        test_a2a_agent_card_candidate.cpp
+    )
+    target_link_libraries(neograph_a2a_agent_card_candidate_tests PRIVATE
+        neograph::a2a
+        httplib
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        GTest::gtest_main
     )
 endif()
 
@@ -124,6 +236,24 @@ if(NEOGRAPH_BUILD_ACP)
     target_sources(neograph_tests PRIVATE
         test_acp_types.cpp
         test_acp_server.cpp
+    )
+endif()
+
+
+# Keep the protocol-neutral invocation and ACP adapter contract independently
+# buildable.  The aggregate neograph_tests target also contains HTTP/schema
+# tests that require OpenSSL headers; ACP itself depends only on Core and must
+# retain a runnable build gate in minimal dependency environments.
+if(NEOGRAPH_BUILD_ACP)
+    add_executable(neograph_acp_tests
+        test_graph_invocation.cpp
+        test_acp_types.cpp
+        test_acp_server.cpp
+    )
+    target_link_libraries(neograph_acp_tests PRIVATE
+        neograph::core
+        neograph::acp
+        GTest::gtest_main
     )
 endif()
 
@@ -152,7 +282,7 @@ if(NEOGRAPH_BUILD_POSTGRES)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
-    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp)
+    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp test_evidence_ledger.cpp)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
 endif()
 
@@ -164,12 +294,27 @@ endif()
 
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
-    neograph::llm
-    neograph::async
-    httplib OpenSSL::SSL OpenSSL::Crypto
-    cppdotenv
     GTest::gtest_main
 )
+
+# Keep the core and Program test targets buildable in the minimal dependency
+# configuration.  The corresponding source files are already compile-gated
+# where a component-specific API is used; a test target must not manufacture a
+# link dependency on an optional library that was intentionally disabled.
+foreach(_neograph_test_component IN ITEMS llm async mcp mcp_server harness mcp_http_server a2a acp util postgres)
+    if(TARGET neograph::${_neograph_test_component})
+        target_link_libraries(neograph_tests PRIVATE neograph::${_neograph_test_component})
+    endif()
+endforeach()
+if(TARGET httplib)
+    target_link_libraries(neograph_tests PRIVATE httplib)
+endif()
+if(TARGET cppdotenv)
+    target_link_libraries(neograph_tests PRIVATE cppdotenv)
+endif()
+if(TARGET OpenSSL::SSL)
+    target_link_libraries(neograph_tests PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp)
@@ -177,6 +322,10 @@ endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp_server)
+endif()
+
+if(TARGET neograph_harness)
+    target_link_libraries(neograph_tests PRIVATE neograph::harness)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
@@ -204,12 +353,64 @@ endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_tests PRIVATE neograph::sqlite)
-    if(NEOGRAPH_BUILD_MCP_SERVER)
+    if(TARGET neograph_mcp_sqlite)
         target_link_libraries(neograph_tests PRIVATE neograph::mcp_sqlite SQLite::SQLite3)
     endif()
 endif()
 
 include(GoogleTest)
+
+# Cross-repository compatibility is a metadata gate, not an integration
+# build.  Keep it runnable in the minimal test configuration so a historical
+# NeoCode/NeoProtocol reference cannot silently become current conformance.
+add_test(NAME CrossRepositoryCompatibility.Metadata
+    COMMAND Python3::Interpreter
+        ${PROJECT_SOURCE_DIR}/scripts/check_cross_repository_compatibility.py
+        --metadata ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.json
+        --schema ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.schema.json)
+set_tests_properties(CrossRepositoryCompatibility.Metadata
+    PROPERTIES LABELS "compatibility;metadata")
+
+# Q7 uses a frozen-storage audit rather than a claim inferred from source
+# availability. Keep its Python contract runnable in minimal configurations.
+add_test(NAME QuickJS.LegacyDrainAudit
+    COMMAND Python3::Interpreter
+        ${PROJECT_SOURCE_DIR}/tests/test_legacy_drain_audit.py)
+set_tests_properties(QuickJS.LegacyDrainAudit
+    PROPERTIES LABELS "quickjs;migration;metadata")
+
+if(TARGET neograph_program_tests)
+    if(NEOGRAPH_BUILD_POSTGRES)
+        # Keep the Program PostgreSQL store integration case off the shared
+        # checkpoint fixture while other test cases remain parallelizable.
+        set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
+            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility")
+        gtest_discover_tests(neograph_program_tests
+            TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
+            PROPERTIES RESOURCE_LOCK postgres_test_db)
+        gtest_discover_tests(neograph_program_tests
+            TEST_FILTER "-${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}")
+    else()
+        gtest_discover_tests(neograph_program_tests)
+    endif()
+endif()
+if(TARGET neograph_a2a_agent_card_candidate_tests)
+    gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
+endif()
+if(TARGET neograph_acp_tests)
+    gtest_discover_tests(neograph_acp_tests)
+endif()
+if(TARGET neograph_quickjs_tests)
+    gtest_discover_tests(neograph_quickjs_tests)
+endif()
+
+if(TARGET neograph_quickjs_c_smoke)
+    add_test(NAME QuickJS.CEmbeddingSmoke COMMAND neograph_quickjs_c_smoke)
+    set_tests_properties(QuickJS.CEmbeddingSmoke PROPERTIES LABELS "quickjs;abi")
+endif()
+if(TARGET neograph_a2a_agent_card_candidate_tests)
+    gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
+endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)
     add_test(NAME PostgresCheckpointAbiTest.OldHeaderNewLibrary

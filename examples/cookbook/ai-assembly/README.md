@@ -12,10 +12,10 @@ friction a brand-new C++ developer hits along the way.
 
 Four members of the National Assembly sit on different ports,
 each one an A2A endpoint backed by a distinct persona prompt and the
-same OpenAI model (`gpt-5.4-mini`). The Speaker (Speaker of the National Assembly) is a separate
-program that broadcasts a bill to every member in parallel via
-NeoGraph's `A2AClient`, parses each member's vote out of the reply, and
-declares the outcome.
+same OpenRouter route for the pinned DeepSeek model. The Speaker (Speaker of
+the National Assembly) is a separate program that broadcasts a bill to every
+member in parallel via NeoGraph's `A2AClient`, parses each member's vote out
+of the reply, and declares the outcome.
 
 ```
                           ┌──────────────────┐
@@ -27,7 +27,7 @@ declares the outcome.
             ▼          ▼                       ▼          ▼
        :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
        Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
-       (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
+       (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
 Each member is a one-node NeoGraph (`__start__ → persona → __end__`)
@@ -35,7 +35,7 @@ served behind `a2a::A2AServer`. The graph reads a `prompt` channel and
 writes a `response` channel; the A2A server's default
 `GraphAgentAdapter` surfaces those over JSON-RPC.
 
-## Live transcript (gpt-5.4-mini, 2026-04-29)
+## Live transcript (DeepSeek via OpenRouter, 2026-04-29)
 
 Bill: [`bills/basic_income.txt`](bills/basic_income.txt) — universal
 basic income, 500,000 won/month, funded by land + carbon + progressive tax.
@@ -53,21 +53,29 @@ basic income, 500,000 won/month, funded by land + carbon + progressive tax.
 ```
 
 Each persona's reasoning genuinely tracks their party's stated values.
-That's not the framework's doing — it's just OpenAI honoring distinct
+That's not the framework's doing — it is the pinned model following distinct
 system prompts — but the assembly mechanics (parallel A2A, vote tally,
 discovery) are pure NeoGraph.
 
-## Build + run (in NeoGraph tree)
+## Build + run (in the NeoGraph tree)
 
 ```bash
-# from NeoGraph repo root
-cmake --build build-pybind --target \
+# from NeoGraph repo root; A2A and LLM are optional build components
+cmake -S . -B build-cookbook \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_A2A=ON \
+    -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
+
+The member servers make live OpenRouter calls; `OPENROUTER_API_KEY` and
+network access are required. Compilation itself is offline.
 
 ## Python speaker variant (v0.2.1+, cross-language A2A)
 
@@ -76,9 +84,9 @@ C++ member servers — proves the A2A protocol bridges languages
 cleanly:
 
 ```bash
-pip install neograph-engine          # >= 0.2.1
+pip install 'neograph-engine>=0.2.1'
 # (start the C++ members in another terminal as above)
-PYTHONPATH=build-pybind python3 examples/cookbook/ai-assembly/speaker.py \
+PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
     http://127.0.0.1:8103 http://127.0.0.1:8104
@@ -88,6 +96,7 @@ The Python A2A binding (`neograph_engine.a2a`) ships in v0.2.1.
 Server side (graph-as-A2A-endpoint) stays C++-only for now.
 
 ## Friction journal — what a fresh NeoGraph user tripped over
+
 
 These are the rough edges discovered while building this. **All four
 were fixed in v0.2.1** — left here as a record.
@@ -136,17 +145,16 @@ in the parent shell first. Now documented in
 - `parse_vote` regex on free-form Korean text works because the model
   reliably honors `vote: support/oppose/abstain` when asked. Persona output
   staying inside the format made this a 5-line tally function.
-- Build was clean — FetchContent pulled v0.2.0, no manual dep
-  installation. OpenSSL/CURL on a stock Ubuntu was enough.
+- In-tree CMake build is self-contained; configure it with
+  `NEOGRAPH_BUILD_A2A=ON` and `NEOGRAPH_BUILD_LLM=ON` as shown above.
 
 ## Files
 
 ```
-ai-national-assembly/
-├── CMakeLists.txt              # FetchContent NeoGraph v0.2.0
-├── src/
-│   ├── member_server.cpp       # one binary, configurable persona
-│   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
+ai-assembly/
+├── member_server.cpp           # one configurable persona server
+├── speaker.cpp                 # orchestrator, broadcasts bill, tallies
+├── speaker.py                  # Python A2A client variant
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)

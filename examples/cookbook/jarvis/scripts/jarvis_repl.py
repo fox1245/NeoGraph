@@ -31,8 +31,8 @@ except OSError:
     pass
 atexit.register(lambda: readline.write_history_file(HIST_FILE))
 
-# ── OPENAI_API_KEY 자동 로드 — 없으면 NeoGraph 루트 .env 에서 ───────────────
-if not os.environ.get("OPENAI_API_KEY"):
+# ── OPENROUTER_API_KEY 자동 로드 — 없으면 NeoGraph 루트 .env 에서 ─────────────
+if not os.environ.get("OPENROUTER_API_KEY"):
     env_path = os.path.join(NEOGRAPH_ROOT, ".env")
     if os.path.exists(env_path):
         with open(env_path, encoding="utf-8") as f:

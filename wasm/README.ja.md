@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=9126f4bfed65128d8b676e182ae6e0b13f5d544de24e73018ce2ba8d44fb8093 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=5d8c8917e27b2b522ff655a631f05e29701f0759b8f5bb9595f2db1d02089b92 -->
 # NeoGraph WASM — 実現可能性の急上昇
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -71,10 +71,12 @@ em++ -std=c++20 -O3 -flto -fexceptions -pthread \
 
 `node wasm/smoke.js` で実行します。ブラウザーのフラグは必要ありません。
 
-`compile()` はデフォルトをプロビジョニングするため、`-pthread` が必要です
-thread_pool のサイズは `hardware_concurrency()` です。シングルスレッド WASM は
-も可能です - `-sPTHREAD_POOL_SIZE=0` を渡して呼び出します
-`run()` の前の `engine->set_worker_count(1)`。
+`compile()` のデフォルトは `worker_count=1` なので、エンジン所有の
+スレッドプールは作成されません。このスモークコマンドは、呼び出し側が
+`set_worker_count(N >= 2)` で並列ファンアウトを選べるように Emscripten の
+4 スレッドを有効にしますが、スモーク自体は 1 ワーカーのデフォルトを使います。
+シングルスレッドビルドでは `-sPTHREAD_POOL_SIZE=0` を渡せばよく、
+`set_worker_count(1)` の呼び出しは不要です。
 
 ## フェーズ 2 スケッチ
 

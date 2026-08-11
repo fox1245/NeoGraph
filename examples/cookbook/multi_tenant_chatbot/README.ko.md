@@ -82,15 +82,15 @@ cmake --build build --target cookbook_multi_tenant_mock
 OpenAI 키 없이 작동합니다. NG 엔진 용량 측정(동시 요청 1000개/
 컴파일 캐시 적중률/메모리).
 
-### 라이브 LLM 버전(실제 OpenAI gpt-4o-mini)
+### 라이브 LLM 버전(OpenRouter DeepSeek)
 
 ```bash
-# .env must contain OPENAI_API_KEY at repo root
+# 저장소 루트의 .env에 OPENROUTER_API_KEY가 있어야 합니다.
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
 ```
 
-**비용 ≒ 0.06 USD/요청 1000개**(LLM 호출 2330회 × gpt-4o-mini 요금).
+**비용은 provider와 사용량에 따라 다릅니다**(고정 DeepSeek 경로를 통한 LLM 호출 2330회).
 
 ## 측정
 
@@ -104,9 +104,8 @@ cmake --build build --target cookbook_multi_tenant_live
 |**피크 RSS**|**5.25MB**|**21.9MB**|**29.25MB**|
 |컴파일 캐시 적중률| 99.7% | 94% | **99.4%** |
 |독특한 엔진| 3 | 6 | 6 |
-
-**측정 환경**: WSL2 / 32스레드 asio 스레드 풀 / 단일 호스트 / 실제
-OpenAI API 호출.
+**측정 환경**: WSL2 / 32-thread asio thread pool / 단일 호스트 /
+실제 OpenRouter DeepSeek API 호출.
 
 주요 번호:
 
@@ -147,9 +146,8 @@ SaaS 운영.
 |동시 기내 10,000명 + 고객 10,000명 × 토폴로지 100개|~85MB|✅ 넉넉함 ~915MB 남음|
 |동시 기내 100,000명 + …|~800MB|⚠️ RAM가 거의 다 사용되었습니다|
 
-* 가정: 연결당 ~8KB + 컴파일 캐시 항목당 ~10KB + 기본 5MB.
+물론 OpenRouter rate limit이 처리량의 상한입니다.
 
-물론 t2.micro 1 vCPU 및 OpenAI 계층 RPM 제한은 *처리량* 상한입니다.
 **핵심은 한계 고객 비용이 ~0**이라는 것입니다.
 
 > t2.micro의 LangGraph 100명의 고객을 위한 1GB = 100개의 프로세스 =
@@ -168,8 +166,8 @@ SaaS 운영.
 
 - **CheckpointStore 통합** — 현재 요청별로 기록을 입력으로 전달합니다.
 Postgres CheckpointStore를 사용하면 thread_id당 자동 지속성이 유지됩니다.
-- **고객별 공급자** — alice=gpt-4o-mini, bob=claude-haiku 스타일
-고객마다 다른 model/provider. NodeContext::provider는 고객별로 변경됩니다.
+- **고정 공급자** — 모든 고객이 동일한 OpenRouter DeepSeek 모델을 사용하며,
+  `NodeContext::provider`에는 고객별 컨텍스트를 담을 수 있습니다.
 - **스트리밍 응답** — 토큰 수준의 경우 `input.stream_cb` + SSE가 포함된 `run(input)`
 스트리밍. 스트림 콜백과 함께 NG의 `run(NodeInput)` 경로를 직접 사용하세요.
 - **A/B 실험 프레임워크** — graph_def 해시 + customer_id 고정 분할을 통한 트래픽 분할.

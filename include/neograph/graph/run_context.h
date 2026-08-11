@@ -10,6 +10,7 @@
 #include <neograph/tool_dispatch.h>
 #include <neograph/types.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -31,6 +32,14 @@ struct RunContext {
 
     /// Shared token accounting sink for this run and its subgraphs.
     std::shared_ptr<UsageAccumulator> usage;
+
+    /// Program-supplied token ceiling and terminal signal. Zero/null leave generic Core runs unchanged.
+    std::uint64_t                     model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
+    /// Durable Program run identity used by host-brokered journal effects.
+    std::string run_id;
+    /// Shared sibling-cancellation scope for budget-aware nodes.
+    std::shared_ptr<CancelToken> budget_cancel_token;
 
     /// Absolute monotonic-clock deadline supplied through RunMetadata, when set.
     std::optional<std::chrono::steady_clock::time_point> deadline;
@@ -61,6 +70,12 @@ struct RunContext {
     /// parent policy and this engine's own policy, so a subgraph cannot weaken
     /// a parent gate by using a different GraphEngine instance.
     ToolGate tool_gate;
+
+    /// Shared host admission boundary for every tool call in this run.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+
+    /// Stable host/Program identity copied to each dispatched tool call.
+    ToolExecutionIdentity tool_execution_identity;
 
 };
 

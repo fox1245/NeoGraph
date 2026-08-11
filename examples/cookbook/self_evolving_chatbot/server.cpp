@@ -12,8 +12,8 @@
 // Python 객체라 runtime 에 자기 자신을 reshape 하는 게 사실상 불가능,
 // NG 의 graph-as-JSON 모델만 가능한 카테고리.
 //
-// 비용 추정: 5 turn × (main LLM call ~2.3 + judge LLM call 1) = ~16
-// gpt-4o-mini call ≈ $0.003.
+// Cost estimate: 5 turns × (main LLM call ~2.3 + judge LLM call 1) = ~16
+// pinned DeepSeek via OpenRouter calls.
 //
 // 빌드/실행:
 //   cmake --build build --target cookbook_self_evolving_chatbot
@@ -151,10 +151,10 @@ public:
 
 // ── (3) LLM judge — history + 현재 topology → 다음 topology ─────────
 //
-// 진짜 self-evolution 의 핵심. gpt-4o-mini 가 사용자 대화 스타일을 보고
-// 'simple / reflexive / fanout' 중 best fit 을 한 단어로 응답.
+// 진짜 self-evolution 의 핵심. deepseek/deepseek-v4-flash-0731 이 사용자
+// 대화 스타일을 보고 'simple / reflexive / fanout' 중 best fit 을 한 단어로
+// 응답.
 // Production 이면 judgment prompt + few-shot + 더 풍부한 metric (응답
-// 만족도, 사용자 후속 질문 패턴 등) 결합 가능.
 
 static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
@@ -170,7 +170,7 @@ static std::string llm_judge_topology(
     }
 
     neograph::CompletionParams p;
-    p.model = "gpt-4o-mini";
+    p.model = "deepseek/deepseek-v4-flash-0731";
     p.messages.push_back({
         "system",
         "You are a chatbot harness optimizer. Given a conversation history "
@@ -235,15 +235,17 @@ static long peak_rss_kb() {
 
 int main() {
     cppdotenv::auto_load_dotenv();
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "OPENAI_API_KEY missing (.env or export 필요).\n";
+        std::cerr << "OPENROUTER_API_KEY missing (.env or export 필요).\n";
         return 1;
     }
 
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
-    cfg.default_model = "gpt-4o-mini";
+    cfg.base_url = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 
     NodeFactory::instance().register_type("merge",
@@ -287,7 +289,7 @@ int main() {
         // (a) 현재 topology 로 응답.
         NodeContext ctx;
         ctx.provider = provider;
-        ctx.model = "gpt-4o-mini";
+        ctx.model = "deepseek/deepseek-v4-flash-0731";
         ctx.instructions = alice.system_prompt;
         auto engine = cache.get_or_compile(alice.topology_def, ctx);
 

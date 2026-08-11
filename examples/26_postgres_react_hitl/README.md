@@ -103,7 +103,7 @@ have exactly one row total.
 ### Reference numbers from a real run
 
 A complete run-resume-resume cycle on the multimodal-RAG demo above
-(2 supervisor rounds × 2 researchers each, claude-sonnet-4-5)
+(2 supervisor rounds × 2 researchers each, pinned DeepSeek via OpenRouter)
 produced these PG numbers:
 
 | Metric                      | Value      | Notes |
@@ -126,7 +126,7 @@ into `supervisor_messages`.
 1. Copy and fill in credentials:
    ```
    cp .env.example .env
-   # edit ANTHROPIC_API_KEY
+   # set OPENROUTER_API_KEY; set CRAWL4AI_API_TOKEN to a fresh `openssl rand -hex 32` value
    ```
 2. Bring up the supporting services:
    ```
@@ -156,7 +156,9 @@ cmake --build build --target example_postgres_react_hitl -j
 ```
 
 The host-side .env's `POSTGRES_URL=postgresql://postgres:test@localhost:55432/neograph`
-points at the compose-published port; same for `CRAWL4AI_URL`.
+points at the compose-published port; `CRAWL4AI_URL` does the same for Crawl4AI.
+`CRAWL4AI_API_TOKEN` is sent as its bearer credential; the compose file rejects
+an empty value and publishes Crawl4AI only on `127.0.0.1`.
 
 ## Running the integration tests against this stack
 

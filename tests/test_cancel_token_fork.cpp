@@ -20,6 +20,7 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/post.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -28,6 +29,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -106,13 +108,32 @@ TEST(CancelTokenFork, ForkedOperationChildOutlivesPostedEmit) {
     auto parent = std::make_shared<CancelToken>();
     asio::io_context io;
     auto operation = parent->fork();
-    operation->bind_executor(io.get_executor());
+    (void)operation->bind_executor(io.get_executor());
     parent->cancel();
     operation.reset();
 
     std::size_t drained = 0;
     EXPECT_NO_THROW(drained = io.run());
     EXPECT_EQ(drained, 1u) << "the queued emit must actually be drained";
+}
+
+TEST(CancelTokenFork, UnbindBeforeContextTeardownLeavesRetainedTokenSafe) {
+    // A token may outlive a completed operation (for example, a node can
+    // retain RunContext::cancel_token for diagnostics). It must release the
+    // non-owning Asio executor while that executor's io_context is still
+    // alive; otherwise destroying the token later destroys a stale strand.
+    auto parent = std::make_shared<CancelToken>();
+    std::shared_ptr<CancelToken> retained;
+    {
+        asio::io_context io;
+        retained = parent->fork();
+        (void)retained->bind_executor(io.get_executor());
+        parent->cancel();
+        EXPECT_EQ(io.run(), 1u);
+        retained->unbind_executor();
+    }
+
+    EXPECT_NO_THROW(retained.reset());
 }
 
 TEST(CancelTokenFork, ChildSiblingsAreIndependent) {
@@ -180,10 +201,11 @@ TEST(CancelTokenFork, ChildSlotIsBindableToCoSpawn) {
     std::atomic<bool> got_cancelled{false};
 
     auto child = parent->fork();
-    child->bind_executor(io.get_executor());
+    const auto child_executor = child->bind_executor(io.get_executor());
 
-    auto body = [&]() -> asio::awaitable<void> {
+    auto body = [&, child]() -> asio::awaitable<void> {
         try {
+            child->throw_if_cancelled("CancelToken test entry");
             // Sleep 200ms — plenty of time for cancel() from the
             // other thread to land on the signal.
             asio::steady_timer t(co_await asio::this_coro::executor);
@@ -199,8 +221,10 @@ TEST(CancelTokenFork, ChildSlotIsBindableToCoSpawn) {
         }
     };
 
-    asio::co_spawn(io, body(),
-        asio::bind_cancellation_slot(child->slot(), asio::detached));
+    asio::post(child_executor, [child_executor, child, &body] {
+        asio::co_spawn(child_executor, body(),
+                       asio::bind_cancellation_slot(child->slot(), asio::detached));
+    });
 
     // Cancel from another thread while io.run() is waiting.
     std::thread canceller([&]() {
@@ -217,4 +241,67 @@ TEST(CancelTokenFork, ChildSlotIsBindableToCoSpawn) {
     EXPECT_FALSE(ran_to_completion)
         << "cancel should preempt the timer well before its 200ms "
            "expiry";
+}
+
+TEST(CancelTokenFork, SerialExecutorOwnsSlotDuringConcurrentCancellation) {
+    // A generic thread pool may execute a cancellation emit and a
+    // cancellation-slot lifecycle transition on different workers. The
+    // bound strand is the ownership boundary: both must run there.
+    asio::thread_pool pool(2);
+    auto parent = std::make_shared<CancelToken>();
+    auto child = parent->fork();
+    const auto child_executor = child->bind_executor(pool.get_executor());
+
+    std::promise<void> entered;
+    std::promise<void> finished;
+    auto entered_future = entered.get_future();
+    auto finished_future = finished.get_future();
+    std::atomic<bool> got_cancelled{false};
+    std::exception_ptr unexpected;
+
+    auto body = [child, &entered, &finished, &got_cancelled,
+                 &unexpected]() -> asio::awaitable<void> {
+        try {
+            child->throw_if_cancelled("concurrent cancellation test entry");
+            entered.set_value();
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::seconds(1));
+            co_await timer.async_wait(asio::use_awaitable);
+            unexpected = std::make_exception_ptr(
+                std::runtime_error("cancellation did not abort the timer"));
+        } catch (const asio::system_error& error) {
+            if (error.code() == asio::error::operation_aborted) {
+                got_cancelled = true;
+            } else {
+                unexpected = std::current_exception();
+            }
+        } catch (...) {
+            unexpected = std::current_exception();
+        }
+        finished.set_value();
+    };
+
+    asio::post(child_executor, [child_executor, child, &body] {
+        asio::co_spawn(child_executor, body(),
+                       asio::bind_cancellation_slot(child->slot(), asio::detached));
+    });
+
+    if (entered_future.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
+        parent->cancel();
+        pool.join();
+        ADD_FAILURE() << "cancellation-bound operation did not begin";
+        return;
+    }
+
+    parent->cancel();
+    if (finished_future.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
+        pool.stop();
+        pool.join();
+        ADD_FAILURE() << "cancellation-bound operation did not finish";
+        return;
+    }
+    pool.join();
+
+    EXPECT_EQ(unexpected, nullptr);
+    EXPECT_TRUE(got_cancelled);
 }
