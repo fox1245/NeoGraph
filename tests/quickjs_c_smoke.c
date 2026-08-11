@@ -13,6 +13,17 @@ static int fail(const char* message) {
     return 1;
 }
 
+#if defined(_MSC_VER)
+static void stage(const char* name) {
+    fprintf(stderr, "quickjs C embedding smoke stage: %s\n", name);
+    fflush(stderr);
+}
+#else
+static void stage(const char* name) {
+    (void)name;
+}
+#endif
+
 static int clear_exception(JSContext* context) {
     JSValue   exception     = JS_GetException(context);
     const int has_exception = !JS_IsUndefined(exception);
@@ -166,17 +177,22 @@ static int verify_function_list_initializers(void) {
 }
 
 int main(void) {
+    stage("verify function-list initializers");
     if (verify_function_list_initializers() != 0) return 1;
+
+    stage("create runtime");
     JSRuntime* runtime = JS_NewRuntime();
     if (!runtime) return fail("JS_NewRuntime failed");
 
+    stage("create context");
     JSContext* context = JS_NewContext(runtime);
     if (!context) {
         JS_FreeRuntime(runtime);
         return fail("JS_NewContext failed");
     }
 
-    int     result = 0;
+    int result = 0;
+    stage("install native binding");
     JSValue global = JS_GetGlobalObject(context);
     if (JS_IsException(global)) {
         result = fail("JS_GetGlobalObject failed");
@@ -190,6 +206,8 @@ int main(void) {
     }
     JS_FreeValue(context, global);
 
+    stage("evaluate sealed global surface");
+
     if (!evaluate_truth(context,
                         "nativeAdd(20, 22) === 42 && typeof std === 'undefined' && "
                         "typeof os === 'undefined' && typeof process === 'undefined' && "
@@ -199,6 +217,8 @@ int main(void) {
         result = fail("explicit binding or sealed global surface check failed");
         goto done;
     }
+
+    stage("reject unregistered module");
 
     JSValue module =
         JS_Eval(context, "import * as os from 'os';", strlen("import * as os from 'os';"),
@@ -213,6 +233,8 @@ int main(void) {
         result = fail("unregistered module rejection did not set an exception");
         goto done;
     }
+
+    stage("interrupt infinite evaluation");
 
     InterruptBudget budget = {0, 8};
     JS_SetInterruptHandler(runtime, interrupt_after_budget, &budget);
@@ -230,6 +252,8 @@ int main(void) {
     }
     JS_SetInterruptHandler(runtime, NULL, NULL);
 
+    stage("enforce memory limit");
+
     JS_SetMemoryLimit(runtime, 256 * 1024);
     JSValue allocation =
         JS_Eval(context, "new Uint8Array(1024 * 1024)", strlen("new Uint8Array(1024 * 1024)"),
@@ -244,6 +268,8 @@ int main(void) {
         result = fail("memory limit rejection did not set an exception");
         goto done;
     }
+
+    stage("enforce stack limit");
 
     JS_SetMemoryLimit(runtime, 8 * 1024 * 1024);
     JS_SetMaxStackSize(runtime, 64 * 1024);
@@ -262,6 +288,7 @@ int main(void) {
     }
 
 done:
+    stage("destroy context and runtime");
     JS_FreeContext(context);
     JS_FreeRuntime(runtime);
     if (result == 0) puts("quickjs C embedding smoke passed");
