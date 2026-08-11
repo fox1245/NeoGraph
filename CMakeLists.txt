@@ -372,6 +372,10 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     target_include_directories(neograph_quickjs PRIVATE
         ${_neograph_quickjs_wrapper_dir}
         ${DEPS_DIR}/quickjs)
+    if(MSVC)
+        target_include_directories(neograph_quickjs PRIVATE
+            "${_neograph_quickjs_msvc_output_dir}")
+    endif()
     target_compile_definitions(neograph_quickjs PRIVATE
         CONFIG_VERSION=\"2026-06-04\")
     set_target_properties(neograph_quickjs PROPERTIES
