@@ -392,9 +392,9 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
         "return (uintptr_t)_AddressOfReturnAddress();"
         "stack pointer intrinsic")
     _neograph_quickjs_replace_exact(_quickjs_c
-        "double d = 1.0 / 0.0;"
-        "double d = INFINITY;"
-        "MSVC infinity constant")
+        "1.0 / 0.0"
+        "INFINITY"
+        "MSVC infinity constants")
     _neograph_quickjs_replace_exact(_quickjs_c
         "static void __attribute((unused)) dump_token"
         "static void __maybe_unused dump_token"
