@@ -166,10 +166,10 @@ struct CompiledGraph {
      * compiler dropped or rewired something silently — exactly the
      * v0.1.0–v0.1.7 conditional_edges regression class.
      */
-    json to_json() const;
+    NEOGRAPH_API json to_json() const;
 
     /// @brief Copy the declarative portion without live GraphNode instances.
-    TopologySpec topology() const;
+    NEOGRAPH_API TopologySpec topology() const;
 };
 
 /**

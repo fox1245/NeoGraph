@@ -91,9 +91,10 @@ public:
     static constexpr std::string_view JAVASCRIPT_QUICKJS_BUILD_OPTIONS =
 #if defined(_MSC_VER)
         "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
-        "DYNAMIC_MODULES=disabled;NEOGRAPH_PLATFORM_PORT=msvc-v1;"
+        "DYNAMIC_MODULES=disabled;MSVC_INTRINSICS=disabled;"
+        "NEOGRAPH_PLATFORM_PORT=msvc-v1;"
         "NEOGRAPH_PLATFORM_PORT_SHA256="
-        "a464cb0952d6854aa14ac5ff910c43b4a71d994004d24dade58d695697dce7bb";
+        "ef3a9ecbc3235de8a84999ea5bce453e35f4b8828c581ef5e66afe270ca160c8";
 #else
         "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
         "DYNAMIC_MODULES=disabled";

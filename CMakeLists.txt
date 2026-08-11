@@ -391,6 +391,11 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     endfunction()
     if(MSVC)
         target_compile_definitions(neograph_quickjs PRIVATE _CRT_SECURE_NO_WARNINGS)
+        # /O2 implies /Oi, but MSVC cannot use intrinsic CRT math names such
+        # as floor/ceil/log2 as constant function pointers in QuickJS's
+        # static Math table (C2099). Keep optimization, disable only intrinsic
+        # substitution for this private C target.
+        target_compile_options(neograph_quickjs PRIVATE /Oi-)
     endif()
     # Upstream's opcode-set mask macros intentionally pack bits into a signed
     # int (for example M4(...) in quickjs.c). UBSan's shift check reports that
