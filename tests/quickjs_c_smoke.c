@@ -225,6 +225,9 @@ int main(void) {
         goto done;
     }
 
+    stage("disable stack limit for native binding diagnostic");
+    JS_SetMaxStackSize(runtime, 0);
+
     stage("evaluate zero-argument native binding");
     if (!evaluate_truth(context, "nativeUndefined() === undefined", JS_EVAL_TYPE_GLOBAL)) {
         result = fail("zero-argument native binding evaluation failed");
