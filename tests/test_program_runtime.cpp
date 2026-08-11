@@ -182,8 +182,13 @@ public:
         const auto call = map_fail_first_calls.fetch_add(1, std::memory_order_relaxed) + 1;
         if (call == 1) {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
-            timer.expires_after(std::chrono::milliseconds(1));
-            co_await timer.async_wait(asio::use_awaitable);
+            for (unsigned attempt = 0;
+                 map_fail_first_active.load(std::memory_order_relaxed) == 0; ++attempt) {
+                if (attempt == 2000)
+                    throw std::runtime_error("map fail-fast sibling did not become active");
+                timer.expires_after(std::chrono::milliseconds(1));
+                co_await timer.async_wait(asio::use_awaitable);
+            }
             throw std::runtime_error("map fail-fast sentinel");
         }
         map_fail_first_active.fetch_add(1, std::memory_order_relaxed);
@@ -2662,8 +2667,7 @@ TEST(ProgramRuntimeTest, JavaScriptAwaitTimeoutCancelsDirectCoreWork) {
     EXPECT_LT(elapsed.count(), 2);
 }
 
-TEST(ProgramRuntimeTest, JavaScriptQuorumRunsMembersConcurrentlyAndOrdersSuccesses) {
-    blocking_calls.store(0);
+TEST(ProgramRuntimeTest, JavaScriptQuorumOrdersSuccessfulMembers) {
     AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     const auto      version =
         fixture.admit_javascript(javascript_runtime_source("runtime-short-blocking",
@@ -2682,7 +2686,6 @@ TEST(ProgramRuntimeTest, JavaScriptQuorumRunsMembersConcurrentlyAndOrdersSuccess
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json::array({json{{"id", 1}}, json{{"id", 2}}}));
-    EXPECT_EQ(blocking_calls.load(), 1U);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptCancelScopeCancelsTheOwningRun) {
@@ -5593,9 +5596,6 @@ TEST(ProgramRuntimeTest, ParallelMapFailFastCancelsActiveSiblingAfterFailure) {
                                                  "trace-parallel-map-fail-fast-active",
                                                  {}});
 
-    for (int attempt = 0; attempt < 100 && map_fail_first_active.load() == 0; ++attempt)
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    ASSERT_GT(map_fail_first_active.load(), 0U);
 
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);

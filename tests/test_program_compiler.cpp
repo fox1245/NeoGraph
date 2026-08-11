@@ -674,8 +674,8 @@ TEST(ProgramCompilerTest, JavaScriptRetainedBuildersShareTheQuickJsMemoryCeiling
                                                             R"JS(
             export function define() {
                 const retained = [];
-                for (let index = 0; index < 100000; ++index) {
-                    retained.push(ng.graph("retained-" + index + "-" + "x".repeat(16 * 1024)));
+                for (let index = 0; index < 16; ++index) {
+                    retained.push(ng.graph("retained-" + index + "-" + "x".repeat(1024 * 1024)));
                 }
                 return ng.graph("main");
             }
@@ -685,7 +685,11 @@ TEST(ProgramCompilerTest, JavaScriptRetainedBuildersShareTheQuickJsMemoryCeiling
         (void)compiler.compile(source);
         FAIL() << "expected cumulative native-memory rejection";
     } catch (const ProgramCompileError& error) {
-        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RESOURCE_LIMIT"));
+        ASSERT_FALSE(error.diagnostics().empty());
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RESOURCE_LIMIT"))
+            << error.diagnostics().front().code << ": "
+            << error.diagnostics().front().message << " "
+            << error.diagnostics().front().witness.dump();
     }
 }
 

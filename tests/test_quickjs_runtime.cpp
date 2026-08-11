@@ -14,6 +14,10 @@ namespace {
 class Runtime final {
 public:
     Runtime() : runtime_(JS_NewRuntime()), context_(runtime_ ? JS_NewContext(runtime_) : nullptr) {}
+    Runtime(const JSMallocFunctions& allocator, void* opaque)
+        : runtime_(JS_NewRuntime2(&allocator, opaque)),
+          context_(runtime_ ? JS_NewContext(runtime_) : nullptr) {}
+
 
     Runtime(const Runtime&)            = delete;
     Runtime& operator=(const Runtime&) = delete;
@@ -215,7 +219,14 @@ TEST(QuickJsRuntimeTest, InterruptsEvaluationWhenCancellationWasRequested) {
 }
 
 TEST(QuickJsRuntimeTest, EnforcesRuntimeMemoryAndStackLimits) {
-    Runtime runtime;
+    const JSMallocFunctions allocator{
+        accounting_malloc,
+        accounting_free,
+        accounting_realloc,
+        accounting_usable_size,
+    };
+    AllocationStats stats;
+    Runtime runtime(allocator, &stats);
     ASSERT_NE(runtime.runtime(), nullptr);
     ASSERT_NE(runtime.context(), nullptr);
 

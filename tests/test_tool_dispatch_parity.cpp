@@ -304,9 +304,10 @@ TEST(ToolDispatchParity, ScalingToTwentyTools) {
               << "concurrent " << concurrent.count() << "ms, "
               << "speedup " << ratio << "x\n";
 
-    // The shared pool is deliberately bounded at 16 workers, so N=20 may take
-    // two waves; it must still be far below the 20-wave keyed-exclusive path.
-    EXPECT_LT(concurrent, 3 * kToolDelay)
+    // The shared pool is deliberately bounded between 2 and 16 workers, so
+    // absolute wall time depends on the host. The same-process ratio must
+    // still prove overlap against the keyed-exclusive reference path.
+    EXPECT_GT(ratio, 1.5)
         << "synchronous tools did not overlap at N=" << kN;
     EXPECT_GE(serial, kN * kToolDelay - 200ms)
         << "same-key tool calls bypassed keyed-exclusive admission";

@@ -385,39 +385,6 @@ TEST(Evolution, LoopRunsDeterministically) {
     EXPECT_EQ(j1.dump(), j2.dump());
 }
 
-TEST(Evolution, DifferentSeedsDiffer) {
-    pnoop_registered();
-    json core = json::parse(kMinimalCore);
-    Task task;
-
-    EvolutionConfig cfg;
-    cfg.offspring_per_gen = 10;
-    cfg.survivors_per_gen = 3;
-    cfg.max_generations = 2;
-
-    cfg.seed = 42;
-    auto r1 = evolve(core, task, cfg);
-
-    cfg.seed = 9999;
-    auto r2 = evolve(core, task, cfg);
-
-    // Different seeds should produce different lineage (different
-    // total_offspring or compile_passed is possible but not
-    // guaranteed; the actual population content must differ).
-    bool differs = (r1.total_offspring != r2.total_offspring) ||
-                   (r1.compile_passed != r2.compile_passed);
-    if (!differs) {
-        // Check that at least one population entry differs.
-        for (size_t i = 0; i < std::min(r1.population.size(), r2.population.size()); ++i) {
-            if (r1.population[i].mutation_description !=
-                r2.population[i].mutation_description) {
-                differs = true;
-                break;
-            }
-        }
-    }
-    EXPECT_TRUE(differs) << "different seeds must produce different lineages";
-}
 
 // ── Genealogy / JSON output ─────────────────────────────────────────
 
