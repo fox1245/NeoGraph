@@ -10,7 +10,7 @@
 // keeps them alive (each MCPTool retains the right back-reference).
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_mcp_multi http://localhost:8000 \
 //       python3 examples/demo_mcp_stdio_server.py
 // (auto-loads .env from the cwd or any parent directory.)
@@ -40,9 +40,9 @@ int main(int argc, char** argv) {
     const std::string question   = (argc >= 5) ? argv[4]
         : "What is the weather in Tokyo, and then save a note summarizing the answer.";
 
-    const char* key_env = std::getenv("OPENAI_API_KEY");
+    const char* key_env = std::getenv("OPENROUTER_API_KEY");
     if (!key_env) {
-        std::cerr << "OPENAI_API_KEY missing (set it or put it in .env)\n";
+        std::cerr << "OPENROUTER_API_KEY missing (set it or put it in .env)\n";
         return 1;
     }
     std::string api_key = key_env;
@@ -74,7 +74,9 @@ int main(int argc, char** argv) {
     // --- LLM ---
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
-    cfg.default_model = "gpt-4o-mini";
+    cfg.base_url = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
         neograph::llm::OpenAIProvider::create(cfg);
 

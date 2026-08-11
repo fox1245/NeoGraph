@@ -5,6 +5,9 @@
 # so each `run`/`resume` invocation is its own process — that's the
 # whole point of the demo (proving checkpoints survive the process).
 #
+# `.env` must set both OPENROUTER_API_KEY and CRAWL4AI_API_TOKEN before
+# starting this stack; current Crawl4AI releases refuse externally reachable
+# unauthenticated API traffic.
 # Bring the supporting services up first:
 #   docker compose up -d postgres crawl4ai
 #
@@ -44,8 +47,10 @@ services:
   crawl4ai:
     image: unclecode/crawl4ai:latest
     shm_size: 1gb
+    environment:
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?Set CRAWL4AI_API_TOKEN in .env to a random secret}
     ports:
-      - "11235:11235"
+      - "127.0.0.1:11235:11235"
 
   agent:
     build:

@@ -212,8 +212,12 @@ void SchemaProvider::parse_schema()
         : user_config_.base_url_override;
     conn_.endpoint = c.value("endpoint", "");
     conn_.stream_endpoint = c.value("stream_endpoint", conn_.endpoint);
-    conn_.auth_header = c.value("auth_header", "");
-    conn_.auth_prefix = c.value("auth_prefix", "");
+    conn_.auth_header = user_config_.auth_header_override.empty()
+        ? c.value("auth_header", "")
+        : user_config_.auth_header_override;
+    conn_.auth_prefix = user_config_.auth_prefix_override.empty()
+        ? c.value("auth_prefix", "")
+        : user_config_.auth_prefix_override;
     conn_.api_key_env = c.value("api_key_env", "");
     conn_.auth_query_param = c.value("auth_query_param", "");
     if (c.contains("extra_headers") && c["extra_headers"].is_object()) {
@@ -1072,6 +1076,18 @@ json SchemaProvider::build_body(const CompletionParams& params) const {
         body[k] = v;
     }
 
+    // OpenRouter provider routing is a top-level object. Keep it as a
+    // schema-independent configuration default; schemas may additionally
+    // expose `provider` in `per_call_fields` for a request-local override.
+    // Source: https://openrouter.ai/docs/guides/routing/provider-selection
+    // (verified 2026-08-08).
+    if (!user_config_.provider_routing.is_null()) {
+        if (!user_config_.provider_routing.is_object()) {
+            throw std::invalid_argument(
+                "SchemaProvider Config::provider_routing must be an object");
+        }
+        body["provider"] = user_config_.provider_routing;
+    }
     // Per-call body field bindings (issue #33).
     //
     // The schema declares which paths a caller can override per-call

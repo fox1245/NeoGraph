@@ -15,6 +15,6 @@ P8 切换处置：[`spec/neograph-example-disposition-v1.json`](../../spec/neogr
 | [`byo-openai/`](byo-openai/) | 带上你自己的 `openai.OpenAI()` 客户端：继承 NeoGraph 的 `Provider`，把每一次 LLM 调用委托给 SDK，同时保留你自己的重试 / Azure / 可观测性配置。另含：通过 agentic-provider 模式实现工具调用。 |
 | [`jarvis/`](jarvis/) | **语音驱动的元编排器（骨架）。** 麦克风 → whisper.cpp（自动检测语言）→ router（direct / delegate / parallel 三路）→ MCP 工具或 A2A 专家 → supertonic 设备端 TTS，使用检测到的用户语言。JSON 驱动的工具 + 代理目录，A2A 双向（JARVIS 自身也可被访问）。设备端运行，零云依赖。 |
 | [`minimal-mcp/`](minimal-mcp/) | MCP 客户端往返，且**没有 LLM、没有 API 密钥、没有 fastmcp**：约 60 行 stdlib stdio 服务器 + 一个执行 `initialize` → `tools/list` → `tools/call` 的 C++ 执行框架。展示 NeoGraph 的 MCP 客户端只需要一个会说线协议的进程 — 对端可以是任何东西。 |
-| [`ollama-provider/`](ollama-provider/) | 通过 Ollama 使用本地 LLM。两条路径：内置 `OpenAIProvider` 对接 Ollama 的兼容端点（零新代码），或者自定义 `Provider` 对接原生 `/api/chat`。完整代理栈，不需要外部 API 密钥。 |
+| [`openrouter-provider/`](openrouter-provider/) | OpenRouter 固定 DeepSeek provider 示例：比较兼容 endpoint 的内置 `OpenAIProvider` 与直接 HTTP 的自定义 Python `Provider`。 |
 
 每个示例也会记录它暴露出的摩擦点 — 这有助于找到公开 API 的粗糙边缘。

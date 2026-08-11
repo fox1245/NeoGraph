@@ -457,12 +457,16 @@ void init_provider(py::module_& m) {
         .def(py::init([](const std::string& api_key,
                          const std::string& base_url,
                          const std::string& default_model,
-                         int timeout_seconds) {
+                         int timeout_seconds,
+                         py::object provider_routing) {
             neograph::llm::OpenAIProvider::Config cfg;
             cfg.api_key = api_key;
             cfg.base_url = base_url;
             cfg.default_model = default_model;
             cfg.timeout_seconds = timeout_seconds;
+            if (!provider_routing.is_none()) {
+                cfg.provider_routing = py_to_json(provider_routing);
+            }
             // create() returns unique_ptr; convert to shared_ptr so the
             // pybind11 holder type matches.
             return std::shared_ptr<neograph::llm::OpenAIProvider>(
@@ -471,7 +475,8 @@ void init_provider(py::module_& m) {
             py::arg("api_key") = "",
             py::arg("base_url") = "https://api.openai.com",
             py::arg("default_model") = "gpt-4o-mini",
-            py::arg("timeout_seconds") = 60);
+            py::arg("timeout_seconds") = 60,
+            py::arg("provider_routing") = py::none());
 
     // ── SchemaProvider ───────────────────────────────────────────────────
     py::class_<neograph::llm::SchemaProvider, neograph::Provider,
@@ -485,7 +490,10 @@ void init_provider(py::module_& m) {
                          int timeout_seconds,
                          const std::string& base_url_override,
                          bool use_websocket,
-                         bool prefer_libcurl) {
+                         bool prefer_libcurl,
+                         py::object provider_routing,
+                         const std::string& auth_header_override,
+                         const std::string& auth_prefix_override) {
             neograph::llm::SchemaProvider::Config cfg;
             cfg.schema_path = schema_path;
             cfg.api_key = api_key;
@@ -494,6 +502,11 @@ void init_provider(py::module_& m) {
             cfg.base_url_override = base_url_override;
             cfg.use_websocket = use_websocket;
             cfg.prefer_libcurl = prefer_libcurl;
+            cfg.auth_header_override = auth_header_override;
+            cfg.auth_prefix_override = auth_prefix_override;
+            if (!provider_routing.is_none()) {
+                cfg.provider_routing = py_to_json(provider_routing);
+            }
             return std::shared_ptr<neograph::llm::SchemaProvider>(
                 neograph::llm::SchemaProvider::create(cfg).release());
         }),
@@ -503,7 +516,10 @@ void init_provider(py::module_& m) {
             py::arg("timeout_seconds") = 60,
             py::arg("base_url_override") = "",
             py::arg("use_websocket") = false,
-            py::arg("prefer_libcurl") = false);
+            py::arg("prefer_libcurl") = false,
+            py::arg("provider_routing") = py::none(),
+            py::arg("auth_header_override") = "",
+            py::arg("auth_prefix_override") = "");
 #endif // NEOGRAPH_PYBIND_HAS_LLM
 }
 

@@ -119,7 +119,8 @@ subordinate by just adding its URL to this JSON.
 
 ## Router (Intent Classification) — JARVIS's Brain
 
-A single call to a small/fast LLM (e.g., `gpt-4o-mini` or local `llama-3.2-1b`) returns:
+A single call to the pinned DeepSeek model (`deepseek/deepseek-v4-flash-0731`)
+returns:
 
 ```json
 {
@@ -223,7 +224,7 @@ cmake --build build-jarvis --target cookbook_jarvis -j
 
 # 3a. Run — text/wav input (Korean line-edit REPL recommended)
 cd examples/cookbook/jarvis
-python3 scripts/jarvis_repl.py                 # Automatically loads OPENAI_API_KEY from .env
+python3 scripts/jarvis_repl.py                 # Automatically loads OPENROUTER_API_KEY from .env
 #   Tony ▸ Hello?                                # Text
 #   Tony ▸ wav:/path/to/audio.wav                # Audio file → STT
 
@@ -235,9 +236,9 @@ JARVIS_MIC=1 bash scripts/run_jarvis.sh config-demo/real-tools
 python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ```
 
-LLM provider selected by `OPENAI_API_KEY` in `.env` (direct OpenAI) or
-`OPENAI_BASE_URL`+`JARVIS_ROUTER_MODEL`/`JARVIS_SYNTH_MODEL` (Groq/Cerebras/etc.
-OpenAI-compatible). Without it, runs offline with MockProvider (echo).
+The live provider is fixed to OpenRouter with the pinned DeepSeek model and
+`OPENROUTER_API_KEY` in `.env`. Without the key, it runs offline with
+MockProvider (echo).
 
 ## Voice Stack Details
 
@@ -268,13 +269,13 @@ in LangGraph (Python twin `langgraph_twin.py`), measures in identical constraint
 (`--cpus=2 --memory=2g`) container.
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
 ## Implementation Status
 
-**Fully functional** — Verified live voice single-turn runs on real hardware (real LLM Groq).
-Mic→VAD→STT→router→4-way→synth→TTS full chain + memory persistence + A2A self-server.
+**Fully functional** — Verified live voice single-turn runs on real hardware
+(OpenRouter DeepSeek). Mic→VAD→STT→router→4-way→synth→TTS full chain +
 
 Known limitations / next version:
 - **Barge-in not supported** — Utterances during TTS playback are discarded via backpressure

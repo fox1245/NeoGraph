@@ -36,7 +36,7 @@
 // `tests/test_schema_provider_stream_async_outer_io.cpp` against
 // a local httplib SSE mock + Korean unicode payload + 6 concurrent
 // outer coroutines + Valgrind clean. This example is the
-// **runnable** counterpart — point it at a real OpenAI key and
+// **runnable** counterpart — point it at a real OpenRouter key and
 // watch tokens stream out.
 //
 // ## What it does
@@ -50,7 +50,7 @@
 // LLM call streams tokens via the post-#10 path.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_react_async_streaming
 //
 // Compare with example 01 (sync `agent.run_stream`) — same agent
@@ -182,25 +182,20 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-        const char* api_key = std::getenv("OPENAI_API_KEY");
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENAI_API_KEY environment variable "
+            std::cerr << "Set OPENROUTER_API_KEY environment variable "
                          "(or put it in .env beside the binary)\n";
             return 1;
         }
 
-        // SchemaProvider("openai_responses") is the exact transport
-        // that segfaulted in issue #4. The HTTP/SSE path lands on
-        // Provider::complete_stream_async's post-#10 default (worker
-        // thread + dispatch back onto awaiter executor). Flip
-        // use_websocket=true to drive the openai-responses WS path,
-        // which uses SchemaProvider's native complete_stream_async
-        // override (skips even the worker thread; pure co_await).
         neograph::llm::SchemaProvider::Config provider_cfg;
         provider_cfg.schema_path     = "openai_responses";
         provider_cfg.api_key         = api_key;
-        provider_cfg.default_model   = "gpt-4o-mini";
+        provider_cfg.base_url_override = "https://openrouter.ai/api";
+        provider_cfg.default_model   = "deepseek/deepseek-v4-flash-0731";
         provider_cfg.timeout_seconds = 30;
+        provider_cfg.provider_routing = {{"zdr", true}};
         std::shared_ptr<neograph::Provider> provider =
             neograph::llm::SchemaProvider::create(provider_cfg);
 

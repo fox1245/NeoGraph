@@ -35,7 +35,7 @@ LangChain/LangGraph 的 StateGraph 是 Python class instance — pickle 也会�
 
 ## 核心机制
 
-每个 turn 结束时，LLM judge（gpt-4o-mini）查看 conversation history + current topology，并用一个词回答最适合的形态：
+每个 turn 结束时，OpenRouter 的固定 DeepSeek 模型作为 LLM judge 查看 conversation history + current topology，并用一个词回答最适合的形态：
 
 - `simple` — 1 次 LLM 调用，简短直接回答（适合 factual Q）
 - `reflexive` — 3 次 LLM 调用（draft → critique → final）（适合追求准确性）

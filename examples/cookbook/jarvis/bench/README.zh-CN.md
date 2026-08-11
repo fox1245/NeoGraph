@@ -6,10 +6,10 @@
 在 NeoGraph（C++ mock 构建）和 LangGraph（Python 对等实现 `langgraph_twin.py`）中复刻相同拓扑（mic→stt→merge→memory→router→4-way→synth/skip→commit→tts），并在相同约束（`--cpus=2 --memory=2g`）的容器中测量。
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
-## 测量结果（2026-07-05，WSL2，--cpus=2 --memory=2g）
+## 历史测量结果（2026-07-05，OpenRouter 迁移前；Groq）
 
 | 指标 | NeoGraph | LangGraph | 差值 |
 |---|---|---|---|
@@ -27,7 +27,7 @@ GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns ×
 ## E2E 轮次 — 包含真实 MCP 工具往返（2026-07-05）
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_e2e.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 ```
 
 共享 demo MCP server 容器（time/calc/weather）+ 24-turn 混合集（直接工具调用 · 并行 fan-out · 聊天 · 记忆回忆），每边 2 轮并用 ABBA 顺序交错：
@@ -46,7 +46,7 @@ GROQ_API_KEY=... bash bench/run_bench_e2e.sh
 ## 边界测量轮次 — 消除 Provider 离散（2026-07-05）
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_proxy.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
 用代理边界测量解决 E2E 的“离散吞没差值”问题：把 nginx 放在 Groq 前面，用来 **记录每次调用的 upstream（WAN+Groq）时间**，并从 turn round-trip 中减去它，只比较 residual（graph + HTTP client serialization + local MCP + pipe）。这不是统计绕法（增加 ABBA/retry 次数），而是直接测量并扣除噪声源本身 — 即使不同轮次碰到不同 Groq 窗口，结果也不会摇摆。
@@ -89,6 +89,6 @@ GROQ_API_KEY=... bash bench/run_bench_proxy.sh
 - `driver.py` / `analyze.py` — 测量 · 对比表
 - `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — 基准镜像
 - `run_bench.sh`（core）/ `run_bench_e2e.sh`（real tool E2E）— 运行器
-- `turns_mock.txt`（200）/ `turns_groq.txt`（20）/ `turns_e2e.txt`（24）— turn 集合
+- `turns_mock.txt`（200）/ `turns_openrouter.txt`（20）/ `turns_e2e.txt`（24）— turn 集合
 - `../config-bench/` — 空 catalog（固定 chat path）/
   `../config-bench-e2e/` — 共享 MCP server catalog

@@ -1,7 +1,7 @@
 // AI 국회의원 server — exposes a single persona over A2A.
 //
-// Each invocation runs one OpenAI-backed persona on a configured port.
-// The persona reads the inbound bill text, returns its vote (찬성/반대/
+// Each invocation runs one OpenRouter-backed DeepSeek persona on a configured
+// port. The persona reads the inbound bill text, returns its vote (찬성/반대/
 // 기권) plus reasoning. The Speaker reaches it via NeoGraph's A2AClient
 // over the standard /.well-known/agent-card.json discovery path.
 //
@@ -11,8 +11,8 @@
 // Example:
 //   member_server 8101 의원_김진보 진보당 prompts/jinbo.txt
 //
-// .env (or env vars) must set OPENAI_API_KEY. Model is hard-coded to
-// gpt-5.4-mini per project requirement.
+// .env (or env vars) must set OPENROUTER_API_KEY. The model is hard-coded to
+// deepseek/deepseek-v4-flash-0731.
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
@@ -55,7 +55,7 @@ std::string slurp_file(const std::string& path) {
 
 // PersonaNode — a single LLM call that wears the persona of one
 // 국회의원. Reads `prompt` (the bill text + voting instructions from
-// the Speaker), calls OpenAI with the persona's system prompt, and
+// the pinned OpenRouter DeepSeek route with the persona's system prompt,
 // writes the model's reply to `response` for the A2A server adapter
 // to surface as the agent's text response.
 class PersonaNode : public GraphNode {
@@ -76,7 +76,7 @@ class PersonaNode : public GraphNode {
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
         CompletionParams p;
-        p.model = "gpt-5.4-mini";
+        p.model = "deepseek/deepseek-v4-flash-0731";
         p.temperature = 0.7f;
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user", user_text});
@@ -114,9 +114,9 @@ int main(int argc, char** argv) {
     std::string party         = argv[3];
     std::string prompt_path   = argv[4];
 
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key || !*api_key) {
-        std::cerr << "OPENAI_API_KEY not set\n";
+        std::cerr << "OPENROUTER_API_KEY not set\n";
         return 2;
     }
 
@@ -128,13 +128,15 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Provider — gpt-5.4-mini per project requirement.
+    // Provider — OpenRouter DeepSeek with ZDR routing.
     // create_shared returns shared_ptr<Provider> so the NodeFactory
     // lambda below can capture and reuse the same provider across
     // every node-instantiation call.
     llm::OpenAIProvider::Config cfg;
     cfg.api_key       = api_key;
-    cfg.default_model = "gpt-5.4-mini";
+    cfg.base_url      = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::OpenAIProvider::create_shared(cfg);
 
     // Wire the persona node into a one-step graph.

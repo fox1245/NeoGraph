@@ -102,7 +102,8 @@ json base_schema() {
 
 std::unique_ptr<SchemaProvider> make_provider_from(
     const json& schema,
-    std::shared_ptr<const SchemaStrategyRegistry> strategy_registry = nullptr) {
+    std::shared_ptr<const SchemaStrategyRegistry> strategy_registry = nullptr,
+    json provider_routing = nullptr) {
     auto path = write_temp_schema(schema);
     if (path.empty()) return nullptr;
 
@@ -111,6 +112,7 @@ std::unique_ptr<SchemaProvider> make_provider_from(
     cfg.api_key = "test-key";
     cfg.default_model = "gpt-test";
     cfg.strategy_registry = std::move(strategy_registry);
+    cfg.provider_routing = std::move(provider_routing);
 
     auto sp = SchemaProvider::create(cfg);
     std::remove(path.c_str());
@@ -390,5 +392,37 @@ TEST(SchemaPerCallFields, NestedPathBindsCorrectly) {
     ASSERT_TRUE(body.contains("a")) << body.dump();
     EXPECT_EQ(body["a"]["b"]["c"]["d"].get<std::string>(), "deep");
 }
+
+TEST(SchemaProviderRouting, ConfigDefaultAndPerCallOverride) {
+    auto schema = base_schema();
+    schema["request"]["per_call_fields"] = json::array({"provider"});
+    const json configured = {
+        {"zdr", true},
+        {"only", json::array({"morph"})},
+        {"allow_fallbacks", false},
+    };
+    auto sp = make_provider_from(schema, nullptr, configured);
+    ASSERT_NE(sp, nullptr);
+
+    auto body = SchemaProviderTestAccess::build_body(*sp, basic_params());
+    EXPECT_EQ(body.at("provider"), configured);
+
+    CompletionParams params = basic_params();
+    params.extra_fields = {
+        {"provider", {{"only", json::array({"deepseek"})}}},
+    };
+    body = SchemaProviderTestAccess::build_body(*sp, params);
+    const json expected_provider = {{"only", json::array({"deepseek"})}};
+    EXPECT_EQ(body.at("provider"), expected_provider);
+}
+
+TEST(SchemaProviderRouting, RejectsNonObjectConfiguration) {
+    auto sp = make_provider_from(base_schema(), nullptr, "morph");
+    ASSERT_NE(sp, nullptr);
+    EXPECT_THROW(
+        (void)SchemaProviderTestAccess::build_body(*sp, basic_params()),
+        std::invalid_argument);
+}
+
 
 #endif // !_WIN32

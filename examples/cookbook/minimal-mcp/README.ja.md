@@ -4,7 +4,7 @@
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 このリポジトリ (03 / 20 / 21 / 22) 内の他のすべての MCP サンプルは MCP をラップしています
-`OPENAI_API_KEY` とほとんどの MCP を必要とする ReAct ループ内のクライアント
+`OPENROUTER_API_KEY` と、ほとんどの MCP を必要とする ReAct ループ内のクライアント
 チュートリアルでは、`pip install fastmcp` (約 60 個のパッケージをプルします) を前提としています。
 サーバー側で。これには有益な事実が隠されています。
 

@@ -76,20 +76,17 @@ public:
 
 int main() {
     const bool smoke_mode = environment("NEOGRAPH_HARNESS_SMOKE") == "1";
-    const auto api_key    = environment("NEOGRAPH_HARNESS_API_KEY", "OPENAI_API_KEY");
+    const auto api_key    = environment("NEOGRAPH_HARNESS_API_KEY", "OPENROUTER_API_KEY");
     if (!smoke_mode && api_key.empty()) {
-        std::cerr << "Set NEOGRAPH_HARNESS_API_KEY or OPENAI_API_KEY\n";
+        std::cerr << "Set NEOGRAPH_HARNESS_API_KEY or OPENROUTER_API_KEY\n";
         return 2;
     }
 
     neograph::llm::OpenAIProvider::Config provider_config;
-    provider_config.api_key = api_key;
-    if (const auto base_url = environment("NEOGRAPH_HARNESS_BASE_URL"); !base_url.empty()) {
-        provider_config.base_url = base_url;
-    }
-    if (const auto model = environment("NEOGRAPH_HARNESS_MODEL"); !model.empty()) {
-        provider_config.default_model = model;
-    }
+    provider_config.api_key         = api_key;
+    provider_config.base_url        = "https://openrouter.ai/api";
+    provider_config.default_model   = "deepseek/deepseek-v4-flash-0731";
+    provider_config.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider;
     if (smoke_mode) {
         provider                      = std::make_shared<SmokeReviewProvider>();

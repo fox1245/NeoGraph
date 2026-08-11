@@ -71,7 +71,7 @@ build (bundled reduced build excludes ConvInteger) → default fp32(~183MB).
 - Cost ×, always runs at graph start
 
 ### router (`intent_classifier`)
-- Small LLM (gpt-4o-mini, ~200-400ms)
+- Pinned DeepSeek model via OpenRouter (~200-400ms)
 - System prompt = persona.txt [router] + MCP catalog text + agent registry text
 - Output JSON validation: parse failure → fallback (mode=chat). Tool/agent names
   verified against catalog·registry; if not real, demoted to chat (prevents LLM-invented
@@ -95,7 +95,7 @@ build (bundled reduced build excludes ConvInteger) → default fp32(~183MB).
 - Extracts `[SUMMARY]` line first from response → saves to `delegated_reply`
 
 ### response_synth (`llm_call`)
-- Large LLM (gpt-4o, ~800-1500ms)
+- Pinned DeepSeek model via OpenRouter (~800-1500ms)
 - System prompt = persona.txt [synth] (+ language instruction + session boundary comment)
 - Conversation history (memory_context.recent_turns) is **passed as a messages array of user/assistant
   role turns** — previously, inline JSON in user message caused model to treat past answers

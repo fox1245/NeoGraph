@@ -1,5 +1,5 @@
-# Groq 경계 계측 프록시 — nginx 가 TLS 종단 + 콜별 상류 타이밍 로깅
+# OpenRouter boundary instrumentation proxy — nginx logs per-call upstream timing
 FROM nginx:alpine
-COPY examples/cookbook/jarvis/bench/nginx-groq.conf /etc/nginx/nginx.conf
+COPY examples/cookbook/jarvis/bench/nginx-openrouter.conf /etc/nginx/nginx.conf
 RUN mkdir -p /logs
 EXPOSE 8080

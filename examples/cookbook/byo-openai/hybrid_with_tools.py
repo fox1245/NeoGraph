@@ -1,15 +1,14 @@
-"""NeoGraph + openai-sdk hybrid WITH tool calling — agentic provider.
+"""NeoGraph + openai-sdk hybrid WITH tool calling — OpenRouter agentic provider.
 
 Pattern A from the cookbook README: do the tool-calling loop inside
-the Python Provider's `complete()`. The user's openai SDK fires the
+the Python Provider's `complete()`. The OpenRouter-backed SDK fires the
 LLM call, sees `tool_calls`, dispatches Python functions in-process,
 appends results, calls again, and returns only the final assistant
-message to NeoGraph. The graph sees one provider call per turn, no
-`tool_dispatch` node needed.
+message to NeoGraph.
 
 Run:
     pip install neograph-engine>=0.2.3 openai
-    echo 'OPENAI_API_KEY=sk-...' > .env
+    echo 'OPENROUTER_API_KEY=sk-or-...' > .env
     python hybrid_with_tools.py
 """
 
@@ -70,7 +69,8 @@ class AgenticOpenAIProvider(ng.Provider):
     final assistant message (no tool_calls) or the cap is hit. NeoGraph
     sees exactly one provider call per graph step.
     """
-    def __init__(self, client, tools=PYTHON_TOOLS, model="gpt-5.4-mini",
+    def __init__(self, client, tools=PYTHON_TOOLS,
+                 model="deepseek/deepseek-v4-flash-0731",
                  max_iterations=8):
         super().__init__()
         self.client    = client
@@ -97,6 +97,7 @@ class AgenticOpenAIProvider(ng.Provider):
                 messages=messages,
                 tools=sdk_tools,
                 temperature=params.temperature,
+                extra_body={"provider": {"zdr": True}},
             )
             choice = r.choices[0]
 
@@ -158,13 +159,15 @@ def _load_env():
             return
 
 
-def main() -> int:
     _load_env()
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("OPENAI_API_KEY not set", file=sys.stderr)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("OPENROUTER_API_KEY not set", file=sys.stderr)
         return 2
 
-    client = OpenAI()
+    client = OpenAI(
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        base_url="https://openrouter.ai/api/v1",
+    )
     provider = AgenticOpenAIProvider(client)
     ctx = ng.NodeContext(
         provider=provider,

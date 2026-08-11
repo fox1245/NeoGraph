@@ -14,10 +14,9 @@ A2A가 실제 다중 인물 시나리오에서 작동함을 증명하고
 
 네 명의 국회의원이 서로 다른 항구에 앉아 있는데,
 각각은 고유한 페르소나 프롬프트로 지원되는 A2A 엔드포인트이며
-동일한 OpenAI 모델(`gpt-5.4-mini`). 국회의장(국회의장)은 별도이다.
-모든 회원에게 동시에 법안을 방송하는 프로그램
-NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
-결과를 선언합니다.
+고정 DeepSeek 모델을 사용하는 동일한 OpenRouter 경로입니다. 국회의장은 별도
+프로그램으로, NeoGraph의 `A2AClient`를 통해 모든 회원에게 법안을 병렬 방송하고
+응답에서 투표를 분석하여 결과를 선언합니다.
 
 ```
                           ┌──────────────────┐
@@ -29,7 +28,7 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
             ▼          ▼                       ▼          ▼
        :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
        Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
-       (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
+       (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
 각 구성원은 1노드 NeoGraph(`__start__ → persona → __end__`)입니다.
@@ -37,7 +36,7 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
 `response` 채널을 작성합니다. A2A 서버의 기본값
 `GraphAgentAdapter`는 JSON-RPC 이상의 항목을 표면화합니다.
 
-## 실시간 대본(gpt-5.4-mini, 2026-04-29)
+## 실시간 대본(DeepSeek via OpenRouter, 2026-04-29)
 
 청구서: [`bills/basic_income.txt`](bills/basic_income.txt) — 범용
 기본소득, 500,000 won/month, 토지 + 탄소 + 누진세로 자금 지원.
@@ -71,12 +70,12 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-멤버 서버는 실제 OpenAI 호출을 하므로 `OPENAI_API_KEY`와 네트워크가
+멤버 서버는 OpenRouter를 호출하므로 `OPENROUTER_API_KEY`와 네트워크가
 필요합니다. 컴파일 자체는 오프라인으로 검증할 수 있습니다.
 
 ## Python 스피커 변형(v0.2.1+, 교차 언어 A2A)

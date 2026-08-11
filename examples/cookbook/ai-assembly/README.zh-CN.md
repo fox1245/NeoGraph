@@ -11,10 +11,9 @@
 ## 它做什么
 
 四名国会议员监听在不同端口上，
-每一个都是由不同 persona prompt 和同一个 OpenAI 模型（`gpt-5.4-mini`）支撑的 A2A endpoint。
-Speaker（国会议长）是一个独立程序，通过 NeoGraph 的 `A2AClient`
-并行向每位成员广播一份法案，从回复中解析每位成员的投票，
-并宣布结果。
+每一个都是由不同 persona prompt 和同一个 OpenRouter 路由（固定 DeepSeek 模型）支撑的 A2A endpoint。
+Speaker（国会议长）是独立程序，通过 NeoGraph 的 `A2AClient`
+并行向每位成员广播法案，从回复中解析投票并宣布结果。
 
 ```
                           ┌──────────────────┐
@@ -26,14 +25,14 @@ Speaker（国会议长）是一个独立程序，通过 NeoGraph 的 `A2AClient`
             ▼          ▼                       ▼          ▼
        :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
        Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
-       (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
+       (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
 每位成员都是一个单节点 NeoGraph（`__start__ → persona → __end__`），
 由 `a2a::A2AServer` 提供服务。graph 读取 `prompt` channel 并写入 `response` channel；
 A2A server 默认的 `GraphAgentAdapter` 会通过 JSON-RPC 暴露这些 channel。
 
-## 现场转录（gpt-5.4-mini，2026-04-29）
+## 现场转录（DeepSeek via OpenRouter，2026-04-29）
 
 法案：[`bills/basic_income.txt`](bills/basic_income.txt) — 普遍
 基本收入，每月 500,000 韩元，由土地税 + 碳税 + 累进税资助。
@@ -66,12 +65,12 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-成员服务器会调用 OpenAI，因此需要 `OPENAI_API_KEY` 和网络访问。
+成员服务器会调用 OpenRouter，因此需要 `OPENROUTER_API_KEY` 和网络访问。
 编译本身可以离线验证。
 
 ## Python speaker 变体（v0.2.1+，跨语言 A2A）

@@ -12,11 +12,10 @@ A2A が実際の複数ペルソナのシナリオで機能することを証明�
 ## 何をするのか
 
 国会議員4名がそれぞれ異なる港に座っており、
-それぞれが、個別のペルソナ プロンプトによってサポートされる A2A エンドポイントであり、
-同じ OpenAI モデル (`gpt-5.4-mini`)。議長（国会議長）は別人である
-を介してすべてのメンバーに請求書を並行してブロードキャストするプログラム
-NeoGraph の `A2AClient` は、返信から各メンバーの投票を解析し、
-結果を宣言します。
+それぞれが個別のペルソナプロンプトで支えられた A2A エンドポイントで、
+固定 DeepSeek モデルを使う同じ OpenRouter ルートです。議長は別プログラムで、
+NeoGraph の `A2AClient` を介して全メンバーへ法案を並行配信し、
+返信から投票を解析して結果を宣言します。
 
 ```
                           ┌──────────────────┐
@@ -28,7 +27,7 @@ NeoGraph の `A2AClient` は、返信から各メンバーの投票を解析し�
             ▼          ▼                       ▼          ▼
        :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
        Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
-       (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
+       (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
 各メンバーは 1 ノードの NeoGraph (`__start__ → persona → __end__`) です。
@@ -36,7 +35,7 @@ NeoGraph の `A2AClient` は、返信から各メンバーの投票を解析し�
 `response` チャネルを書き込みます。 A2Aサーバーのデフォルト
 `GraphAgentAdapter` は、JSON-RPC 経由でそれらを表示します。
 
-## ライブトランスクリプト (gpt-5.4-mini、2026-04-29)
+## ライブトランスクリプト (DeepSeek via OpenRouter、2026-04-29)
 
 ビル: [`bills/basic_income.txt`](bills/basic_income.txt) — ユニバーサル
 ベーシックインカム、月額50万ウォン、財源は土地+炭素+累進税。
@@ -70,12 +69,12 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-メンバーサーバーは OpenAI を呼び出すため、`OPENAI_API_KEY` と
+メンバーサーバーは OpenRouter を呼び出すため、`OPENROUTER_API_KEY` と
 ネットワーク接続が必要です。コンパイル自体はオフラインで検証できます。
 
 ## Python スピーカー バリアント (v0.2.1+、クロスランゲージ A2A)

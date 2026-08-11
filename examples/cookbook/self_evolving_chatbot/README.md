@@ -39,8 +39,9 @@ runtime node/edge reshaping requires Python module reload, in-flight conversatio
 
 ## Core Mechanism
 
-At end of each turn, LLM judge (gpt-4o-mini) looks at conversation history + current
-topology and responds with best fit in one word:
+At end of each turn, the pinned DeepSeek model via OpenRouter acts as the
+LLM judge: it looks at conversation history + current topology and responds
+with the best fit in one word:
 
 - `simple` — 1 LLM call, short direct answer (suitable for factual Q)
 - `reflexive` — 3 LLM calls (draft → critique → final) (suitable for accuracy-seeking)

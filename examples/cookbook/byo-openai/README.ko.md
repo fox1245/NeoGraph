@@ -6,7 +6,7 @@
 
 대부분의 프로덕션 Python 사용자는 이미 `openai.OpenAI()` 클라이언트를 보유하고 있습니다.
 자체 재시도, 사용자 지정 전송, 관찰 가능성 후크가 있는 인스턴스
-또는 Azure/Bedrock/Groq 라우팅. 이 요리책은 연결 방법을 보여줍니다.
+OpenRouter 라우팅. 이 요리책은 연결 방법을 보여줍니다.
 기존 클라이언트를 사용자 정의 `Provider`로 NeoGraph에 넣습니다.
 NeoGraph의 내장 `OpenAIProvider`.
 
@@ -18,9 +18,9 @@ ReAct 루프 등)은 내장 공급자와 같습니다.
 
 |당신이 원하는|사용|
 |---|---|
-|"OpenAI로 가는 가장 빠른 길을 알려주세요"|`neograph_engine.llm.OpenAIProvider`(네이티브 asio + 연결 풀, 높은 RPS에서 SDK보다 ~1.5배 빠름)|
+|"고정 DeepSeek 경로를 OpenRouter로 사용하고 싶습니다"|공식 `openai` SDK를 사용하는 `OpenAISdkProvider`|
 |"재시도/Azure/프록시/후크가 포함된 `openai.OpenAI()`가 이미 설정되어 있습니다."|이 요리책(하위 클래스 `Provider`, 클라이언트에 위임)|
-|"나는 LangChain / Anthropic / Bedrock / Groq를 사용하고 있습니다"|관련 SDK가 포함된 이 요리책|
+|"공식 `openai` SDK를 통해 OpenRouter API를 사용하고 있습니다"|고정 DeepSeek 모델과 함께 이 요리책|
 |"테스트에서 LLM를 조롱하고 싶습니다"|결정론적 스텁이 포함된 이 요리책|
 
 요점: **NeoGraph의 그래프 엔진은 LLM 호출 방식에 신경 쓰지 않습니다.
@@ -36,7 +36,7 @@ from openai import OpenAI
 
 class OpenAISdkProvider(ng.Provider):
     """NeoGraph Provider backed by the official `openai` SDK."""
-    def __init__(self, client: OpenAI, model: str = "gpt-5.4-mini"):
+    def __init__(self, client: OpenAI, model: str = "deepseek/deepseek-v4-flash-0731"):
         super().__init__()
         self.client = client
         self.model  = model
@@ -69,7 +69,7 @@ SDK 클라이언트에 연결된 구성입니다.
 
 ```bash
 pip install neograph-engine>=0.2.3 openai
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 python hybrid.py
 ```
 
@@ -77,7 +77,7 @@ python hybrid.py
 ```
 [hybrid] using openai SDK inside NeoGraph 0.2.3 graph
 [hybrid] running one llm_call through the OpenAI SDK provider
-[provider] complete() call #1 (2 msgs) — model=gpt-5.4-mini
+[provider] complete() call #1 (2 msgs) — model=deepseek/deepseek-v4-flash-0731
 [... user and assistant messages ...]
 [hybrid] provider.complete() called 1× via openai SDK
 ```
@@ -130,7 +130,7 @@ class AgenticOpenAIProvider(ng.Provider):
                      for n, fn in self.tools.items()]
         for _ in range(10):  # cap loops
             r = self.client.chat.completions.create(
-                model=params.model or "gpt-5.4-mini",
+                model=params.model or "deepseek/deepseek-v4-flash-0731",
                 messages=messages, tools=sdk_tools)
             choice = r.choices[0]
             if not choice.message.tool_calls:

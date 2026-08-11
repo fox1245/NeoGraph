@@ -1,21 +1,23 @@
 // NeoGraph Example 25: Deep Research
 //
 // A C++ port of langchain-ai/open_deep_research.
-// One supervisor Claude agent plans research, fans out parallel sub-researchers
+// One supervisor DeepSeek agent plans research, fans out parallel sub-researchers
 // (each running its own ReAct loop with web tools), then synthesises a final
 // markdown report.
 //
-// Tools are backed by a local Crawl4AI Docker container (no API keys):
-//   docker run -d -p 11235:11235 --shm-size=1g --name crawl4ai \
-//       unclecode/crawl4ai:latest
+// Tools are backed by a local Crawl4AI Docker container. Its current secure
+// API requires the same CRAWL4AI_API_TOKEN in the container and client:
+//   export CRAWL4AI_API_TOKEN="$(openssl rand -hex 32)"
+//   docker run -d -p 127.0.0.1:11235:11235 --shm-size=1g --name crawl4ai \
+//       -e CRAWL4AI_API_TOKEN unclecode/crawl4ai:latest
 //
 // Usage:
-//   ANTHROPIC_API_KEY=sk-ant-... ./example_deep_research "why did the Byzantine Empire fall"
+//   OPENROUTER_API_KEY=sk-or-... ./example_deep_research "why did the Byzantine Empire fall"
 //
 // Environment:
-//   ANTHROPIC_API_KEY         — required
+//   OPENROUTER_API_KEY        — required
 //   CRAWL4AI_URL              — optional, defaults to http://localhost:11235
-//   DR_MODEL                  — optional, defaults to claude-sonnet-4-6
+//   CRAWL4AI_API_TOKEN        — optional for legacy servers; required by the current secure Docker server
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
@@ -82,8 +84,9 @@ static std::string url_encode(const std::string& s) {
 
 class Crawl4AIClient {
 public:
-    explicit Crawl4AIClient(std::string base_url)
-        : base_url_(std::move(base_url)) {}
+    explicit Crawl4AIClient(std::string base_url, std::string api_token = {})
+        : base_url_(std::move(base_url))
+        , api_token_(std::move(api_token)) {}
 
     // Returns cleaned markdown of `url`. Throws on HTTP failure.
     std::string fetch_markdown(const std::string& url,
@@ -100,12 +103,21 @@ public:
         cli.set_read_timeout(60, 0);
         cli.set_connection_timeout(15, 0);
 
-        auto res = cli.Post(prefix + "md", body.dump(), "application/json");
+        httplib::Headers headers;
+        if (!api_token_.empty()) {
+            headers.emplace("Authorization", "Bearer " + api_token_);
+        }
+        auto res = cli.Post(prefix + "md", headers, body.dump(), "application/json");
 
         if (!res) {
             throw std::runtime_error(
                 "Crawl4AI connection failed: " + httplib::to_string(res.error()) +
                 " (is the crawl4ai container running at " + base_url_ + "?)");
+        }
+        if (res->status == 401 && api_token_.empty()) {
+            throw std::runtime_error(
+                "Crawl4AI /md requires CRAWL4AI_API_TOKEN; configure the same "
+                "bearer token for the client and server");
         }
         if (res->status != 200) {
             throw std::runtime_error(
@@ -122,6 +134,7 @@ public:
 
 private:
     std::string base_url_;
+    std::string api_token_;
 };
 
 // =========================================================================
@@ -236,14 +249,13 @@ private:
 // =========================================================================
 
 int main(int argc, char** argv) {
-    // Load .env from the current working directory (or the nearest ancestor
-    // that has one). Existing environment variables win — a shell-exported
-    // ANTHROPIC_API_KEY still takes precedence over the .env value.
+    // Existing environment variables win — OPENROUTER_API_KEY from a
+    // shell-exported value takes precedence over the .env value.
     cppdotenv::load_dotenv(".env");
 
-    const char* api_key = std::getenv("ANTHROPIC_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY in the environment or in ./.env\n";
+        std::cerr << "Set OPENROUTER_API_KEY in the environment or in ./.env\n";
         return 1;
     }
 
@@ -261,27 +273,24 @@ int main(int argc, char** argv) {
     const char* crawl4ai_url_env = std::getenv("CRAWL4AI_URL");
     std::string crawl4ai_url = crawl4ai_url_env ? crawl4ai_url_env
                                                 : "http://localhost:11235";
+    const char* crawl4ai_token_env = std::getenv("CRAWL4AI_API_TOKEN");
+    const std::string crawl4ai_token =
+        crawl4ai_token_env ? crawl4ai_token_env : "";
 
-    const char* model_env = std::getenv("DR_MODEL");
-    std::string model = model_env ? model_env : "claude-sonnet-4-6";
+    const std::string model = "deepseek/deepseek-v4-flash-0731";
 
-    // Anthropic provider via built-in "claude" schema. Wrapped in the
-    // RateLimitedProvider decorator because Deep Research fans out several
-    // concurrent researcher calls and it's easy to trip Anthropic's
-    // minute-window rate limits on low tiers. The decorator reads the
-    // 429 response's Retry-After header and sleeps exactly that long
-    // before retrying. Users with generous quotas (or non-Anthropic
-    // backends that don't rate-limit) can drop the wrapper.
-    auto raw_claude = llm::SchemaProvider::create({
-        .schema_path    = "claude",
-        .api_key        = api_key,
-        .default_model  = model,
-        .timeout_seconds = 120
+    auto raw_openrouter = llm::SchemaProvider::create({
+        .schema_path      = "openai_responses",
+        .api_key          = api_key,
+        .default_model    = model,
+        .timeout_seconds  = 120,
+        .base_url_override = "https://openrouter.ai/api",
+        .provider_routing = {{"zdr", true}}
     });
     std::shared_ptr<Provider> provider =
-        llm::RateLimitedProvider::create(std::move(raw_claude));
+        llm::RateLimitedProvider::create(std::move(raw_openrouter));
 
-    auto crawl = std::make_shared<Crawl4AIClient>(crawl4ai_url);
+    auto crawl = std::make_shared<Crawl4AIClient>(crawl4ai_url, crawl4ai_token);
 
     std::vector<std::unique_ptr<Tool>> tools;
     tools.push_back(std::make_unique<WebSearchTool>(crawl));
@@ -296,7 +305,7 @@ int main(int argc, char** argv) {
     auto engine = graph::create_deep_research_graph(
         provider, std::move(tools), cfg);
 
-    std::cout << "=== Deep Research (NeoGraph + Claude + Crawl4AI) ===\n";
+    std::cout << "=== Deep Research (NeoGraph + DeepSeek + Crawl4AI) ===\n";
     std::cout << "Query: " << query << "\n";
     std::cout << "Model: " << model << "\n";
     std::cout << "Crawl4AI: " << crawl4ai_url << "\n\n";
@@ -340,11 +349,12 @@ int main(int argc, char** argv) {
         });
     } catch (const std::exception& e) {
         std::cerr << "\n[fatal] run aborted: " << e.what() << "\n";
-        std::cerr << "If this is Anthropic HTTP 429, your org's tokens-per-minute\n"
-                     "budget is too tight for the default iteration counts. Try:\n"
+        std::cerr << "If this is an OpenRouter HTTP 429, your account's\n"
+                     "rate limit is too tight for the default iteration counts.\n"
+                     "Try:\n"
                      "  * lowering max_supervisor_iterations / max_concurrent_researchers\n"
                      "  * shrinking Crawl4AI response caps further\n"
-                     "  * upgrading your Anthropic rate tier\n";
+                     "  * upgrading your OpenRouter rate tier\n";
         return 1;
     }
 

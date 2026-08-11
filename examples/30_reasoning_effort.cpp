@@ -1,8 +1,7 @@
 // NeoGraph Example 30: reasoning_effort tradeoff sweep on /v1/responses
 //
-// Reasoning-capable models exposed through the OpenAI Responses API
-// (the o-series, gpt-5 family, and gpt-5.4-mini) accept a top-level
-// "reasoning": {"effort": ...} field that controls how many hidden
+// Reasoning-capable models exposed through the OpenRouter Responses API
+// may accept a top-level "reasoning": {"effort": ...} field. This example
 // chain-of-thought tokens the model is allowed to spend before
 // emitting the visible answer. Levels in order of cost:
 //
@@ -25,8 +24,8 @@
 //   * reasoning_tok / output_tok / wall_ms climb monotonically with
 //     effort — that part is unconditional, every prompt costs more
 //     at higher effort. On the default snail puzzle below
-//     (gpt-5.4-mini, 2026-04): 0 -> 82 -> 95 -> 187 reasoning tokens,
-//     1.9 s -> 3.0 s wall. The cost knob is real.
+//     at higher effort. The pinned DeepSeek model may spend more tokens and
+//     time as the requested effort increases; the output reports both.
 //
 //   * answer correctness only diverges on hard-enough problems. The
 //     snail puzzle is in-distribution for the model and lands at
@@ -35,21 +34,18 @@
 //     hop arithmetic with ambiguity, niche logic puzzles) and you'll
 //     see "none" / "low" hedge or skip the trick that "high" catches.
 //
-// Note on supported values: this varies per model. gpt-5.4-mini
-// accepts {none, low, medium, high, xhigh}; older o-series accepted
-// {low, medium, high}; "minimal" appears in some docs but is
-// rejected by gpt-5.4-mini as of 2026-04. The example uses the
-// gpt-5.4-mini-supported set.
+// Note on supported values: reasoning controls are model/provider-specific.
+// The pinned DeepSeek model is exercised with the conservative
+// {none, low, medium, high} sweep below.
 //
 // Bypasses SchemaProvider because `reasoning` isn't part of
 // CompletionParams's surface — built inline so the wire shape is
 // fully visible (same pattern as example 29).
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_reasoning_effort                          # default puzzle
 //   ./example_reasoning_effort "your custom prompt"     # any prompt
-//   MODEL=gpt-5.4-mini ./example_reasoning_effort ...   # pick model
 
 #include <neograph/neograph.h>
 #include <neograph/async/http_client.h>
@@ -113,8 +109,9 @@ static Trial run_one(const std::string& api_key,
     body["model"]     = model;
     body["input"]     = question;
     body["reasoning"] = json{{"effort", effort}};
+    body["provider"] = json{{"zdr", true}};
 
-    auto endpoint = async::split_async_endpoint("https://api.openai.com");
+    auto endpoint = async::split_async_endpoint("https://openrouter.ai/api");
 
     auto t0 = std::chrono::steady_clock::now();
     async::HttpResponse resp;
@@ -169,13 +166,12 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     try {
-        const char* api_key = std::getenv("OPENAI_API_KEY");
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENAI_API_KEY (env or .env)\n";
+            std::cerr << "Set OPENROUTER_API_KEY (env or .env)\n";
             return 1;
         }
-        const char* model_env = std::getenv("MODEL");
-        std::string model = model_env ? model_env : "gpt-5.4-mini";
+        const std::string model = "deepseek/deepseek-v4-flash-0731";
 
         // Default problem: the snail-in-a-well puzzle. Single correct
         // answer (28), classic last-day-doesn't-slip trick. At "none"

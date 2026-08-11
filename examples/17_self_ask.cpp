@@ -26,7 +26,7 @@
 //      real system.
 //
 // Usage:
-//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_self_ask
 // (auto-loads .env from the cwd or any parent directory.)
 
@@ -64,7 +64,7 @@ static ChatCompletion ask(Provider& p,
                           const std::vector<ChatMessage>& messages,
                           float temperature) {
     CompletionParams params;
-    params.model = "claude-sonnet-4-6";
+    params.model = "deepseek/deepseek-v4-flash-0731";
     params.temperature = temperature;
     params.messages = messages;
     return p.complete(params);
@@ -74,7 +74,7 @@ static ChatCompletion ask(Provider& p,
 // system prompt. In production this would be a search tool or RAG lookup.
 static std::string lookup(Provider& p, const std::string& sub_question) {
     CompletionParams params;
-    params.model = "claude-sonnet-4-6";
+    params.model = "deepseek/deepseek-v4-flash-0731";
     params.temperature = 0.0f;
     params.messages.push_back({"system",
         "You are a reference database. Given a factual question, answer with "
@@ -89,17 +89,19 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const char* api_key = std::getenv("ANTHROPIC_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+        std::cerr << "Set OPENROUTER_API_KEY environment variable "
                      "(or put it in .env beside the binary)\n";
         return 1;
     }
 
     llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "claude";
+    cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
-    cfg.default_model = "claude-sonnet-4-6";
+    cfg.base_url_override = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::SchemaProvider::create(cfg);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"

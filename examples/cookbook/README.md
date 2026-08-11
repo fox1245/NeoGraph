@@ -17,7 +17,7 @@ supporting assets) is tracked in
 | [`byo-openai/`](byo-openai/) | Bring your own `openai.OpenAI()` client: subclass NeoGraph's `Provider` to delegate every LLM call into the SDK, keeping all your retries / Azure / observability config. Also: tool calling via the agentic-provider pattern. |
 | [`jarvis/`](jarvis/) | **Voice-driven meta-orchestrator (skeleton).** Mic → whisper.cpp (auto-detect language) → router (direct / delegate / parallel 3-way) → MCP tools or A2A specialists → supertonic on-device TTS, in the user's detected language. JSON-driven tool + agent catalogs, A2A bidirectional (JARVIS is itself reachable). On-device, zero cloud required. |
 | [`minimal-mcp/`](minimal-mcp/) | MCP client round-trip with **no LLM, no API key, no fastmcp**: a ~60-line stdlib stdio server + a C++ harness that does `initialize` → `tools/list` → `tools/call`. Shows NeoGraph's MCP client only needs a process that speaks the wire protocol — the peer can be anything. |
-| [`ollama-provider/`](ollama-provider/) | Local LLM via Ollama. Two paths: built-in `OpenAIProvider` against Ollama's compat endpoint (zero new code), or a custom `Provider` against the native `/api/chat`. Full agent stack with no external API keys. |
+| [`openrouter-provider/`](openrouter-provider/) | OpenRouter fixed DeepSeek provider surfaces: built-in `OpenAIProvider` against the compatibility endpoint and a custom Python `Provider` using direct HTTP. |
 
 Each cookbook also documents the friction it surfaced — useful for
 finding the rough edges of the public API.

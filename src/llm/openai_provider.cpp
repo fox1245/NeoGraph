@@ -67,11 +67,18 @@ json OpenAIProvider::build_body(const CompletionParams& params) const {
         body["max_completion_tokens"] = params.max_tokens;
     }
 
-    // OpenRouter's Chat Completions API accepts routing preferences only as
-    // a top-level object named "provider". Preserve that object verbatim so
-    // its documented fields can evolve without a NeoGraph release.
+    // OpenRouter's Chat Completions API accepts routing preferences only as a
+    // top-level object named "provider". Preserve the configured object
+    // verbatim so its documented fields can evolve without a NeoGraph release.
     // Source: https://openrouter.ai/docs/guides/routing/provider-selection
     // (verified 2026-08-08).
+    if (!config_.provider_routing.is_null()) {
+        if (!config_.provider_routing.is_object()) {
+            throw std::invalid_argument(
+                "OpenAIProvider Config::provider_routing must be an object");
+        }
+        body["provider"] = config_.provider_routing;
+    }
     if (params.extra_fields.is_object()) {
         const auto provider = params.extra_fields.find("provider");
         if (provider != params.extra_fields.end()) {

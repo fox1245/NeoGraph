@@ -9,10 +9,11 @@
 // Scenario:
 //   - Launch examples/demo_mcp_stdio_server.py (kb_lookup / save_note / list_notes).
 //   - Discover its tools via get_tools().
-//   - Drive a ReAct loop against OpenAI, letting the LLM pick which tool to call.
+//   - Drive a ReAct loop against OpenRouter's pinned DeepSeek model, letting
+//     the LLM pick which tool to call.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_mcp_stdio python3 examples/demo_mcp_stdio_server.py
 // (auto-loads .env from the cwd or any parent directory.)
 //
@@ -45,9 +46,9 @@ int main(int argc, char** argv) {
         ? std::string(argv[3])
         : "Look up what NeoGraph is, then save a note containing the result.";
 
-    const char* key_env = std::getenv("OPENAI_API_KEY");
+    const char* key_env = std::getenv("OPENROUTER_API_KEY");
     if (!key_env) {
-        std::cerr << "OPENAI_API_KEY not set (env or .env file)\n";
+        std::cerr << "OPENROUTER_API_KEY not set (env or .env file)\n";
         return 1;
     }
     std::string api_key = key_env;
@@ -72,7 +73,9 @@ int main(int argc, char** argv) {
     // --- LLM provider ---
     neograph::llm::OpenAIProvider::Config config;
     config.api_key       = api_key;
-    config.default_model = "gpt-4o-mini";
+    config.base_url      = "https://openrouter.ai/api";
+    config.default_model = "deepseek/deepseek-v4-flash-0731";
+    config.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
         neograph::llm::OpenAIProvider::create(config);
 

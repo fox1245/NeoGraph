@@ -114,7 +114,8 @@ int main(int argc, char** argv) {
 
     auto provider = neograph::llm::OpenAIProvider::create_shared(
         {.api_key = key, .base_url = "https://openrouter.ai/api",
-         .default_model = "deepseek/deepseek-v4-flash"});
+         .default_model = "deepseek/deepseek-v4-flash-0731",
+         .provider_routing = {{"zdr", true}}});
 
     // Build the tool catalog to feed the architect, and a live copy to
     // bind into the spawned harness.
@@ -167,7 +168,7 @@ int main(int argc, char** argv) {
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         std::cout << "── Attempt #" << attempt << ": model authors a tool-calling agent ──\n";
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-flash";
+        p.model = "deepseek/deepseek-v4-flash-0731";
         p.messages = convo;
         p.temperature = 0.2f;
         p.max_tokens = 4000;

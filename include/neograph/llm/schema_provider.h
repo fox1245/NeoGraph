@@ -65,55 +65,33 @@ namespace test_access { class SchemaProviderTestAccess; }  // fwd-decl for frien
  * @see OpenAIProvider for a simpler OpenAI-only provider.
  */
 class NEOGRAPH_API SchemaProvider : public Provider {
-  public:
-    /// Configuration for schema-based provider.
+public:
+    /// Configuration for schema-based providers.
     struct Config {
-        std::string schema_path;                    ///< Path to schema file, or built-in name ("openai", "claude", "gemini").
-        std::string api_key;                        ///< API key (overrides env var if set).
-        std::string default_model = "gpt-4o-mini";  ///< Default model name.
-        int timeout_seconds = 60;                   ///< HTTP request timeout in seconds.
-        std::string base_url_override;              ///< If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints.
-
-        /// Drive `complete_stream` over `wss://` instead of HTTP/SSE.
-        /// Currently supported only for the "openai-responses" schema —
-        /// matches OpenAI's WebSocket mode at /v1/responses, which
-        /// claims ~40% lower latency on agentic rollouts with 20+ tool
-        /// calls (per developers.openai.com/api/docs/guides/websocket-mode).
-        /// Throws on `complete_stream` for any other schema. Has no
-        /// effect on `complete_async` / `complete()` (non-streaming
-        /// path stays HTTP).
+        std::string schema_path;  ///< Path to schema file, or built-in name ("openai", "claude", "gemini").
+        std::string api_key;      ///< API key (or empty for env lookup).
+        std::string default_model = "gpt-4o-mini"; ///< Default model name.
+        int timeout_seconds = 60; ///< HTTP timeout in seconds.
+        std::string base_url_override; ///< If non-empty, overrides the schema's `connection.base_url`.
+        /// Optional authentication overrides for adapters such as OpenRouter's
+        /// Anthropic-compatible endpoint. Empty values preserve schema fields.
+        std::string auth_header_override;
+        std::string auth_prefix_override;
+        /// Drive `complete_stream` over a WebSocket instead of HTTP/SSE.
+        /// Currently supported only for the "openai-responses" schema.
+        /// This matches OpenAI's WebSocket mode at `/v1/responses`, which
+        /// claims ~40% lower latency for long agentic tool calls.
         bool use_websocket = false;
-
-        /// Switch the non-streaming HTTP transport to libcurl (HTTP/2
-        /// + multiplexing + Cloudflare-friendly fingerprint). Default
-        /// off: empirical bench (dr_compare 2026-04-26) showed parity
-        /// or slight regression on the LangGraph-equivalent
-        /// deep-research workload vs the default HTTP/1.1 ConnPool;
-        /// the multiplex win only materialises when fan-out width
-        /// dominates per-call latency, and our default config doesn't
-        /// hit that yet. Flip on if you have parallel-fan-out code
-        /// hitting Cloudflare-WAF endpoints (where the default httplib
-        /// path may get fingerprinted out).
-        bool prefer_libcurl = false;
-
-        /// Optional value-level extension seam for schema strategy names.
-        /// The provider copies this registry before parsing, so the caller
-        /// may safely discard or mutate its builder after `create` returns.
-        /// The registry accepts aliases for reviewed built-in primitives;
-        /// it does not execute callbacks.
+        /// Default top-level OpenRouter provider-routing object stamped into
+        /// every request. A per-call `CompletionParams::extra_fields.provider`
+        /// object overrides this value.
+        json provider_routing;
+        /// Optional registry of reviewed aliases for schema strategy names.
+        /// When unset, the standard registry is used.
         std::shared_ptr<const SchemaStrategyRegistry> strategy_registry;
+        /// Prefer the libcurl HTTP/2 pool over the httplib transport.
+        bool prefer_libcurl = false;
     };
-
-    /**
-     * @brief Create a schema-based provider instance.
-     *
-     * If schema_path matches a built-in name, the embedded schema is used.
-     * Otherwise it is treated as a file path.
-     *
-     * @param config Provider configuration with schema path and API key.
-     * @return A unique_ptr to the created provider.
-     * @throws std::runtime_error If the schema cannot be loaded or parsed.
-     */
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
     /// Destructor — shuts down the background HTTP loop + worker

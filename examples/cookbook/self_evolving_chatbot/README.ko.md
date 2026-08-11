@@ -41,8 +41,8 @@ LangChain/LangGraph의 StateGraph는 Python 클래스 인스턴스입니다. 피
 
 ## 핵심 메커니즘
 
-각 턴이 끝나면 LLM 심사위원(gpt-4o-mini)이 대화 내역 + 현재를 살펴봅니다.
-토폴로지와 한 단어로 가장 잘 어울리는 응답:
+각 턴이 끝나면 OpenRouter의 고정 DeepSeek 모델이 LLM 심사위원으로서
+대화 내역 + 현재 토폴로지를 살펴보고 가장 적합한 형태를 한 단어로 반환합니다.
 
 - `simple` — 1개의 LLM 통화, 짧은 직접 응답(사실적 Q에 적합)
 - `reflexive` — 3개의 LLM 호출(초안 → 비평 → 최종)(정확성 추구에 적합)

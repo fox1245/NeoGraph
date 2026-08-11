@@ -59,7 +59,7 @@ static std::shared_ptr<neograph::Provider> g_prov;
 
 static std::string ask(const std::string& system, const std::string& user, int max_tokens) {
     neograph::CompletionParams p;
-    p.model = "deepseek/deepseek-v4-flash";
+    p.model = "deepseek/deepseek-v4-flash-0731";
     p.temperature = 0.8f;   // prose wants some warmth
     p.max_tokens = max_tokens;
     p.messages = {{"system", system}, {"user", user}};
@@ -291,12 +291,13 @@ int main(int argc, char** argv) {
     if (key && *key)
         g_prov = neograph::llm::OpenAIProvider::create_shared(
             {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "deepseek/deepseek-v4-flash"});
+             .default_model = "deepseek/deepseek-v4-flash-0731",
+             .provider_routing = {{"zdr", true}}});
 
     std::cout << "===== THE BEAST (novelist · prompt → light-novel .txt) =====\n"
                  "Premise: " << premise.substr(0, 100) << (premise.size() > 100 ? "…" : "") << "\n"
                  "Chapters: " << total << "   Learner: "
-              << (g_prov ? "the model (deepseek-v4-flash)" : "deterministic stub (no key)") << "\n"
+              << (g_prov ? "the model (deepseek-v4-flash-0731)" : "deterministic stub (no key)") << "\n"
                  "State channels (the cure for lost-in-the-middle): premise·outline·bible·"
                  "summary·book·idx·total\n\n";
 

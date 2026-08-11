@@ -62,6 +62,13 @@ public:
         /// inherit from. Until then, watch the unit when configuring
         /// across modules.
         int timeout_seconds = 60;
+        /// Optional top-level OpenRouter provider-routing object stamped into
+        /// every request. A per-call `CompletionParams::extra_fields.provider`
+        /// object overrides this value.
+        ///
+        /// Example: `{"zdr": true}` restricts routing to Zero Data
+        /// Retention endpoints.
+        json provider_routing;
     };
 
     /**

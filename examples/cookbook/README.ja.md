@@ -16,7 +16,7 @@ READMEに従って実行してください。
 | [`byo-openai/`](byo-openai/) |独自の `openai.OpenAI()` クライアントを導入します。NeoGraph の `Provider` をサブクラス化して、すべての LLM 呼び出しを SDK に委任し、すべての再試行 / Azure / オブザーバビリティ構成を維持します。また: エージェント プロバイダー パターンを介したツール呼び出し。 |
 | [`jarvis/`](jarvis/) | **音声駆動のメタ オーケストレーター (スケルトン)。** マイク → whisper.cpp (言語自動検出) → ルーター (ダイレクト / デリゲート / パラレル 3 ウェイ) → MCP ツールまたは A2A スペシャリスト → ユーザーが検出した言語でのスーパートニック オンデバイス TTS。 JSON 駆動のツール + エージェント カタログ、A2A 双方向 (JARVIS 自体に到達可能)。オンデバイス、クラウド不要。 |
 | [`minimal-mcp/`](minimal-mcp/) | **LLM なし、API キーなし、fastmcp なし**の MCP クライアント ラウンドトリップ: ~60 行の stdlib stdio サーバー + `initialize` → `tools/list` → `tools/call` を実行する C++ ハーネス。 NeoGraph の MCP クライアントにはワイヤ プロトコルを話すプロセスのみが必要であることを示します。ピアは何でもかまいません。 |
-| [`ollama-provider/`](ollama-provider/) | Ollama経由のローカルLLM。 2 つのパス: Ollama の互換エンドポイントに対する組み込み `OpenAIProvider` (新しいコードはゼロ)、またはネイティブ `/api/chat` に対するカスタム `Provider`。外部 API キーを含まない完全なエージェント スタック。 |
+| [`openrouter-provider/`](openrouter-provider/) | OpenRouter の固定 DeepSeek provider。互換 endpoint 用の組み込み `OpenAIProvider` と直接 HTTP のカスタム Python `Provider` を比較します。 |
 
 各クックブックには、それが表面化した摩擦についても記録されています。
 パブリック API の大まかな部分を見つけます。

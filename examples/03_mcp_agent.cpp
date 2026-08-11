@@ -5,7 +5,7 @@
 // and runs a ReAct graph.
 //
 // Prerequisites:
-//   1. Set OPENAI_API_KEY in the .env file
+//   1. Set OPENROUTER_API_KEY in the .env file
 //   2. Run an MCP server (e.g., python server.py --transport streamable-http --port 8000)
 //
 // Usage:
@@ -38,16 +38,18 @@ int main(int argc, char* argv[]) {
     std::string mcp_url = argv[1];
     std::string question = argv[2];
 
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Error: OPENAI_API_KEY not set (env or .env file)\n";
+        std::cerr << "Error: OPENROUTER_API_KEY not set (env or .env file)\n";
         return 1;
     }
 
     // 2. Create LLM Provider
     neograph::llm::OpenAIProvider::Config llm_config;
     llm_config.api_key = api_key;
-    llm_config.default_model = "gpt-4o-mini";
+    llm_config.base_url = "https://openrouter.ai/api";
+    llm_config.default_model = "deepseek/deepseek-v4-flash-0731";
+    llm_config.provider_routing = {{"zdr", true}};
     auto provider = std::shared_ptr<neograph::Provider>(
         neograph::llm::OpenAIProvider::create(llm_config)
     );

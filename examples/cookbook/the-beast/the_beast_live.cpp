@@ -97,7 +97,8 @@ int main(int argc, char** argv) {
         neograph::llm::OpenAIProvider::create_shared({.api_key       = key,
                                                       .base_url      = "https://openrouter.ai/api",
                                                       .default_model = model,
-                                                      .timeout_seconds = 180});
+                                                      .timeout_seconds = 180,
+                                                      .provider_routing = provider_routing});
 
     ng::NodeContext ctx;
     ctx.provider = provider;

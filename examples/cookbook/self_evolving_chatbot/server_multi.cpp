@@ -12,8 +12,8 @@
 //      / oscillation) 이 자연스럽게 topology distribution 으로 분류됨
 //      — graph_def 가 customer behavior 의 본질적 cluster 발견 메커니즘.
 //
-// 비용 추정: 5 customer × 5 turn × (~2.3 main + 1 judge) ≈ 82 LLM call
-// × gpt-4o-mini ≈ $0.02.
+// Cost estimate: 5 customers × 5 turns × (~2.3 main + 1 judge) ≈ 82 LLM calls
+// through the pinned DeepSeek via OpenRouter.
 //
 // 빌드/실행:
 //   cmake --build build --target cookbook_self_evolving_chatbot_multi
@@ -166,7 +166,7 @@ static std::string llm_judge_topology(
     }
 
     neograph::CompletionParams p;
-    p.model = "gpt-4o-mini";
+    p.model = "deepseek/deepseek-v4-flash-0731";
     p.messages.push_back({
         "system",
         "You are a chatbot harness optimizer. Given a conversation history "
@@ -300,15 +300,17 @@ static long peak_rss_kb() {
 
 int main() {
     cppdotenv::auto_load_dotenv();
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "OPENAI_API_KEY missing (.env or export 필요).\n";
+        std::cerr << "OPENROUTER_API_KEY missing (.env or export 필요).\n";
         return 1;
     }
 
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
-    cfg.default_model = "gpt-4o-mini";
+    cfg.base_url = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 
     NodeFactory::instance().register_type("merge",
@@ -351,7 +353,7 @@ int main() {
 
             NodeContext ctx;
             ctx.provider = provider;
-            ctx.model = "gpt-4o-mini";
+            ctx.model = "deepseek/deepseek-v4-flash-0731";
             ctx.instructions = cust.system_prompt;
             auto engine = cache.get_or_compile(cust.topology_def, ctx);
 

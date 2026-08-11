@@ -25,9 +25,9 @@ print("  ".join(c.ljust(widths[c]) for c in cols))
 for s in sorted(summaries, key=lambda x: x["label"]):
     print("  ".join(str(s.get(c, "")).ljust(widths[c]) for c in cols))
 
-# 짝(mock/api × neograph/langgraph) 오버헤드 델타
+# 짝(mock/openrouter × neograph/langgraph) 오버헤드 델타
 by = {s["label"]: s for s in summaries}
-for suffix in ("mock", "groq"):
+for suffix in ("mock", "openrouter"):
     a, b = by.get(f"neograph-{suffix}"), by.get(f"langgraph-{suffix}")
     if a and b:
         print(f"\n[{suffix}] 턴당 delta (langgraph − neograph): "

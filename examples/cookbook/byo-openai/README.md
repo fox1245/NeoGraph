@@ -4,7 +4,7 @@
 
 Most production Python users already have an `openai.OpenAI()` client
 instance with their own retries, custom transport, observability hooks,
-or Azure / Bedrock / Groq routing. This cookbook shows how to plug
+or OpenRouter routing. This cookbook shows how to plug
 that existing client into NeoGraph as a custom `Provider` — instead of
 NeoGraph's built-in `OpenAIProvider`.
 
@@ -16,9 +16,9 @@ ReAct loops, etc.) just like the built-in provider.
 
 | You want | Use |
 |---|---|
-| "Just give me the fastest path to OpenAI" | `neograph_engine.llm.OpenAIProvider` (native asio + connection pool, ~1.5× faster than the SDK at high RPS) |
+| "Just use the pinned DeepSeek route through OpenRouter" | `OpenAISdkProvider` with the official `openai` SDK |
 | "I already have an `openai.OpenAI()` set up with retries / Azure / proxy / hooks" | This cookbook (subclass `Provider`, delegate to your client) |
-| "I'm using LangChain / Anthropic / Bedrock / Groq" | This cookbook with the relevant SDK |
+| "I'm using the OpenRouter API through the official `openai` SDK" | This cookbook with the pinned DeepSeek model |
 | "I want to mock the LLM in tests" | This cookbook with a deterministic stub |
 
 The point: **NeoGraph's graph engine doesn't care how the LLM call
@@ -34,7 +34,7 @@ from openai import OpenAI
 
 class OpenAISdkProvider(ng.Provider):
     """NeoGraph Provider backed by the official `openai` SDK."""
-    def __init__(self, client: OpenAI, model: str = "gpt-5.4-mini"):
+    def __init__(self, client: OpenAI, model: str = "deepseek/deepseek-v4-flash-0731"):
         super().__init__()
         self.client = client
         self.model  = model
@@ -67,7 +67,7 @@ configuration that was attached to the SDK client.
 
 ```bash
 pip install neograph-engine>=0.2.3 openai
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 python hybrid.py
 ```
 
@@ -75,7 +75,7 @@ Output:
 ```
 [hybrid] using openai SDK inside NeoGraph 0.2.3 graph
 [hybrid] running one llm_call through the OpenAI SDK provider
-[provider] complete() call #1 (2 msgs) — model=gpt-5.4-mini
+[provider] complete() call #1 (2 msgs) — model=deepseek/deepseek-v4-flash-0731
 [... user and assistant messages ...]
 [hybrid] provider.complete() called 1× via openai SDK
 ```
@@ -128,7 +128,7 @@ class AgenticOpenAIProvider(ng.Provider):
                      for n, fn in self.tools.items()]
         for _ in range(10):  # cap loops
             r = self.client.chat.completions.create(
-                model=params.model or "gpt-5.4-mini",
+                model=params.model or "deepseek/deepseek-v4-flash-0731",
                 messages=messages, tools=sdk_tools)
             choice = r.choices[0]
             if not choice.message.tool_calls:
