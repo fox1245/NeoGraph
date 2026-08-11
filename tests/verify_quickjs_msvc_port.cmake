@@ -50,9 +50,17 @@ _require("${_quickjs_wrapper}" "#if defined(_MSC_VER)" "the wrapper MSVC branch"
 _require("${_quickjs_wrapper}" "#include \"quickjs-msvc-port.h\""
          "the generated MSVC consumer header")
 _require("${_quickjs_header}" "static inline JSValue js_msvc_make_value" "the MSVC JSValue constructor")
-_require("${_quickjs_header}" ".u.func = { length, JS_CFUNC_generic" "MSVC function-list initializers")
+_require("${_quickjs_header}" "#if defined(__cplusplus)\nstatic inline JSCFunctionListEntry js_msvc_make_function_list_entry"
+         "the C++17 function-list constructors")
+_require("${_quickjs_header}" "js_msvc_make_cfunc_ ## cproto ## _entry"
+         "the typed C++ special-function constructor")
 _forbid("${_quickjs_header}" "#define JS_MKVAL(tag, val) (JSValue){" "a JSValue compound literal")
 _forbid("${_quickjs_header}" "return (JSValue)v;" "a redundant JSValue struct cast")
+_require("${_quickjs_header}" "JSCFunctionType ft = { 0 };\nft.generic_magic = func;"
+         "the C++17-safe function union initialization")
+_forbid("${_quickjs_header}" "JSCFunctionType ft = { .generic_magic = func };"
+        "a designated union initializer")
+_require("${_quickjs_header}" "#include <math.h>" "the NAN declaration")
 _require("${_cutils}" "_BitScanReverse64" "the 64-bit count-leading-zero intrinsic")
 _require("${_cutils}" "_BitScanForward64" "the 64-bit count-trailing-zero intrinsic")
 _require("${_cutils}" "memcpy(&value, tab, sizeof(value))" "unaligned-safe reads")

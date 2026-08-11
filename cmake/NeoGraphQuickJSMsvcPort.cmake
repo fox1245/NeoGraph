@@ -246,6 +246,10 @@ static inline void put_u16(uint8_t *tab, uint16_t val)
     file(WRITE "${output_dir}/cutils.h" "${_cutils_h}")
     file(READ "${quickjs_source_dir}/quickjs.h" _quickjs_h)
     _neograph_quickjs_replace_exact(_quickjs_h
+        "#include <string.h>"
+        "#include <string.h>\n#include <math.h>"
+        "MSVC NAN declaration")
+    _neograph_quickjs_replace_exact(_quickjs_h
 [=[#define JS_MKVAL(tag, val) (JSValue){ (JSValueUnion){ .uint64 = (uint32_t)(val) }, tag }
 #define JS_MKPTR(tag, p) (JSValue){ (JSValueUnion){ .ptr = p }, tag }
 
@@ -288,6 +292,11 @@ static inline JSValue js_msvc_make_nan(void)
         "return v;"
         "redundant JSValue struct casts")
     _neograph_quickjs_replace_exact(_quickjs_h
+        "JSCFunctionType ft = { .generic_magic = func };"
+        [=[JSCFunctionType ft = { 0 };
+ft.generic_magic = func;]=]
+        "MSVC C++ union initialization")
+    _neograph_quickjs_replace_exact(_quickjs_h
 [=[#define JS_CFUNC_DEF(name, length, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u = { .func = { length, JS_CFUNC_generic, { .generic = func1 } } } }
 #define JS_CFUNC_MAGIC_DEF(name, length, func1, magic) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, magic, .u = { .func = { length, JS_CFUNC_generic_magic, { .generic_magic = func1 } } } }
 #define JS_CFUNC_SPECIAL_DEF(name, length, cproto, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u = { .func = { length, JS_CFUNC_ ## cproto, { .cproto = func1 } } } }
@@ -304,22 +313,269 @@ static inline JSValue js_msvc_make_nan(void)
 #define JS_OBJECT_DEF(name, tab, len, prop_flags) { name, prop_flags, JS_DEF_OBJECT, 0, .u = { .prop_list = { tab, len } } }
 #define JS_ALIAS_DEF(name, from) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0, .u = { .alias = { from, -1 } } }
 #define JS_ALIAS_BASE_DEF(name, from, base) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0, .u = { .alias = { from, base } } }]=]
-[=[#define JS_CFUNC_DEF(name, length, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u.func = { length, JS_CFUNC_generic, { .generic = func1 } } }
-#define JS_CFUNC_MAGIC_DEF(name, length, func1, magic) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, magic, .u.func = { length, JS_CFUNC_generic_magic, { .generic_magic = func1 } } }
-#define JS_CFUNC_SPECIAL_DEF(name, length, cproto, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u.func = { length, JS_CFUNC_ ## cproto, { .cproto = func1 } } }
-#define JS_ITERATOR_NEXT_DEF(name, length, func1, magic) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, magic, .u.func = { length, JS_CFUNC_iterator_next, { .iterator_next = func1 } } }
-#define JS_CGETSET_DEF(name, fgetter, fsetter) { name, JS_PROP_CONFIGURABLE, JS_DEF_CGETSET, 0, .u.getset.get.getter = fgetter, .u.getset.set.setter = fsetter }
-#define JS_CGETSET_MAGIC_DEF(name, fgetter, fsetter, magic) { name, JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, magic, .u.getset.get.getter_magic = fgetter, .u.getset.set.setter_magic = fsetter }
-#define JS_PROP_STRING_DEF(name, cstr, prop_flags) { name, prop_flags, JS_DEF_PROP_STRING, 0, .u.str = cstr }
-#define JS_PROP_INT32_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_INT32, 0, .u.i32 = val }
-#define JS_PROP_INT64_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_INT64, 0, .u.i64 = val }
-#define JS_PROP_DOUBLE_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_DOUBLE, 0, .u.f64 = val }
-#define JS_PROP_UNDEFINED_DEF(name, prop_flags) { name, prop_flags, JS_DEF_PROP_UNDEFINED, 0, .u.i32 = 0 }
-#define JS_PROP_ATOM_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_ATOM, 0, .u.i32 = val }
-#define JS_PROP_BOOL_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_BOOL, 0, .u.i32 = val }
-#define JS_OBJECT_DEF(name, tab, len, prop_flags) { name, prop_flags, JS_DEF_OBJECT, 0, .u.prop_list = { tab, len } }
-#define JS_ALIAS_DEF(name, from) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0, .u.alias = { from, -1 } }
-#define JS_ALIAS_BASE_DEF(name, from, base) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0, .u.alias = { from, base } }]=]
+[=[#if defined(__cplusplus)
+static inline JSCFunctionListEntry js_msvc_make_function_list_entry(const char *name,
+                                                                      uint8_t prop_flags,
+                                                                      uint8_t def_type,
+                                                                      int16_t magic)
+{
+    JSCFunctionListEntry entry = {};
+    entry.name = name;
+    entry.prop_flags = prop_flags;
+    entry.def_type = def_type;
+    entry.magic = magic;
+    return entry;
+}
+
+static inline void js_msvc_set_function_entry(JSCFunctionListEntry *entry,
+                                              int length,
+                                              JSCFunctionEnum cproto)
+{
+    entry->u.func.length = static_cast<uint8_t>(length);
+    entry->u.func.cproto = static_cast<uint8_t>(cproto);
+}
+
+static inline JSCFunctionListEntry js_msvc_make_cfunc_entry(const char *name,
+                                                             int length,
+                                                             JSCFunction *func)
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0);
+    js_msvc_set_function_entry(&entry, length, JS_CFUNC_generic);
+    entry.u.func.cfunc.generic = func;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_cfunc_magic_entry(
+    const char *name,
+    int length,
+    JSValue (*func)(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic),
+    int magic)
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, static_cast<int16_t>(magic));
+    js_msvc_set_function_entry(&entry, length, JS_CFUNC_generic_magic);
+    entry.u.func.cfunc.generic_magic = func;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_cfunc_f_f_entry(const char *name,
+                                                                 int length,
+                                                                 double (*func)(double))
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0);
+    js_msvc_set_function_entry(&entry, length, JS_CFUNC_f_f);
+    entry.u.func.cfunc.f_f = func;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_cfunc_f_f_f_entry(const char *name,
+                                                                   int length,
+                                                                   double (*func)(double, double))
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0);
+    js_msvc_set_function_entry(&entry, length, JS_CFUNC_f_f_f);
+    entry.u.func.cfunc.f_f_f = func;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_iterator_next_entry(
+    const char *name,
+    int length,
+    JSValue (*func)(JSContext *ctx,
+                    JSValueConst this_val,
+                    int argc,
+                    JSValueConst *argv,
+                    int *pdone,
+                    int magic),
+    int magic)
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, static_cast<int16_t>(magic));
+    js_msvc_set_function_entry(&entry, length, JS_CFUNC_iterator_next);
+    entry.u.func.cfunc.iterator_next = func;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_cgetset_entry(
+    const char *name,
+    JSValue (*getter)(JSContext *ctx, JSValueConst this_val),
+    JSValue (*setter)(JSContext *ctx, JSValueConst this_val, JSValueConst val))
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, JS_PROP_CONFIGURABLE, JS_DEF_CGETSET, 0);
+    entry.u.getset.get.getter = getter;
+    entry.u.getset.set.setter = setter;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_cgetset_magic_entry(
+    const char *name,
+    JSValue (*getter)(JSContext *ctx, JSValueConst this_val, int magic),
+    JSValue (*setter)(JSContext *ctx, JSValueConst this_val, JSValueConst val, int magic),
+    int magic)
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, static_cast<int16_t>(magic));
+    entry.u.getset.get.getter_magic = getter;
+    entry.u.getset.set.setter_magic = setter;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_string_entry(const char *name,
+                                                              const char *value,
+                                                              uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_STRING, 0);
+    entry.u.str = value;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_int32_entry(const char *name,
+                                                             int32_t value,
+                                                             uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_INT32, 0);
+    entry.u.i32 = value;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_int64_entry(const char *name,
+                                                             int64_t value,
+                                                             uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_INT64, 0);
+    entry.u.i64 = value;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_double_entry(const char *name,
+                                                              double value,
+                                                              uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_DOUBLE, 0);
+    entry.u.f64 = value;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_undefined_entry(const char *name,
+                                                                 uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_UNDEFINED, 0);
+    entry.u.i32 = 0;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_atom_entry(const char *name,
+                                                            int32_t value,
+                                                            uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_ATOM, 0);
+    entry.u.i32 = value;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_bool_entry(const char *name,
+                                                            int32_t value,
+                                                            uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_PROP_BOOL, 0);
+    entry.u.i32 = value;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_object_entry(
+    const char *name,
+    const JSCFunctionListEntry *tab,
+    int len,
+    uint8_t prop_flags)
+{
+    JSCFunctionListEntry entry =
+        js_msvc_make_function_list_entry(name, prop_flags, JS_DEF_OBJECT, 0);
+    entry.u.prop_list.tab = tab;
+    entry.u.prop_list.len = len;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_alias_entry(const char *name,
+                                                             const char *from)
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0);
+    entry.u.alias.name = from;
+    entry.u.alias.base = -1;
+    return entry;
+}
+
+static inline JSCFunctionListEntry js_msvc_make_alias_base_entry(const char *name,
+                                                                  const char *from,
+                                                                  int base)
+{
+    JSCFunctionListEntry entry = js_msvc_make_function_list_entry(
+        name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0);
+    entry.u.alias.name = from;
+    entry.u.alias.base = base;
+    return entry;
+}
+
+#define JS_CFUNC_DEF(name, length, func1) \
+    js_msvc_make_cfunc_entry((name), (length), (func1))
+#define JS_CFUNC_MAGIC_DEF(name, length, func1, magic) \
+    js_msvc_make_cfunc_magic_entry((name), (length), (func1), (magic))
+#define JS_CFUNC_SPECIAL_DEF(name, length, cproto, func1) \
+    js_msvc_make_cfunc_ ## cproto ## _entry((name), (length), (func1))
+#define JS_ITERATOR_NEXT_DEF(name, length, func1, magic) \
+    js_msvc_make_iterator_next_entry((name), (length), (func1), (magic))
+#define JS_CGETSET_DEF(name, fgetter, fsetter) \
+    js_msvc_make_cgetset_entry((name), (fgetter), (fsetter))
+#define JS_CGETSET_MAGIC_DEF(name, fgetter, fsetter, magic) \
+    js_msvc_make_cgetset_magic_entry((name), (fgetter), (fsetter), (magic))
+#define JS_PROP_STRING_DEF(name, cstr, prop_flags) \
+    js_msvc_make_string_entry((name), (cstr), (prop_flags))
+#define JS_PROP_INT32_DEF(name, val, prop_flags) \
+    js_msvc_make_int32_entry((name), (val), (prop_flags))
+#define JS_PROP_INT64_DEF(name, val, prop_flags) \
+    js_msvc_make_int64_entry((name), (val), (prop_flags))
+#define JS_PROP_DOUBLE_DEF(name, val, prop_flags) \
+    js_msvc_make_double_entry((name), (val), (prop_flags))
+#define JS_PROP_UNDEFINED_DEF(name, prop_flags) \
+    js_msvc_make_undefined_entry((name), (prop_flags))
+#define JS_PROP_ATOM_DEF(name, val, prop_flags) \
+    js_msvc_make_atom_entry((name), (val), (prop_flags))
+#define JS_PROP_BOOL_DEF(name, val, prop_flags) \
+    js_msvc_make_bool_entry((name), (val), (prop_flags))
+#define JS_OBJECT_DEF(name, tab, len, prop_flags) \
+    js_msvc_make_object_entry((name), (tab), (len), (prop_flags))
+#define JS_ALIAS_DEF(name, from) js_msvc_make_alias_entry((name), (from))
+#define JS_ALIAS_BASE_DEF(name, from, base) \
+    js_msvc_make_alias_base_entry((name), (from), (base))
+#else
+#define JS_CFUNC_DEF(name, length, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u = { .func = { length, JS_CFUNC_generic, { .generic = func1 } } } }
+#define JS_CFUNC_MAGIC_DEF(name, length, func1, magic) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, magic, .u = { .func = { length, JS_CFUNC_generic_magic, { .generic_magic = func1 } } } }
+#define JS_CFUNC_SPECIAL_DEF(name, length, cproto, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u = { .func = { length, JS_CFUNC_ ## cproto, { .cproto = func1 } } } }
+#define JS_ITERATOR_NEXT_DEF(name, length, func1, magic) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, magic, .u = { .func = { length, JS_CFUNC_iterator_next, { .iterator_next = func1 } } } }
+#define JS_CGETSET_DEF(name, fgetter, fsetter) { name, JS_PROP_CONFIGURABLE, JS_DEF_CGETSET, 0, .u = { .getset = { .get = { .getter = fgetter }, .set = { .setter = fsetter } } } }
+#define JS_CGETSET_MAGIC_DEF(name, fgetter, fsetter, magic) { name, JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, magic, .u = { .getset = { .get = { .getter_magic = fgetter }, .set = { .setter_magic = fsetter } } } }
+#define JS_PROP_STRING_DEF(name, cstr, prop_flags) { name, prop_flags, JS_DEF_PROP_STRING, 0, .u = { .str = cstr } }
+#define JS_PROP_INT32_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_INT32, 0, .u = { .i32 = val } }
+#define JS_PROP_INT64_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_INT64, 0, .u = { .i64 = val } }
+#define JS_PROP_DOUBLE_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_DOUBLE, 0, .u = { .f64 = val } }
+#define JS_PROP_UNDEFINED_DEF(name, prop_flags) { name, prop_flags, JS_DEF_PROP_UNDEFINED, 0, .u = { .i32 = 0 } }
+#define JS_PROP_ATOM_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_ATOM, 0, .u = { .i32 = val } }
+#define JS_PROP_BOOL_DEF(name, val, prop_flags) { name, prop_flags, JS_DEF_PROP_BOOL, 0, .u = { .i32 = val } }
+#define JS_OBJECT_DEF(name, tab, len, prop_flags) { name, prop_flags, JS_DEF_OBJECT, 0, .u = { .prop_list = { tab, len } } }
+#define JS_ALIAS_DEF(name, from) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0, .u = { .alias = { from, -1 } } }
+#define JS_ALIAS_BASE_DEF(name, from, base) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_ALIAS, 0, .u = { .alias = { from, base } } }
+#endif]=]
         "MSVC static function-list initializers")
     file(WRITE "${output_dir}/quickjs-msvc-port.h" "${_quickjs_h}")
 

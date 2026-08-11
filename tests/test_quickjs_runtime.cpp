@@ -18,7 +18,6 @@ public:
         : runtime_(JS_NewRuntime2(&allocator, opaque)),
           context_(runtime_ ? JS_NewContext(runtime_) : nullptr) {}
 
-
     Runtime(const Runtime&)            = delete;
     Runtime& operator=(const Runtime&) = delete;
 
@@ -159,6 +158,60 @@ std::size_t accounting_usable_size(const void* pointer) {
     if (!pointer) return 0;
     return (static_cast<const AllocationHeader*>(pointer) - 1)->size;
 }
+#if defined(_MSC_VER)
+JSValue msvc_generic_magic(JSContext*, JSValueConst, int, JSValueConst*, int) {
+    return JS_UNDEFINED;
+}
+
+double msvc_unary(double value) {
+    return value;
+}
+
+double msvc_binary(double left, double right) {
+    return left + right;
+}
+
+JSValue msvc_getter(JSContext*, JSValueConst) {
+    return JS_UNDEFINED;
+}
+
+JSValue msvc_setter(JSContext*, JSValueConst, JSValueConst) {
+    return JS_UNDEFINED;
+}
+
+JSValue msvc_getter_magic(JSContext*, JSValueConst, int) {
+    return JS_UNDEFINED;
+}
+
+JSValue msvc_setter_magic(JSContext*, JSValueConst, JSValueConst, int) {
+    return JS_UNDEFINED;
+}
+
+JSValue msvc_iterator_next(JSContext*, JSValueConst, int, JSValueConst*, int*, int) {
+    return JS_UNDEFINED;
+}
+
+const JSCFunctionListEntry msvc_nested_entries[]        = {JS_CFUNC_DEF("nested", 0, native_add)};
+const JSCFunctionListEntry msvc_function_list_entries[] = {
+    JS_CFUNC_DEF("generic", 1, native_add),
+    JS_CFUNC_MAGIC_DEF("magic", 2, msvc_generic_magic, 3),
+    JS_CFUNC_SPECIAL_DEF("unary", 1, f_f, msvc_unary),
+    JS_CFUNC_SPECIAL_DEF("binary", 2, f_f_f, msvc_binary),
+    JS_ITERATOR_NEXT_DEF("next", 1, msvc_iterator_next, 4),
+    JS_CGETSET_DEF("property", msvc_getter, msvc_setter),
+    JS_CGETSET_MAGIC_DEF("magicProperty", msvc_getter_magic, msvc_setter_magic, 5),
+    JS_PROP_STRING_DEF("string", "value", JS_PROP_CONFIGURABLE),
+    JS_PROP_INT32_DEF("int32", 7, JS_PROP_WRITABLE),
+    JS_PROP_INT64_DEF("int64", 8, JS_PROP_WRITABLE),
+    JS_PROP_DOUBLE_DEF("double", 9.0, JS_PROP_WRITABLE),
+    JS_PROP_UNDEFINED_DEF("undefined", JS_PROP_WRITABLE),
+    JS_PROP_ATOM_DEF("atom", 10, JS_PROP_WRITABLE),
+    JS_PROP_BOOL_DEF("bool", 1, JS_PROP_WRITABLE),
+    JS_OBJECT_DEF("object", msvc_nested_entries, 1, JS_PROP_WRITABLE),
+    JS_ALIAS_DEF("alias", "generic"),
+    JS_ALIAS_BASE_DEF("baseAlias", "generic", 3),
+};
+#endif
 
 TEST(QuickJsRuntimeTest, BindsOnlyExplicitNativeFunctions) {
     Runtime runtime;
@@ -226,7 +279,7 @@ TEST(QuickJsRuntimeTest, EnforcesRuntimeMemoryAndStackLimits) {
         accounting_usable_size,
     };
     AllocationStats stats;
-    Runtime runtime(allocator, &stats);
+    Runtime         runtime(allocator, &stats);
     ASSERT_NE(runtime.runtime(), nullptr);
     ASSERT_NE(runtime.context(), nullptr);
 
@@ -268,5 +321,29 @@ TEST(QuickJsRuntimeTest, SupportsAccountedCustomAllocator) {
     EXPECT_EQ(stats.allocations, 0U);
     EXPECT_EQ(stats.bytes, 0U);
 }
+#if defined(_MSC_VER)
+TEST(QuickJsRuntimeTest, MsvcFunctionListMacrosPreserveMemberTypes) {
+    EXPECT_EQ(msvc_function_list_entries[0].u.func.cfunc.generic, native_add);
+    EXPECT_EQ(msvc_function_list_entries[1].u.func.cfunc.generic_magic, msvc_generic_magic);
+    EXPECT_EQ(msvc_function_list_entries[2].u.func.cfunc.f_f, msvc_unary);
+    EXPECT_EQ(msvc_function_list_entries[3].u.func.cfunc.f_f_f, msvc_binary);
+    EXPECT_EQ(msvc_function_list_entries[4].u.func.cfunc.iterator_next, msvc_iterator_next);
+    EXPECT_EQ(msvc_function_list_entries[5].u.getset.get.getter, msvc_getter);
+    EXPECT_EQ(msvc_function_list_entries[5].u.getset.set.setter, msvc_setter);
+    EXPECT_EQ(msvc_function_list_entries[6].u.getset.get.getter_magic, msvc_getter_magic);
+    EXPECT_EQ(msvc_function_list_entries[6].u.getset.set.setter_magic, msvc_setter_magic);
+    EXPECT_STREQ(msvc_function_list_entries[7].u.str, "value");
+    EXPECT_EQ(msvc_function_list_entries[8].u.i32, 7);
+    EXPECT_EQ(msvc_function_list_entries[9].u.i64, 8);
+    EXPECT_DOUBLE_EQ(msvc_function_list_entries[10].u.f64, 9.0);
+    EXPECT_EQ(msvc_function_list_entries[11].u.i32, 0);
+    EXPECT_EQ(msvc_function_list_entries[12].u.i32, 10);
+    EXPECT_EQ(msvc_function_list_entries[13].u.i32, 1);
+    EXPECT_EQ(msvc_function_list_entries[14].u.prop_list.tab, msvc_nested_entries);
+    EXPECT_EQ(msvc_function_list_entries[14].u.prop_list.len, 1);
+    EXPECT_EQ(msvc_function_list_entries[15].u.alias.base, -1);
+    EXPECT_EQ(msvc_function_list_entries[16].u.alias.base, 3);
+}
+#endif
 
 }  // namespace
