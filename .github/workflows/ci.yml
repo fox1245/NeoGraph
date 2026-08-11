@@ -225,6 +225,8 @@ jobs:
             -DNEOGRAPH_BUILD_UTIL=ON \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
       - name: Build
@@ -261,9 +263,9 @@ jobs:
     #     with their own vcpkg / choco setup.
     #   * OpenSSL comes from the runner's preinstalled copy (choco
     #     installs it by default into `C:\Program Files\OpenSSL-Win64`).
-    # This still exercises neograph_core / neograph_async (TLS path) /
-    # neograph_mcp (both HTTP and stdio transports) / neograph_llm
-    # — the layers with 2.0 Windows-specific code.
+    # This exercises neograph_core / neograph_program + embedded QuickJS /
+    # neograph_async (TLS path) / neograph_mcp (HTTP + stdio) / neograph_llm,
+    # including native MSVC compilation of the sealed control runtime.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -283,7 +285,7 @@ jobs:
           echo "OpenSSL installed at: $ssl"
           "OPENSSL_ROOT_DIR=$ssl" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
-      - name: Configure (MCP + async only; PG + SQLite + libcurl disabled on Windows CI)
+      - name: Configure (Program + QuickJS + MCP + async; PG + SQLite + libcurl disabled)
         shell: pwsh
         run: |
           cmake -B build `
@@ -297,6 +299,8 @@ jobs:
             -DNEOGRAPH_BUILD_POSTGRES=OFF `
             -DNEOGRAPH_BUILD_SQLITE=OFF `
             -DNEOGRAPH_BUILD_TESTS=ON `
+            -DNEOGRAPH_BUILD_PROGRAM=ON `
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON `
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
       - name: Build
@@ -314,6 +318,58 @@ jobs:
         with:
           name: ctest-logs-windows
           path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  build-windows-asan:
+    # Focused native-MSVC sanitizer canary for the Program/QuickJS boundary.
+    # Release mode avoids /RTC incompatibility; /Zi retains actionable stacks.
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (MSVC AddressSanitizer, Program + QuickJS only)
+        shell: pwsh
+        run: |
+          cmake -B build-windows-asan `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DNEOGRAPH_BUILD_LLM=OFF `
+            -DNEOGRAPH_BUILD_MCP=OFF `
+            -DNEOGRAPH_BUILD_UTIL=OFF `
+            -DNEOGRAPH_BUILD_POSTGRES=OFF `
+            -DNEOGRAPH_BUILD_SQLITE=OFF `
+            -DNEOGRAPH_BUILD_PROGRAM=ON `
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON `
+            -DNEOGRAPH_BUILD_TESTS=ON `
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF `
+            -DNEOGRAPH_BUILD_BENCHMARKS=OFF `
+            -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
+
+      - name: Build Program and QuickJS sanitizer targets
+        shell: pwsh
+        run: |
+          cmake --build build-windows-asan --config Release -j `
+            --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
+
+      - name: Run Program and QuickJS under MSVC AddressSanitizer
+        shell: pwsh
+        run: |
+          ctest --test-dir build-windows-asan -C Release `
+            --output-on-failure -j `
+            -R "^(QuickJS\.|Program)"
+
+      - name: Upload sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows-asan
+          path: build-windows-asan/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
   # ──────────────────────────────────────────────────────────────────

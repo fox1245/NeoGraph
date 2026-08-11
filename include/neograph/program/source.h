@@ -89,7 +89,15 @@ public:
     static constexpr std::string_view JAVASCRIPT_QUICKJS_ARCHIVE_DIGEST =
         "sha256:b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a";
     static constexpr std::string_view JAVASCRIPT_QUICKJS_BUILD_OPTIONS =
-        "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;DYNAMIC_MODULES=disabled";
+#if defined(_MSC_VER)
+        "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
+        "DYNAMIC_MODULES=disabled;NEOGRAPH_PLATFORM_PORT=msvc-v1;"
+        "NEOGRAPH_PLATFORM_PORT_SHA256="
+        "2bbe6797028c267f565daf56424badcbb59d016c3fa1f2f6c1e69a77eaa84467";
+#else
+        "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
+        "DYNAMIC_MODULES=disabled";
+#endif
     static constexpr std::string_view JAVASCRIPT_PROFILE                = "sealed-v1";
     static constexpr std::uint32_t    JAVASCRIPT_PROFILE_VERSION        = 1;
     static constexpr std::uint32_t    JAVASCRIPT_NG_API_VERSION          = 1;

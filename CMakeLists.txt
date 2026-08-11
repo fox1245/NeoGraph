@@ -321,27 +321,46 @@ target_link_libraries(asio INTERFACE Threads::Threads)
 # standalone std/os modules, filesystem/process helpers, and module loader
 # that the sealed NeoGraph contexts must never expose.  This target is neither
 # exported nor installed; Core does not link it, directly or transitively.
-if(NEOGRAPH_BUILD_QUICKJS_CONTROL AND WIN32)
-    message(FATAL_ERROR
-        "NEOGRAPH_BUILD_QUICKJS_CONTROL is POSIX-only during Q0: the pinned "
-        "upstream QuickJS sources use POSIX timing and stack APIs. Leave it "
-        "OFF on native Windows until a separately qualified port is added.")
-endif()
-
 if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
-    # Compile through source wrappers that apply a private C symbol prefix
-    # before the pristine pinned sources are preprocessed. This is portable
-    # across object formats and prevents static consumers from capturing (or
-    # colliding with) another QuickJS engine; visibility alone only protects
-    # the shared-library export table.
+    # The durable runtime identity in source.h includes the exact MSVC overlay
+    # hash. Any port edit must therefore update that identity explicitly.
+    file(SHA256
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/NeoGraphQuickJSMsvcPort.cmake"
+        _neograph_quickjs_msvc_port_sha256)
+    file(READ
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/neograph/program/source.h"
+        _neograph_program_source_header)
+    string(FIND "${_neograph_program_source_header}"
+        "${_neograph_quickjs_msvc_port_sha256}"
+        _neograph_quickjs_msvc_port_identity_match)
+    if(_neograph_quickjs_msvc_port_identity_match EQUAL -1)
+        message(FATAL_ERROR
+            "NeoGraph QuickJS MSVC port changed without updating "
+            "ProgramSource::JAVASCRIPT_QUICKJS_BUILD_OPTIONS")
+    endif()
+    unset(_neograph_program_source_header)
+    unset(_neograph_quickjs_msvc_port_identity_match)
+    unset(_neograph_quickjs_msvc_port_sha256)
+    # POSIX toolchains compile pristine upstream sources through symbol-prefix
+    # wrappers. MSVC compiles deterministic build-directory copies produced by
+    # a fail-closed portability overlay; the vendored archive itself stays
+    # byte-for-byte upstream.
     set(_neograph_quickjs_wrapper_dir ${DEPS_DIR}/quickjs/neograph)
-    add_library(neograph_quickjs OBJECT
-        ${_neograph_quickjs_wrapper_dir}/quickjs.c
-        ${_neograph_quickjs_wrapper_dir}/cutils.c
-        ${_neograph_quickjs_wrapper_dir}/dtoa.c
-        ${_neograph_quickjs_wrapper_dir}/libregexp.c
-        ${_neograph_quickjs_wrapper_dir}/libunicode.c
-    )
+    if(MSVC)
+        include(cmake/NeoGraphQuickJSMsvcPort.cmake)
+        neograph_prepare_quickjs_msvc_sources(
+            "${DEPS_DIR}/quickjs"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/quickjs-msvc"
+            _neograph_quickjs_sources)
+    else()
+        set(_neograph_quickjs_sources
+            ${_neograph_quickjs_wrapper_dir}/quickjs.c
+            ${_neograph_quickjs_wrapper_dir}/cutils.c
+            ${_neograph_quickjs_wrapper_dir}/dtoa.c
+            ${_neograph_quickjs_wrapper_dir}/libregexp.c
+            ${_neograph_quickjs_wrapper_dir}/libunicode.c)
+    endif()
+    add_library(neograph_quickjs OBJECT ${_neograph_quickjs_sources})
     target_include_directories(neograph_quickjs PRIVATE
         ${_neograph_quickjs_wrapper_dir}
         ${DEPS_DIR}/quickjs)

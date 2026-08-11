@@ -403,6 +403,15 @@ endif()
 if(TARGET neograph_quickjs_tests)
     gtest_discover_tests(neograph_quickjs_tests)
 endif()
+if(TARGET neograph_quickjs)
+    add_test(NAME QuickJS.MsvcPortSource
+        COMMAND ${CMAKE_COMMAND}
+            -DNEOGRAPH_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+            -DNEOGRAPH_BINARY_DIR=${PROJECT_BINARY_DIR}
+            -P ${PROJECT_SOURCE_DIR}/tests/verify_quickjs_msvc_port.cmake)
+    set_tests_properties(QuickJS.MsvcPortSource PROPERTIES LABELS "quickjs;portability")
+endif()
+
 
 if(TARGET neograph_quickjs_c_smoke)
     add_test(NAME QuickJS.CEmbeddingSmoke COMMAND neograph_quickjs_c_smoke)

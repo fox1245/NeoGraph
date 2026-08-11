@@ -1,0 +1,41 @@
+if(NOT DEFINED NEOGRAPH_SOURCE_DIR OR NOT DEFINED NEOGRAPH_BINARY_DIR)
+    message(FATAL_ERROR "NEOGRAPH_SOURCE_DIR and NEOGRAPH_BINARY_DIR are required")
+endif()
+
+include("${NEOGRAPH_SOURCE_DIR}/cmake/NeoGraphQuickJSMsvcPort.cmake")
+set(_output "${NEOGRAPH_BINARY_DIR}/quickjs-msvc-port-verification")
+neograph_prepare_quickjs_msvc_sources(
+    "${NEOGRAPH_SOURCE_DIR}/deps/quickjs"
+    "${_output}"
+    _sources)
+
+list(LENGTH _sources _source_count)
+if(NOT _source_count EQUAL 5)
+    message(FATAL_ERROR "expected five generated QuickJS sources, got ${_source_count}")
+endif()
+
+file(READ "${_output}/quickjs.c" _quickjs)
+file(READ "${_output}/cutils.h" _cutils)
+file(READ "${_output}/dtoa.c" _dtoa)
+
+function(_require text needle label)
+    string(FIND "${text}" "${needle}" _position)
+    if(_position EQUAL -1)
+        message(FATAL_ERROR "generated MSVC port is missing ${label}")
+    endif()
+endfunction()
+
+_require("${_quickjs}" "#include \"quickjs-prefix.h\"" "the private symbol prefix")
+_require("${_quickjs}" "GetSystemTimeAsFileTime" "the Windows clock shim")
+_require("${_quickjs}" "defined(__EMSCRIPTEN__) || defined(_MSC_VER)" "the computed-goto guard")
+_require("${_quickjs}" "!defined(__EMSCRIPTEN__) && !defined(_MSC_VER)" "the POSIX atomics guard")
+_require("${_quickjs}" "__declspec(align(JS_MALLOC_ALIGN))" "allocator alignment")
+_require("${_quickjs}" "_AddressOfReturnAddress()" "the MSVC stack intrinsic")
+_require("${_cutils}" "_BitScanReverse64" "the 64-bit count-leading-zero intrinsic")
+_require("${_cutils}" "_BitScanForward64" "the 64-bit count-trailing-zero intrinsic")
+_require("${_cutils}" "memcpy(&value, tab, sizeof(value))" "unaligned-safe reads")
+_require("${_dtoa}" "#if !defined(_MSC_VER)\n#include <sys/time.h>" "the dtoa POSIX guard")
+
+file(SHA256 "${NEOGRAPH_SOURCE_DIR}/cmake/NeoGraphQuickJSMsvcPort.cmake" _port_digest)
+file(READ "${NEOGRAPH_SOURCE_DIR}/include/neograph/program/source.h" _source_header)
+_require("${_source_header}" "${_port_digest}" "the durable MSVC port identity")
