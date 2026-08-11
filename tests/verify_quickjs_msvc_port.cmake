@@ -36,6 +36,8 @@ _require("${_cutils}" "_BitScanForward64" "the 64-bit count-trailing-zero intrin
 _require("${_cutils}" "memcpy(&value, tab, sizeof(value))" "unaligned-safe reads")
 _require("${_dtoa}" "#if !defined(_MSC_VER)\n#include <sys/time.h>" "the dtoa POSIX guard")
 
-file(SHA256 "${NEOGRAPH_SOURCE_DIR}/cmake/NeoGraphQuickJSMsvcPort.cmake" _port_digest)
+file(READ "${NEOGRAPH_SOURCE_DIR}/cmake/NeoGraphQuickJSMsvcPort.cmake" _port_source)
+string(REPLACE "\r\n" "\n" _port_source "${_port_source}")
+string(SHA256 _port_digest "${_port_source}")
 file(READ "${NEOGRAPH_SOURCE_DIR}/include/neograph/program/source.h" _source_header)
 _require("${_source_header}" "${_port_digest}" "the durable MSVC port identity")

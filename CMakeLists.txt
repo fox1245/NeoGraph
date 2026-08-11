@@ -324,9 +324,14 @@ target_link_libraries(asio INTERFACE Threads::Threads)
 if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     # The durable runtime identity in source.h includes the exact MSVC overlay
     # hash. Any port edit must therefore update that identity explicitly.
-    file(SHA256
+    file(READ
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/NeoGraphQuickJSMsvcPort.cmake"
-        _neograph_quickjs_msvc_port_sha256)
+        _neograph_quickjs_msvc_port_source)
+    string(REPLACE "\r\n" "\n"
+        _neograph_quickjs_msvc_port_source
+        "${_neograph_quickjs_msvc_port_source}")
+    string(SHA256 _neograph_quickjs_msvc_port_sha256
+        "${_neograph_quickjs_msvc_port_source}")
     file(READ
         "${CMAKE_CURRENT_SOURCE_DIR}/include/neograph/program/source.h"
         _neograph_program_source_header)
@@ -340,6 +345,7 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     endif()
     unset(_neograph_program_source_header)
     unset(_neograph_quickjs_msvc_port_identity_match)
+    unset(_neograph_quickjs_msvc_port_source)
     unset(_neograph_quickjs_msvc_port_sha256)
     # POSIX toolchains compile pristine upstream sources through symbol-prefix
     # wrappers. MSVC compiles deterministic build-directory copies produced by
