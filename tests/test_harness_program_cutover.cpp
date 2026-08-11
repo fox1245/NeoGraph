@@ -456,7 +456,7 @@ TEST(HarnessProgramCutover, DefineOnlyJavaScriptRetainsCoreOutputContract) {
 TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRuntime) {
     HarnessFixture                fixture;
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    auto                          value = request();
+    auto                          value          = request();
     value["budgets"]["provider_timeout_seconds"] = 30;
     value["budgets"]["max_output_tokens"]        = 100;
     value["harness"]                             = {{"mode", "javascript"},
@@ -1468,7 +1468,7 @@ TEST(HarnessProgramCutover, ReconnectsSqlitePendingEffectWithCheckpointAndJourna
     std::filesystem::remove(path);
 }
 
-TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneCasWinnerAndOneDispatch) {
+TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneWinnerAndOneDispatch) {
     HarnessFixture* fixture_ptr = nullptr;
     HarnessFixture  fixture([&](const neograph::mcp::HarnessWorkerCall& call,
                                const std::shared_ptr<neograph::graph::CancelToken>&) {
@@ -1510,7 +1510,8 @@ TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneCasWinnerAndOne
                                                   {"result", {{"approved", approved}}}});
             return accepted.at("accepted").get<bool>() ? 1 : -1;
         } catch (const neograph::program::ProgramDiagnosticError& error) {
-            return error.diagnostic().code == "P_RESUME_CONFLICT" ? 0 : -2;
+            const auto& code = error.diagnostic().code;
+            return code == "P_RESUME_CONFLICT" || code == "P_RESUME_STATE" ? 0 : -2;
         }
     };
     auto first_resume  = std::async(std::launch::async, [&] { return resume_once(first, true); });

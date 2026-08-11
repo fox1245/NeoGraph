@@ -2,19 +2,23 @@
 
 #include <stddef.h>
 
-_Static_assert(offsetof(neograph_program_native_binding_v1, destroy) +
-                   sizeof(neograph_program_native_destroy_v1) ==
-                   sizeof(neograph_program_native_binding_v1),
-               "v1 binding layout must be complete");
-_Static_assert(offsetof(neograph_program_native_invoke_request_v1, cancellation) +
-                   sizeof(const neograph_program_native_cancellation_v1*) ==
-                   sizeof(neograph_program_native_invoke_request_v1),
-               "v1 request layout must be complete");
+typedef char
+    native_binding_layout_must_be_complete[offsetof(neograph_program_native_binding_v1, destroy) +
+                                                       sizeof(neograph_program_native_destroy_v1) ==
+                                                   sizeof(neograph_program_native_binding_v1)
+                                               ? 1
+                                               : -1];
+typedef char native_request_layout_must_be_complete
+    [offsetof(neograph_program_native_invoke_request_v1, cancellation) +
+                 sizeof(const neograph_program_native_cancellation_v1*) ==
+             sizeof(neograph_program_native_invoke_request_v1)
+         ? 1
+         : -1];
 
-static int32_t smoke_invoke(void* userdata,
+static int32_t smoke_invoke(void*                                            userdata,
                             const neograph_program_native_invoke_request_v1* request,
-                            neograph_program_native_completion_v1 completion,
-                            void* completion_userdata) {
+                            neograph_program_native_completion_v1            completion,
+                            void*                                            completion_userdata) {
     (void)userdata;
     (void)request;
     (void)completion;

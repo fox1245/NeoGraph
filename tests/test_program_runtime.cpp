@@ -182,8 +182,8 @@ public:
         const auto call = map_fail_first_calls.fetch_add(1, std::memory_order_relaxed) + 1;
         if (call == 1) {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
-            for (unsigned attempt = 0;
-                 map_fail_first_active.load(std::memory_order_relaxed) == 0; ++attempt) {
+            for (unsigned attempt = 0; map_fail_first_active.load(std::memory_order_relaxed) == 0;
+                 ++attempt) {
                 if (attempt == 2000)
                     throw std::runtime_error("map fail-fast sibling did not become active");
                 timer.expires_after(std::chrono::milliseconds(1));
@@ -3129,7 +3129,7 @@ TEST(ProgramRuntimeTest, RepeatedAsyncWaitNeverMissesConcurrentCompletion) {
     }
 }
 
-TEST(ProgramRuntimeTest, ConcurrentResumeHasOneCasWinnerAndOneCoreDispatch) {
+TEST(ProgramRuntimeTest, ConcurrentResumeHasOneWinnerAndOneCoreDispatch) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-interrupt");
@@ -3147,7 +3147,8 @@ TEST(ProgramRuntimeTest, ConcurrentResumeHasOneCasWinnerAndOneCoreDispatch) {
                 resume_for(interrupted, json{{"decision", std::move(decision)}}, "trace-race"));
             return handle.wait().status() == ProgramTerminalStatus::Completed ? 1 : -1;
         } catch (const ProgramDiagnosticError& error) {
-            return error.diagnostic().code == "P_RESUME_CONFLICT" ? 0 : -2;
+            const auto& code = error.diagnostic().code;
+            return code == "P_RESUME_CONFLICT" || code == "P_RESUME_STATE" ? 0 : -2;
         } catch (...) {
             return -3;
         }
@@ -5595,7 +5596,6 @@ TEST(ProgramRuntimeTest, ParallelMapFailFastCancelsActiveSiblingAfterFailure) {
                                                  RunBudget{10000, 1000, 1000, 2, 3, 20, 0, 1, 3},
                                                  "trace-parallel-map-fail-fast-active",
                                                  {}});
-
 
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);

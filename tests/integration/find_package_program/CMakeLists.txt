@@ -44,6 +44,7 @@ endif()
 
 add_executable(consumer main.cpp)
 target_link_libraries(consumer PRIVATE neograph::program)
+target_compile_features(consumer PRIVATE cxx_std_20)
 
 # Compile a downstream consumer as C11 and link it through the C++ Program
 # target. This keeps the public native ABI independent of C++ object layouts.

@@ -2,21 +2,24 @@
 
 #include <stddef.h>
 
-_Static_assert(offsetof(neograph_program_native_binding_v1, abi_version) == 0,
-               "native binding ABI field must remain first");
-_Static_assert(offsetof(neograph_program_native_binding_v1, struct_size) >
-                   offsetof(neograph_program_native_binding_v1, abi_version),
-               "native binding size field must follow ABI field");
-_Static_assert(sizeof(neograph_program_native_result_v1) >=
-                   offsetof(neograph_program_native_result_v1, payload_json) +
-                       sizeof(neograph_program_native_owned_bytes_v1),
-               "native result must contain its v1 payload prefix");
+typedef char native_binding_abi_field_must_be_first
+    [offsetof(neograph_program_native_binding_v1, abi_version) == 0 ? 1 : -1];
+typedef char native_binding_size_field_must_follow_abi_field
+    [offsetof(neograph_program_native_binding_v1, struct_size) >
+             offsetof(neograph_program_native_binding_v1, abi_version)
+         ? 1
+         : -1];
+typedef char native_result_must_contain_v1_payload_prefix
+    [sizeof(neograph_program_native_result_v1) >=
+             offsetof(neograph_program_native_result_v1, payload_json) +
+                 sizeof(neograph_program_native_owned_bytes_v1)
+         ? 1
+         : -1];
 
-static int32_t reject_invoke(
-    void* userdata,
-    const neograph_program_native_invoke_request_v1* request,
-    neograph_program_native_completion_v1 completion,
-    void* completion_userdata) {
+static int32_t reject_invoke(void*                                            userdata,
+                             const neograph_program_native_invoke_request_v1* request,
+                             neograph_program_native_completion_v1            completion,
+                             void*                                            completion_userdata) {
     (void)userdata;
     (void)request;
     (void)completion;

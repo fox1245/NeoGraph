@@ -140,9 +140,6 @@ if(TARGET neograph_quickjs)
     add_executable(neograph_quickjs_tests
         test_quickjs_runtime.cpp
     )
-    target_include_directories(neograph_quickjs_tests PRIVATE
-        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
-    )
     target_compile_features(neograph_quickjs_tests PRIVATE cxx_std_17)
     _neograph_attach_quickjs_runtime(neograph_quickjs_tests)
     target_link_libraries(neograph_quickjs_tests PRIVATE
@@ -151,9 +148,6 @@ if(TARGET neograph_quickjs)
 
     add_executable(neograph_quickjs_c_smoke
         quickjs_c_smoke.c
-    )
-    target_include_directories(neograph_quickjs_c_smoke PRIVATE
-        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
     )
     set_target_properties(neograph_quickjs_c_smoke PROPERTIES
         C_STANDARD 11

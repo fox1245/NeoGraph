@@ -136,6 +136,10 @@ struct NEOGRAPH_API CopyNinjaBehavioralProfile {
     std::vector<CopyNinjaBehavioralProbe> development_probes;
 };
 
+class CopyNinjaHarness;
+NEOGRAPH_API CopyNinjaHarness materialize_copy_ninja(
+    const AgentCardCompatibilityCandidate& candidate, CopyNinjaBehavioralProfile profile);
+
 /**
  * A local, separately materialized deterministic compatibility harness.
  *
@@ -182,12 +186,5 @@ private:
     std::string                             name_;
     std::shared_ptr<const CopyNinjaHarness> harness_;
 };
-
-/**
- * Materialize a fixed local template after its independently supplied
- * development probes match.  The returned harness remains unadmitted.
- */
-NEOGRAPH_API CopyNinjaHarness materialize_copy_ninja(
-    const AgentCardCompatibilityCandidate& candidate, CopyNinjaBehavioralProfile profile);
 
 }  // namespace neograph::a2a

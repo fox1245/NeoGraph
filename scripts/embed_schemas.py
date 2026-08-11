@@ -29,6 +29,25 @@ def raw_string_delimiter(content: str) -> str:
             return candidate
     raise ValueError("Unable to choose a collision-free C++ raw-string delimiter")
 
+MAX_RAW_LITERAL_BYTES = 12 * 1024
+
+
+def split_raw_string_content(content: str):
+    """Split UTF-8 content below MSVC's per-literal size ceiling."""
+    chunks = []
+    current = []
+    current_bytes = 0
+    for character in content:
+        character_bytes = len(character.encode("utf-8"))
+        if current and current_bytes + character_bytes > MAX_RAW_LITERAL_BYTES:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(character)
+        current_bytes += character_bytes
+    chunks.append("".join(current))
+    return chunks
+
 
 def main():
     if len(sys.argv) != 3:
@@ -64,10 +83,11 @@ def main():
             raise ValueError("Schema filenames collide after C++ identifier normalization")
         for name, content in schemas.items():
             var_name = identifiers[name]
-            delimiter = raw_string_delimiter(content)
-            out.write(f'inline const char* {var_name} = R"{delimiter}(\n')
-            out.write(content)
-            out.write(f'\n){delimiter}";\n\n')
+            out.write(f"inline const char* {var_name} =\n")
+            for chunk in split_raw_string_content(f"\n{content}\n"):
+                delimiter = raw_string_delimiter(chunk)
+                out.write(f'R"{delimiter}({chunk}){delimiter}"\n')
+            out.write(";\n\n")
 
         # Registry map
         out.write("inline const std::map<std::string, const char*>& schemas() {\n")
