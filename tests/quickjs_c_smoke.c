@@ -201,10 +201,20 @@ int main(void) {
     JSContext* context = JS_NewContext(runtime);
     if (!context) {
         JS_FreeRuntime(runtime);
+
         return fail("JS_NewContext failed");
     }
 
     int result = 0;
+    stage("invoke native callback through direct function pointer");
+    JSCFunction* direct_native = native_undefined;
+    JSValue      direct_result = direct_native(context, JS_UNDEFINED, 0, NULL);
+    if (!JS_IsUndefined(direct_result)) {
+        JS_FreeValue(context, direct_result);
+        result = fail("direct native callback did not return undefined");
+        goto done;
+    }
+    JS_FreeValue(context, direct_result);
     stage("install native binding");
     JSValue global = JS_GetGlobalObject(context);
     if (JS_IsException(global)) {
