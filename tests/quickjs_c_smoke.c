@@ -55,7 +55,118 @@ static int interrupt_after_budget(JSRuntime* runtime, void* opaque) {
     return budget->polls >= budget->limit;
 }
 
+static JSValue macro_generic_magic(
+    JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv, int magic) {
+    (void)context;
+    (void)this_value;
+    (void)argc;
+    (void)argv;
+    (void)magic;
+    return JS_UNDEFINED;
+}
+
+static double macro_unary(double value) {
+    return value;
+}
+
+static double macro_binary(double left, double right) {
+    return left + right;
+}
+
+static JSValue macro_getter(JSContext* context, JSValueConst this_value) {
+    (void)context;
+    (void)this_value;
+    return JS_UNDEFINED;
+}
+
+static JSValue macro_setter(JSContext* context, JSValueConst this_value, JSValueConst value) {
+    (void)context;
+    (void)this_value;
+    (void)value;
+    return JS_UNDEFINED;
+}
+
+static JSValue macro_getter_magic(JSContext* context, JSValueConst this_value, int magic) {
+    (void)context;
+    (void)this_value;
+    (void)magic;
+    return JS_UNDEFINED;
+}
+
+static JSValue macro_setter_magic(JSContext*   context,
+                                  JSValueConst this_value,
+                                  JSValueConst value,
+                                  int          magic) {
+    (void)context;
+    (void)this_value;
+    (void)value;
+    (void)magic;
+    return JS_UNDEFINED;
+}
+
+static JSValue macro_iterator_next(JSContext*    context,
+                                   JSValueConst  this_value,
+                                   int           argc,
+                                   JSValueConst* argv,
+                                   int*          done,
+                                   int           magic) {
+    (void)context;
+    (void)this_value;
+    (void)argc;
+    (void)argv;
+    (void)done;
+    (void)magic;
+    return JS_UNDEFINED;
+}
+
+static const JSCFunctionListEntry macro_nested_entries[] = {JS_CFUNC_DEF("nested", 0, native_add)};
+static const JSCFunctionListEntry macro_entries[]        = {
+    JS_CFUNC_DEF("generic", 1, native_add),
+    JS_CFUNC_MAGIC_DEF("magic", 2, macro_generic_magic, 3),
+    JS_CFUNC_SPECIAL_DEF("unary", 1, f_f, macro_unary),
+    JS_CFUNC_SPECIAL_DEF("binary", 2, f_f_f, macro_binary),
+    JS_ITERATOR_NEXT_DEF("next", 1, macro_iterator_next, 4),
+    JS_CGETSET_DEF("property", macro_getter, macro_setter),
+    JS_CGETSET_MAGIC_DEF("magicProperty", macro_getter_magic, macro_setter_magic, 5),
+    JS_PROP_STRING_DEF("string", "value", JS_PROP_CONFIGURABLE),
+    JS_PROP_INT32_DEF("int32", 7, JS_PROP_WRITABLE),
+    JS_PROP_INT64_DEF("int64", 8, JS_PROP_WRITABLE),
+    JS_PROP_DOUBLE_DEF("double", 9.0, JS_PROP_WRITABLE),
+    JS_PROP_UNDEFINED_DEF("undefined", JS_PROP_WRITABLE),
+    JS_PROP_ATOM_DEF("atom", 10, JS_PROP_WRITABLE),
+    JS_PROP_BOOL_DEF("bool", 1, JS_PROP_WRITABLE),
+    JS_OBJECT_DEF("object", macro_nested_entries, 1, JS_PROP_WRITABLE),
+    JS_ALIAS_DEF("alias", "generic"),
+    JS_ALIAS_BASE_DEF("baseAlias", "generic", 3),
+};
+
+static int verify_function_list_initializers(void) {
+    if (macro_entries[0].u.func.cfunc.generic != native_add ||
+        macro_entries[1].u.func.cfunc.generic_magic != macro_generic_magic ||
+        macro_entries[2].u.func.cfunc.f_f != macro_unary ||
+        macro_entries[3].u.func.cfunc.f_f_f != macro_binary ||
+        macro_entries[4].u.func.cfunc.iterator_next != macro_iterator_next) {
+        return fail("function-list function fields changed");
+    }
+    if (macro_entries[5].u.getset.get.getter != macro_getter ||
+        macro_entries[5].u.getset.set.setter != macro_setter ||
+        macro_entries[6].u.getset.get.getter_magic != macro_getter_magic ||
+        macro_entries[6].u.getset.set.setter_magic != macro_setter_magic) {
+        return fail("function-list accessor fields changed");
+    }
+    if (strcmp(macro_entries[7].u.str, "value") != 0 || macro_entries[8].u.i32 != 7 ||
+        macro_entries[9].u.i64 != 8 || macro_entries[10].u.f64 != 9.0 ||
+        macro_entries[11].u.i32 != 0 || macro_entries[12].u.i32 != 10 ||
+        macro_entries[13].u.i32 != 1 || macro_entries[14].u.prop_list.tab != macro_nested_entries ||
+        macro_entries[14].u.prop_list.len != 1 || macro_entries[15].u.alias.base != -1 ||
+        macro_entries[16].u.alias.base != 3) {
+        return fail("function-list data fields changed");
+    }
+    return 0;
+}
+
 int main(void) {
+    if (verify_function_list_initializers() != 0) return 1;
     JSRuntime* runtime = JS_NewRuntime();
     if (!runtime) return fail("JS_NewRuntime failed");
 
