@@ -60,6 +60,11 @@ _require("${_quickjs_header}" "JSCFunctionType ft = { 0 };\nft.generic_magic = f
          "the C++17-safe function union initialization")
 _forbid("${_quickjs_header}" "JSCFunctionType ft = { .generic_magic = func };"
         "a designated union initializer")
+_require("${_quickjs_header}"
+         "#else\n#define JS_CFUNC_DEF(name, length, func1) { name, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, JS_DEF_CFUNC, 0, .u = { .func ="
+         "the C function-list outer-union initializer")
+_forbid("${_quickjs_header}" ".u.func ="
+        "a flattened C function-list union designator")
 _require("${_quickjs_header}" "#include <math.h>" "the NAN declaration")
 _require("${_cutils}" "_BitScanReverse64" "the 64-bit count-leading-zero intrinsic")
 _require("${_cutils}" "_BitScanForward64" "the 64-bit count-trailing-zero intrinsic")
