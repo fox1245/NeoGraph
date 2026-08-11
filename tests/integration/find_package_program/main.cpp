@@ -209,10 +209,10 @@ int main() {
     ProgramCompiler compiler(registry, ProgramCompilerConfig{"installed-consumer/v1"});
     ProgramCompiler reordered_compiler(reordered_registry,
                                        ProgramCompilerConfig{"installed-consumer/v1"});
-#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
     const RunBudget runtime_budget{1000, 1000, 1000, 1, 1, 100, 0, 0, 0};
-    const auto      compiled_bundle  = compiler.compile(compiled_source, runtime_budget);
-    const auto      reordered_bundle = reordered_compiler.compile(compiled_source, runtime_budget);
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    const auto compiled_bundle  = compiler.compile(compiled_source, runtime_budget);
+    const auto reordered_bundle = reordered_compiler.compile(compiled_source, runtime_budget);
 #else
     const auto compiled_bundle  = compiler.compile(compiled_source);
     const auto reordered_bundle = reordered_compiler.compile(compiled_source);

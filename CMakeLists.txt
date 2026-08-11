@@ -353,10 +353,12 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     # byte-for-byte upstream.
     set(_neograph_quickjs_wrapper_dir ${DEPS_DIR}/quickjs/neograph)
     if(MSVC)
+        set(_neograph_quickjs_msvc_output_dir
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/quickjs-msvc")
         include(cmake/NeoGraphQuickJSMsvcPort.cmake)
         neograph_prepare_quickjs_msvc_sources(
             "${DEPS_DIR}/quickjs"
-            "${CMAKE_CURRENT_BINARY_DIR}/generated/quickjs-msvc"
+            "${_neograph_quickjs_msvc_output_dir}"
             _neograph_quickjs_sources)
     else()
         set(_neograph_quickjs_sources
@@ -387,7 +389,7 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
         target_include_directories(${target} PRIVATE ${_neograph_quickjs_wrapper_dir})
         if(MSVC)
             target_include_directories(${target} PRIVATE
-                "${CMAKE_CURRENT_BINARY_DIR}/generated/quickjs-msvc")
+                "${_neograph_quickjs_msvc_output_dir}")
         endif()
         target_link_libraries(${target} PRIVATE Threads::Threads)
         if(UNIX AND NOT APPLE)
