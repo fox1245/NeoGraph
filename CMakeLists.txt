@@ -624,6 +624,10 @@ if(NEOGRAPH_BUILD_PROGRAM)
     if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
         target_include_directories(neograph_program PRIVATE
             ${_neograph_quickjs_wrapper_dir})
+        if(MSVC)
+            target_include_directories(neograph_program PRIVATE
+                "${CMAKE_CURRENT_BINARY_DIR}/generated/quickjs-msvc")
+        endif()
         target_compile_definitions(neograph_program PRIVATE NEOGRAPH_PROGRAM_HAS_QUICKJS=1)
         _neograph_attach_quickjs_runtime(neograph_program)
     endif()
