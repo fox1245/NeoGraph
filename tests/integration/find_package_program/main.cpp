@@ -406,24 +406,33 @@ int main() {
     bool     runtime_contract             = false;
     unsigned callbacks_before_destruction = 0;
     {
-        ProgramRuntime runtime(RuntimeConfig{catalog, checkpoints, {}, journal, 2});
-        const auto     completed = runtime.run(
-            "installed-consumer", admitted,
-            ProgramInvocation{neograph::json::object(), runtime_budget, "installed-sync", sink});
+        ProgramRuntime    runtime(RuntimeConfig{catalog, checkpoints, {}, journal, 2});
+        ProgramInvocation completed_invocation;
+        completed_invocation.input    = neograph::json::object();
+        completed_invocation.budget   = runtime_budget;
+        completed_invocation.trace_id = "installed-sync";
+        completed_invocation.events   = sink;
+        const auto completed =
+            runtime.run("installed-consumer", admitted, std::move(completed_invocation));
+
+        ProgramInvocation interrupted_invocation;
+        interrupted_invocation.input    = neograph::json::object();
+        interrupted_invocation.budget   = runtime_budget;
+        interrupted_invocation.trace_id = "installed-interrupt";
+        interrupted_invocation.events   = sink;
         const auto interrupted =
             runtime
-                .start("installed-consumer", admitted_interrupt,
-                       ProgramInvocation{neograph::json::object(), runtime_budget,
-                                         "installed-interrupt", sink})
+                .start("installed-consumer", admitted_interrupt, std::move(interrupted_invocation))
                 .wait();
 
+        ProgramResume resume;
+        resume.value      = neograph::json{{"decision", "approved"}};
+        resume.trace_id   = "installed-resume";
+        resume.events     = sink;
+        resume.pending_id = interrupted.interrupt().value().pending_input.value().call_id();
         asio::io_context io;
         auto             resumed_future = asio::co_spawn(
-            io,
-            runtime.resume_async(
-                "installed-consumer", interrupted.run_id(),
-                ProgramResume{neograph::json{{"decision", "approved"}}, "installed-resume", sink,
-                              interrupted.interrupt().value().pending_input.value().call_id()}),
+            io, runtime.resume_async("installed-consumer", interrupted.run_id(), std::move(resume)),
             asio::use_future);
         io.run();
         const auto resumed           = resumed_future.get();
