@@ -628,24 +628,31 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #endif]=]
         "computed-goto dispatch guard")
 
-    # MSVC's C compiler miscompiles the indirect JSClassCall return path for
-    # the 16-byte upstream JSValue aggregate: it fast-fails before the native
-    # callback is entered. C functions are built-in engine classes, so route
-    # this one known target directly while preserving the generic extension
-    # dispatch for every other callable class.
+    # MSVC's C frontend keeps a JSCFunctionType union in a local between
+    # selecting the C-function protocol and invoking it. That local loses the
+    # generic callback target under the AddressSanitizer build. Use the
+    # authoritative function-object field at each dispatch site instead.
     _neograph_quickjs_replace_exact(_quickjs_c
-[=[    p = JS_VALUE_GET_OBJ(func_obj);
-    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
-        JSClassCall *call_func;]=]
-[=[    p = JS_VALUE_GET_OBJ(func_obj);
-    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
+[=[    func = p->u.cfunc.c_function;
+    switch(cproto) {]=]
+[=[    func = p->u.cfunc.c_function;
 #if defined(_MSC_VER)
-        if (p->class_id == JS_CLASS_C_FUNCTION)
-            return js_call_c_function(caller_ctx, func_obj, this_obj, argc,
-                                      (JSValueConst *)argv, flags);
+#undef func
+#define func p->u.cfunc.c_function
 #endif
-        JSClassCall *call_func;]=]
-        "MSVC C-function direct dispatch")
+    switch(cproto) {]=]
+        "MSVC C-function union dispatch")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    rt->current_stack_frame = sf->prev_frame;
+    return ret_val;
+}]=]
+[=[    rt->current_stack_frame = sf->prev_frame;
+#if defined(_MSC_VER)
+#undef func
+#endif
+    return ret_val;
+}]=]
+        "MSVC C-function union dispatch cleanup")
     _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"
