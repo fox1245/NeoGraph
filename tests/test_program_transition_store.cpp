@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <array>
 #include <barrier>
 #include <filesystem>
 #include <future>
