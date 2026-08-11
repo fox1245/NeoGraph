@@ -59,6 +59,17 @@ static JSValue native_add(JSContext*    context,
     return JS_NewInt32(context, left + right);
 }
 
+static JSValue native_undefined(JSContext*    context,
+                                JSValueConst  this_value,
+                                int           argc,
+                                JSValueConst* argv) {
+    (void)context;
+    (void)this_value;
+    (void)argc;
+    (void)argv;
+    return JS_UNDEFINED;
+}
+
 static int interrupt_after_budget(JSRuntime* runtime, void* opaque) {
     (void)runtime;
     InterruptBudget* budget = opaque;
@@ -199,9 +210,11 @@ int main(void) {
         goto done;
     }
     if (JS_SetPropertyStr(context, global, "nativeAdd",
-                          JS_NewCFunction(context, native_add, "nativeAdd", 2)) != 1) {
+                          JS_NewCFunction(context, native_add, "nativeAdd", 2)) != 1 ||
+        JS_SetPropertyStr(context, global, "nativeUndefined",
+                          JS_NewCFunction(context, native_undefined, "nativeUndefined", 0)) != 1) {
         JS_FreeValue(context, global);
-        result = fail("could not install nativeAdd");
+        result = fail("could not install native functions");
         goto done;
     }
     JS_FreeValue(context, global);
@@ -212,12 +225,17 @@ int main(void) {
         goto done;
     }
 
+    stage("evaluate zero-argument native binding");
+    if (!evaluate_truth(context, "nativeUndefined() === undefined", JS_EVAL_TYPE_GLOBAL)) {
+        result = fail("zero-argument native binding evaluation failed");
+        goto done;
+    }
+
     stage("evaluate native binding");
     if (!evaluate_truth(context, "nativeAdd(20, 22) === 42", JS_EVAL_TYPE_GLOBAL)) {
         result = fail("native binding evaluation failed");
         goto done;
     }
-
     stage("evaluate sealed global surface");
     if (!evaluate_truth(context,
                         "typeof std === 'undefined' && typeof os === 'undefined' && "
