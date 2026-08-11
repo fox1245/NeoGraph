@@ -627,6 +627,25 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #define DIRECT_DISPATCH  1
 #endif]=]
         "computed-goto dispatch guard")
+
+    # MSVC's C compiler miscompiles the indirect JSClassCall return path for
+    # the 16-byte upstream JSValue aggregate: it fast-fails before the native
+    # callback is entered. C functions are built-in engine classes, so route
+    # this one known target directly while preserving the generic extension
+    # dispatch for every other callable class.
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    p = JS_VALUE_GET_OBJ(func_obj);
+    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
+        JSClassCall *call_func;]=]
+[=[    p = JS_VALUE_GET_OBJ(func_obj);
+    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
+#if defined(_MSC_VER)
+        if (p->class_id == JS_CLASS_C_FUNCTION)
+            return js_call_c_function(caller_ctx, func_obj, this_obj, argc,
+                                      (JSValueConst *)argv, flags);
+#endif
+        JSClassCall *call_func;]=]
+        "MSVC C-function direct dispatch")
     _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"
