@@ -1329,8 +1329,12 @@ TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
     HarnessFixture fixture;
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
-    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    EXPECT_THROW(service.get(run_id), std::invalid_argument);
+    EXPECT_THROW(
+        [&] {
+            neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+            (void)service.get(run_id);
+        }(),
+        std::invalid_argument);
     std::error_code error;
     std::filesystem::remove(path, error);
 }
