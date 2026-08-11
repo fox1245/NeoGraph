@@ -37,10 +37,15 @@ def test_cpp_examples_that_build_topologies_declare_schema_version():
     externally_versioned = {
         "examples/cookbook/jarvis/src/main.cpp",  # Loads jarvis_graph.json.
     }
-    generated_and_gated = {
-        "examples/cookbook/the-beast/the_beast_apex.cpp",
-        "examples/cookbook/the-beast/the_beast_forge.cpp",
-        "examples/cookbook/the-beast/the_beast_live.cpp",
+    generated_gate_sources = {
+        "examples/cookbook/the-beast/the_beast_apex.cpp":
+            "examples/cookbook/the-beast/the_beast_apex.cpp",
+        "examples/cookbook/the-beast/the_beast_forge.cpp":
+            "examples/cookbook/the-beast/the_beast_forge.cpp",
+        "examples/cookbook/the-beast/the_beast_live.cpp":
+            "examples/cookbook/the-beast/beast_common.h",
+        "examples/cookbook/the-beast/the_beast_copy_ninja.cpp":
+            "examples/cookbook/the-beast/beast_common.h",
     }
     minimum_markers = {
         "examples/09_all_features.cpp": 5,
@@ -59,9 +64,13 @@ def test_cpp_examples_that_build_topologies_declare_schema_version():
         relative = path.relative_to(ROOT).as_posix()
         if relative in externally_versioned:
             continue
-        if relative in generated_and_gated:
-            if "schema_version must match TOPOLOGY_SCHEMA_VERSION" not in text:
-                offenders.append(f"{relative} (generated schema gate missing)")
+        if relative in generated_gate_sources:
+            gate_source = ROOT / generated_gate_sources[relative]
+            if "schema_version must match TOPOLOGY_SCHEMA_VERSION" not in (
+                    gate_source.read_text(encoding="utf-8")):
+                offenders.append(
+                    f"{relative} (generated schema gate missing from "
+                    f"{gate_source.relative_to(ROOT).as_posix()})")
             continue
         marker_count = text.count('{"schema_version"') + text.count('"schema_version":')
         required = minimum_markers.get(relative, 1)
