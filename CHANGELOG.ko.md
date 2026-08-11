@@ -157,6 +157,10 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 
 ### 수정
 
+- **QuickJS `all` join 초기화 경합.** 완료 핸들러가 초기 멤버 launch 등록 중인
+  JavaScript join을 닫지 않도록 했다. 즉시 완료하는 자식 때문에 형제 초기 또는
+  교체 명령이 dispatch되기 전에 generator가 재개될 수 있던 문제를 막았고,
+  두 경로를 반복 런타임 회귀 테스트로 고정했다.
 - **Harness 집계 발견 출처 (이슈 #174).** 세부 사항(details)이 이제 기존 평면 `findings` 배열과 정렬된 `finding_sources` 배열을 포함. 각 항목은 스키마 검증된 작업자 출력이나 확립된 `findings` 모양을 변경하지 않고 집계 색인, 소스 작업자 ID, 작업자-로컬 색인을 기록.
 - **Harness 내보낸 결과 린트 (이슈 #173).** 노드 효과 계약이 이제 호출자가 그래프 실행 후 소비할 때 선택적 `exports` 배열에 쓰여진 채널을 선언할 수 있음. Harness 컴파일과 `GraphEngine` 런타임 검증 모두 `final_result`에 대해 거짓 경고 없이 진짜 쓰기 전용 채널에 대해 E6을 유지.
 - **MCP 2025-11-25 도구-클라이언트 계약 현대화 (이슈 #147 M0).** 초기화가 이제 멱등이며 협상된 서버 메타데이터를 유지; HTTP 도구가 발견 세션을 재사용; `/mcp` 엔드포인트 구성이 요청과 알림에 의해 공유; 도구 발견이 불투명한 커서를 따름; JSON-RPC 코드/데이터, 전체 도구 메타데이터, 비텍스트 콘텐츠, `structuredContent`, `isError`, `_meta`가 C++ 및 Python 경로에서 생존. 구성 가능한 HTTP 타임아웃/정적/동적 헤더, 출력-스키마 검증, 엄격한 응답-ID 검사, 타입 있는 `InitializeResult`, `ToolDefinition`, `ListToolsPage`, `CallToolResult` API 추가. SSE 감지가 이제 `data:` URL을 포함하는 JSON을 잘못 분류하는 대신 `Content-Type` 사용.

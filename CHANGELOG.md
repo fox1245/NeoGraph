@@ -190,6 +190,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **QuickJS `all` join startup race.** Completion handlers now wait for initial
+  member-launch registration before closing a JavaScript join. An immediately
+  completing child can no longer resume the generator before its sibling initial
+  or replacement commands dispatch; repeated runtime regressions cover both paths.
 - **Harness aggregate finding provenance (issue #174).** Details now include a
   `finding_sources` array aligned with the existing flat `findings` array.
   Every entry records its aggregate index, source worker ID, and worker-local

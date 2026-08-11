@@ -164,6 +164,9 @@ NeoGraph 的所有显著变更均记录于本文件。
 
 ### 修复
 
+- **QuickJS `all` join 初始化竞争。** 完成处理程序现在会在初始成员 launch
+  注册完成后才关闭 JavaScript join。立即完成的子项不能再在同级初始或替换命令
+  dispatch 前使 generator 恢复；重复运行时回归测试覆盖两条路径。
 - **Harness 聚合发现来源（issue #174）。** 详情现在包括与现有扁平
   `findings` 数组对齐的 `finding_sources` 数组。每个条目记录其聚合索引、
   来源工作器 ID 和工作器本地索引，而不更改经过模式验证的工作器输出或
