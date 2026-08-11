@@ -231,6 +231,29 @@ int main(void) {
     }
     JS_FreeValue(context, global);
 
+    stage("invoke native binding through C API");
+    global = JS_GetGlobalObject(context);
+    if (JS_IsException(global)) {
+        result = fail("JS_GetGlobalObject failed for native call");
+        goto done;
+    }
+    JSValue native_undefined_value = JS_GetPropertyStr(context, global, "nativeUndefined");
+    JS_FreeValue(context, global);
+    if (JS_IsException(native_undefined_value)) {
+        JS_FreeValue(context, native_undefined_value);
+        result = fail("could not load nativeUndefined");
+        goto done;
+    }
+    JSValue native_undefined_result =
+        JS_Call(context, native_undefined_value, JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(context, native_undefined_value);
+    if (!JS_IsUndefined(native_undefined_result)) {
+        JS_FreeValue(context, native_undefined_result);
+        result = fail("C API native call did not return undefined");
+        goto done;
+    }
+    JS_FreeValue(context, native_undefined_result);
+
     stage("evaluate literal");
     if (!evaluate_truth(context, "1 + 1 === 2", JS_EVAL_TYPE_GLOBAL)) {
         result = fail("literal evaluation failed");

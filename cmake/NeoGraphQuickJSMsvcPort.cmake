@@ -684,6 +684,42 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #endif]=]
         "MSVC C-function callback diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
+[=[static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                               JSValueConst this_obj, JSValueConst new_target,
+                               int argc, JSValue *argv, int flags)
+{
+    JSRuntime *rt = caller_ctx->rt;]=]
+[=[static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                               JSValueConst this_obj, JSValueConst new_target,
+                               int argc, JSValue *argv, int flags)
+{
+#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs call: entry\n");
+    fflush(stderr);
+#endif
+    JSRuntime *rt = caller_ctx->rt;]=]
+        "MSVC generic call entry diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    p = JS_VALUE_GET_OBJ(func_obj);
+    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {]=]
+[=[    p = JS_VALUE_GET_OBJ(func_obj);
+#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs call: class %u\n", p->class_id);
+    fflush(stderr);
+#endif
+    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {]=]
+        "MSVC generic call class diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[        return call_func(caller_ctx, func_obj, this_obj, argc,
+                         (JSValueConst *)argv, flags);]=]
+[=[#if defined(_MSC_VER)
+        fprintf(stderr, "neograph quickjs call: invoke class callback\n");
+        fflush(stderr);
+#endif
+        return call_func(caller_ctx, func_obj, this_obj, argc,
+                         (JSValueConst *)argv, flags);]=]
+        "MSVC generic call callback diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"
         "POSIX atomics guard")
