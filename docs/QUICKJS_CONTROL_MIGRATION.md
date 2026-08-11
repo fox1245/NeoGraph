@@ -7,6 +7,8 @@ Architecture: `QUICKJS_CONTROL_ARCHITECTURE.md`
 Public authoring boundary: [`QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Executable gates: `../spec/quickjs-control-runtime.sdd.yaml`
+Completion runbook: [`QUICKJS_MIGRATION_COMPLETION.md`](QUICKJS_MIGRATION_COMPLETION.md)
+Completion execution spec: [`../spec/quickjs-control-migration-completion.sdd.yaml`](../spec/quickjs-control-migration-completion.sdd.yaml)
 Post-cutover controller extension:
 [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
 Tracking epic: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23)

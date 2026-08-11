@@ -1,0 +1,311 @@
+# Ordered release-completion contract for the accepted QuickJS migration.
+# It supplements; it does not weaken or replace quickjs-control-runtime.sdd.yaml.
+
+spec:
+  id: quickjs-control-migration-completion
+  revision: 1
+  created: "2026-08-11"
+  owner: fox1245
+  status: proposed
+  priority: P0
+  kind: release-migration-completion
+  visibility: repository
+  methodology: [SDD, TDD, EDD]
+  parent_contract: spec/quickjs-control-runtime.sdd.yaml
+  migration_plan: docs/QUICKJS_CONTROL_MIGRATION.md
+  operational_runbook: docs/QUICKJS_MIGRATION_COMPLETION.md
+  source_baseline: 61661e9ad1fc386b5142139c48c327ede7464633
+
+purpose:
+  statement: >-
+    Complete Q0 dependency/platform qualification and Q7 legacy runtime removal
+    without reopening legacy authoring, weakening the restricted durable profile,
+    or treating a source-tree inspection as a storage migration proof.
+  completion_target:
+    - one_user_authored_language_javascript
+    - one_canonical_strict_Core_IR
+    - one_Program_durability_and_effect_model
+    - no_legacy_Program_JSON_parser_compiler_dispatcher_or_fallback
+
+fixed_architecture:
+  javascript_runtime: QuickJS
+  javascript_authoring: sole_public_user_authored_language
+  core_executor: GraphEngine
+  durable_command_owner: ProgramRuntime
+  canonical_Core_JSON: validated_storage_and_low_level_interchange_not_authoring
+  trusted_cpp: embeddable_host_API_not_public_program_JSON_authoring
+  excluded_work:
+    - trusted_direct_execution_profile_issue_35
+    - durable_async_Promise_scheduler
+    - reopening_Core_DSL_or_Program_JSON_authoring
+    - a_permanent_dual_runtime_or_fallback_stack
+
+starting_state:
+  Q0_dependency_qualification: implemented_linux_verified
+  Q1_through_Q6: implemented
+  legacy_drain_proof: passed_no_deployment_attestation
+  Q7_legacy_runtime_removal: pending_platform_qualification
+  known_blockers:
+    - Windows rejects NEOGRAPH_BUILD_QUICKJS_CONTROL=ON.
+    - macOS lacks a full QuickJS-enabled static/shared runtime qualification matrix.
+    - Linux arm64 QuickJS qualification is not wired into the ordinary CI build.
+    - installed consumers do not yet run a successful installed JavaScript define/main flow.
+    - legacy Program JSON plan/schema/compiler/dispatcher code remains in production sources.
+  historical_evidence_not_final_release_evidence:
+    - "2026-08-10 no-deployment drain proof sha256:06f362cb6a11d773a45b8db7d4a247a1d4b319795181d173195288ba03fd6217"
+
+nonnegotiable_rules:
+  - Windows remains a Q0 completion requirement unless a separately accepted architecture change revises the parent contract.
+  - A platform compatibility shim or patch is a runtime semantic input and enters provenance and durable runtime identity.
+  - quickjs-libc.c, std, os, dynamic native module loading, arbitrary FFI, and public QuickJS exports remain excluded.
+  - No failed JavaScript submission may select a legacy compiler or runtime branch.
+  - A source-tree checkout, synthetic CTest fixture, or unattested empty inventory never proves final drain.
+  - No legacy source parser alias, compatibility re-export, or permanent fallback remains after M6.
+  - All gate results are observed and content-addressed; planned commands are not evidence.
+
+platform_matrix:
+  required_platforms:
+    - id: linux-x86_64
+      program_quickjs: [static, shared]
+      core_only: [static, shared]
+      runtime_tests: required
+      installed_consumer: required
+      sanitizer: [asan_ubsan, tsan]
+      performance_preregistration: required
+    - id: linux-arm64
+      program_quickjs: [static, shared]
+      core_only: [static, shared]
+      runtime_tests: required
+      installed_consumer: required
+      sanitizer: [asan_ubsan]
+      performance_preregistration: required
+    - id: macos
+      program_quickjs: [static, shared]
+      core_only: [static, shared]
+      runtime_tests: required
+      installed_consumer: required
+      sanitizer: [asan_ubsan_equivalent]
+      performance_preregistration: required
+    - id: windows-x64-msvc
+      program_quickjs: [static, shared]
+      core_only: [static, shared]
+      runtime_tests: required
+      installed_consumer: required
+      sanitizer: [msvc_asan]
+      performance_preregistration: required
+  matrix_rules:
+    - Every row uses a fresh configure directory and an installed-prefix consumer.
+    - Core-only proof includes no QuickJS object, transitive link dependency, export, allocation path, or size delta attributable to QuickJS.
+    - Program static proof checks a prefixed private QuickJS namespace and can coexist with an independently linked QuickJS.
+    - Program shared proof checks that no private QuickJS implementation symbol is exported.
+    - Windows uses native inspection tooling for archive/export checks; unsupported Unix-only commands are not a waiver.
+
+execution_order:
+  - id: M0_release_boundary
+    depends_on: []
+    objective: Bind one candidate commit, cutover ID, platform matrix, and evidence index before implementation claims.
+    actions:
+      - Record source commit, dirty state, compiler, CMake options/cache, architecture, QuickJS provenance, and expected evidence outputs.
+      - Preserve the old no-deployment proof as historical evidence only.
+      - Set the announced legacy publication/resume fence for the candidate cutover.
+    evidence:
+      - immutable evidence index with SHA-256 identities for every command output
+      - supported platform and toolchain matrix
+    exit:
+      - No later phase can be marked passed without an evidence-index entry.
+
+  - id: M1_portability
+    depends_on: [M0_release_boundary]
+    objective: Make the selected private QuickJS embedding build safely on every required platform.
+    actions:
+      - Replace the Windows Q0 FATAL path with a qualified maintained port layer while retaining default-off behavior.
+      - Keep upstream vendor sources immutable; review compatibility code as NeoGraph-owned source.
+      - Bind the exact shim/patch implementation into JavaScriptRuntimeIdentity, provenance, and bundle/replay mismatch checks.
+      - Preserve private symbol prefixing and no-quickjs-libc policy for static and shared products.
+      - Add a C embedding smoke for deterministic evaluation, explicit native binding, interrupt, memory limit, stack limit, and absent std/os modules.
+    evidence:
+      - successful clean QuickJS-enabled and Core-only configuration/build for every required platform
+      - runtime identity/provenance test covering platform port mismatch
+      - C smoke output for every required platform
+    exit:
+      - Every platform can build the private runtime without changing the public Core link interface.
+
+  - id: M2_package_and_consumer
+    depends_on: [M1_portability]
+    objective: Prove installed static/shared products rather than build-tree accidents.
+    actions:
+      - Extend the installed-consumer driver for every platform and both linkage modes.
+      - Exercise a successful installed JavaScript define() and generator main() publication/run, plus the existing second-QuickJS collision probe.
+      - Verify Core-only consumers have no QuickJS package metadata, link closure, or runtime requirement.
+      - Inspect static namespaces and shared exports with platform-native tooling.
+    evidence:
+      - one clean build/install/configure/build/run log per platform_matrix row
+      - package metadata and dependency closure records
+      - static namespace and shared export reports
+    exit:
+      - All installed consumers pass after prefix relocation where the platform supports relocation.
+
+  - id: M3_safety_and_durability
+    depends_on: [M2_package_and_consumer]
+    objective: Prove that the enabled runtime preserves isolation, ownership, cancellation, and exact replay semantics.
+    actions:
+      - Run QuickJS isolation, JavaScript/Harness end-to-end, replay/recovery, fault-injection, and native ABI suites on all enabled platforms.
+      - Run Linux ASan/UBSan and TSan with QuickJS enabled; macOS supported ASan/UBSan equivalent; and Windows MSVC ASan.
+      - Cover cancellation during JavaScript evaluation, interrupted callCore recovery, allocator teardown, callback-after-cancellation, and runtime/profile/binding mismatch before dispatch.
+      - Record unavailable sanitizer classes explicitly instead of reporting them as passed.
+    evidence:
+      - per-platform ctest and focused test reports
+      - sanitizer reports with active QuickJS configuration
+      - zero-dispatch assertions for every rejected fixture
+    exit:
+      - No NeoGraph or QuickJS ownership/isolation defect is suppressed; all enabled safety rows pass.
+
+  - id: M4_performance_and_footprint
+    depends_on: [M3_safety_and_durability]
+    objective: Close preregistered performance, startup, allocation, and size gates before legacy deletion.
+    actions:
+      - Run scripts/build_quickjs_performance_matrix.sh on Linux against the accepted preregistration.
+      - Add accepted macOS and Windows preregistrations before collecting their metrics.
+      - Report repeated cold/warm startup and allocation distributions, installed binary sizes, and dependency closures for every platform.
+      - Compare only matched option sets and rerun noisy failures without silently relaxing thresholds.
+    evidence:
+      - quickjs performance result JSON per required platform
+      - qualification report with binary sizes, startup samples, allocation high-water marks, and dynamic dependencies
+    exit:
+      - Every blocking cold, warm, allocation, size, and enabled-unused/Core-only threshold passes.
+
+  - id: M5_final_drain_and_dependency_inventory
+    depends_on: [M4_performance_and_footprint]
+    objective: Establish the actual deletion boundary and separate legacy-only code from final runtime infrastructure.
+    actions:
+      - Reissue a named no-deployment attestation for this exact cutover or capture a complete frozen storage snapshot under a legacy write fence.
+      - Enumerate every durable Program/Harness store and classify every legacy artifact as translated, drain_only, or rejected.
+      - Run audit_legacy_drain.py --require-final against the actual frozen input.
+      - Inventory each legacy-looking source/schema/test as legacy_only, shared_with_javascript, or shared_with_trusted_cpp with a replacement/retention reason and regression test.
+    evidence:
+      - final neograph-legacy-drain-proof with final_drain.passed_is_true
+      - operator inventory and storage content identities
+      - source dependency inventory tied to the same cutover ID
+    exit:
+      - No active/recoverable/unknown/activated/drain_only legacy artifact exists and the write fence remains active through M7.
+
+  - id: M6_replace_then_delete
+    depends_on: [M5_final_drain_and_dependency_inventory]
+    objective: Remove legacy Program JSON authoring and runtime machinery without damaging JavaScript or trusted C++ paths.
+    actions:
+      - Migrate retained trusted-C++ callers away from Program-document JSON and ProgramPlan operation-tree dispatch before deletion.
+      - Preserve JavaScript command admission/journal/replay behavior with regression tests before removing shared dependencies.
+      - Delete Program-document v1-v4 schemas, CanonicalJson legacy decode, ProgramPlan parse/lowering/dispatch, Harness Program-JSON translation, legacy-only docs/examples/tests, and compatibility links.
+      - Retain only canonical JavaScript/source/bundle/journal formats and trusted C++ infrastructure justified by the dependency inventory.
+      - Retain or archive drain-audit evidence without retaining a deployable legacy runtime fallback.
+    evidence:
+      - deletion manifest mapping each removed target to its inventory classification
+      - compiler and runtime negative tests for every legacy submission route
+      - final public API/export/package surface report
+    exit:
+      - No production path can parse, compile, dispatch, or fall back to a Program JSON operation tree.
+
+  - id: M7_clean_room_release
+    depends_on: [M6_replace_then_delete]
+    objective: Reproduce every required proof from the final tree and publish an honest completion record.
+    actions:
+      - Repeat M2 through M4 from fresh build/install directories after deletion.
+      - Run graph-equivalence, storage-migration, replay, fault, native ABI, JavaScript/Harness smoke, sanitizer, consumer, and performance gates.
+      - Re-run M5 when any post-snapshot action could admit, resume, or modify legacy state.
+      - Update parent completion state, architecture/migration/public-boundary docs, changelog, and issue state only after all evidence passes.
+    evidence:
+      - final evidence index with all prior gate identities
+      - release smoke record
+      - updated parent completion state and public documentation
+    exit:
+      - Q0 and Q7 are complete and the release exposes one user authoring language, one canonical Core IR, and one durable effect model.
+
+final_drain_contract:
+  tool: scripts/audit_legacy_drain.py
+  required_command: >-
+    python3 scripts/audit_legacy_drain.py --inventory <inventory.json>
+    --root <frozen-export-root> --output <evidence-root>/legacy-drain-proof.json
+    --require-final
+  required_preconditions:
+    - inventory_complete_true
+    - frozen_read_only_storage_or_exact_named_no_deployment_attestation
+    - legacy_write_fence_remains_active_through_removal_release
+  hard_blockers:
+    - drain_only_artifact
+    - active_or_recoverable_legacy_run
+    - unknown_or_interrupted_legacy_outcome
+    - legacy_activation
+    - unscanned_legacy_reference
+    - incomplete_inventory
+    - live_SQLite_WAL_SHM_or_journal_sidecar
+  prohibited_substitutes:
+    - source_checkout
+    - synthetic_fixture
+    - unattested_empty_inventory
+    - historical_no_deployment_attestation_for_a_later_cutover
+
+required_deletion_classification:
+  categories:
+    legacy_only:
+      action: delete
+    shared_with_javascript:
+      action: decouple_then_retain_or_replace
+    shared_with_trusted_cpp:
+      action: migrate_callers_then_retain_or_replace
+  initial_inventory_targets:
+    - include/neograph/program/plan.h
+    - src/program/plan.cpp
+    - src/program/compiler.cpp
+    - src/program/run_attempt.cpp
+    - src/program/runtime.cpp
+    - include/neograph/program/source.h
+    - src/program/source.cpp
+    - include/neograph/program/migration.h
+    - src/program/migration.cpp
+    - schemas/program-document-v1.schema.json
+    - schemas/program-document-v2.schema.json
+    - schemas/program-document-v3.schema.json
+    - schemas/program-document-v4.schema.json
+    - src/mcp/harness_program_translator.cpp
+    - tests/integration/find_package_program/main.cpp
+    - scripts/audit_legacy_drain.py
+  retention_guard:
+    - JavaScript source/bundle/command-journal formats are not legacy merely because they are under program.
+    - Strict Core JSON remains canonical data and must not be removed as a Program DSL artifact.
+    - Harness JavaScript translation remains required; only Harness Program-JSON translation is removable.
+
+verification_contract:
+  existing_commands:
+    - >-
+      scripts/build_quickjs_performance_matrix.sh <fresh-build-root>
+      <evidence-root>/quickjs-performance-linux.json
+    - >-
+      python3 scripts/audit_legacy_drain.py --inventory <inventory.json>
+      --root <frozen-export-root> --output <evidence-root>/legacy-drain-proof.json
+      --require-final
+    - "ctest --test-dir <clean-build> --output-on-failure"
+    - "scripts/test_find_package.sh --program --quickjs --shared"
+    - "scripts/test_find_package.sh --core-only --shared"
+  required_new_or_extended_proofs:
+    - Windows QuickJS-enabled static and shared install consumers.
+    - macOS QuickJS-enabled static install consumer and runtime test job.
+    - Linux arm64 QuickJS-enabled static/shared matrix.
+    - Installed successful JavaScript define/main run.
+    - C embedding smoke on every required platform.
+    - Platform-native QuickJS static/shared symbol inspection.
+    - Platform-specific preregistered startup/allocation/footprint reports.
+
+acceptance:
+  - Every M0 through M7 exit condition is observed in order.
+  - No hard blocker or failed performance/safety/consumer matrix row is waived locally.
+  - No public legacy DSL/Program JSON source API, parser, schema, dispatcher, or fallback remains.
+  - Existing JavaScript restricted-durable recovery semantics remain exact.
+  - Core-only consumers remain QuickJS-independent.
+  - The final release evidence index binds the cutover ID to all proof identities.
+
+completion_update_rule: >-
+  Set quickjs-control-runtime completion_state.quickjs_dependency_qualification
+  to complete after M4 exits with accepted platform evidence. Set
+  completion_state.legacy_runtime_removal to complete only after M7 exits.
+  Documentation and changelog claims are updated only after the final release
+  smoke record is accepted.

@@ -4,7 +4,7 @@
 
 spec:
   id: quickjs-control-runtime
-  revision: 5
+  revision: 6
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -15,6 +15,8 @@ spec:
   source_baseline: 61661e9ad1fc386b5142139c48c327ede7464633
   canonical_design: docs/QUICKJS_CONTROL_ARCHITECTURE.md
   migration_plan: docs/QUICKJS_CONTROL_MIGRATION.md
+  completion_runbook: docs/QUICKJS_MIGRATION_COMPLETION.md
+  completion_execution_spec: spec/quickjs-control-migration-completion.sdd.yaml
   controller_extension:
     canonical_design: docs/SELF_EVOLVING_AGENT_CONTROLLER.md
     executable_contract: spec/self-evolving-agent-controller.sdd.yaml
