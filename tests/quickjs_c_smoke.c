@@ -63,10 +63,12 @@ static JSValue native_undefined(JSContext*    context,
                                 JSValueConst  this_value,
                                 int           argc,
                                 JSValueConst* argv) {
+    stage("entered zero-argument native callback");
     (void)context;
     (void)this_value;
     (void)argc;
     (void)argv;
+    stage("returning zero-argument native callback");
     return JS_UNDEFINED;
 }
 
