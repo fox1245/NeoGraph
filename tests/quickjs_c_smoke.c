@@ -206,15 +206,26 @@ int main(void) {
     }
     JS_FreeValue(context, global);
 
-    stage("evaluate sealed global surface");
+    stage("evaluate literal");
+    if (!evaluate_truth(context, "1 + 1 === 2", JS_EVAL_TYPE_GLOBAL)) {
+        result = fail("literal evaluation failed");
+        goto done;
+    }
 
+    stage("evaluate native binding");
+    if (!evaluate_truth(context, "nativeAdd(20, 22) === 42", JS_EVAL_TYPE_GLOBAL)) {
+        result = fail("native binding evaluation failed");
+        goto done;
+    }
+
+    stage("evaluate sealed global surface");
     if (!evaluate_truth(context,
-                        "nativeAdd(20, 22) === 42 && typeof std === 'undefined' && "
-                        "typeof os === 'undefined' && typeof process === 'undefined' && "
-                        "typeof require === 'undefined' && typeof fetch === 'undefined' && "
-                        "typeof Worker === 'undefined' && typeof load === 'undefined'",
+                        "typeof std === 'undefined' && typeof os === 'undefined' && "
+                        "typeof process === 'undefined' && typeof require === 'undefined' && "
+                        "typeof fetch === 'undefined' && typeof Worker === 'undefined' && "
+                        "typeof load === 'undefined'",
                         JS_EVAL_TYPE_GLOBAL)) {
-        result = fail("explicit binding or sealed global surface check failed");
+        result = fail("sealed global surface check failed");
         goto done;
     }
 
