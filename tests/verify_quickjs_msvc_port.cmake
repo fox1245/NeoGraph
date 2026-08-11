@@ -41,8 +41,6 @@ _require("${_quickjs}" "!defined(__EMSCRIPTEN__) && !defined(_MSC_VER)" "the POS
 _require("${_quickjs}" "__declspec(align(JS_MALLOC_ALIGN))" "allocator alignment")
 _require("${_quickjs}" "_AddressOfReturnAddress()" "the MSVC stack intrinsic")
 _require("${_quickjs}" "#include \"quickjs-msvc-port.h\"" "the patched public header include")
-_require("${_quickjs}" "#define func p->u.cfunc.c_function"
-         "the MSVC C-function union dispatch")
 _require("${_quickjs}" "static void __maybe_unused dump_token" "the portable debug helper attribute")
 _require("${_quickjs}" "double d = INFINITY;" "the MSVC-safe infinity constant")
 _forbid("${_quickjs}" "1.0 / 0.0" "a compile-time floating divide by zero")

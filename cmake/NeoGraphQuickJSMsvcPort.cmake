@@ -628,31 +628,61 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #endif]=]
         "computed-goto dispatch guard")
 
-    # MSVC's C frontend keeps a JSCFunctionType union in a local between
-    # selecting the C-function protocol and invoking it. That local loses the
-    # generic callback target under the AddressSanitizer build. Use the
-    # authoritative function-object field at each dispatch site instead.
+
+    # Diagnostic markers for the native-call boundary. They are emitted only
+    # in the MSVC port until its ASan failure has a source-level location.
     _neograph_quickjs_replace_exact(_quickjs_c
-[=[    func = p->u.cfunc.c_function;
-    switch(cproto) {]=]
-[=[    func = p->u.cfunc.c_function;
+[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                  JSValueConst this_obj,
+                                  int argc, JSValueConst *argv, int flags)
+{
+    JSRuntime *rt = ctx->rt;]=]
+[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                  JSValueConst this_obj,
+                                  int argc, JSValueConst *argv, int flags)
+{
 #if defined(_MSC_VER)
-#undef func
-#define func p->u.cfunc.c_function
+    fprintf(stderr, "neograph quickjs C call: entry\n");
+    fflush(stderr);
 #endif
-    switch(cproto) {]=]
-        "MSVC C-function union dispatch")
+    JSRuntime *rt = ctx->rt;]=]
+        "MSVC C-function entry diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
-[=[    rt->current_stack_frame = sf->prev_frame;
-    return ret_val;
-}]=]
-[=[    rt->current_stack_frame = sf->prev_frame;
+[=[    arg_count = p->u.cfunc.length;
+
+    /* better to always check stack overflow */]=]
+[=[    arg_count = p->u.cfunc.length;
 #if defined(_MSC_VER)
-#undef func
+    fprintf(stderr, "neograph quickjs C call: function metadata\n");
+    fflush(stderr);
 #endif
-    return ret_val;
-}]=]
-        "MSVC C-function union dispatch cleanup")
+
+    /* better to always check stack overflow */]=]
+        "MSVC C-function metadata diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    rt->current_stack_frame = sf;
+    ctx = p->u.cfunc.realm; /* change the current realm */]=]
+[=[    rt->current_stack_frame = sf;
+#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs C call: frame installed\n");
+    fflush(stderr);
+#endif
+    ctx = p->u.cfunc.realm; /* change the current realm */]=]
+        "MSVC C-function frame diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    case JS_CFUNC_generic:
+        ret_val = func.generic(ctx, this_obj, argc, arg_buf);]=]
+[=[    case JS_CFUNC_generic:
+#if defined(_MSC_VER)
+        fprintf(stderr, "neograph quickjs C call: invoke generic\n");
+        fflush(stderr);
+#endif
+        ret_val = func.generic(ctx, this_obj, argc, arg_buf);
+#if defined(_MSC_VER)
+        fprintf(stderr, "neograph quickjs C call: generic returned\n");
+        fflush(stderr);
+#endif]=]
+        "MSVC C-function callback diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"
