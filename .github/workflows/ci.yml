@@ -307,6 +307,14 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Release -j
 
+      # Keep the C-header consumer ABI separate from the much larger C++ suite:
+      # MSVC's C aggregate initialization has previously corrupted QuickJS's
+      # static function tables while C++ callers remained healthy.
+      - name: Smoke test QuickJS C embedding under MSVC
+        shell: pwsh
+        working-directory: build
+        run: ctest -C Release --output-on-failure -R "^QuickJS[.]CEmbeddingSmoke$"
+
       - name: Run tests (no Postgres; MCP stdio uses bundled `python`)
         shell: pwsh
         working-directory: build
@@ -366,12 +374,12 @@ jobs:
           cmake --build build-windows-asan --config Release -j `
             --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
 
-      - name: Run Program and QuickJS under MSVC AddressSanitizer
+      - name: Run QuickJS boundary tests under MSVC AddressSanitizer
         shell: pwsh
         run: |
           ctest --test-dir build-windows-asan -C Release `
             --output-on-failure -j `
-            -R "^(QuickJS\.|Program)"
+            -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
 
       - name: Upload sanitizer logs on failure
         if: failure()
