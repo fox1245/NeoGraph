@@ -123,6 +123,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
         target_link_libraries(neograph_program_tests PRIVATE
             neograph::program_sqlite
+            SQLite::SQLite3
         )
     endif()
     if(TARGET neograph_program_postgres)
