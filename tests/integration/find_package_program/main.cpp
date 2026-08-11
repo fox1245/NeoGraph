@@ -168,6 +168,31 @@ neograph::json program_document(std::string node_type = "installed-node") {
     };
 }
 
+ProgramSource authored_program_source(std::string source_id,
+                                      std::string node_type = "installed-node") {
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    return ProgramSource::from_javascript(std::move(source_id),
+                                          R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "installed-reducer", initial: 0});
+                graph.node("main", {type: ")JS" +
+                                              node_type + R"JS("});
+                graph.entry("main");
+                graph.exit("main");
+                return graph;
+            }
+
+            export function* main(input) {
+                return yield ng.callCore("main", input, "installed:main");
+            }
+        )JS");
+#else
+    return ProgramSource::from_cpp_builder(std::move(source_id), 1,
+                                           program_document(std::move(node_type)));
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -180,15 +205,20 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    const auto compiled_source =
-        ProgramSource::from_cpp_builder("installed-compiler-consumer", 1, program_document());
+    const auto      compiled_source = authored_program_source("installed-compiler-consumer");
     ProgramCompiler compiler(registry, ProgramCompilerConfig{"installed-consumer/v1"});
     ProgramCompiler reordered_compiler(reordered_registry,
                                        ProgramCompilerConfig{"installed-consumer/v1"});
-    const auto      compiled_bundle        = compiler.compile(compiled_source);
-    const auto      reordered_bundle       = reordered_compiler.compile(compiled_source);
-    const auto      compiled_bytes         = compiled_bundle.serialize_canonical();
-    const auto      parsed_compiled_bundle = ProgramBundle::parse(compiled_bytes);
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    const RunBudget runtime_budget{1000, 1000, 1000, 1, 1, 100, 0, 0, 0};
+    const auto      compiled_bundle  = compiler.compile(compiled_source, runtime_budget);
+    const auto      reordered_bundle = reordered_compiler.compile(compiled_source, runtime_budget);
+#else
+    const auto compiled_bundle  = compiler.compile(compiled_source);
+    const auto reordered_bundle = reordered_compiler.compile(compiled_source);
+#endif
+    const auto compiled_bytes         = compiled_bundle.serialize_canonical();
+    const auto parsed_compiled_bundle = ProgramBundle::parse(compiled_bytes);
 
     const bool compiler_deterministic =
         compiler.registry_snapshot_fingerprint() == registry.fingerprint() &&
@@ -211,14 +241,29 @@ int main() {
                                    compiled_bundle.core_plan_identities().size() == 1 &&
                                    compiled_bundle.executable_registry_identities().size() == 2 &&
                                    compiled_bundle.declared_budget_requirements().size() == 9;
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    const bool authoring_complete = compiled_bundle.source_kind() == SourceKind::JavaScript &&
+                                    compiled_bundle.control_source().has_value() &&
+                                    compiled_bundle.javascript_runtime().quickjs_release ==
+                                        ProgramSource::JAVASCRIPT_ENGINE_VERSION;
+#else
+    const bool authoring_complete = compiled_bundle.source_kind() == SourceKind::CppBuilder &&
+                                    !compiled_bundle.control_source().has_value();
+#endif
 
     AdmissionProfileBuilder admission_builder;
     admission_builder.id("installed-profile")
         .semantic_version("1.0.0")
         .registry(registry)
-        .mode(AdmissionMode::MultiTenant)
-        .max_program_schema_version(1)
-        .allow_source_kind(SourceKind::CppBuilder)
+        .mode(AdmissionMode::MultiTenant);
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    admission_builder.max_program_schema_version(LATEST_PROGRAM_SCHEMA_VERSION)
+        .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged)
+        .allow_source_kind(SourceKind::JavaScript);
+#else
+    admission_builder.max_program_schema_version(1).allow_source_kind(SourceKind::CppBuilder);
+#endif
+    admission_builder
         .allow_executable(
             ExecutableIdentity{ExecutableKind::Node, "installed-node", "1.0.0", hash('1')})
         .allow_executable(
@@ -236,6 +281,9 @@ int main() {
         .admission_profile(admission)
         .allow_capability("installed-capability")
         .budget_ceiling(BudgetLimits{60000, 10000, 1000000, 1, 1, 100, 1, 1, 1});
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    policy_builder.minimum_execution_guarantee(ExecutionGuarantee::Unmanaged);
+#endif
     const auto policy            = std::move(policy_builder).build();
     const auto policy_round_trip = PolicySnapshot::parse(policy.serialize_canonical());
 
@@ -245,8 +293,8 @@ int main() {
     const SourceMapEntry   mapping{"/steps/0", authored};
     auto                   stored_source = ProgramSource::from_cpp_builder(
         "installed-consumer", 1,
-        neograph::json{{"program_schema_version", 1}, {"steps", neograph::json::array()}},
-        {import}, {mapping});
+        neograph::json{{"program_schema_version", 1}, {"steps", neograph::json::array()}}, {import},
+        {mapping});
     const auto source_round_trip = ProgramSource::parse(stored_source.serialize_canonical());
 
     Diagnostic diagnostic;
@@ -336,23 +384,27 @@ int main() {
         version_round_trip.policy_snapshot().fingerprint() == policy.fingerprint() &&
         version_round_trip.dependency_receipts().size() == 1 && enum_round_trips;
 
-    const auto interrupt_source = ProgramSource::from_cpp_builder(
-        "installed-runtime-interrupt", 1, program_document("installed-interrupt"));
+    const auto interrupt_source =
+        authored_program_source("installed-runtime-interrupt", "installed-interrupt");
+#if defined(NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL)
+    const auto interrupt_bundle = compiler.compile(interrupt_source, runtime_budget);
+#else
     const auto interrupt_bundle = compiler.compile(interrupt_source);
-    auto       program_store    = std::make_shared<InMemoryProgramStore>();
-    auto       engine_cache     = std::make_shared<EngineGenerationCache>();
-    auto       catalog          = std::make_shared<ProgramCatalog>(
+#endif
+    auto program_store = std::make_shared<InMemoryProgramStore>();
+    auto engine_cache  = std::make_shared<EngineGenerationCache>();
+    auto catalog       = std::make_shared<ProgramCatalog>(
         CatalogConfig{program_store, registry, engine_cache, "installed-consumer/v1"});
     const auto admitted = catalog->admit(
         compiled_bundle, ProgramAdmission{"installed-consumer", admission, policy, {}});
     const auto admitted_interrupt = catalog->admit(
         interrupt_bundle, ProgramAdmission{"installed-consumer", admission, policy, {}});
-    auto            checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    auto            journal     = std::make_shared<InMemoryProgramTransitionStore>();
-    auto            sink        = std::make_shared<CountingSink>();
-    const RunBudget runtime_budget{1000, 1000, 1000, 1, 1, 100, 0, 0, 0};
-    bool            runtime_contract             = false;
-    unsigned        callbacks_before_destruction = 0;
+    auto checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    auto journal     = std::make_shared<InMemoryProgramTransitionStore>();
+    auto sink        = std::make_shared<CountingSink>();
+
+    bool     runtime_contract             = false;
+    unsigned callbacks_before_destruction = 0;
     {
         ProgramRuntime runtime(RuntimeConfig{catalog, checkpoints, {}, journal, 2});
         const auto     completed = runtime.run(
@@ -399,8 +451,8 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     runtime_contract = runtime_contract && sink->calls.load() == callbacks_before_destruction;
 
-    if (!compiler_deterministic || !compiler_round_trip || !compiler_complete || !prior_contracts ||
-        !runtime_contract) {
+    if (!compiler_deterministic || !compiler_round_trip || !compiler_complete ||
+        !authoring_complete || !prior_contracts || !runtime_contract) {
         return EXIT_FAILURE;
     }
     std::cout << compiled_bundle.id() << '\n'

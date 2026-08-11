@@ -55,6 +55,7 @@ set_target_properties(native_abi_consumer PROPERTIES
 target_link_libraries(native_abi_consumer PRIVATE neograph::program)
 
 if(NEOGRAPH_EXPECT_QUICKJS_CONTROL)
+    target_compile_definitions(consumer PRIVATE NEOGRAPH_FIND_PACKAGE_QUICKJS_CONTROL=1)
     add_library(second_quickjs STATIC second_quickjs.c)
     set_target_properties(second_quickjs PROPERTIES
         C_STANDARD 11

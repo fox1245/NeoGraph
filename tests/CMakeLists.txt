@@ -147,6 +147,17 @@ if(TARGET neograph_quickjs)
     target_link_libraries(neograph_quickjs_tests PRIVATE
         GTest::gtest_main
     )
+
+    add_executable(neograph_quickjs_c_smoke
+        quickjs_c_smoke.c
+    )
+    target_include_directories(neograph_quickjs_c_smoke PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
+    )
+    set_target_properties(neograph_quickjs_c_smoke PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON)
+    _neograph_attach_quickjs_runtime(neograph_quickjs_c_smoke)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
@@ -390,6 +401,11 @@ if(TARGET neograph_acp_tests)
 endif()
 if(TARGET neograph_quickjs_tests)
     gtest_discover_tests(neograph_quickjs_tests)
+endif()
+
+if(TARGET neograph_quickjs_c_smoke)
+    add_test(NAME QuickJS.CEmbeddingSmoke COMMAND neograph_quickjs_c_smoke)
+    set_tests_properties(QuickJS.CEmbeddingSmoke PROPERTIES LABELS "quickjs;abi")
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
     gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
