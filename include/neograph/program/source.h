@@ -93,7 +93,7 @@ public:
         "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
         "DYNAMIC_MODULES=disabled;NEOGRAPH_PLATFORM_PORT=msvc-v1;"
         "NEOGRAPH_PLATFORM_PORT_SHA256="
-        "2bbe6797028c267f565daf56424badcbb59d016c3fa1f2f6c1e69a77eaa84467";
+        "a464cb0952d6854aa14ac5ff910c43b4a71d994004d24dade58d695697dce7bb";
 #else
         "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
         "DYNAMIC_MODULES=disabled";
