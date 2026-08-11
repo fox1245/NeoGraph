@@ -94,7 +94,7 @@ public:
         "DYNAMIC_MODULES=disabled;MSVC_INTRINSICS=disabled;"
         "NEOGRAPH_PLATFORM_PORT=msvc-v1;"
         "NEOGRAPH_PLATFORM_PORT_SHA256="
-        "5899d450c47603126ce36ecafa0f5115b69c2a4283a0d3952f6e5cec9a33f9aa";
+        "4dcab8f86e5bc365c42d27b323f333996fc525ac5759d855d7960a8a9b7d851f";
 #else
         "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;"
         "DYNAMIC_MODULES=disabled";
