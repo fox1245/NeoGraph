@@ -629,22 +629,6 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
         "computed-goto dispatch guard")
     _neograph_quickjs_replace_exact(_quickjs_c
 [=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                   JSValueConst this_obj,
-                                   int argc, JSValueConst *argv, int flags);
-static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
-[=[#if defined(_MSC_VER)
-static int js_msvc_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                   JSValueConst this_obj,
-                                   int argc, JSValueConst *argv, int flags,
-                                   JSValue *result);
-#endif
-static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                  JSValueConst this_obj,
-                                  int argc, JSValueConst *argv, int flags);
-static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
-        "MSVC C-function out-parameter declaration")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
                                   JSValueConst this_obj,
                                   int argc, JSValueConst *argv, int flags)
 {]=]
