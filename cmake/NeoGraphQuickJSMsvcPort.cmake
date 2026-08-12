@@ -582,14 +582,6 @@ static inline JSCFunctionListEntry js_msvc_make_alias_base_entry(const char *nam
 
     file(READ "${quickjs_source_dir}/quickjs.c" _quickjs_c)
     _neograph_quickjs_replace_exact(_quickjs_c
-        "#define SHORT_OPCODES    1"
-        [=[#define SHORT_OPCODES    1
-#if defined(_MSC_VER)
-#undef SHORT_OPCODES
-#define SHORT_OPCODES    0
-#endif]=]
-        "MSVC short-opcode disable")
-    _neograph_quickjs_replace_exact(_quickjs_c
         "#include \"quickjs.h\""
         "#include \"quickjs-msvc-port.h\""
         "patched QuickJS header include")
@@ -635,6 +627,17 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #define DIRECT_DISPATCH  1
 #endif]=]
         "computed-goto dispatch guard")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[                ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                          JS_UNDEFINED, call_argc, call_argv, 0);]=]
+[=[#if defined(_MSC_VER)
+                ret_val = JS_Call(ctx, call_argv[-1], JS_UNDEFINED,
+                                  call_argc, call_argv);
+#else
+                ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                          JS_UNDEFINED, call_argc, call_argv, 0);
+#endif]=]
+        "MSVC bytecode call ABI")
 
 
     _neograph_quickjs_replace_exact(_quickjs_c

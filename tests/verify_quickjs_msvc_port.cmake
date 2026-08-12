@@ -43,8 +43,8 @@ _require("${_quickjs}" "_AddressOfReturnAddress()" "the MSVC stack intrinsic")
 _require("${_quickjs}" "#include \"quickjs-msvc-port.h\"" "the patched public header include")
 _require("${_quickjs}" "static void __maybe_unused dump_token" "the portable debug helper attribute")
 _require("${_quickjs}" "double d = INFINITY;" "the MSVC-safe infinity constant")
-_require("${_quickjs}" "#undef SHORT_OPCODES\n#define SHORT_OPCODES    0"
-         "the MSVC wide-opcode mode")
+_require("${_quickjs}" "#if defined(_MSC_VER)\n                ret_val = JS_Call(ctx, call_argv[-1], JS_UNDEFINED,"
+         "the MSVC bytecode call ABI")
 _forbid("${_quickjs}" "1.0 / 0.0" "a compile-time floating divide by zero")
 _forbid("${_quickjs}" "(JSValue)argv[0]" "an invalid JSValue argument cast")
 _forbid("${_quickjs}" "(JSValueConst)JS_NewBool" "an invalid JSValueConst constructor cast")
