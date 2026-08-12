@@ -582,6 +582,14 @@ static inline JSCFunctionListEntry js_msvc_make_alias_base_entry(const char *nam
 
     file(READ "${quickjs_source_dir}/quickjs.c" _quickjs_c)
     _neograph_quickjs_replace_exact(_quickjs_c
+        "#define SHORT_OPCODES    1"
+        [=[#define SHORT_OPCODES    1
+#if defined(_MSC_VER)
+#undef SHORT_OPCODES
+#define SHORT_OPCODES    0
+#endif]=]
+        "MSVC short-opcode disable")
+    _neograph_quickjs_replace_exact(_quickjs_c
         "#include \"quickjs.h\""
         "#include \"quickjs-msvc-port.h\""
         "patched QuickJS header include")
@@ -629,151 +637,6 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
         "computed-goto dispatch guard")
 
 
-    # Diagnostic markers for the native-call boundary. They are emitted only
-    # in the MSVC port until its ASan failure has a source-level location.
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                  JSValueConst this_obj,
-                                  int argc, JSValueConst *argv, int flags)
-{
-    JSRuntime *rt = ctx->rt;]=]
-[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                  JSValueConst this_obj,
-                                  int argc, JSValueConst *argv, int flags)
-{
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs C call: entry\n");
-    fflush(stderr);
-#endif
-    JSRuntime *rt = ctx->rt;]=]
-        "MSVC C-function entry diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[    arg_count = p->u.cfunc.length;
-
-    /* better to always check stack overflow */]=]
-[=[    arg_count = p->u.cfunc.length;
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs C call: function metadata\n");
-    fflush(stderr);
-#endif
-
-    /* better to always check stack overflow */]=]
-        "MSVC C-function metadata diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[    rt->current_stack_frame = sf;
-    ctx = p->u.cfunc.realm; /* change the current realm */]=]
-[=[    rt->current_stack_frame = sf;
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs C call: frame installed\n");
-    fflush(stderr);
-#endif
-    ctx = p->u.cfunc.realm; /* change the current realm */]=]
-        "MSVC C-function frame diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[    case JS_CFUNC_generic:
-        ret_val = func.generic(ctx, this_obj, argc, arg_buf);]=]
-[=[    case JS_CFUNC_generic:
-#if defined(_MSC_VER)
-        fprintf(stderr, "neograph quickjs C call: invoke generic\n");
-        fflush(stderr);
-#endif
-        ret_val = func.generic(ctx, this_obj, argc, arg_buf);
-#if defined(_MSC_VER)
-        fprintf(stderr, "neograph quickjs C call: generic returned\n");
-        fflush(stderr);
-#endif]=]
-        "MSVC C-function callback diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                               JSValueConst this_obj, JSValueConst new_target,
-                               int argc, JSValue *argv, int flags)
-{
-    JSRuntime *rt = caller_ctx->rt;]=]
-[=[static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                               JSValueConst this_obj, JSValueConst new_target,
-                               int argc, JSValue *argv, int flags)
-{
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs call: entry\n");
-    fflush(stderr);
-#endif
-    JSRuntime *rt = caller_ctx->rt;]=]
-        "MSVC generic call entry diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[    p = JS_VALUE_GET_OBJ(func_obj);
-    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {]=]
-[=[    p = JS_VALUE_GET_OBJ(func_obj);
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs call: class %u\n", p->class_id);
-    fflush(stderr);
-#endif
-    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {]=]
-        "MSVC generic call class diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[        return call_func(caller_ctx, func_obj, this_obj, argc,
-                         (JSValueConst *)argv, flags);]=]
-[=[#if defined(_MSC_VER)
-        fprintf(stderr, "neograph quickjs call: invoke class callback\n");
-        fflush(stderr);
-#endif
-        return call_func(caller_ctx, func_obj, this_obj, argc,
-                         (JSValueConst *)argv, flags);]=]
-        "MSVC generic call callback diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[        call_func = rt->class_array[p->class_id].call;
-        if (!call_func) {]=]
-[=[        call_func = rt->class_array[p->class_id].call;
-#if defined(_MSC_VER)
-        fprintf(stderr, "neograph quickjs call: class handler acquired\n");
-        fflush(stderr);
-#endif
-        if (!call_func) {]=]
-        "MSVC class handler lookup diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[static inline BOOL js_check_stack_overflow(JSRuntime *rt, size_t alloca_size)
-{
-    uintptr_t sp;
-    sp = js_get_stack_pointer() - alloca_size;
-    return unlikely(sp < rt->stack_limit);
-}]=]
-[=[static inline BOOL js_check_stack_overflow(JSRuntime *rt, size_t alloca_size)
-{
-    uintptr_t sp;
-    sp = js_get_stack_pointer() - alloca_size;
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs stack: sp=%p limit=%p allocation=%zu\n",
-            (void *)sp, (void *)rt->stack_limit, alloca_size);
-    fflush(stderr);
-#endif
-    return unlikely(sp < rt->stack_limit);
-}]=]
-        "MSVC bytecode stack-check diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[    b = p->u.func.function_bytecode;
-
-    if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {]=]
-[=[    b = p->u.func.function_bytecode;
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs bytecode: metadata=%p\n", (void *)b);
-    fflush(stderr);
-#endif
-
-    if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {]=]
-        "MSVC bytecode metadata diagnostic")
-    _neograph_quickjs_replace_exact(_quickjs_c
-[=[    local_buf = alloca(alloca_size);
-    if (unlikely(arg_allocated_size)) {]=]
-[=[#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs bytecode: allocate %zu bytes\n", alloca_size);
-    fflush(stderr);
-#endif
-    local_buf = alloca(alloca_size);
-#if defined(_MSC_VER)
-    fprintf(stderr, "neograph quickjs bytecode: allocation complete\n");
-    fflush(stderr);
-#endif
-    if (unlikely(arg_allocated_size)) {]=]
-        "MSVC bytecode allocation diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"

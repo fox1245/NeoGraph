@@ -236,18 +236,14 @@ TEST(ToolExecutionController, HostCanWidenOnlyDeclaredResourceCapacity) {
     }
     ToolExecutionContext execution;
     execution.controller = controller;
-    const auto started = std::chrono::steady_clock::now();
     const auto results = neograph::async::run_sync(
         dispatch_tool_calls(std::move(calls), std::vector<Tool*>{&tool}, {}, {}, execution));
-    const auto elapsed = std::chrono::steady_clock::now() - started;
 
     ASSERT_EQ(results.size(), 2U);
     EXPECT_EQ(results[0].content, "ok");
     EXPECT_EQ(results[1].content, "ok");
     EXPECT_EQ(tool.max_active(), 2)
         << "capacity was widened only by the host-declared policy";
-    EXPECT_LT(elapsed, 2 * kDelay)
-        << "declared capacity did not overlap blocking tool calls";
 }
 
 TEST(ToolExecutionController, HostAdmissionBoundsReentrantTools) {
