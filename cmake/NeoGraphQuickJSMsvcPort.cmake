@@ -799,6 +799,18 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
         "INFINITY"
         "MSVC infinity constants")
     _neograph_quickjs_replace_exact(_quickjs_c
+        [=[        case OP_call:
+            dbuf_putc(bc_out, OP_call0 + idx);
+            return;]=]
+        [=[        case OP_call:
+#if !defined(_MSC_VER)
+            dbuf_putc(bc_out, OP_call0 + idx);
+            return;
+#else
+            break;
+#endif]=]
+        "MSVC short-call opcode guard")
+    _neograph_quickjs_replace_exact(_quickjs_c
         "static void __attribute((unused)) dump_token"
         "static void __maybe_unused dump_token"
         "debug helper attribute")

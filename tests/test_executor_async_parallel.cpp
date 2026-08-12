@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -35,6 +36,11 @@ using namespace neograph::graph;
 
 namespace {
 
+struct OverlapProbe {
+    std::atomic<std::size_t> active{0};
+    std::atomic<std::size_t> peak{0};
+};
+
 // Async-native work node — each run waits delay_ms on a
 // timer and writes to the "findings" append channel. Async so that
 // the parallel path shows real overlap on a single-threaded
@@ -42,15 +48,30 @@ namespace {
 class AsyncWorkerNode : public GraphNode {
     std::string name_;
     int delay_ms_;
+    std::shared_ptr<OverlapProbe> overlap_;
 public:
-    AsyncWorkerNode(std::string name, int delay_ms)
-        : name_(std::move(name)), delay_ms_(delay_ms) {}
+    AsyncWorkerNode(std::string name, int delay_ms, std::shared_ptr<OverlapProbe> overlap = {})
+        : name_(std::move(name)), delay_ms_(delay_ms), overlap_(std::move(overlap)) {}
 
     asio::awaitable<NodeOutput> run(NodeInput) override {
         auto ex = co_await asio::this_coro::executor;
         asio::steady_timer t(ex);
         t.expires_after(std::chrono::milliseconds(delay_ms_));
-        co_await t.async_wait(asio::use_awaitable);
+        if (overlap_) {
+            const auto active = overlap_->active.fetch_add(1, std::memory_order_relaxed) + 1;
+            auto peak = overlap_->peak.load(std::memory_order_relaxed);
+            while (peak < active &&
+                   !overlap_->peak.compare_exchange_weak(peak, active,
+                                                         std::memory_order_relaxed)) {
+            }
+        }
+        try {
+            co_await t.async_wait(asio::use_awaitable);
+        } catch (...) {
+            if (overlap_) overlap_->active.fetch_sub(1, std::memory_order_relaxed);
+            throw;
+        }
+        if (overlap_) overlap_->active.fetch_sub(1, std::memory_order_relaxed);
         json append = json::array();
         append.push_back("done-by-" + name_);
         NodeOutput out;
@@ -167,13 +188,13 @@ TEST(ExecutorAsyncParallel, AllBranchesCompleteInReadyOrder) {
 }
 
 TEST(ExecutorAsyncParallel, BranchesRunConcurrentlyOnSharedIoContext) {
-    // Three branches × 50ms each. Sequential would take 150ms; true
-    // parallel on one io_context converges to ~50ms. Bound generously
-    // against scheduling jitter.
+    // Wall-clock duration is affected by host scheduling under parallel CTest.
+    // Track the workers while each is suspended on its timer instead.
+    auto overlap = std::make_shared<OverlapProbe>();
     std::vector<std::unique_ptr<GraphNode>> nodes;
-    nodes.push_back(std::make_unique<AsyncWorkerNode>("a", 50));
-    nodes.push_back(std::make_unique<AsyncWorkerNode>("b", 50));
-    nodes.push_back(std::make_unique<AsyncWorkerNode>("c", 50));
+    nodes.push_back(std::make_unique<AsyncWorkerNode>("a", 50, overlap));
+    nodes.push_back(std::make_unique<AsyncWorkerNode>("b", 50, overlap));
+    nodes.push_back(std::make_unique<AsyncWorkerNode>("c", 50, overlap));
     ParallelHarness h(std::move(nodes));
     auto store = std::make_shared<InMemoryCheckpointStore>();
     CheckpointCoordinator coord(store, "tid-overlap");
@@ -194,17 +215,11 @@ TEST(ExecutorAsyncParallel, BranchesRunConcurrentlyOnSharedIoContext) {
         },
         asio::detached);
 
-    auto t0 = std::chrono::steady_clock::now();
     io.run();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
 
     ASSERT_TRUE(got.has_value());
-    // Anything under 140ms proves we're not purely sequential (3 × 50);
-    // a tight bound of ~60ms would demand less jitter than CI provides.
-    EXPECT_LT(elapsed_ms, 140)
-        << "parallel async took " << elapsed_ms
-        << "ms — expected ~50ms with true overlap, sequential floor 150ms";
+    EXPECT_EQ(overlap->peak.load(std::memory_order_relaxed), 3U);
+    EXPECT_EQ(overlap->active.load(std::memory_order_relaxed), 0U);
 }
 
 TEST(ExecutorAsyncParallel, NodeInterruptSavesDedicatedCheckpoint) {

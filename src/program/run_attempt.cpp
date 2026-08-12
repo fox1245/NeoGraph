@@ -3476,7 +3476,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         state->scopes[index] = std::make_shared<JavaScriptScopeState>();
                     }
                     asio::co_spawn(
-                        executor,
+                        completion_executor,
                         execute_command(
                             members[index], operation_id + "/member/" + std::to_string(index),
                             state->tokens[index], state->scopes[index], scope_depth + 1, false),
