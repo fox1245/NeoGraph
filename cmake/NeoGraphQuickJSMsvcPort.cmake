@@ -730,6 +730,51 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
         if (!call_func) {]=]
         "MSVC class handler lookup diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
+[=[static inline BOOL js_check_stack_overflow(JSRuntime *rt, size_t alloca_size)
+{
+    uintptr_t sp;
+    sp = js_get_stack_pointer() - alloca_size;
+    return unlikely(sp < rt->stack_limit);
+}]=]
+[=[static inline BOOL js_check_stack_overflow(JSRuntime *rt, size_t alloca_size)
+{
+    uintptr_t sp;
+    sp = js_get_stack_pointer() - alloca_size;
+#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs stack: sp=%p limit=%p allocation=%zu\n",
+            (void *)sp, (void *)rt->stack_limit, alloca_size);
+    fflush(stderr);
+#endif
+    return unlikely(sp < rt->stack_limit);
+}]=]
+        "MSVC bytecode stack-check diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    b = p->u.func.function_bytecode;
+
+    if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {]=]
+[=[    b = p->u.func.function_bytecode;
+#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs bytecode: metadata=%p\n", (void *)b);
+    fflush(stderr);
+#endif
+
+    if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {]=]
+        "MSVC bytecode metadata diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    local_buf = alloca(alloca_size);
+    if (unlikely(arg_allocated_size)) {]=]
+[=[#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs bytecode: allocate %zu bytes\n", alloca_size);
+    fflush(stderr);
+#endif
+    local_buf = alloca(alloca_size);
+#if defined(_MSC_VER)
+    fprintf(stderr, "neograph quickjs bytecode: allocation complete\n");
+    fflush(stderr);
+#endif
+    if (unlikely(arg_allocated_size)) {]=]
+        "MSVC bytecode allocation diagnostic")
+    _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"
         "POSIX atomics guard")
