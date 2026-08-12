@@ -720,19 +720,15 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
                          (JSValueConst *)argv, flags);]=]
         "MSVC generic call callback diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
-[=[    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
-        JSClassCall *call_func;]=]
-[=[    if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
+[=[        call_func = rt->class_array[p->class_id].call;
+        if (!call_func) {]=]
+[=[        call_func = rt->class_array[p->class_id].call;
 #if defined(_MSC_VER)
-        if (p->class_id == JS_CLASS_C_FUNCTION) {
-            fprintf(stderr, "neograph quickjs call: bypass C class table\n");
-            fflush(stderr);
-            return js_call_c_function(caller_ctx, func_obj, this_obj, argc,
-                                      (JSValueConst *)argv, flags);
-        }
+        fprintf(stderr, "neograph quickjs call: class handler acquired\n");
+        fflush(stderr);
 #endif
-        JSClassCall *call_func;]=]
-        "MSVC C-function table bypass diagnostic")
+        if (!call_func) {]=]
+        "MSVC class handler lookup diagnostic")
     _neograph_quickjs_replace_exact(_quickjs_c
         "#if !defined(__EMSCRIPTEN__)\n#define CONFIG_ATOMICS"
         "#if !defined(__EMSCRIPTEN__) && !defined(_MSC_VER)\n#define CONFIG_ATOMICS"
