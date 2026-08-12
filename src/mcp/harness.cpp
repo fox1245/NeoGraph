@@ -1063,9 +1063,13 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 throw std::invalid_argument("Stored Harness contract manifest binding mismatch");
             contract_run.emplace(std::move(*recovered));
         }
+        const bool contract_finalized =
+            contract_run && contract_run->verification() &&
+            contract_run->status() != program::ContractRunStatus::Running;
         auto value = std::make_shared<Run>(
             Run{a->id, std::move(mode), h, a->runtime, std::move(contract_run),
-                std::move(workspace_revision), false, retained->run_record().created_at_ms(),
+                std::move(workspace_revision), contract_finalized,
+                retained->run_record().created_at_ms(),
                 std::make_shared<std::mutex>()});
         std::lock_guard l(mutex);
         return runs.emplace(id, value).first->second;

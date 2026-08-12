@@ -267,6 +267,14 @@ int main(void) {
         goto done;
     }
 
+    stage("evaluate zero-argument native method binding");
+    if (!evaluate_truth(context,
+                        "({ invoke: nativeUndefined }).invoke() === undefined",
+                        JS_EVAL_TYPE_GLOBAL)) {
+        result = fail("zero-argument native method binding evaluation failed");
+        goto done;
+    }
+
     stage("evaluate native binding");
     if (!evaluate_truth(context, "nativeAdd(20, 22) === 42", JS_EVAL_TYPE_GLOBAL)) {
         result = fail("native binding evaluation failed");

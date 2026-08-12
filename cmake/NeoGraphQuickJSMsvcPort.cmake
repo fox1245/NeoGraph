@@ -628,16 +628,83 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #endif]=]
         "computed-goto dispatch guard")
     _neograph_quickjs_replace_exact(_quickjs_c
-[=[                ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
-                                          JS_UNDEFINED, call_argc, call_argv, 0);]=]
+[=[static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                               JSValueConst this_obj, JSValueConst new_target,
+                               int argc, JSValue *argv, int flags)
+{]=]
 [=[#if defined(_MSC_VER)
-                ret_val = JS_Call(ctx, call_argv[-1], JS_UNDEFINED,
-                                  call_argc, call_argv);
+/* Keep the 16-byte JSValue return inside the direct C-function call. */
+static int js_msvc_call_c_function_from_bytecode(JSContext *ctx,
+                                                  JSValueConst func_obj,
+                                                  JSValueConst this_obj,
+                                                  int argc,
+                                                  JSValueConst *argv,
+                                                  JSValue *result)
+{
+    if (JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT ||
+        JS_VALUE_GET_OBJ(func_obj)->class_id != JS_CLASS_C_FUNCTION) {
+        return 0;
+    }
+    *result = js_call_c_function(ctx, func_obj, this_obj, argc, argv, 0);
+    return 1;
+}
+#endif
+
+static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                               JSValueConst this_obj, JSValueConst new_target,
+                               int argc, JSValue *argv, int flags)
+{]=]
+        "MSVC bytecode C-function call helper")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[            has_call_argc:
+                call_argv = sp - call_argc;
+                sf->cur_pc = pc;
+                ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                          JS_UNDEFINED, call_argc, call_argv, 0);]=]
+[=[            has_call_argc:
+                call_argv = sp - call_argc;
+                sf->cur_pc = pc;
+#if defined(_MSC_VER)
+                if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], JS_UNDEFINED,
+                                                            call_argc, call_argv, &ret_val)) {
+                    ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                              JS_UNDEFINED, call_argc, call_argv, 0);
+                }
 #else
                 ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
                                           JS_UNDEFINED, call_argc, call_argv, 0);
 #endif]=]
         "MSVC bytecode call ABI")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[                ret_val = JS_CallInternal(ctx, call_argv[-1], call_argv[-2],
+                                          JS_UNDEFINED, call_argc, call_argv, 0);]=]
+[=[#if defined(_MSC_VER)
+                if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], call_argv[-2],
+                                                            call_argc, call_argv, &ret_val)) {
+                    ret_val = JS_CallInternal(ctx, call_argv[-1], call_argv[-2],
+                                              JS_UNDEFINED, call_argc, call_argv, 0);
+                }
+#else
+                ret_val = JS_CallInternal(ctx, call_argv[-1], call_argv[-2],
+                                          JS_UNDEFINED, call_argc, call_argv, 0);
+#endif]=]
+        "MSVC bytecode method-call ABI")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[                } else {
+                    ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                              JS_UNDEFINED, call_argc, call_argv, 0);]=]
+[=[                } else {
+#if defined(_MSC_VER)
+                    if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], JS_UNDEFINED,
+                                                                call_argc, call_argv, &ret_val)) {
+                        ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                                  JS_UNDEFINED, call_argc, call_argv, 0);
+                    }
+#else
+                    ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                              JS_UNDEFINED, call_argc, call_argv, 0);
+#endif]=]
+        "MSVC bytecode eval-call ABI")
 
 
     _neograph_quickjs_replace_exact(_quickjs_c
