@@ -634,17 +634,17 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 {]=]
 [=[#if defined(_MSC_VER)
 /* Keep the bytecode path out of MSVC's JSValue aggregate return ABI. */
-static int js_msvc_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                   JSValueConst this_obj,
-                                   int argc, JSValueConst *argv, int flags,
-                                   JSValue *result)
+static no_inline int js_msvc_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                             JSValueConst this_obj,
+                                             int argc, JSValueConst *argv, int flags,
+                                             JSValue *result)
 #else
 static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
                                   JSValueConst this_obj,
                                   int argc, JSValueConst *argv, int flags)
 #endif
 {]=]
-        "MSVC C-function out-parameter dispatch")
+        "MSVC non-inlined C-function out-parameter dispatch")
     _neograph_quickjs_replace_exact(_quickjs_c
 [=[    /* better to always check stack overflow */
     if (js_check_stack_overflow(rt, sizeof(arg_buf[0]) * arg_count))
@@ -694,12 +694,12 @@ static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
 {]=]
 [=[#if defined(_MSC_VER)
 /* Bytecode callers receive JSValue through their local result slot. */
-static int js_msvc_call_c_function_from_bytecode(JSContext *ctx,
-                                                   JSValueConst func_obj,
-                                                   JSValueConst this_obj,
-                                                  int argc,
-                                                  JSValueConst *argv,
-                                                  JSValue *result)
+static no_inline int js_msvc_call_c_function_from_bytecode(JSContext *ctx,
+                                                            JSValueConst func_obj,
+                                                            JSValueConst this_obj,
+                                                            int argc,
+                                                            JSValueConst *argv,
+                                                            JSValue *result)
 {
     if (JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT ||
         JS_VALUE_GET_OBJ(func_obj)->class_id != JS_CLASS_C_FUNCTION) {
@@ -713,7 +713,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                JSValueConst this_obj, JSValueConst new_target,
                                int argc, JSValue *argv, int flags)
 {]=]
-        "MSVC bytecode C-function call helper")
+        "MSVC non-inlined bytecode C-function call helper")
     _neograph_quickjs_replace_exact(_quickjs_c
 [=[            has_call_argc:
                 call_argv = sp - call_argc;
