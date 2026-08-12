@@ -628,15 +628,77 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
 #endif]=]
         "computed-goto dispatch guard")
     _neograph_quickjs_replace_exact(_quickjs_c
+[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                   JSValueConst this_obj,
+                                   int argc, JSValueConst *argv, int flags);
+static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
+[=[#if defined(_MSC_VER)
+static int js_msvc_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                   JSValueConst this_obj,
+                                   int argc, JSValueConst *argv, int flags,
+                                   JSValue *result);
+#endif
+static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                  JSValueConst this_obj,
+                                  int argc, JSValueConst *argv, int flags);
+static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
+        "MSVC C-function out-parameter declaration")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                  JSValueConst this_obj,
+                                  int argc, JSValueConst *argv, int flags)
+{]=]
+[=[#if defined(_MSC_VER)
+/* Keep the bytecode path out of MSVC's JSValue aggregate return ABI. */
+static int js_msvc_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                   JSValueConst this_obj,
+                                   int argc, JSValueConst *argv, int flags,
+                                   JSValue *result)
+#else
+static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                  JSValueConst this_obj,
+                                  int argc, JSValueConst *argv, int flags)
+#endif
+{]=]
+        "MSVC C-function out-parameter dispatch")
+    _neograph_quickjs_replace_exact(_quickjs_c
+[=[    rt->current_stack_frame = sf->prev_frame;
+    return ret_val;
+}
+
+static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
+[=[    rt->current_stack_frame = sf->prev_frame;
+#if defined(_MSC_VER)
+    *result = ret_val;
+    return 0;
+#else
+    return ret_val;
+#endif
+}
+
+#if defined(_MSC_VER)
+static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
+                                  JSValueConst this_obj,
+                                  int argc, JSValueConst *argv, int flags)
+{
+    JSValue result;
+    (void)js_msvc_call_c_function(ctx, func_obj, this_obj, argc, argv, flags, &result);
+    return result;
+}
+#endif
+
+static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
+        "MSVC C-function aggregate-return wrapper")
+    _neograph_quickjs_replace_exact(_quickjs_c
 [=[static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                JSValueConst this_obj, JSValueConst new_target,
                                int argc, JSValue *argv, int flags)
 {]=]
 [=[#if defined(_MSC_VER)
-/* Keep the 16-byte JSValue return inside the direct C-function call. */
+/* Bytecode callers receive JSValue through their local result slot. */
 static int js_msvc_call_c_function_from_bytecode(JSContext *ctx,
-                                                  JSValueConst func_obj,
-                                                  JSValueConst this_obj,
+                                                   JSValueConst func_obj,
+                                                   JSValueConst this_obj,
                                                   int argc,
                                                   JSValueConst *argv,
                                                   JSValue *result)
@@ -645,8 +707,7 @@ static int js_msvc_call_c_function_from_bytecode(JSContext *ctx,
         JS_VALUE_GET_OBJ(func_obj)->class_id != JS_CLASS_C_FUNCTION) {
         return 0;
     }
-    *result = js_call_c_function(ctx, func_obj, this_obj, argc, argv, 0);
-    return 1;
+    return js_msvc_call_c_function(ctx, func_obj, this_obj, argc, argv, 0, result) == 0;
 }
 #endif
 
