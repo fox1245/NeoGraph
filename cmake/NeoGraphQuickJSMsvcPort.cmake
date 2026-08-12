@@ -646,6 +646,20 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
 {]=]
         "MSVC C-function out-parameter dispatch")
     _neograph_quickjs_replace_exact(_quickjs_c
+[=[    /* better to always check stack overflow */
+    if (js_check_stack_overflow(rt, sizeof(arg_buf[0]) * arg_count))
+        return JS_ThrowStackOverflow(ctx);]=]
+[=[    /* better to always check stack overflow */
+    if (js_check_stack_overflow(rt, sizeof(arg_buf[0]) * arg_count)) {
+#if defined(_MSC_VER)
+        *result = JS_ThrowStackOverflow(ctx);
+        return 0;
+#else
+        return JS_ThrowStackOverflow(ctx);
+#endif
+    }]=]
+        "MSVC C-function stack-overflow result handoff")
+    _neograph_quickjs_replace_exact(_quickjs_c
 [=[    rt->current_stack_frame = sf->prev_frame;
     return ret_val;
 }

@@ -47,6 +47,8 @@ _require("${_quickjs}" "static int js_msvc_call_c_function(JSContext *ctx"
           "the MSVC C-function out-parameter dispatcher")
 _require("${_quickjs}" "*result = ret_val;\n    return 0;"
           "the MSVC C-function result handoff")
+_require("${_quickjs}" "*result = JS_ThrowStackOverflow(ctx);\n        return 0;"
+          "the MSVC C-function stack-overflow result handoff")
 _require("${_quickjs}" "static int js_msvc_call_c_function_from_bytecode"
           "the MSVC bytecode C-function call helper")
 _require("${_quickjs}" "if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], JS_UNDEFINED,"
