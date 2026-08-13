@@ -382,7 +382,14 @@ TEST(HarnessProgramStoreTest, FileStorePersistsLongContentAddressedIdentifiers) 
 
     file.reset();
     std::error_code ignored;
+#ifdef _WIN32
+    const auto absolute_root =
+        std::filesystem::absolute(std::filesystem::path(root)).lexically_normal();
+    std::filesystem::remove_all(std::filesystem::path(LR"(\\?\)" + absolute_root.native()),
+                                ignored);
+#else
     std::filesystem::remove_all(root, ignored);
+#endif
 }
 
 TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillWork) {

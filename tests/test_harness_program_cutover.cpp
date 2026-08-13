@@ -1203,7 +1203,13 @@ TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdenti
                   first_record.version().core_materialization_receipt().capability_bindings),
               neograph::program::capability_binding_receipt_root(
                   second_record.version().core_materialization_receipt().capability_bindings));
-    std::filesystem::remove_all(root);
+    std::error_code cleanup_error;
+#ifdef _WIN32
+    std::filesystem::remove_all(std::filesystem::path(LR"(\\?\)" + root.native()),
+                                cleanup_error);
+#else
+    std::filesystem::remove_all(root, cleanup_error);
+#endif
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
