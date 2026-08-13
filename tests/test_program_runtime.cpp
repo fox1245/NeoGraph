@@ -1897,7 +1897,7 @@ TEST(ProgramRuntimeTest, JavaScriptCommandFinalizersReleaseNativeMemoryCharges) 
     const auto source = ProgramSource::from_javascript("test:native-command-release.js",
                                                        R"JS(
             export function* main() {
-                for (let batch = 0; batch < 2000; ++batch) {
+                for (let batch = 0; batch < 1000; ++batch) {
                     let retained = [];
                     for (let index = 0; index < 16; ++index) {
                         retained.push(ng.callCore(

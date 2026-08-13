@@ -145,8 +145,9 @@ public:
     /// short-circuit. Drives node->run(NodeInput) via co_await and uses
     /// asio::steady_timer.async_wait for backoff so
     /// the executor is not frozen during retry waits. NodeInterrupt +
-    /// exception semantics are preserved while coroutine catch funclets
-    /// retain only an opaque exception handle.
+    /// exception semantics preserved bit-for-bit; GCC-13-safe (catch
+    /// block captures the exception via std::optional, co_await
+    /// happens outside).
     ///
     /// Public so regression tests can drive it directly without
     /// reconstructing a full super-step.
