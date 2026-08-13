@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -167,10 +168,8 @@ def create_pg_restore_stub(path: Path, tables: dict[str, dict[str, Any]]) -> Non
         }
         for table, entry in tables.items()
     }
-    executable = path / "pg_restore"
     payload = json.dumps(encoded_tables, sort_keys=True, separators=(",", ":"))
-    executable.write_text(
-        f"""#!{sys.executable}
+    script = f"""#!{sys.executable}
 import json
 import sys
 
@@ -195,10 +194,17 @@ print("COPY public." + table + " (" + ", ".join(entry["columns"]) + ") FROM stdi
 for row in entry["rows"]:
     print(row)
 print(r"\\.")
-""",
-        encoding="utf-8",
-    )
-    executable.chmod(0o755)
+"""
+    if os.name == "nt":
+        script_path = path / "pg_restore.py"
+        script_path.write_text(script, encoding="utf-8")
+        (path / "pg_restore.cmd").write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0pg_restore.py" %*\r\n', encoding="utf-8"
+        )
+    else:
+        executable = path / "pg_restore"
+        executable.write_text(script, encoding="utf-8")
+        executable.chmod(0o755)
 
 
 def inventory(stores: list[dict[str, Any]], legacy_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -252,7 +258,7 @@ class LegacyDrainAuditTest(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
-            env=environment,
+            env={**os.environ, **(environment or {})},
         )
         return result, proof_path
 

@@ -275,9 +275,24 @@ int main(void) {
         goto done;
     }
 
+    stage("evaluate shadowed eval native binding");
+    if (!evaluate_truth(context,
+                        "function invoke(eval) { return eval() === undefined; }\n"
+                        "invoke(nativeUndefined)",
+                        JS_EVAL_TYPE_GLOBAL)) {
+        result = fail("shadowed eval native binding evaluation failed");
+        goto done;
+    }
+
     stage("evaluate native binding");
     if (!evaluate_truth(context, "nativeAdd(20, 22) === 42", JS_EVAL_TYPE_GLOBAL)) {
         result = fail("native binding evaluation failed");
+        goto done;
+    }
+    if (!evaluate_truth(context,
+                        "try { nativeAdd(); false; } catch (error) { error instanceof TypeError; }",
+                        JS_EVAL_TYPE_GLOBAL)) {
+        result = fail("native binding exception evaluation failed");
         goto done;
     }
     stage("evaluate sealed global surface");
