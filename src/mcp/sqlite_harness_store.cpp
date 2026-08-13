@@ -1852,10 +1852,18 @@ void SqliteHarnessRecordStore::save_contract_run(
             current.text(1) != artifact.artifact_id() || current.text(2) != run_record.bundle_id() ||
             current.text(3) != run_record.program_version_id() ||
             current.text(4) != wrapper.run_record().id() ||
-            wrapper.run_record().serialize_canonical() != run_record.serialize_canonical()) {
+            wrapper.run_record().owner_scope() != run_record.owner_scope() ||
+            wrapper.run_record().run_id() != run_record.run_id() ||
+            wrapper.run_record().bundle_id() != run_record.bundle_id() ||
+            wrapper.run_record().program_version_id() != run_record.program_version_id() ||
+            wrapper.run_record().binding_fingerprint() != run_record.binding_fingerprint()) {
             throw std::invalid_argument("Harness contract Program run binding is corrupt");
         }
         wrapper.validate_artifact(artifact);
+        // The Program transition can advance between the caller's snapshot and
+        // this transaction. Validate the contract against the authoritative
+        // record instead of requiring byte equality with a stale snapshot.
+        validate_contract_run_binding(artifact, wrapper.run_record(), contract_run);
 
         Statement existing(
             impl_->db,
@@ -1875,7 +1883,7 @@ void SqliteHarnessRecordStore::save_contract_run(
                 throw std::invalid_argument("Stored Harness contract SQLite binding is corrupt");
             }
             const auto stored = program::ContractRun::parse(existing.text(5));
-            validate_contract_run_binding(artifact, run_record, stored);
+            validate_contract_run_binding(artifact, wrapper.run_record(), stored);
             if (stored.serialize_canonical() != existing.text(5)) {
                 throw std::invalid_argument("Stored Harness contract canonical bytes are corrupt");
             }
