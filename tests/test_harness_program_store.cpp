@@ -368,6 +368,21 @@ TEST(HarnessProgramStoreTest, FileStoreRejectsDurableReconnectCapability) {
     std::filesystem::remove_all(directory.path.string() + "-files", ignored);
 }
 
+TEST(HarnessProgramStoreTest, FileStorePersistsLongContentAddressedIdentifiers) {
+    TempDb directory;
+    const auto root = directory.path.string() + "-long-id-files";
+    auto       file = std::make_shared<FileHarnessRecordStore>(root);
+    const auto id   = "artifact-" + digest('1') + "-" + digest('2') + "-" + digest('3');
+    const json record{{"artifact_id", id}, {"value", "stored"}};
+
+    file->save_artifact(id, record);
+    EXPECT_EQ(file->load_artifact(id), record);
+
+    file.reset();
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
 TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillWork) {
     TempDb  db;
     Fixture fixture;

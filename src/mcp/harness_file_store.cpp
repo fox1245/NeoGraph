@@ -18,6 +18,22 @@
 
 namespace neograph::mcp {
 
+#ifdef _WIN32
+namespace {
+
+std::filesystem::path extended_windows_path(const std::filesystem::path& value) {
+    const auto absolute = std::filesystem::absolute(value).lexically_normal();
+    const auto native   = absolute.native();
+    if (native.starts_with(LR"(\\?\)")) return absolute;
+    if (native.starts_with(LR"(\\)")) {
+        return std::filesystem::path(LR"(\\?\UNC\)" + native.substr(2));
+    }
+    return std::filesystem::path(LR"(\\?\)" + native);
+}
+
+}  // namespace
+#endif
+
 struct FileHarnessRecordStore::Impl {
     explicit Impl(std::string directory) : root(std::move(directory)) {
         if (root.empty()) throw std::invalid_argument("FileHarnessRecordStore root must not be empty");
@@ -42,18 +58,25 @@ struct FileHarnessRecordStore::Impl {
         const auto temporary = std::filesystem::path(
             target.string() + ".tmp." +
             std::to_string(next_temp.fetch_add(1, std::memory_order_relaxed)));
+#ifdef _WIN32
+        const auto writable_temporary = extended_windows_path(temporary);
+        const auto writable_target    = extended_windows_path(target);
+#else
+        const auto& writable_temporary = temporary;
+        const auto& writable_target    = target;
+#endif
         {
-            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            std::ofstream output(writable_temporary, std::ios::binary | std::ios::trunc);
             if (!output) throw std::runtime_error("cannot open temporary Harness record");
             output << record.dump();
             output.flush();
             if (!output) throw std::runtime_error("cannot write temporary Harness record");
         }
 #ifdef _WIN32
-        if (!MoveFileExW(temporary.c_str(), target.c_str(),
+        if (!MoveFileExW(writable_temporary.c_str(), writable_target.c_str(),
                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
             const auto code = GetLastError();
-            std::filesystem::remove(temporary);
+            std::filesystem::remove(writable_temporary);
             throw std::runtime_error("cannot commit Harness record (Windows error " +
                                      std::to_string(code) + ")");
         }
@@ -70,9 +93,14 @@ struct FileHarnessRecordStore::Impl {
     std::optional<json> load(const char* collection, const std::string& id) {
         const auto target = path(collection, id);
         std::lock_guard lock(mutex);
-        std::ifstream input(target, std::ios::binary);
+#ifdef _WIN32
+        const auto readable_target = extended_windows_path(target);
+#else
+        const auto& readable_target = target;
+#endif
+        std::ifstream input(readable_target, std::ios::binary);
         if (!input) {
-            if (!std::filesystem::exists(target)) return std::nullopt;
+            if (!std::filesystem::exists(readable_target)) return std::nullopt;
             throw std::runtime_error("cannot read Harness record");
         }
         std::ostringstream content;
