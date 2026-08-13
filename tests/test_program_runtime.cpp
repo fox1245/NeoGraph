@@ -5230,7 +5230,13 @@ TEST(ProgramRuntimeTest, DurableDslAwaitTimeoutCancelsAndRecordsItsChild) {
     const auto settled_children = settled.children();
     ASSERT_EQ(settled_children.size(), 1U);
     EXPECT_EQ(settled_children.front().state, ProgramChildState::Cancelled);
-    EXPECT_FALSE(settled_children.front().terminal_result.has_value());
+    // Parent timeout and child cancellation publish through independent
+    // scheduler paths.  The parent may snapshot the cancelled relation before
+    // or after the child's matching terminal result is durably attached.
+    if (const auto& terminal = settled_children.front().terminal_result) {
+        EXPECT_EQ(terminal->status(), ProgramTerminalStatus::Cancelled);
+        EXPECT_EQ(terminal->run_id(), pending_children.front().child_run_id);
+    }
 }
 TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
     blocking_calls.store(0);

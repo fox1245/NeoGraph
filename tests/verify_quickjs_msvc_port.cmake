@@ -43,20 +43,28 @@ _require("${_quickjs}" "_AddressOfReturnAddress()" "the MSVC stack intrinsic")
 _require("${_quickjs}" "#include \"quickjs-msvc-port.h\"" "the patched public header include")
 _require("${_quickjs}" "static void __maybe_unused dump_token" "the portable debug helper attribute")
 _require("${_quickjs}" "double d = INFINITY;" "the MSVC-safe infinity constant")
-_require("${_quickjs}" "static no_inline int js_msvc_call_c_function(JSContext *ctx"
-          "the MSVC non-inlined C-function out-parameter dispatcher")
+_require("${_quickjs}" "static no_inline int js_msvc_call_c_function(JSContext *ctx,"
+          "the MSVC pointer-only C-function out-parameter dispatcher")
+_require("${_quickjs}" "const JSValue *func_obj_ptr"
+          "the MSVC C-function object pointer")
+_require("${_quickjs}" "const JSValue *this_obj_ptr"
+          "the MSVC C-function receiver pointer")
 _require("${_quickjs}" "static no_inline int js_msvc_call_c_function_from_bytecode"
-          "the MSVC non-inlined bytecode C-function call helper")
+          "the MSVC pointer-only bytecode C-function call helper")
+_require("${_quickjs}" "const JSValue *func_obj,\n                                                             const JSValue *this_obj,"
+          "the MSVC bytecode helper pointer parameters")
 _require("${_quickjs}" "*result = ret_val;\n    return 0;"
           "the MSVC C-function result handoff")
 _require("${_quickjs}" "*result = JS_ThrowStackOverflow(ctx);\n        return 0;"
           "the MSVC C-function stack-overflow result handoff")
-_require("${_quickjs}" "if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], JS_UNDEFINED,"
+_require("${_quickjs}" "if (!js_msvc_call_c_function_from_bytecode(ctx, &call_argv[-1], NULL,"
           "the MSVC bytecode call ABI")
-_require("${_quickjs}" "if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], call_argv[-2],"
+_require("${_quickjs}" "if (!js_msvc_call_c_function_from_bytecode(ctx, &call_argv[-1], &call_argv[-2],"
           "the MSVC bytecode method-call ABI")
 _forbid("${_quickjs}" "*result = js_call_c_function(ctx, func_obj, this_obj, argc, argv, 0);"
          "an MSVC aggregate-return bytecode call")
+_forbid("${_quickjs}" "js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1],"
+         "an MSVC by-value bytecode callback call")
 _forbid("${_quickjs}" "1.0 / 0.0" "a compile-time floating divide by zero")
 _forbid("${_quickjs}" "(JSValue)argv[0]" "an invalid JSValue argument cast")
 _forbid("${_quickjs}" "(JSValueConst)JS_NewBool" "an invalid JSValueConst constructor cast")

@@ -633,9 +633,10 @@ static int gettimeofday(struct timeval *tv, void *timezone_ignored)
                                   int argc, JSValueConst *argv, int flags)
 {]=]
 [=[#if defined(_MSC_VER)
-/* Keep the bytecode path out of MSVC's JSValue aggregate return ABI. */
-static no_inline int js_msvc_call_c_function(JSContext *ctx, JSValueConst func_obj,
-                                             JSValueConst this_obj,
+/* Keep bytecode callers out of this MSVC JSValue aggregate call boundary. */
+static no_inline int js_msvc_call_c_function(JSContext *ctx,
+                                             const JSValue *func_obj_ptr,
+                                             const JSValue *this_obj_ptr,
                                              int argc, JSValueConst *argv, int flags,
                                              JSValue *result)
 #else
@@ -643,7 +644,11 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
                                   JSValueConst this_obj,
                                   int argc, JSValueConst *argv, int flags)
 #endif
-{]=]
+{
+#if defined(_MSC_VER)
+    JSValue func_obj = *func_obj_ptr;
+    JSValue this_obj = this_obj_ptr ? *this_obj_ptr : JS_UNDEFINED;
+#endif]=]
         "MSVC non-inlined C-function out-parameter dispatch")
     _neograph_quickjs_replace_exact(_quickjs_c
 [=[    /* better to always check stack overflow */
@@ -680,7 +685,7 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
                                   int argc, JSValueConst *argv, int flags)
 {
     JSValue result;
-    (void)js_msvc_call_c_function(ctx, func_obj, this_obj, argc, argv, flags, &result);
+    (void)js_msvc_call_c_function(ctx, &func_obj, &this_obj, argc, argv, flags, &result);
     return result;
 }
 #endif
@@ -693,16 +698,16 @@ static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,]=]
                                int argc, JSValue *argv, int flags)
 {]=]
 [=[#if defined(_MSC_VER)
-/* Bytecode callers receive JSValue through their local result slot. */
+/* Bytecode callers carry JSValues only by address until callback dispatch. */
 static no_inline int js_msvc_call_c_function_from_bytecode(JSContext *ctx,
-                                                            JSValueConst func_obj,
-                                                            JSValueConst this_obj,
-                                                            int argc,
-                                                            JSValueConst *argv,
-                                                            JSValue *result)
+                                                             const JSValue *func_obj,
+                                                             const JSValue *this_obj,
+                                                             int argc,
+                                                             JSValueConst *argv,
+                                                             JSValue *result)
 {
-    if (JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT ||
-        JS_VALUE_GET_OBJ(func_obj)->class_id != JS_CLASS_C_FUNCTION) {
+    if (JS_VALUE_GET_TAG(*func_obj) != JS_TAG_OBJECT ||
+        JS_VALUE_GET_OBJ(*func_obj)->class_id != JS_CLASS_C_FUNCTION) {
         return 0;
     }
     return js_msvc_call_c_function(ctx, func_obj, this_obj, argc, argv, 0, result) == 0;
@@ -724,7 +729,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 call_argv = sp - call_argc;
                 sf->cur_pc = pc;
 #if defined(_MSC_VER)
-                if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], JS_UNDEFINED,
+                if (!js_msvc_call_c_function_from_bytecode(ctx, &call_argv[-1], NULL,
                                                             call_argc, call_argv, &ret_val)) {
                     ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
                                               JS_UNDEFINED, call_argc, call_argv, 0);
@@ -738,7 +743,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 [=[                ret_val = JS_CallInternal(ctx, call_argv[-1], call_argv[-2],
                                           JS_UNDEFINED, call_argc, call_argv, 0);]=]
 [=[#if defined(_MSC_VER)
-                if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], call_argv[-2],
+                if (!js_msvc_call_c_function_from_bytecode(ctx, &call_argv[-1], &call_argv[-2],
                                                             call_argc, call_argv, &ret_val)) {
                     ret_val = JS_CallInternal(ctx, call_argv[-1], call_argv[-2],
                                               JS_UNDEFINED, call_argc, call_argv, 0);
@@ -754,7 +759,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                               JS_UNDEFINED, call_argc, call_argv, 0);]=]
 [=[                } else {
 #if defined(_MSC_VER)
-                    if (!js_msvc_call_c_function_from_bytecode(ctx, call_argv[-1], JS_UNDEFINED,
+                    if (!js_msvc_call_c_function_from_bytecode(ctx, &call_argv[-1], NULL,
                                                                 call_argc, call_argv, &ret_val)) {
                         ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
                                                   JS_UNDEFINED, call_argc, call_argv, 0);
