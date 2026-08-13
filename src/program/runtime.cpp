@@ -4266,7 +4266,18 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     }
     child_concurrency.commit();
     if (!completed) {
-        auto reconnected = reconnect(owner_scope, run_id);
+        // Reconciliation replaces an already-terminal Interrupted control with
+        // a newer durable terminal state.  Do not let reconnect reuse that
+        // stale in-memory control while another thread still owns it.
+        const auto reconciled = impl_->config.transitions->load(owner_scope, run_id);
+        if (!reconciled)
+            throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Reconciled Program run was not found");
+        auto control = std::make_shared<detail::RunControl>(
+            *reconciled, impl_->config.transitions);
+        if (!reconciled->invocation().parent_run_id.empty())
+            impl_->bind_budgeted_child_completion(control, owner_scope,
+                                                  reconciled->invocation().parent_run_id, run_id);
+        auto reconnected = ProgramHandle(std::move(control));
         if (const auto result = reconnected.try_result()) {
             if (!previous->invocation().parent_run_id.empty())
                 publish_child_completion(impl_->config.transitions, owner_scope,

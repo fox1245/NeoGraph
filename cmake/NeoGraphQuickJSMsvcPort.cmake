@@ -256,7 +256,8 @@ static inline void put_u16(uint8_t *tab, uint16_t val)
 #define JS_TAG_IS_FLOAT64(tag) ((unsigned)(tag) == JS_TAG_FLOAT64)
 
 #define JS_NAN (JSValue){ .u.float64 = JS_FLOAT64_NAN, JS_TAG_FLOAT64 }]=]
-[=[static inline JSValue js_msvc_make_value(int64_t tag, uint32_t val)
+[=[#if defined(__cplusplus)
+static inline JSValue js_msvc_make_value(int64_t tag, uint32_t val)
 {
     JSValue value = { 0 };
     value.u.uint64 = val;
@@ -283,9 +284,16 @@ static inline JSValue js_msvc_make_nan(void)
 #define JS_MKVAL(tag, val) js_msvc_make_value((tag), (uint32_t)(val))
 #define JS_MKPTR(tag, p) js_msvc_make_pointer((tag), (void *)(p))
 
-#define JS_TAG_IS_FLOAT64(tag) ((unsigned)(tag) == JS_TAG_FLOAT64)
+#define JS_NAN js_msvc_make_nan()
+#else
+#define JS_MKVAL(tag, val) (JSValue){ (JSValueUnion){ .uint64 = (uint32_t)(val) }, tag }
+#define JS_MKPTR(tag, p) (JSValue){ (JSValueUnion){ .ptr = p }, tag }
 
-#define JS_NAN js_msvc_make_nan()]=]
+#define JS_NAN (JSValue){ .u.float64 = JS_FLOAT64_NAN, JS_TAG_FLOAT64 }
+#endif
+
+#define JS_TAG_IS_FLOAT64(tag) ((unsigned)(tag) == JS_TAG_FLOAT64)
+]=]
         "MSVC JSValue constructors")
     _neograph_quickjs_replace_exact(_quickjs_h
         "return (JSValue)v;"

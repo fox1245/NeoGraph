@@ -1326,15 +1326,17 @@ TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
         SQLITE_OK);
     sqlite3_close(database);
 
-    EXPECT_THROW(
-        [&] {
-            HarnessFixture fixture;
-            fixture.config.record_store =
-                std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
-            neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-            (void)service.get(run_id);
-        }(),
-        std::invalid_argument);
+    bool rejected = false;
+    try {
+        HarnessFixture fixture;
+        fixture.config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
+        neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+        (void)service.get(run_id);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    EXPECT_TRUE(rejected);
     std::error_code error;
     std::filesystem::remove(path, error);
 }

@@ -78,7 +78,10 @@ _require("${_quickjs_header}" "#if defined(__cplusplus)\nstatic inline JSCFuncti
          "the C++17 function-list constructors")
 _require("${_quickjs_header}" "js_msvc_make_cfunc_ ## cproto ## _entry"
          "the typed C++ special-function constructor")
-_forbid("${_quickjs_header}" "#define JS_MKVAL(tag, val) (JSValue){" "a JSValue compound literal")
+_require("${_quickjs_header}" "#if defined(__cplusplus)\nstatic inline JSValue js_msvc_make_value"
+         "the C++17-safe JSValue constructor branch")
+_require("${_quickjs_header}" "#else\n#define JS_MKVAL(tag, val) (JSValue){"
+         "the C aggregate-literal JSValue constructor branch")
 _forbid("${_quickjs_header}" "return (JSValue)v;" "a redundant JSValue struct cast")
 _require("${_quickjs_header}" "JSCFunctionType ft = { 0 };\nft.generic_magic = func;"
          "the C++17-safe function union initialization")
