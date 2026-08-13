@@ -2,7 +2,7 @@
 
 # Package config for a downstream `find_package(NeoGraph CONFIG REQUIRED)`.
 #
-# The engine's optional pieces (llm, mcp, a2a, acp, postgres, sqlite) are built
+# The engine's optional pieces (program, llm, mcp, a2a, acp, postgres, sqlite) are built
 # or not depending on which system libraries were present at engine-build time,
 # so the set of exported targets varies per install. The dependency lookups below
 # are written out at configure time to match what was actually built — see
@@ -16,11 +16,33 @@
 
 include(CMakeFindDependencyMacro)
 
+# Package variables live in caller scope. Clear every supported component and
+# every requested unknown component before dependency discovery, which may
+# return early when an installed dependency is unavailable.
+set(_neograph_known_components
+    core program async llm mcp mcp_server mcp_sqlite mcp_http_server
+    a2a acp util postgres sqlite)
+set(_neograph_components_to_reset
+    ${_neograph_known_components}
+    ${NeoGraph_FIND_COMPONENTS})
+list(REMOVE_DUPLICATES _neograph_components_to_reset)
+foreach(_neograph_component IN LISTS _neograph_components_to_reset)
+    set(NeoGraph_${_neograph_component}_FOUND FALSE)
+endforeach()
+unset(_neograph_component)
+unset(_neograph_components_to_reset)
+unset(_neograph_known_components)
+
 @NEOGRAPH_CONFIG_DEPENDENCIES@
 
 include("${CMAKE_CURRENT_LIST_DIR}/NeoGraphTargets.cmake")
 
 set(NEOGRAPH_COMPONENTS_BUILT "@NEOGRAPH_COMPONENTS_BUILT@")
+
+foreach(_neograph_component IN LISTS NEOGRAPH_COMPONENTS_BUILT)
+    set(NeoGraph_${_neograph_component}_FOUND TRUE)
+endforeach()
+unset(_neograph_component)
 set(NEOGRAPH_ABI_SOVERSION "@PROJECT_VERSION_MAJOR@")
 
 check_required_components(NeoGraph)

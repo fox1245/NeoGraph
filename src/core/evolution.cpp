@@ -24,10 +24,6 @@ const T& pick(const std::vector<T>& vec, std::mt19937& rng) {
     return vec[std::uniform_int_distribution<size_t>(0, vec.size() - 1)(rng)];
 }
 
-bool chance(int pct, std::mt19937& rng) {
-    return std::uniform_int_distribution<int>(0, 99)(rng) < pct;
-}
-
 std::vector<std::string> node_names(const json& core) {
     std::vector<std::string> names;
     if (core.contains("nodes") && core["nodes"].is_object()) {
@@ -36,154 +32,6 @@ std::vector<std::string> node_names(const json& core) {
         }
     }
     return names;
-}
-
-std::vector<std::string> object_keys_vec(const json& obj) {
-    std::vector<std::string> keys;
-    if (obj.is_object()) {
-        for (auto it = obj.begin(); it != obj.end(); ++it)
-            keys.push_back(it.key());
-    }
-    return keys;
-}
-
-// ── mutation operators ──────────────────────────────────────────────
-
-MutationResult op_swap_template(const json& core, std::mt19937& rng) {
-    if (!core.contains("templates") || !core["templates"].is_object())
-        return {std::nullopt, "swap_template: no templates"};
-    const auto& tmpls = core["templates"];
-    auto tmpl_keys = object_keys_vec(tmpls);
-    if (tmpl_keys.size() < 2)
-        return {std::nullopt, "swap_template: need ≥2 templates"};
-    if (!core.contains("use") || !core["use"].is_array() || core["use"].empty())
-        return {std::nullopt, "swap_template: no use entries"};
-
-    json mutated = deep_copy(core);
-    size_t idx = std::uniform_int_distribution<size_t>(0, mutated["use"].size() - 1)(rng);
-
-    // Read current use entry via items() emulation.
-    std::string current;
-    {
-        json entry = mutated["use"][idx];
-        current = entry["template"].get<std::string>();
-    }
-
-    size_t current_nparams = 0;
-    if (tmpls.contains(current) && tmpls[current].contains("params") &&
-        tmpls[current]["params"].is_array()) {
-        current_nparams = tmpls[current]["params"].size();
-    }
-
-    std::vector<std::string> candidates;
-    for (const auto& k : tmpl_keys) {
-        if (k == current) continue;
-        size_t nparams = 0;
-        if (tmpls[k].contains("params") && tmpls[k]["params"].is_array())
-            nparams = tmpls[k]["params"].size();
-        if (nparams == current_nparams)
-            candidates.push_back(k);
-    }
-    if (candidates.empty())
-        return {std::nullopt, "swap_template: no compatible target"};
-
-    std::string chosen = pick(candidates, rng);
-    mutated["use"][idx]["template"] = chosen;
-    mutated["use"][idx]["args"] = json::object();
-
-    return {std::move(mutated),
-            "swap_template: use[" + std::to_string(idx) + "] " +
-                current + " → " + chosen};
-}
-
-MutationResult op_add_use(const json& core, std::mt19937& rng) {
-    if (!core.contains("templates") || !core["templates"].is_object())
-        return {std::nullopt, "add_use: no templates"};
-    const auto& tmpls = core["templates"];
-    auto tmpl_keys = object_keys_vec(tmpls);
-    if (tmpl_keys.empty())
-        return {std::nullopt, "add_use: empty templates"};
-
-    json mutated = deep_copy(core);
-    if (!mutated.contains("use") || !mutated["use"].is_array())
-        mutated["use"] = json::array();
-
-    const std::string& tname = pick(tmpl_keys, rng);
-    const json tmpl = tmpls[tname];
-
-    json new_use;
-    new_use["template"] = tname;
-    new_use["prefix"] = tname + "_" + std::to_string(mutated["use"].size());
-    new_use["when"] = true;
-
-    if (tmpl.contains("params") && tmpl["params"].is_array()) {
-        json args = json::object();
-        for (auto pit = tmpl["params"].begin(); pit != tmpl["params"].end(); ++pit) {
-            std::string pname = (*pit).get<std::string>();
-            args[pname] = "evolved_" + pname;
-        }
-        new_use["args"] = std::move(args);
-    }
-
-    mutated["use"].push_back(std::move(new_use));
-    return {std::move(mutated),
-            "add_use: template '" + tname + "' instantiated"};
-}
-
-MutationResult op_remove_use(const json& core, std::mt19937& rng) {
-    if (!core.contains("use") || !core["use"].is_array())
-        return {std::nullopt, "remove_use: no use array"};
-    size_t n = core["use"].size();
-    if (n <= 1)
-        return {std::nullopt, "remove_use: need >1 use entries"};
-
-    size_t idx = std::uniform_int_distribution<size_t>(0, n - 1)(rng);
-    json mutated = json::parse(core.dump());
-    json new_uses = json::array();
-    for (size_t i = 0; i < n; ++i) {
-        if (i == idx) continue;
-        new_uses.push_back(mutated["use"][i]);
-    }
-    mutated["use"] = std::move(new_uses);
-    return {std::move(mutated),
-            "remove_use: removed use[" + std::to_string(idx) + "]"};
-}
-
-MutationResult op_tune_param(const json& core, std::mt19937& rng) {
-    if (!core.contains("use") || !core["use"].is_array() || core["use"].empty())
-        return {std::nullopt, "tune_param: no use entries"};
-
-    json mutated = deep_copy(core);
-    size_t idx = std::uniform_int_distribution<size_t>(0, mutated["use"].size() - 1)(rng);
-    json entry = mutated["use"][idx];
-    if (!entry.contains("args") || !entry["args"].is_object() || entry["args"].empty())
-        return {std::nullopt, "tune_param: no args in use[" + std::to_string(idx) + "]"};
-
-    auto arg_keys = object_keys_vec(entry["args"]);
-    const std::string& pname = pick(arg_keys, rng);
-    json old_val = entry["args"][pname];
-    std::string old_str = old_val.dump();
-
-    if (old_val.is_string()) {
-        std::string s = old_val.get<std::string>();
-        if (s == "true")       mutated["use"][idx]["args"][pname] = "false";
-        else if (s == "false") mutated["use"][idx]["args"][pname] = "true";
-        else                   mutated["use"][idx]["args"][pname] = s + "_mut";
-    } else if (old_val.is_number_integer()) {
-        int v = old_val.get<int>();
-        v += chance(50, rng) ? 1 : -1;
-        mutated["use"][idx]["args"][pname] = std::max(0, v);
-    } else if (old_val.is_number_float()) {
-        double v = old_val.get<double>();
-        v += chance(50, rng) ? 0.5 : -0.5;
-        mutated["use"][idx]["args"][pname] = v;
-    } else {
-        return {std::nullopt, "tune_param: unsupported type for " + pname};
-    }
-
-    return {std::move(mutated),
-            "tune_param: use[" + std::to_string(idx) + "]." + pname +
-                " " + old_str + " → " + mutated["use"][idx]["args"][pname].dump()};
 }
 
 MutationResult op_toggle_conditional_edge(const json& core, std::mt19937& rng) {
@@ -518,10 +366,6 @@ bool score_less(const Individual& lhs, const Individual& rhs) {
 
 std::vector<MutationOp> all_operators() {
     return {
-        op_swap_template,
-        op_add_use,
-        op_remove_use,
-        op_tune_param,
         op_toggle_conditional_edge,
         op_toggle_barrier,
         op_add_edge,
@@ -547,12 +391,6 @@ EvolutionResult evolve(const json& seed_core, const Task& task,
     seed_ind.score = evaluate_impl(
         seed_core, task, ctx, config.run_evaluation);
     seed_ind.core = deep_copy(seed_core);
-
-    try {
-        auto elab = Elaborator::elaborate(seed_core);
-        seed_ind.core = std::move(elab.core);
-        seed_ind.sourcemap = std::move(elab.sourcemap);
-    } catch (...) {}
 
     result.population.push_back(std::move(seed_ind));
 
@@ -637,8 +475,6 @@ json to_json(const EvolutionResult& result) {
     best["correct"] = result.best.score.correct;
     if (result.best.score.cost >= 0.0 && result.best.core.is_object()) {
         best["lockfile"] = result.best.core;
-        if (result.best.sourcemap.is_object())
-            best["sourcemap"] = result.best.sourcemap;
     }
     out["best"] = std::move(best);
 

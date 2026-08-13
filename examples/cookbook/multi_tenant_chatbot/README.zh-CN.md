@@ -73,15 +73,15 @@ cmake --build build --target cookbook_multi_tenant_mock
 
 无需 OpenAI key 即可运行。测量 NG engine 容量（1000 个并发请求 / compile cache 命中率 / 内存）。
 
-### Live LLM 版本（真实 OpenAI gpt-4o-mini）
+### Live LLM 版本（OpenRouter DeepSeek）
 
 ```bash
-# .env must contain OPENAI_API_KEY at repo root
+# repo 根目录的 .env 必须包含 OPENROUTER_API_KEY
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
 ```
 
-**成本 ≈ $0.06 / 1000 个请求**（2330 次 LLM 调用 × gpt-4o-mini 费率）。
+**成本取决于 provider 和用量**（2330 次调用均经过固定 DeepSeek 路由）。
 
 ## 测量
 
@@ -95,8 +95,8 @@ cmake --build build --target cookbook_multi_tenant_live
 | **Peak RSS** | **5.25 MB** | **21.9 MB** | **29.25 MB** |
 | Compile cache 命中率 | 99.7% | 94% | **99.4%** |
 | 不同 engine 数 | 3 | 6 | 6 |
-
-**测量环境**：WSL2 / 32-thread asio thread pool / single host / real OpenAI API call。
+**测量环境**：WSL2 / 32-thread asio thread pool / single host /
+真实 OpenRouter DeepSeek API 调用。
 
 关键数字：
 
@@ -139,7 +139,7 @@ cmake --build build --target cookbook_multi_tenant_live
 > 需要 8 GB → 实例本身无法启动。**需要 m5.2xlarge（32 GB，~$0.38/hour）。**
 >
 > 同一任务用 NG = **单个 t2.micro（$0.01/hour）。38× 基础设施成本差异。**
-
+当然，OpenRouter rate limit 是吞吐量上限。
 ## 热切换演示
 
 `server.cpp` 末尾展示了将 alice 的 topology 从 `simple` → `fanout` 原地更改，并立即处理下一次请求。0 deploy cycle，0 restart。真实生产中会是客户在 web UI 中编辑 graph JSON → DB save → 下一次请求使用新 topology。
@@ -147,8 +147,8 @@ cmake --build build --target cookbook_multi_tenant_live
 ## 未来增强
 
 - **CheckpointStore 集成** — 当前每个请求都把 history 作为输入传入。有了 Postgres CheckpointStore 后，可按 thread_id 自动持久化。
-- **每客户 Provider** — alice=gpt-4o-mini、bob=claude-haiku 这种每客户不同 model/provider。NodeContext::provider 按客户改变。
-- **流式响应** — `run(input)` 搭配 `input.stream_cb` + SSE 进行 token-level streaming。直接使用 NG 的 `run(NodeInput)` 路径和 stream callback。
+- **固定 Provider** — 每个 customer 使用同一个 OpenRouter DeepSeek 模型；
+  `NodeContext::provider` 仍可携带 customer-specific context。
 - **A/B 实验框架** — 通过 graph_def hash + customer_id sticky split 分流。可直接扩展该代码模式。
 - **Streaming + cancel integration** — 客户端断开时中止 outbound LLM socket。直接接入 NG 的 `RunConfig::cancel_token`。
 

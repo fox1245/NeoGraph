@@ -4,14 +4,14 @@
 // override one side and inherit the other through run_sync /
 // co_return.
 //
-// InMemoryCheckpointStore still overrides only the sync side. These
-// cases pin that the async peers route through the default bridge
-// correctly:
+// InMemoryCheckpointStore provides direct async peers because its storage is
+// local mutex-protected memory. These cases pin its value semantics; the
+// SyncOnlyStore case below pins the generic blocking-pool fallback:
 //   * save_async()/load_latest_async() round-trip a checkpoint.
 //   * load_by_id_async() finds an explicit id.
 //   * list_async() returns the persisted set.
 //   * put_writes_async / get_writes_async / clear_writes_async track
-//     pending writes through the same default bridge.
+//     pending writes.
 
 #include <gtest/gtest.h>
 #include <neograph/graph/checkpoint.h>
@@ -20,6 +20,26 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <thread>
+class SyncOnlyStore final : public neograph::graph::CheckpointStore {
+public:
+    void save(const neograph::graph::Checkpoint& cp) override {
+        if (std::this_thread::get_id() != caller_thread) {
+            ran_off_thread.store(true, std::memory_order_release);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        saved = cp;
+    }
+
+    std::thread::id caller_thread;
+    std::atomic<bool> ran_off_thread{false};
+    std::optional<neograph::graph::Checkpoint> saved;
+};
 
 using namespace neograph::graph;
 
@@ -34,6 +54,20 @@ Checkpoint make_cp(const std::string& thread, int step) {
     cp.interrupt_phase = CheckpointPhase::Completed;
     return cp;
 }
+
+class BlockingInMemorySaveStore final : public InMemoryCheckpointStore {
+public:
+    void save(const Checkpoint& cp) override {
+        if (std::this_thread::get_id() != caller_thread) {
+            ran_off_thread.store(true, std::memory_order_release);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        InMemoryCheckpointStore::save(cp);
+    }
+
+    std::thread::id caller_thread;
+    std::atomic<bool> ran_off_thread{false};
+};
 
 class CapabilityStore final : public CheckpointStoreCore,
                               public AsyncCheckpointStore,
@@ -131,7 +165,7 @@ public:
 
 } // namespace
 
-TEST(CheckpointAsyncDefault, SaveAndLoadLatestThroughBridge) {
+TEST(CheckpointAsyncDefault, InMemorySaveAndLoadLatestRoundTrip) {
     InMemoryCheckpointStore store;
     auto cp = make_cp("t1", 1);
     auto cp_id = cp.id;
@@ -152,7 +186,7 @@ TEST(CheckpointAsyncDefault, SaveAndLoadLatestThroughBridge) {
     EXPECT_EQ(loaded->step, 1);
 }
 
-TEST(CheckpointAsyncDefault, LoadByIdAndListThroughBridge) {
+TEST(CheckpointAsyncDefault, InMemoryLoadByIdAndListRoundTrip) {
     InMemoryCheckpointStore store;
     store.save(make_cp("t1", 1));
     auto cp2 = make_cp("t1", 2);
@@ -167,7 +201,7 @@ TEST(CheckpointAsyncDefault, LoadByIdAndListThroughBridge) {
     EXPECT_EQ(listed.size(), 3u);
 }
 
-TEST(CheckpointAsyncDefault, PendingWritesRoundTripThroughBridge) {
+TEST(CheckpointAsyncDefault, InMemoryPendingWritesRoundTrip) {
     InMemoryCheckpointStore store;
     PendingWrite w;
     w.task_id = "task-A";
@@ -201,6 +235,68 @@ TEST(CheckpointAsyncDefault, DeleteThreadAsyncRoutesToSync) {
 
     EXPECT_FALSE(store.load_latest("doomed").has_value());
     EXPECT_TRUE(store.load_latest("kept").has_value());
+}
+
+TEST(CheckpointAsyncDefault, SyncOnlyAsyncFallbackUsesBlockingPool) {
+    SyncOnlyStore store;
+    store.caller_thread = std::this_thread::get_id();
+    const auto cp = make_cp("sync-only", 1);
+
+    asio::io_context io;
+    bool timer_fired = false;
+    bool completed = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(5));
+            timer.async_wait([&](auto) { timer_fired = true; });
+            co_await store.save_async(cp);
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(timer_fired);
+    EXPECT_TRUE(completed);
+    EXPECT_TRUE(store.ran_off_thread.load(std::memory_order_acquire));
+    ASSERT_TRUE(store.saved.has_value());
+    EXPECT_EQ(store.saved->id, cp.id);
+}
+
+TEST(CheckpointAsyncDefault, InMemorySubclassRetainsBlockingPoolFallback) {
+    BlockingInMemorySaveStore store;
+    store.caller_thread = std::this_thread::get_id();
+    const auto cp = make_cp("derived-sync-only", 1);
+
+    asio::io_context io;
+    bool timer_fired_before_completion = false;
+    bool completed = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(5));
+            timer.async_wait([&](auto) {
+                timer_fired_before_completion = !completed;
+            });
+            co_await store.save_async(cp);
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(timer_fired_before_completion);
+    EXPECT_TRUE(completed);
+    EXPECT_TRUE(store.ran_off_thread.load(std::memory_order_acquire));
+    ASSERT_TRUE(store.load_latest("derived-sync-only").has_value());
+}
+
+TEST(CheckpointAsyncDefault, NeitherSideOverrideFailsClosed) {
+    CheckpointStore store;
+    EXPECT_THROW(
+        neograph::async::run_sync(store.save_async(make_cp("empty", 1))),
+        std::logic_error);
 }
 
 TEST(CheckpointCapabilities, AdapterDelegatesCoreAsyncAndPendingWrites) {

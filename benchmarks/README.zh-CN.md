@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=beca50aa71f45489f6f78556e6a7225c04c3891ac9c093f5aeda1a4fe50a0620 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=db24e5932e8c6357d88b133d6230abaaffdeeb4c0cf8453e7afd97d0dae66e76 -->
 # NeoGraph 对比 Python 图/流水线框架 — 引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -138,16 +138,51 @@ NeoGraph 使用 worker=1 默认值，因此 `par` 行测量的是拓扑、reduce
 * **Cold start。** 每个实现都在测量前包含 10-iter warm-up loop。整进程数字包含 Python 解释器启动（约 200ms）和框架 import 时间，差异很大（LlamaIndex 和 AutoGen import 大量 trees）。
 * **Fairness。** NeoGraph 使用 CMake `-DCMAKE_BUILD_TYPE=Release` 构建，在 GCC 上解析为 `-O3 -DNDEBUG`。每个 Python 框架都是 stock CPython 3.12，加上当前 pip 安装版本 — 这是典型生产部署，没有自定义调优。历史说明：3.0 之前的 README 写的是 `-O2`，因为那是独立 bench 命令使用的选项；CMake build 的 `Release` 一直解析为 `-O3`。
 
-## 复现
+## Reproduce
 
 ```bash
-# Build NeoGraph (Release — MUST set BUILD_TYPE explicitly; the
-# empty default configures the build without -O3):
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_BUILD_BENCHMARKS=ON
-cmake --build build --target bench_neograph -j
+# Build native Core + v1 Program benchmarks (Release is required for
+# representative timings; the default CMake build type is not optimized).
+cmake -B build-program-bench -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_ASYNC=ON
+cmake --build build-program-bench --target \
+    bench_neograph bench_program bench_program_dispatch \
+    bench_program_serialization_poc bench_program_binary_poc -j
 
-./build/bench_neograph                   # defaults: seq=10000, par=5000
+# Positional arguments are iterations, warmup runs, and measured samples.
+# bench_neograph additionally accepts par_workers before warmup/samples.
+# bench_program's optional fourth argument measures closed-batch outer-run concurrency.
+# Its burst rows are throughput-equivalent time, not individual request latency.
+./build-program-bench/bench_neograph 10000 5000 1 10 5
+./build-program-bench/bench_neograph 10000 5000 auto 10 5
+./build-program-bench/bench_program 1000 10 5
+./build-program-bench/bench_program 1000 10 5 8
+./build-program-bench/bench_program_dispatch 100000 10 5
+./build-program-bench/bench_program_serialization_poc 25 100
+./build-program-bench/bench_program_binary_poc 25 100
 
+# Build the opt-in protobuf/Cap'n Proto transport-envelope experiment.
+# This target alone requires protoc/libprotobuf and capnp/libcapnp.
+cmake -S . -B build-program-codec-poc -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_PROGRAM_CODEC_POC=ON
+cmake --build build-program-codec-poc --target bench_program_codec_poc -j
+taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
+```
+
+Each native benchmark prints `config`, `runtime`, `header`, and `result`
+records. Report the median of the measured samples after the explicit warmup;
+do not compare a single short run. `bench_program` uses in-memory stores and
+no provider/network calls. `bench_program_dispatch` measures only immutable
+`ProgramPlan` lookup and descriptor traversal, not Core execution.
+
+The Python framework comparison remains optional and requires third-party
+packages:
+
+```bash
 # Shared Python venv for every Python framework:
 python3 -m venv /tmp/bench_venv
 /tmp/bench_venv/bin/pip install \
@@ -165,12 +200,19 @@ python3 -m venv /tmp/bench_venv
 /tmp/bench_venv/bin/python benchmarks/bench_autogen.py        10000 5000
 
 # Peak RSS + wall time:
-/usr/bin/time -f "%e s, %M KB" ./build/bench_neograph
+/usr/bin/time -f "%e s, %M KB" ./build-program-bench/bench_neograph
 ```
 
-两边的输出格式都是 `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us`，因此 diff 很直接。
+The service-backed checkpoint, HTTP, and concurrent Docker benchmarks are
+separate experiments; they are not required for the deterministic native
+Core/Program run above.
 
-## 2026-04-19 数字所用的环境
+Output format is tab-separated `config`, `runtime`, `header`, `result`, or
+`metric` records. The native result rows contain median total time and
+per-iteration time; Python scripts retain their historical
+`workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` rows.
+
+## Environment used for the 2026-04-19 numbers
 
 ```
 OS:        Linux 6.6.87.2-microsoft-standard-WSL2 (Ubuntu 24.04 userland)
@@ -181,4 +223,5 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
            llama-index-core 0.14.20, autogen-agentchat 0.7.5
 ```
 
-数字会随硬件变化，但比值应能稳定在 ~20% 以内。
+Numbers will vary on your hardware, but the ratios should be stable to
+within ~20%.

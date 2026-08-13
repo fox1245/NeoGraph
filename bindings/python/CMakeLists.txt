@@ -66,6 +66,7 @@ pybind11_add_module(_neograph
     src/module.cpp
     src/json_bridge.cpp
     src/bind_provider.cpp
+    src/bind_artifact.cpp
     src/bind_state.cpp
     src/bind_graph.cpp
     src/bind_node.cpp

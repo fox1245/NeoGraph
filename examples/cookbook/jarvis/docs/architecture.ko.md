@@ -73,7 +73,7 @@ Python 최적 참조는 55개 토큰 문자 수준 패리티를 확인했습니�
 - 비용 ×, 항상 그래프 시작 시 실행
 
 ### router (`intent_classifier`)
-- 소형 LLM(gpt-4o-mini, ~200-400ms)
+- 고정 DeepSeek 모델(OpenRouter, ~200-400ms)
 - 시스템 프롬프트 = persona.txt [라우터] + MCP 카탈로그 텍스트 + 에이전트 레지스트리 텍스트
 - 출력 JSON 유효성 검사: 구문 분석 실패 → 대체(모드=채팅). Tool/agent 이름
 카탈로그·등록부에 대해 검증됨; 실제가 아닌 경우 채팅으로 강등됩니다(LLM가 발명한 것을 방지함)
@@ -97,7 +97,7 @@ Python 최적 참조는 55개 토큰 문자 수준 패리티를 확인했습니�
 - 응답에서 먼저 `[SUMMARY]` 라인을 추출 → `delegated_reply`에 저장
 
 ### response_synth (`llm_call`)
-- 대형 LLM(gpt-4o, ~800-1500ms)
+- 고정 DeepSeek 모델(OpenRouter, ~800-1500ms)
 - 시스템 프롬프트 = persona.txt [synth] (+ 언어 지침 + 세션 경계 설명)
 - 대화 기록(memory_context.recent_turns)은 **user/assistant의 메시지 배열로 전달됩니다.
 역할 전환** — 이전에는 사용자 메시지의 인라인 JSON로 인해 모델이 과거 답변을 처리하게 되었습니다.

@@ -1,0 +1,43 @@
+#pragma once
+
+#include <neograph/graph/compiler.h>
+#include <neograph/graph/node.h>
+#include <neograph/graph/validator.h>
+#include <neograph/program/registry.h>
+
+#include <memory>
+
+namespace neograph::program::detail {
+struct RegistryNativeControlBinding {
+    std::uint32_t        import_slot = 0;
+    ExecutableIdentity   executable;
+    NativeControlBinding binding;
+};
+
+class RegistrySnapshotAccess {
+public:
+    static const ExecutableManifest& require_manifest(const RegistrySnapshot& snapshot,
+                                                      ExecutableKind          kind,
+                                                      std::string_view        name);
+    static std::vector<ExecutableIdentity> resolve_node_requirements(
+        const RegistrySnapshot& snapshot,
+        std::string_view        name,
+        const json&             node_config);
+    static std::vector<RegistryNativeControlBinding> native_bindings(
+        const RegistrySnapshot& snapshot);
+    static std::shared_ptr<const graph::GraphRegistry> runtime_registry(
+        const RegistrySnapshot& snapshot);
+    static graph::TopologySpec       parse_local(const RegistrySnapshot& snapshot,
+                                                 const json&             definition);
+    static graph::ParseReport        parse_local_report(const RegistrySnapshot& snapshot,
+                                                        const json&             definition);
+    static graph::RoundTripReport    verify_roundtrip_report(const json&                definition,
+                                                             const graph::TopologySpec& topology);
+    static graph::ValidationReport   validate_local(const RegistrySnapshot&    snapshot,
+                                                    const graph::TopologySpec& topology);
+    static graph::CompiledGraph      link_local(const RegistrySnapshot&   snapshot,
+                                                graph::TopologySpec       topology,
+                                                const graph::NodeContext& context);
+};
+
+}  // namespace neograph::program::detail

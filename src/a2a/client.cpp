@@ -55,6 +55,16 @@ void A2AClient::set_timeout(std::chrono::seconds t) {
     timeout_ = t;
 }
 
+void A2AClient::set_authorization_header(std::string authorization_header) {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    authorization_header_ = std::move(authorization_header);
+}
+
+std::string A2AClient::request_authorization_header() const {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    return authorization_header_;
+}
+
 std::chrono::seconds A2AClient::request_timeout() const {
     std::lock_guard<std::mutex> lock(*state_mutex_);
     return timeout_;
@@ -79,6 +89,9 @@ A2AClient::rpc_call_async(const std::string& method, const json& params) {
         {"Content-Type", "application/json"},
         {"Accept",       "application/json, text/event-stream"},
     };
+    if (auto authorization = request_authorization_header(); !authorization.empty()) {
+        headers.emplace_back("Authorization", std::move(authorization));
+    }
 
     async::RequestOptions opts;
     opts.timeout = request_timeout();
@@ -434,6 +447,9 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
         {"Content-Type", "application/json"},
         {"Accept",       "text/event-stream"},
     };
+    if (auto authorization = request_authorization_header(); !authorization.empty()) {
+        headers.emplace_back("Authorization", std::move(authorization));
+    }
 
     async::RequestOptions opts;
     opts.timeout = request_timeout();

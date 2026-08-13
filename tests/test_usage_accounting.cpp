@@ -25,6 +25,12 @@
 #include <neograph/llm/agent.h>
 
 #include <memory>
+#include <atomic>
+#include <barrier>
+#include <thread>
+#include <vector>
+#include <limits>
+
 #include <string>
 
 using namespace neograph;
@@ -155,6 +161,155 @@ TEST(UsageAccounting, SubgraphUsageRollsUpIntoTheParent) {
 
     EXPECT_EQ(result.usage.total_tokens, 15)
         << "the subgraph's tokens did not reach the parent run";
+}
+
+// Budget controls are execution-scoped state and must survive the separate
+// RunConfig that SubgraphNode creates for a child engine.
+TEST(UsageAccounting, SubgraphPropagatesProgramBudgetContext) {
+    auto budget = std::make_shared<std::atomic_bool>(false);
+    auto seen_tokens = std::make_shared<std::atomic<std::uint64_t>>(0);
+    auto saw_same_budget = std::make_shared<std::atomic_bool>(false);
+    NodeFactory::instance().register_type(
+        "usage_budget_probe_2026",
+        [budget, seen_tokens, saw_same_budget](const std::string& name, const json&,
+                                                const NodeContext&) {
+            class BudgetProbeNode final : public GraphNode {
+            public:
+                BudgetProbeNode(std::string name, std::shared_ptr<std::atomic_bool> expected_budget,
+                                std::shared_ptr<std::atomic<std::uint64_t>> seen_tokens,
+                                std::shared_ptr<std::atomic_bool> saw_same_budget)
+                    : name_(std::move(name)),
+                      expected_budget_(std::move(expected_budget)),
+                      seen_tokens_(std::move(seen_tokens)),
+                      saw_same_budget_(std::move(saw_same_budget)) {}
+
+                asio::awaitable<NodeOutput> run(NodeInput in) override {
+                    seen_tokens_->store(in.ctx.model_token_budget, std::memory_order_relaxed);
+                    saw_same_budget_->store(in.ctx.budget_exhausted == expected_budget_,
+                                            std::memory_order_relaxed);
+                    co_return NodeOutput{};
+                }
+
+                std::string get_name() const override { return name_; }
+
+            private:
+                std::string name_;
+                std::shared_ptr<std::atomic_bool> expected_budget_;
+                std::shared_ptr<std::atomic<std::uint64_t>> seen_tokens_;
+                std::shared_ptr<std::atomic_bool> saw_same_budget_;
+            };
+            return std::make_unique<BudgetProbeNode>(
+                name, std::move(budget), std::move(seen_tokens), std::move(saw_same_budget));
+        });
+
+    const json inner = {
+        {"name", "budget_inner"},
+        {"channels", json::object()},
+        {"nodes", {{"probe", {{"type", "usage_budget_probe_2026"}}}}},
+        {"edges", json::array({
+                      {{"from", "__start__"}, {"to", "probe"}},
+                      {{"from", "probe"}, {"to", "__end__"}}
+                  })}};
+    const json outer = {
+        {"name", "budget_outer"},
+        {"channels", json::object()},
+        {"nodes", {{"child", {{"type", "subgraph"}, {"definition", inner}}}}},
+        {"edges", json::array({
+                      {{"from", "__start__"}, {"to", "child"}},
+                      {{"from", "child"}, {"to", "__end__"}}
+                  })}};
+    auto engine = GraphEngine::compile(outer, NodeContext{});
+
+    RunConfig config;
+    config.model_token_budget = 123;
+    config.budget_exhausted = budget;
+    ASSERT_NO_THROW(engine->run(config));
+    EXPECT_EQ(seen_tokens->load(std::memory_order_relaxed), 123U);
+    EXPECT_TRUE(saw_same_budget->load(std::memory_order_relaxed));
+}
+
+TEST(UsageAccounting, WideTotalSurvivesPublicIntCounterOverflow) {
+    UsageAccumulator usage;
+    ChatCompletion::Usage first;
+    first.total_tokens = std::numeric_limits<int>::max();
+    usage.add(first);
+    ChatCompletion::Usage second;
+    second.total_tokens = 1;
+    usage.add(second);
+
+    EXPECT_EQ(usage.total_tokens_wide(),
+              static_cast<long long>(std::numeric_limits<int>::max()) + 1);
+}
+
+TEST(UsageAccounting, InvalidUsageCannotReduceCommittedBudget) {
+    UsageAccumulator usage;
+    usage.add(ChatCompletion::Usage{-7, -3, -1});
+    EXPECT_EQ(usage.total_tokens_wide(), 0);
+
+    // A provider total smaller than its components must not under-report.
+    usage.add(ChatCompletion::Usage{4, 6, 1});
+    EXPECT_EQ(usage.total_tokens_wide(), 10);
+    ASSERT_TRUE(usage.try_reserve(2, 12));
+
+    // Releasing more than the outstanding reservation is a no-op past zero;
+    // it must not create negative committed usage that bypasses the ceiling.
+    usage.release_reservation(100);
+    EXPECT_FALSE(usage.try_reserve(1, 10));
+
+    ASSERT_TRUE(usage.try_reserve(2, 12));
+    usage.settle_reservation(2, ChatCompletion::Usage{-1, -1, -1});
+    EXPECT_FALSE(usage.try_reserve(1, 10));
+}
+TEST(UsageAccounting, SettlingOneReservationPreservesSiblingReservation) {
+    UsageAccumulator usage;
+    ASSERT_TRUE(usage.try_reserve(4, 10));
+    ASSERT_TRUE(usage.try_reserve(3, 10));
+
+    usage.settle_reservation(4, ChatCompletion::Usage{0, 8, 8});
+
+    // Actual usage (8) plus the still-in-flight sibling (3) is 11.
+    EXPECT_FALSE(usage.try_reserve(1, 11));
+    ASSERT_TRUE(usage.try_reserve(1, 12));
+    usage.release_reservation(100);
+}
+
+TEST(UsageAccounting, ConcurrentReservationsRespectTheAdmittedCeiling) {
+    UsageAccumulator usage;
+    constexpr long long ceiling = 100;
+    constexpr int        workers = 16;
+    std::barrier         ready(workers + 1);
+    std::atomic<int>     accepted{0};
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+
+    for (int i = 0; i != workers; ++i) {
+        threads.emplace_back([&] {
+            ready.arrive_and_wait();
+            if (usage.try_reserve(20, ceiling)) {
+                accepted.fetch_add(1, std::memory_order_relaxed);
+                usage.settle_reservation(20, ChatCompletion::Usage{0, 20, 20});
+            }
+        });
+    }
+    ready.arrive_and_wait();
+    for (auto& thread : threads) thread.join();
+
+    EXPECT_LE(accepted.load(std::memory_order_relaxed), ceiling / 20);
+    EXPECT_EQ(usage.total_tokens_wide(),
+              static_cast<long long>(accepted.load(std::memory_order_relaxed)) * 20);
+    EXPECT_LE(usage.total_tokens_wide(), ceiling);
+}
+
+TEST(UsageAccounting, PublicSnapshotClampsWideTotals) {
+    UsageAccumulator usage;
+    ChatCompletion::Usage maxed;
+    maxed.total_tokens = std::numeric_limits<int>::max();
+    usage.add(maxed);
+    usage.add(maxed);
+
+    EXPECT_EQ(usage.total_tokens_wide(),
+              2LL * static_cast<long long>(std::numeric_limits<int>::max()));
+    EXPECT_EQ(usage.snapshot().total_tokens, std::numeric_limits<int>::max());
 }
 
 // The other way to drive an LLM. Agent is not a graph run and has no

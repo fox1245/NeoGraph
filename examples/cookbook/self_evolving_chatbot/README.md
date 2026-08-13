@@ -39,8 +39,9 @@ runtime node/edge reshaping requires Python module reload, in-flight conversatio
 
 ## Core Mechanism
 
-At end of each turn, LLM judge (gpt-4o-mini) looks at conversation history + current
-topology and responds with best fit in one word:
+At end of each turn, the pinned DeepSeek model via OpenRouter acts as the
+LLM judge: it looks at conversation history + current topology and responds
+with the best fit in one word:
 
 - `simple` — 1 LLM call, short direct answer (suitable for factual Q)
 - `reflexive` — 3 LLM calls (draft → critique → final) (suitable for accuracy-seeking)
@@ -205,9 +206,9 @@ if (turn % EVAL_INTERVAL == 0) {
 - **Anti-oscillation guard** — Handle eve case. Lockout if evolved in last N turns,
   or hysteresis (don't change if current topology not N% lower than next-candidate).
 - **LLM-generated graph_def** — Currently selects from 3 pre-defined topologies.
-  More ambitiously, LLM generates graph_def JSON from scratch. NG's
-  [v0.5.0 example 23 evolving chat agent](../../23_*.cpp) fork +
-  meta assembly pattern goes this direction.
+  More ambitiously, an LLM can generate graph_def JSON from scratch. The
+  [`the-beast/`](../the-beast/) cookbook demonstrates the same
+  model-authored topology plus compile/validation gates.
 - **Parallel customer processing** — Sequential demo 7 minutes, parallel per customer = ~1.5 minutes.
   Use `asio::thread_pool` + compile cache directly.
 - **A/B framework** — Operate 2 topologies for same customer simultaneously, decide winner by

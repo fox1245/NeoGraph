@@ -22,6 +22,7 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/compiler.h>
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,17 +34,18 @@ class GraphRegistry;
 /// One static-analysis finding, with a machine-readable witness
 /// (counterexample) for tooling to highlight.
 struct Diagnostic {
-    std::string code;       ///< "E3".."E11" (docs/dsl §5 catalog)
-    std::string severity;   ///< "error" | "warning"
-    std::string path;       ///< JSON-ish path of the offending construct
-    std::string message;    ///< human-readable, self-contained
-    json        witness;    ///< machine-readable counterexample
+    std::string code;          ///< "E3".."E12" (topology validation catalog)
+    std::string severity;      ///< "error" | "warning"
+    std::string path;          ///< Legacy JSON-ish display path
+    std::string message;       ///< human-readable, self-contained
+    json        witness;       ///< machine-readable counterexample
+    std::string json_pointer;  ///< RFC 6901 pointer; empty means document root
 };
 
 struct NEOGRAPH_API ValidationReport {
     std::vector<Diagnostic> diagnostics;
 
-    bool has_errors() const;
+    bool                           has_errors() const;
     std::vector<const Diagnostic*> errors() const;
     std::vector<const Diagnostic*> warnings() const;
     /// Aggregated multi-line text of all diagnostics (throw/log body).
@@ -59,9 +61,9 @@ struct NEOGRAPH_API ValidationReport {
  */
 class NEOGRAPH_API ValidatedTopology {
 public:
-    const TopologySpec& topology() const noexcept { return topology_; }
+    const TopologySpec&     topology() const noexcept { return topology_; }
     const ValidationReport& report() const noexcept { return report_; }
-    TopologySpec release() && { return std::move(topology_); }
+    TopologySpec            release() && { return std::move(topology_); }
 
 private:
     friend class GraphValidator;
@@ -69,7 +71,7 @@ private:
     ValidatedTopology(TopologySpec topology, ValidationReport report)
         : topology_(std::move(topology)), report_(std::move(report)) {}
 
-    TopologySpec topology_;
+    TopologySpec     topology_;
     ValidationReport report_;
 };
 
@@ -79,8 +81,11 @@ public:
     static ValidationReport validate(const TopologySpec& topology);
 
     /// @brief Validate declarative topology with a local registry overlay.
-    static ValidationReport validate(const TopologySpec& topology,
-                                     const GraphRegistry& registry);
+    static ValidationReport validate(const TopologySpec& topology, const GraphRegistry& registry);
+
+    /// @brief Validate topology references without process-global fallback.
+    static ValidationReport validate_local(const TopologySpec&  topology,
+                                           const GraphRegistry& registry);
 
     /**
      * @brief Validate and wrap a topology, throwing when any error is found.
@@ -88,13 +93,16 @@ public:
     static ValidatedTopology require_valid(TopologySpec topology);
 
     /// @brief Validate and wrap using a local registry overlay.
-    static ValidatedTopology require_valid(TopologySpec topology,
-                                           const GraphRegistry& registry);
+    static ValidatedTopology require_valid(TopologySpec topology, const GraphRegistry& registry);
+
+    /// @brief Validate and wrap without process-global fallback.
+    static ValidatedTopology require_valid_local(TopologySpec         topology,
+                                                 const GraphRegistry& registry);
 
     /**
      * @brief Run all static checks against a compiled graph.
      *
-     * Checks (catalog codes from the DSL research doc §5):
+     * Checks (catalog codes from the topology validation research doc):
      *  - E3  dangling references: edge endpoints, conditional-edge
      *        sources and route targets, interrupt names, barrier
      *        wait_for members must name existing nodes (errors).
@@ -129,6 +137,8 @@ public:
      *        write-only unless declared as externally consumed through
      *        an effect contract's optional `exports`, or read-only
      *        without an initial value (warnings).
+     *  - E12 local registry membership: validate_local reports missing
+     *        reducers, node types, and conditions as errors instead of throwing.
      *
      * Pure function of the CompiledGraph + registries; does not
      * execute anything.
@@ -137,6 +147,9 @@ public:
 
     /// @brief Validate using a local-first registry overlay.
     static ValidationReport validate(const CompiledGraph& cg, const GraphRegistry& registry);
+
+    /// @brief Validate a compiled graph without process-global fallback.
+    static ValidationReport validate_local(const CompiledGraph& cg, const GraphRegistry& registry);
 };
 
-} // namespace neograph::graph
+}  // namespace neograph::graph

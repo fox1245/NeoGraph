@@ -1,0 +1,302 @@
+{
+  "schema_version": 1,
+  "id": "quickjs-control-performance-v1",
+  "status": "accepted-preregistration",
+  "owner_issue": 25,
+  "source_baseline": "c063093d9081eeb207b79a25fc953ee8a31d6956",
+  "runtime_identity": {
+    "engine": "quickjs",
+    "release": "2026-06-04",
+    "archive_sha256": "b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a",
+    "build_sources": [
+      "quickjs.c",
+      "cutils.c",
+      "dtoa.c",
+      "libregexp.c",
+      "libunicode.c"
+    ],
+    "excluded_sources": [
+      "quickjs-libc.c",
+      "qjs.c",
+      "qjsc.c"
+    ]
+  },
+  "methodology": {
+    "required_build_type": "Release",
+    "minimum_samples_per_case": 30,
+    "samples_per_case": 30,
+    "core_pair_failure_rerun_samples": 20,
+    "cold_process_isolation": "The runner starts one new benchmark process for every sample.",
+    "warm_preparation": "Warm cases perform their documented preparation before the timed interval; preparation is never included as a sample.",
+    "p95_method": "nearest-rank",
+    "statistics": [
+      "median",
+      "p95",
+      "median_absolute_deviation",
+      "peak_allocated_bytes"
+    ],
+    "threshold_policy": "Absolute ceilings are version controlled here and cannot be overridden by the runner. A missing ceiling is a gate failure.",
+    "memory_definition": "Primitive cases use the QuickJS custom allocator high-water mark. Program and Core cases use the fresh process resident-set high-water mark.",
+    "core_pair_order": "Enabled and disabled binaries alternate first position by sample index.",
+    "one_off_result_sufficient": false
+  },
+  "cases": [
+    {
+      "id": "runtime_creation_cold",
+      "driver": "primitive",
+      "blocking": true,
+      "iterations": 1,
+      "unit": "us",
+      "scope": "JS_NewRuntime2 plus JS_NewContext in a fresh process",
+      "thresholds": {
+        "median_max": 5000.0,
+        "p95_max": 20000.0,
+        "mad_max": 5000.0,
+        "peak_allocated_bytes_max": 8388608
+      }
+    },
+    {
+      "id": "source_compilation_cold",
+      "driver": "primitive",
+      "blocking": true,
+      "iterations": 1,
+      "unit": "us",
+      "scope": "global source compile-only after fresh runtime creation",
+      "thresholds": {
+        "median_max": 5000.0,
+        "p95_max": 20000.0,
+        "mad_max": 5000.0,
+        "peak_allocated_bytes_max": 8388608
+      }
+    },
+    {
+      "id": "module_compilation_cold",
+      "driver": "primitive",
+      "blocking": true,
+      "iterations": 1,
+      "unit": "us",
+      "scope": "ES module compile-only after fresh runtime creation",
+      "thresholds": {
+        "median_max": 5000.0,
+        "p95_max": 20000.0,
+        "mad_max": 5000.0,
+        "peak_allocated_bytes_max": 8388608
+      }
+    },
+    {
+      "id": "define_lowering",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 1,
+      "unit": "us",
+      "scope": "JavaScript module compile, define evaluation, builder validation, and strict Core lowering",
+      "thresholds": {
+        "median_max": 50000.0,
+        "p95_max": 200000.0,
+        "mad_max": 50000.0,
+        "peak_allocated_bytes_max": 268435456
+      }
+    },
+    {
+      "id": "generator_first_command",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 1,
+      "unit": "us",
+      "scope": "first next() on an already-open generator yielding a canonical literal command",
+      "thresholds": {
+        "median_max": 10000.0,
+        "p95_max": 50000.0,
+        "mad_max": 10000.0,
+        "peak_allocated_bytes_max": 268435456
+      }
+    },
+    {
+      "id": "generator_warm_command",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 64,
+      "unit": "us",
+      "scope": "per-command next(response) after one discarded generator step",
+      "thresholds": {
+        "median_max": 10000.0,
+        "p95_max": 50000.0,
+        "mad_max": 10000.0,
+        "peak_allocated_bytes_max": 268435456
+      }
+    },
+    {
+      "id": "host_bridge_round_trip",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 64,
+      "unit": "us",
+      "scope": "ng.callCore construction plus canonical C++ response conversion and next command",
+      "thresholds": {
+        "median_max": 20000.0,
+        "p95_max": 75000.0,
+        "mad_max": 20000.0,
+        "peak_allocated_bytes_max": 268435456
+      }
+    },
+    {
+      "id": "runtime_builder_peak_memory",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 1,
+      "unit": "bytes",
+      "scope": "fresh-process resident-set high-water mark after lowering a representative 64-node builder",
+      "thresholds": {
+        "median_max": 268435456.0,
+        "p95_max": 536870912.0,
+        "mad_max": 134217728.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "structured_join_sequence",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 8,
+      "unit": "us",
+      "scope": "sealed JavaScript generator yielding two sequential admitted Core commands through the in-memory ProgramRuntime",
+      "thresholds": {
+        "median_max": 100000.0,
+        "p95_max": 300000.0,
+        "mad_max": 100000.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "structured_join_parallel",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 8,
+      "unit": "us",
+      "scope": "sealed JavaScript ng.all command joining two admitted Core commands through the in-memory ProgramRuntime",
+      "thresholds": {
+        "median_max": 100000.0,
+        "p95_max": 300000.0,
+        "mad_max": 100000.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "structured_join_race",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 8,
+      "unit": "us",
+      "scope": "sealed JavaScript ng.race command joining two admitted Core commands through the in-memory ProgramRuntime",
+      "thresholds": {
+        "median_max": 100000.0,
+        "p95_max": 300000.0,
+        "mad_max": 100000.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "structured_join_quorum",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 8,
+      "unit": "us",
+      "scope": "sealed JavaScript ng.quorum command joining two admitted Core commands through the in-memory ProgramRuntime",
+      "thresholds": {
+        "median_max": 100000.0,
+        "p95_max": 300000.0,
+        "mad_max": 100000.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "structured_join_await",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 8,
+      "unit": "us",
+      "scope": "sealed JavaScript ng.await command wrapping one admitted Core command through the in-memory ProgramRuntime",
+      "thresholds": {
+        "median_max": 100000.0,
+        "p95_max": 300000.0,
+        "mad_max": 100000.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "javascript_wrapped_core_ratio",
+      "driver": "control",
+      "blocking": true,
+      "iterations": 128,
+      "unit": "ratio",
+      "scope": "128 repeated JavaScript generator plus in-memory ProgramRuntime Core invocations divided by direct Core invocation; repeated denominator timing suppresses sub-10us clock noise",
+      "thresholds": {
+        "median_max": 600.0,
+        "p95_max": 650.0,
+        "mad_max": 150.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "enabled_unused_core_ratio",
+      "driver": "core_pair",
+      "blocking": true,
+      "iterations": 4096,
+      "unit": "ratio",
+      "scope": "Core runtime with QuickJS enabled but unlinked/unused divided by an otherwise identical disabled build; each paired process averages 4096 Core invocations to suppress microsecond-scale scheduler jitter",
+      "thresholds": {
+        "median_max": 1.1,
+        "p95_max": 1.15,
+        "mad_max": 0.15,
+        "peak_allocated_bytes_max": 268435456
+      }
+    },
+    {
+      "id": "replay_growth",
+      "driver": "control",
+      "blocking": true,
+      "status": "active",
+      "replay_command_counts": [
+        {
+          "count": 0,
+          "thresholds": {
+            "median_max": 1000.0,
+            "p95_max": 2500.0,
+            "mad_max": 500.0,
+            "peak_allocated_bytes_max": 536870912
+          }
+        },
+        {
+          "count": 16,
+          "thresholds": {
+            "median_max": 4000.0,
+            "p95_max": 10000.0,
+            "mad_max": 2000.0,
+            "peak_allocated_bytes_max": 536870912
+          }
+        },
+        {
+          "count": 64,
+          "thresholds": {
+            "median_max": 10000.0,
+            "p95_max": 25000.0,
+            "mad_max": 5000.0,
+            "peak_allocated_bytes_max": 536870912
+          }
+        },
+        {
+          "count": 256,
+          "thresholds": {
+            "median_max": 30000.0,
+            "p95_max": 75000.0,
+            "mad_max": 15000.0,
+            "peak_allocated_bytes_max": 536870912
+          }
+        }
+      ],
+      "iterations": 1,
+      "unit": "us",
+      "scope": "fresh QuickJS source re-execution at each recorded command count, requiring canonical equality of every yielded command against an immutable pre-recorded stream; excludes ProgramRuntime scheduling, journal I/O, and Core dispatch"
+    }
+  ]
+}

@@ -1,0 +1,1254 @@
+{
+  "format": "neograph-example-disposition-v1",
+  "schema_version": 1,
+  "status": "p8-audit",
+  "authority": "One entry covers each top-level CMake example target source and each cookbook directory. Supporting assets and variants are covered by their parent directory entry; no entry is silently omitted.",
+  "disposition_enum": [
+    "Core-kept",
+    "Program-ported",
+    "protocol-adapter-ported",
+    "historical-only",
+    "removed"
+  ],
+  "proof_policy": "Every entry records required options, a concrete build target, a run command, and an expected result. `verified` is reserved for focused smoke evidence; `pending-component-smoke` is an explicit remaining P8 item.",
+  "documentation": [
+    "examples/README.md",
+    "examples/cookbook/README.md",
+    "docs/V1_ARCHITECTURE.md",
+    "docs/V1_MIGRATION_PLAN.md"
+  ],
+  "entries": [
+    {
+      "id": "example_core_quickstart",
+      "kind": "example",
+      "path": "examples/62_core_quickstart.cpp",
+      "target": "example_core_quickstart",
+      "disposition": "Core-kept",
+      "requires": [],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "verified",
+        "build": "cmake --build <build-dir> --target example_core_quickstart",
+        "run": "<build-dir>/example_core_quickstart",
+        "expected": "stdout: HELLO"
+      }
+    },
+    {
+      "id": "example_program_quickstart",
+      "kind": "example",
+      "path": "examples/63_program_quickstart.cpp",
+      "target": "example_program_quickstart",
+      "disposition": "Program-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_PROGRAM=ON"
+      ],
+      "rationale": "Program lifecycle or Program-backed Harness surface; retain as the canonical Program-facing example.",
+      "proof": {
+        "status": "verified",
+        "build": "cmake --build <build-dir> --target example_program_quickstart",
+        "run": "<build-dir>/example_program_quickstart",
+        "expected": "stdout: 1"
+      }
+    },
+    {
+      "id": "example_01",
+      "kind": "example",
+      "path": "examples/01_react_agent.cpp",
+      "target": "example_react_agent",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_react_agent",
+        "run": "<build-dir>/example_react_agent",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_02",
+      "kind": "example",
+      "path": "examples/02_custom_graph.cpp",
+      "target": "example_custom_graph",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_custom_graph",
+        "run": "<build-dir>/example_custom_graph",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_03",
+      "kind": "example",
+      "path": "examples/03_mcp_agent.cpp",
+      "target": "example_mcp_agent",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_agent",
+        "run": "<build-dir>/example_mcp_agent",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_04",
+      "kind": "example",
+      "path": "examples/04_checkpoint_hitl.cpp",
+      "target": "example_checkpoint_hitl",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_checkpoint_hitl",
+        "run": "<build-dir>/example_checkpoint_hitl",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_05",
+      "kind": "example",
+      "path": "examples/05_parallel_fanout.cpp",
+      "target": "example_parallel_fanout",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_parallel_fanout",
+        "run": "<build-dir>/example_parallel_fanout",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_06",
+      "kind": "example",
+      "path": "examples/06_subgraph.cpp",
+      "target": "example_subgraph",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_subgraph",
+        "run": "<build-dir>/example_subgraph",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_07",
+      "kind": "example",
+      "path": "examples/07_intent_routing.cpp",
+      "target": "example_intent_routing",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_intent_routing",
+        "run": "<build-dir>/example_intent_routing",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_08",
+      "kind": "example",
+      "path": "examples/08_state_management.cpp",
+      "target": "example_state_management",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_state_management",
+        "run": "<build-dir>/example_state_management",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_09",
+      "kind": "example",
+      "path": "examples/09_all_features.cpp",
+      "target": "example_all_features",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_all_features",
+        "run": "<build-dir>/example_all_features",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_10",
+      "kind": "example",
+      "path": "examples/10_send_command.cpp",
+      "target": "example_send_command",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_send_command",
+        "run": "<build-dir>/example_send_command",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_11",
+      "kind": "example",
+      "path": "examples/11_clay_chatbot.cpp",
+      "target": "example_clay_chatbot",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_CLAY_EXAMPLE=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_clay_chatbot",
+        "run": "<build-dir>/example_clay_chatbot",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_12",
+      "kind": "example",
+      "path": "examples/12_rag_agent.cpp",
+      "target": "example_rag_agent",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_rag_agent",
+        "run": "<build-dir>/example_rag_agent",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_13",
+      "kind": "example",
+      "path": "examples/13_openai_responses.cpp",
+      "target": "example_openai_responses",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_openai_responses",
+        "run": "<build-dir>/example_openai_responses",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_14",
+      "kind": "example",
+      "path": "examples/14_plan_executor.cpp",
+      "target": "example_plan_executor",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_plan_executor",
+        "run": "<build-dir>/example_plan_executor",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_15",
+      "kind": "example",
+      "path": "examples/15_reflexion.cpp",
+      "target": "example_reflexion",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_reflexion",
+        "run": "<build-dir>/example_reflexion",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_16",
+      "kind": "example",
+      "path": "examples/16_tree_of_thoughts.cpp",
+      "target": "example_tree_of_thoughts",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_tree_of_thoughts",
+        "run": "<build-dir>/example_tree_of_thoughts",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_17",
+      "kind": "example",
+      "path": "examples/17_self_ask.cpp",
+      "target": "example_self_ask",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_self_ask",
+        "run": "<build-dir>/example_self_ask",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_18",
+      "kind": "example",
+      "path": "examples/18_multi_agent_debate.cpp",
+      "target": "example_multi_agent_debate",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_multi_agent_debate",
+        "run": "<build-dir>/example_multi_agent_debate",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_19",
+      "kind": "example",
+      "path": "examples/19_rewoo.cpp",
+      "target": "example_rewoo",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_rewoo",
+        "run": "<build-dir>/example_rewoo",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_20",
+      "kind": "example",
+      "path": "examples/20_mcp_hitl.cpp",
+      "target": "example_mcp_hitl",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_hitl",
+        "run": "<build-dir>/example_mcp_hitl",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_21",
+      "kind": "example",
+      "path": "examples/21_mcp_fanout.cpp",
+      "target": "example_mcp_fanout",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_fanout",
+        "run": "<build-dir>/example_mcp_fanout",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_22",
+      "kind": "example",
+      "path": "examples/22_mcp_stdio.cpp",
+      "target": "example_mcp_stdio",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_stdio",
+        "run": "<build-dir>/example_mcp_stdio",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_23",
+      "kind": "example",
+      "path": "examples/23_mcp_multi.cpp",
+      "target": "example_mcp_multi",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_multi",
+        "run": "<build-dir>/example_mcp_multi",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_24",
+      "kind": "example",
+      "path": "examples/24_mcp_feedback.cpp",
+      "target": "example_mcp_feedback",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_feedback",
+        "run": "<build-dir>/example_mcp_feedback",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_25",
+      "kind": "example",
+      "path": "examples/25_deep_research.cpp",
+      "target": "example_deep_research",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_deep_research",
+        "run": "<build-dir>/example_deep_research",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_26_postgres",
+      "kind": "example",
+      "path": "examples/26_postgres_react_hitl/",
+      "target": "example_postgres_react_hitl",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_POSTGRES=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_postgres_react_hitl",
+        "run": "<build-dir>/example_postgres_react_hitl",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_27",
+      "kind": "example",
+      "path": "examples/27_async_concurrent_runs.cpp",
+      "target": "example_async_concurrent_runs",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_async_concurrent_runs",
+        "run": "<build-dir>/example_async_concurrent_runs",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_28",
+      "kind": "example",
+      "path": "examples/28_corrective_rag.cpp",
+      "target": "example_corrective_rag",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_corrective_rag",
+        "run": "<build-dir>/example_corrective_rag",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_29",
+      "kind": "example",
+      "path": "examples/29_responses_envelope.cpp",
+      "target": "example_responses_envelope",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_responses_envelope",
+        "run": "<build-dir>/example_responses_envelope",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_30",
+      "kind": "example",
+      "path": "examples/30_reasoning_effort.cpp",
+      "target": "example_reasoning_effort",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_reasoning_effort",
+        "run": "<build-dir>/example_reasoning_effort",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_31",
+      "kind": "example",
+      "path": "examples/31_local_transformer.cpp",
+      "target": "example_local_transformer",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_local_transformer",
+        "run": "<build-dir>/example_local_transformer",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_33",
+      "kind": "example",
+      "path": "examples/33_openai_responses_ws.cpp",
+      "target": "example_openai_responses_ws",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_openai_responses_ws",
+        "run": "<build-dir>/example_openai_responses_ws",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_34",
+      "kind": "example",
+      "path": "examples/34_openai_responses_ws_tools.cpp",
+      "target": "example_openai_responses_ws_tools",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_openai_responses_ws_tools",
+        "run": "<build-dir>/example_openai_responses_ws_tools",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_35",
+      "kind": "example",
+      "path": "examples/35_re_agent.cpp",
+      "target": "example_re_agent",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_re_agent",
+        "run": "<build-dir>/example_re_agent",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_36",
+      "kind": "example",
+      "path": "examples/36_classifier_fanout.cpp",
+      "target": "example_classifier_fanout",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_classifier_fanout",
+        "run": "<build-dir>/example_classifier_fanout",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_37",
+      "kind": "example",
+      "path": "examples/37_a2a_client.cpp",
+      "target": "example_a2a_client",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_A2A=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_a2a_client",
+        "run": "<build-dir>/example_a2a_client",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_38",
+      "kind": "example",
+      "path": "examples/38_a2a_server.cpp",
+      "target": "example_a2a_server",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_A2A=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_a2a_server",
+        "run": "<build-dir>/example_a2a_server",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_39",
+      "kind": "example",
+      "path": "examples/39_acp_server.cpp",
+      "target": "example_acp_server",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_ACP=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_acp_server",
+        "run": "<build-dir>/example_acp_server",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_40",
+      "kind": "example",
+      "path": "examples/40_react_async_streaming.cpp",
+      "target": "example_react_async_streaming",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_react_async_streaming",
+        "run": "<build-dir>/example_react_async_streaming",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_41",
+      "kind": "example",
+      "path": "examples/41_resume_if_exists_chat.cpp",
+      "target": "example_resume_if_exists_chat",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_resume_if_exists_chat",
+        "run": "<build-dir>/example_resume_if_exists_chat",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_42",
+      "kind": "example",
+      "path": "examples/42_custom_reducer_condition.cpp",
+      "target": "example_custom_reducer_condition",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_custom_reducer_condition",
+        "run": "<build-dir>/example_custom_reducer_condition",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_43",
+      "kind": "example",
+      "path": "examples/43_store_personalization.cpp",
+      "target": "example_store_personalization",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_store_personalization",
+        "run": "<build-dir>/example_store_personalization",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_44",
+      "kind": "example",
+      "path": "examples/44_request_queue_backpressure.cpp",
+      "target": "example_request_queue_backpressure",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_UTIL=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_request_queue_backpressure",
+        "run": "<build-dir>/example_request_queue_backpressure",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_46",
+      "kind": "example",
+      "path": "examples/46_cancel_token.cpp",
+      "target": "example_cancel_token",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_cancel_token",
+        "run": "<build-dir>/example_cancel_token",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_47",
+      "kind": "example",
+      "path": "examples/47_node_cache.cpp",
+      "target": "example_node_cache",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_node_cache",
+        "run": "<build-dir>/example_node_cache",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_48",
+      "kind": "example",
+      "path": "examples/48_sqlite_checkpoint.cpp",
+      "target": "example_sqlite_checkpoint",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_SQLITE=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_sqlite_checkpoint",
+        "run": "<build-dir>/example_sqlite_checkpoint",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_49",
+      "kind": "example",
+      "path": "examples/49_openinference.cpp",
+      "target": "example_openinference",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_openinference",
+        "run": "<build-dir>/example_openinference",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_50",
+      "kind": "example",
+      "path": "examples/50_async_tool.cpp",
+      "target": "example_async_tool",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_async_tool",
+        "run": "<build-dir>/example_async_tool",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_51",
+      "kind": "example",
+      "path": "examples/51_minimal.cpp",
+      "target": "example_minimal",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_minimal",
+        "run": "<build-dir>/example_minimal",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_52_export_schema",
+      "kind": "example",
+      "path": "examples/52_export_schema.cpp",
+      "target": "example_export_schema",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_export_schema",
+        "run": "<build-dir>/example_export_schema",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_52_grpc",
+      "kind": "example",
+      "path": "examples/52_grpc_server.cpp",
+      "target": "example_grpc_server",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_GRPC=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_grpc_server",
+        "run": "<build-dir>/example_grpc_server",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_53_grpc",
+      "kind": "example",
+      "path": "examples/53_grpc_client.cpp",
+      "target": "example_grpc_client",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_GRPC=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_grpc_client",
+        "run": "<build-dir>/example_grpc_client",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_54_evolution",
+      "kind": "example",
+      "path": "examples/54_evolution.cpp",
+      "target": "example_evolution",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_evolution",
+        "run": "<build-dir>/example_evolution",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_54_grpc",
+      "kind": "example",
+      "path": "examples/54_grpc_checkpoint.cpp",
+      "target": "example_grpc_checkpoint",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_GRPC=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_grpc_checkpoint",
+        "run": "<build-dir>/example_grpc_checkpoint",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_55_grpc",
+      "kind": "example",
+      "path": "examples/55_grpc_vs_jsonrpc_toolcall.cpp",
+      "target": "example_grpc_vs_jsonrpc",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_GRPC=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_grpc_vs_jsonrpc",
+        "run": "<build-dir>/example_grpc_vs_jsonrpc",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_56",
+      "kind": "example",
+      "path": "examples/56_history_compaction.cpp",
+      "target": "example_history_compaction",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_history_compaction",
+        "run": "<build-dir>/example_history_compaction",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_57_grpc",
+      "kind": "example",
+      "path": "examples/57_grpc_remote_tool.cpp",
+      "target": "example_grpc_remote_tool",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_GRPC=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_grpc_remote_tool",
+        "run": "<build-dir>/example_grpc_remote_tool",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_58",
+      "kind": "example",
+      "path": "examples/58_harness_bench.cpp",
+      "target": "example_harness_bench",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_harness_bench",
+        "run": "<build-dir>/example_harness_bench",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_59",
+      "kind": "example",
+      "path": "examples/59_mcp_server.cpp",
+      "target": "example_mcp_server",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_MCP_SERVER=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_mcp_server",
+        "run": "<build-dir>/example_mcp_server",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_60",
+      "kind": "example",
+      "path": "examples/60_harness_mcp_server.cpp",
+      "target": "example_harness_mcp_server",
+      "disposition": "Program-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_PROGRAM=ON",
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_SERVER=ON"
+      ],
+      "rationale": "Program lifecycle or Program-backed Harness surface; retain as the canonical Program-facing example.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_harness_mcp_server",
+        "run": "<build-dir>/example_harness_mcp_server",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "example_61",
+      "kind": "example",
+      "path": "examples/61_sync_node.cpp",
+      "target": "example_sync_node",
+      "disposition": "Core-kept",
+      "requires": [],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target example_sync_node",
+        "run": "<build-dir>/example_sync_node",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_ai_assembly",
+      "kind": "cookbook",
+      "path": "examples/cookbook/ai-assembly/",
+      "target": "cookbook_ai_assembly_member",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_A2A=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target cookbook_ai_assembly_member",
+        "run": "<build-dir>/cookbook_ai_assembly_member",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_byo_openai",
+      "kind": "cookbook",
+      "path": "examples/cookbook/byo-openai/",
+      "target": "python-only",
+      "disposition": "Core-kept",
+      "requires": [
+        "python3",
+        "provider SDK"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "python3 -m compileall examples/cookbook/byo-openai",
+        "run": "python3 examples/cookbook/byo-openai/hybrid.py",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_jarvis",
+      "kind": "cookbook",
+      "path": "examples/cookbook/jarvis/",
+      "target": "cookbook_jarvis",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_COOKBOOK_JARVIS=ON",
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON",
+        "NEOGRAPH_BUILD_A2A=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target cookbook_jarvis",
+        "run": "<build-dir>/cookbook_jarvis",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_minimal_mcp",
+      "kind": "cookbook",
+      "path": "examples/cookbook/minimal-mcp/",
+      "target": "cookbook_minimal_mcp",
+      "disposition": "protocol-adapter-ported",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Transport-owned adapter example; retain wire behavior while semantic ownership converges on Core/Program.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target cookbook_minimal_mcp",
+        "run": "<build-dir>/cookbook_minimal_mcp",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_multi_tenant",
+      "kind": "cookbook",
+      "path": "examples/cookbook/multi_tenant_chatbot/",
+      "target": "cookbook_multi_tenant_mock",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target cookbook_multi_tenant_mock",
+        "run": "<build-dir>/cookbook_multi_tenant_mock",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_ollama",
+      "kind": "cookbook",
+      "path": "examples/cookbook/ollama-provider/",
+      "target": "python-only",
+      "disposition": "Core-kept",
+      "requires": [
+        "python3",
+        "Ollama"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "python3 -m compileall examples/cookbook/ollama-provider",
+        "run": "python3 examples/cookbook/ollama-provider/via_openai_compat.py",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_self_evolving",
+      "kind": "cookbook",
+      "path": "examples/cookbook/self_evolving_chatbot/",
+      "target": "cookbook_self_evolving_chatbot",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target cookbook_self_evolving_chatbot",
+        "run": "<build-dir>/cookbook_self_evolving_chatbot",
+        "expected": "recipe-specific output; exit 0"
+      }
+    },
+    {
+      "id": "cookbook_the_beast",
+      "kind": "cookbook",
+      "path": "examples/cookbook/the-beast/",
+      "target": "cookbook_the_beast",
+      "disposition": "Core-kept",
+      "requires": [
+        "NEOGRAPH_BUILD_LLM=ON",
+        "NEOGRAPH_BUILD_MCP_CLIENT=ON"
+      ],
+      "rationale": "Current source uses the supported Core graph surface; retain until an explicit Program or adapter port is proven.",
+      "proof": {
+        "status": "pending-component-smoke",
+        "build": "cmake --build <build-dir> --target cookbook_the_beast",
+        "run": "<build-dir>/cookbook_the_beast",
+        "expected": "recipe-specific output; exit 0"
+      }
+    }
+  ]
+}

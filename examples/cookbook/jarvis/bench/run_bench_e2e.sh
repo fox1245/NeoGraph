@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# E2E 벤치 — 실제 MCP 도구 왕복 포함 전 경로 (direct/parallel/chat/회상) × Groq.
+# E2E 벤치 — 실제 MCP 도구 왕복 포함 전 경로 (direct/parallel/chat/회상) × OpenRouter.
 #
 # 구성: 공유 데모 MCP 서버 컨테이너(jarvis-mcp-demo) + 벤치 컨테이너 2종이
 # 같은 docker 네트워크에서 순차 실행. 동일 제약(--cpus=2 --memory=2g).
 #
-# 사용:  GROQ_API_KEY=... bash bench/run_bench_e2e.sh
+# 사용:  OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 JARVIS="$ROOT/examples/cookbook/jarvis"
@@ -13,7 +13,7 @@ mkdir -p "$OUT"
 NET=jarvis-bench-net
 LIMITS=(--cpus=2 --memory=2g)
 
-[[ -n "${GROQ_API_KEY:-}" ]] || { echo "GROQ_API_KEY 필요"; exit 1; }
+[[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "OPENROUTER_API_KEY 필요"; exit 1; }
 
 echo "[e2e] 이미지 빌드..."
 docker build -q -f "$JARVIS/bench/Dockerfile.neograph"  -t jarvis-bench-neograph  "$ROOT"
@@ -36,15 +36,12 @@ for i in $(seq 1 30); do
     [[ $i -eq 30 ]] && { echo "MCP 서버 기동 실패"; exit 1; }
 done
 
-GROQ_ENV=(-e OPENAI_API_KEY="$GROQ_API_KEY"
-          -e OPENAI_BASE_URL=https://api.groq.com/openai
-          -e JARVIS_ROUTER_MODEL="${BENCH_ROUTER_MODEL:-llama-3.1-8b-instant}"
-          -e JARVIS_SYNTH_MODEL="${BENCH_SYNTH_MODEL:-llama-3.3-70b-versatile}"
-          -e JARVIS_DEBUG=1
-          -e JARVIS_MEMORY_FILE=/tmp/mem.json)
+OPENROUTER_ENV=(-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
+                -e JARVIS_DEBUG=1
+                -e JARVIS_MEMORY_FILE=/tmp/mem.json)
 
 echo "[e2e] NeoGraph 라운드..."
-docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" \
+docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${OPENROUTER_ENV[@]}" \
     -v "$JARVIS/bench":/src/examples/cookbook/jarvis/bench:ro \
     -v "$JARVIS/config-bench-e2e":/src/examples/cookbook/jarvis/config-bench-e2e:ro \
     jarvis-bench-neograph python3 bench/driver.py \
@@ -53,7 +50,7 @@ docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" 
     --label neograph-e2e --delay 2
 
 echo "[e2e] LangGraph 라운드..."
-docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" \
+docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${OPENROUTER_ENV[@]}" \
     -e BENCH_MODE=api -e MCP_URL=http://jarvis-mcp-demo:8888 \
     -e JARVIS_MCP_CATALOG=/app/config-bench-e2e/mcp_catalog.json \
     -v "$JARVIS/bench":/app/bench:ro \

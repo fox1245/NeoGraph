@@ -3,9 +3,9 @@
 #
 # 동일 제약(--cpus=2 --memory=2g)의 컨테이너 2종에서 동일 토폴로지를 구동:
 #   mock 라운드 : LLM 0ms 스텁 → 순수 프레임워크 오버헤드 (200턴)
-#   groq 라운드 : 실제 Groq 초고속 추론 (20턴, GROQ_API_KEY 필요)
+#   OpenRouter 라운드 : 고정 DeepSeek 추론 (20턴, OPENROUTER_API_KEY 필요)
 #
-# 사용:  GROQ_API_KEY=... bash bench/run_bench.sh
+# 사용:  OPENROUTER_API_KEY=... bash bench/run_bench.sh
 # 결과:  $BENCH_OUT(기본 /tmp/jarvis-bench-out)/*.jsonl + 비교표 stdout
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"   # NeoGraph 루트
@@ -34,22 +34,19 @@ run_c -e BENCH_MODE=mock jarvis-bench-langgraph python3 bench/driver.py \
     --turns bench/turns_mock.txt --out /out/langgraph_mock.jsonl \
     --label langgraph-mock
 
-if [[ -n "${GROQ_API_KEY:-}" ]]; then
-    echo "[bench] groq 라운드 (실추론, 20턴, 턴간 2s)"
-    GROQ_ENV=(-e OPENAI_API_KEY="$GROQ_API_KEY"
-              -e OPENAI_BASE_URL=https://api.groq.com/openai
-              -e JARVIS_ROUTER_MODEL="${BENCH_ROUTER_MODEL:-llama-3.1-8b-instant}"
-              -e JARVIS_SYNTH_MODEL="${BENCH_SYNTH_MODEL:-llama-3.3-70b-versatile}")
-    run_c "${GROQ_ENV[@]}" jarvis-bench-neograph python3 bench/driver.py \
+if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "[bench] OpenRouter 라운드 (DeepSeek, 20턴, 턴간 2s)"
+    OPENROUTER_ENV=(-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY")
+    run_c "${OPENROUTER_ENV[@]}" jarvis-bench-neograph python3 bench/driver.py \
         --cmd "exec bash scripts/run_jarvis.sh config-bench" \
-        --turns bench/turns_groq.txt --out /out/neograph_groq.jsonl \
-        --label neograph-groq --delay 2
-    run_c "${GROQ_ENV[@]}" -e BENCH_MODE=api jarvis-bench-langgraph python3 bench/driver.py \
+        --turns bench/turns_openrouter.txt --out /out/neograph_openrouter.jsonl \
+        --label neograph-openrouter --delay 2
+    run_c "${OPENROUTER_ENV[@]}" -e BENCH_MODE=api jarvis-bench-langgraph python3 bench/driver.py \
         --cmd "exec python3 bench/langgraph_twin.py" \
-        --turns bench/turns_groq.txt --out /out/langgraph_groq.jsonl \
-        --label langgraph-groq --delay 2
+        --turns bench/turns_openrouter.txt --out /out/langgraph_openrouter.jsonl \
+        --label langgraph-openrouter --delay 2
 else
-    echo "[bench] GROQ_API_KEY 없음 — groq 라운드 건너뜀"
+    echo "[bench] OPENROUTER_API_KEY 없음 — OpenRouter 라운드 건너뜀"
 fi
 
 echo

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ko source_sha256=097ce5a3394ec214d04a7245b7e4e7e6d937754bb1c18e589a850dc1bc41f54d -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ko source_sha256=a2b7c4a93e6564fc5ecb36f4c559d811fa6c61325ef48a930e1917817b8359d5 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # Python 모드 벤치마크 — Python의 NeoGraph-from-Python 대 LangGraph
@@ -10,16 +10,22 @@
 답변: **아니오.** 부풀림은 Python 인터프리터가 아니라 LangChain 가져오기 트리에서 발생합니다.
 NeoGraph-from-Python = 린 Python(10MB/30ms) + 단일 컴파일된 .so.
 
-## 측정 결과 (2026-07-05, WSL2, python3.12)
+## 재현
+
+먼저 Python 개발 헤더와 pybind11이 필요한 소스 빌드를 구성합니다.
 
 ```bash
-cd <neograph>/build-pybind
-LD=$(pwd)
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/perturn.py   neograph 5000
-python3 <bench>/pybind/startup_rss.py langgraph          # bare
-python3 <bench>/pybind/startup_rss.py langgraph_openai   # actual chatbot stack
-python3 <bench>/pybind/perturn.py   langgraph 5000
+cmake -S . -B build-pybind \
+  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-pybind --target _neograph -j
+LD="$PWD/build-pybind"
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
 |측정항목(모든 Python 프로세스)|Python의 NeoGraph|랭그래프|이점|

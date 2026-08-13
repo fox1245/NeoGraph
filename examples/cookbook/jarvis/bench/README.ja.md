@@ -8,10 +8,10 @@ NeoGraph (C++ モック ビルド) および LangGraph (Python ツイン `langgr
 同一の制約 (`--cpus=2 --memory=2g`) コンテナ内のメジャー。
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
-## 測定結果 (2026-07-05、WSL2、--cpus=2 --memory=2g)
+## 過去の測定結果 (2026-07-05、OpenRouter 移行前; Groq)
 
 |メトリック |ネオグラフ |ランググラフ |デルタ |
 |---|---|---|---|
@@ -32,7 +32,7 @@ GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns ×
 ## E2E ラウンド — 実際の MCP ツールの往復を含む (2026-07-05)
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_e2e.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 ```
 
 共有デモ MCP サーバー コンテナ (時間/計算/天気) + 24 ターン混合セット (直接ツール呼び出し ·
@@ -61,7 +61,7 @@ e2e ターン レイテンシーではフレームワークの優位性を判断
 ## 境界測定ラウンド — プロバイダーの分散を排除する (2026-07-05)
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_proxy.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
 プロキシ境界測定を使用して E2E の「分散がデルタを飲み込む」問題を解決します。
@@ -135,6 +135,6 @@ nginx は `proxy_buffering off` で SSE を通過させるため、`$upstream_he
 - `driver.py` / `analyze.py` — 測定・比較表
 - `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — ベンチマーク画像
 - `run_bench.sh`(コア) / `run_bench_e2e.sh`(リアルツール E2E) — ランナー
-- `turns_mock.txt`(200) / `turns_groq.txt`(20) / `turns_e2e.txt`(24) — ターン セット
+- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — ターン セット
 - `../config-bench/` — 空のカタログ (チャット パスは固定) /
   `../config-bench-e2e/` — 共有 MCP サーバー カタログ

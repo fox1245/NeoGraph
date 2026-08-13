@@ -2,7 +2,9 @@
 #include <neograph/graph/state.h>
 
 #include "channel_write_codec.h"
+
 #include <chrono>
+#include <stdexcept>
 
 namespace neograph::graph {
 
@@ -16,10 +18,8 @@ namespace {
 
 inline json serialize_command(const std::optional<Command>& cmd) {
     if (!cmd) return json();
-    return {
-        {"goto_node", cmd->goto_node},
-        {"updates",   detail::serialize_channel_writes(cmd->updates)}
-    };
+    return {{"goto_node", cmd->goto_node},
+            {"updates", detail::serialize_channel_writes(cmd->updates)}};
 }
 inline std::optional<Command> deserialize_command(const json& j) {
     if (j.is_null() || !j.is_object()) return std::nullopt;
@@ -52,8 +52,8 @@ inline std::vector<Send> deserialize_sends(const json& arr) {
 inline PendingWrite make_pending_write(const std::string& task_id,
                                        const std::string& task_path,
                                        const std::string& node_name,
-                                       const NodeResult& nr,
-                                       int step) {
+                                       const NodeResult&  nr,
+                                       int                step) {
     PendingWrite pw;
     pw.task_id   = task_id;
     pw.task_path = task_path;
@@ -63,7 +63,8 @@ inline PendingWrite make_pending_write(const std::string& task_id,
     pw.sends     = serialize_sends(nr.sends);
     pw.step      = step;
     pw.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
     return pw;
 }
 
@@ -77,30 +78,26 @@ inline NodeResult pending_to_node_result(const PendingWrite& pw) {
 
 inline int64_t now_ms() {
     using namespace std::chrono;
-    return duration_cast<milliseconds>(
-        system_clock::now().time_since_epoch()).count();
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-} // namespace
+}  // namespace
 
 // =========================================================================
 // CheckpointCoordinator
 // =========================================================================
 
-CheckpointCoordinator::CheckpointCoordinator(
-    std::shared_ptr<CheckpointStore> store,
-    std::string thread_id)
+CheckpointCoordinator::CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
+                                             std::string                      thread_id)
     : store_(std::move(store)), thread_id_(std::move(thread_id)) {}
 
-std::string CheckpointCoordinator::save_super_step(
-    const GraphState& state,
-    const std::string& current_node,
-    const std::vector<std::string>& next_nodes,
-    CheckpointPhase phase,
-    int step,
-    const std::string& parent_id,
-    const BarrierState& barrier_state) const {
-
+std::string CheckpointCoordinator::save_super_step(const GraphState&               state,
+                                                   const std::string&              current_node,
+                                                   const std::vector<std::string>& next_nodes,
+                                                   CheckpointPhase                 phase,
+                                                   int                             step,
+                                                   const std::string&              parent_id,
+                                                   const BarrierState& barrier_state) const {
     if (!enabled()) return {};
 
     Checkpoint cp;
@@ -157,14 +154,12 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     return ctx;
 }
 
-void CheckpointCoordinator::record_pending_write(
-    const std::string& parent_cp_id,
-    const std::string& task_id,
-    const std::string& task_path,
-    const std::string& node_name,
-    const NodeResult& nr,
-    int step) const {
-
+void CheckpointCoordinator::record_pending_write(const std::string& parent_cp_id,
+                                                 const std::string& task_id,
+                                                 const std::string& task_path,
+                                                 const std::string& node_name,
+                                                 const NodeResult&  nr,
+                                                 int                step) const {
     if (!enabled()) return;
     // Symmetric with clear_pending_writes: an empty parent_cp_id means
     // we're inside the very first super-step, before any checkpoint has
@@ -178,9 +173,7 @@ void CheckpointCoordinator::record_pending_write(
                        make_pending_write(task_id, task_path, node_name, nr, step));
 }
 
-void CheckpointCoordinator::clear_pending_writes(
-    const std::string& parent_cp_id) const {
-
+void CheckpointCoordinator::clear_pending_writes(const std::string& parent_cp_id) const {
     if (!enabled()) return;
     if (parent_cp_id.empty()) return;
     store_->clear_writes(thread_id_, parent_cp_id);
@@ -193,32 +186,27 @@ void CheckpointCoordinator::clear_pending_writes(
 // via co_await. The cp/write construction is pure CPU; only the store
 // I/O suspends.
 
-asio::awaitable<std::string>
-CheckpointCoordinator::save_super_step_async(
-    const GraphState& state,
-    const std::string& current_node,
+asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
+    const GraphState&               state,
+    const std::string&              current_node,
     const std::vector<std::string>& next_nodes,
-    CheckpointPhase phase,
-    int step,
-    const std::string& parent_id,
-    const BarrierState& barrier_state) const {
-
-    co_return co_await save_super_step_async(
-        state, current_node, next_nodes, phase, step, parent_id,
-        barrier_state, json());
+    CheckpointPhase                 phase,
+    int                             step,
+    const std::string&              parent_id,
+    const BarrierState&             barrier_state) const {
+    co_return co_await save_super_step_async(state, current_node, next_nodes, phase, step,
+                                             parent_id, barrier_state, json());
 }
 
-asio::awaitable<std::string>
-CheckpointCoordinator::save_super_step_async(
-    const GraphState& state,
-    const std::string& current_node,
+asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
+    const GraphState&               state,
+    const std::string&              current_node,
     const std::vector<std::string>& next_nodes,
-    CheckpointPhase phase,
-    int step,
-    const std::string& parent_id,
-    const BarrierState& barrier_state,
-    const json& metadata) const {
-
+    CheckpointPhase                 phase,
+    int                             step,
+    const std::string&              parent_id,
+    const BarrierState&             barrier_state,
+    const json&                     metadata) const {
     if (!enabled()) co_return std::string{};
 
     Checkpoint cp;
@@ -234,8 +222,8 @@ CheckpointCoordinator::save_super_step_async(
     cp.step            = step;
     cp.timestamp       = now_ms();
 
-    auto id = cp.id;
-    co_await store_->save_async(cp);
+    auto      id = cp.id;
+    co_await  store_->save_async(cp);
     co_return id;
 }
 
@@ -244,23 +232,20 @@ asio::awaitable<void> CheckpointCoordinator::record_pending_write_async(
     const std::string& task_id,
     const std::string& task_path,
     const std::string& node_name,
-    const NodeResult& nr,
-    int step) const {
-
+    const NodeResult&  nr,
+    int                step) const {
     if (!enabled() || parent_cp_id.empty()) co_return;
     co_await store_->put_writes_async(thread_id_, parent_cp_id,
-        make_pending_write(task_id, task_path, node_name, nr, step));
+                                      make_pending_write(task_id, task_path, node_name, nr, step));
 }
 
 asio::awaitable<void> CheckpointCoordinator::clear_pending_writes_async(
     const std::string& parent_cp_id) const {
-
     if (!enabled() || parent_cp_id.empty()) co_return;
     co_await store_->clear_writes_async(thread_id_, parent_cp_id);
 }
 
-asio::awaitable<ResumeContext>
-CheckpointCoordinator::load_for_resume_async() const {
+asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() const {
     ResumeContext ctx;
     if (!enabled()) co_return ctx;
 
@@ -290,4 +275,43 @@ CheckpointCoordinator::load_for_resume_async() const {
     co_return ctx;
 }
 
-} // namespace neograph::graph
+asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_async(
+    std::string checkpoint_id) const {
+    ResumeContext ctx;
+    if (!enabled()) co_return ctx;
+
+    auto cp_opt = co_await store_->load_by_id_async(checkpoint_id);
+    if (!cp_opt) co_return ctx;
+    if (cp_opt->id != checkpoint_id) {
+        throw std::runtime_error("Checkpoint store returned a different checkpoint id");
+    }
+    if (cp_opt->thread_id != thread_id_) {
+        throw std::runtime_error("Checkpoint does not belong to resume thread: " + thread_id_);
+    }
+    if (cp_opt->schema_version != CHECKPOINT_SCHEMA_VERSION) {
+        throw std::runtime_error("Checkpoint schema version is incompatible");
+    }
+
+    ctx.have_cp        = true;
+    ctx.checkpoint_id  = cp_opt->id;
+    ctx.channel_values = cp_opt->channel_values;
+    ctx.phase          = cp_opt->interrupt_phase;
+    ctx.next_nodes     = cp_opt->next_nodes;
+    ctx.barrier_state  = cp_opt->barrier_state;
+
+    ctx.start_step = static_cast<int>(cp_opt->step);
+    if (cp_opt->interrupt_phase == CheckpointPhase::After ||
+        cp_opt->interrupt_phase == CheckpointPhase::Completed ||
+        cp_opt->interrupt_phase == CheckpointPhase::Updated) {
+        ctx.start_step += 1;
+    }
+
+    auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
+    for (const auto& pw : pending) {
+        ctx.replay_results.emplace(pw.task_id, pending_to_node_result(pw));
+    }
+
+    co_return ctx;
+}
+
+}  // namespace neograph::graph

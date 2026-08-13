@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=9126f4bfed65128d8b676e182ae6e0b13f5d544de24e73018ce2ba8d44fb8093 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=5d8c8917e27b2b522ff655a631f05e29701f0759b8f5bb9595f2db1d02089b92 -->
 # NeoGraph WASM — 可行性验证
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -60,7 +60,7 @@ em++ -std=c++20 -O3 -flto -fexceptions -pthread \
 
 用 `node wasm/smoke.js` 运行。不需要浏览器参数。
 
-`-pthread` 是必需的，因为 `compile()` 会创建一个大小为 `hardware_concurrency()` 的默认线程池。单线程 WASM 也可行 — 传入 `-sPTHREAD_POOL_SIZE=0`，并在 `run()` 前调用 `engine->set_worker_count(1)`。
+`compile()` 默认使用 `worker_count=1`，因此不会创建引擎自有线程池。该冒烟命令仍启用四个 Emscripten 线程，以便调用方可通过 `set_worker_count(N >= 2)` 选择并行扇出；冒烟测试本身使用单工作线程默认值。单线程构建只需传入 `-sPTHREAD_POOL_SIZE=0`，无需调用 `set_worker_count(1)`。
 
 ## Phase 2 计划
 

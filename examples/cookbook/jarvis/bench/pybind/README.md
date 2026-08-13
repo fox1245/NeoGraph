@@ -8,16 +8,23 @@ the advantages of standalone C++ (startup · RSS · throughput)?**
 Answer: **No.** The bloat is not from Python interpreter but from LangChain import tree.
 NeoGraph-from-Python = lean Python (10MB/30ms) + single compiled .so.
 
-## Measured Results (2026-07-05, WSL2, python3.12)
+## Reproduce
+
+Configure a source build with Python bindings first (Python development headers
+and pybind11 are required):
 
 ```bash
-cd <neograph>/build-pybind
-LD=$(pwd)
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/perturn.py   neograph 5000
-python3 <bench>/pybind/startup_rss.py langgraph          # bare
-python3 <bench>/pybind/startup_rss.py langgraph_openai   # actual chatbot stack
-python3 <bench>/pybind/perturn.py   langgraph 5000
+cmake -S . -B build-pybind \
+  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-pybind --target _neograph -j
+LD="$PWD/build-pybind"
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
 | Metric (all Python processes) | NeoGraph-from-Python | LangGraph | Advantage |

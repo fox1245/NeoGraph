@@ -850,8 +850,8 @@ something, and the message lists exactly what.
   diagnostic instead of silently changing their routing or parsing semantics.
 - Upgrade C++ input with `GraphCompiler::upgrade_to_latest()` or Python input
   with `ng.upgrade_topology()`. Ignored legacy data is retained under collision-
-  safe `x-upgraded-*` annotations. For DSL sources, re-run the elaborator so the
-  lockfile and source map are regenerated together.
+  safe `x-upgraded-*` annotations. Strict Core JSON is the retained interchange
+  artifact; JavaScript sources should be recompiled through QuickJS `define()`.
 
 ---
 

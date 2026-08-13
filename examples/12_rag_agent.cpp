@@ -1,8 +1,9 @@
 // NeoGraph Example 12: RAG (Retrieval-Augmented Generation) Agent
 //
 // Demonstrates how to build a RAG agent using NeoGraph with real embeddings.
-// Uses OpenAI text-embedding-3-small for vector similarity search and
-// an in-memory vector store. In production, replace with PGVector / Pinecone.
+// Uses OpenRouter's OpenAI-compatible `openai/text-embedding-3-small` for
+// vector similarity search and an in-memory vector store. In production,
+// replace with PGVector / Pinecone.
 //
 // NOTE — this is the inference-only "retrieve-then-generate" pattern that
 // has become the dominant industry usage of "RAG", NOT the original
@@ -21,7 +22,7 @@
 //   4. Generates an answer grounded in the retrieved context
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_rag_agent
 // (auto-loads .env from the cwd or any parent directory.)
 //
@@ -46,13 +47,15 @@
 using json = neograph::json;
 
 // =========================================================================
-// Embedding Client — calls OpenAI /v1/embeddings API
+// Embedding Client — calls OpenRouter's OpenAI-compatible embeddings API
+// (embeddings necessarily use an embedding model; chat calls below use
+// deepseek/deepseek-v4-flash-0731).
 // =========================================================================
 
 class EmbeddingClient {
 public:
     EmbeddingClient(const std::string& api_key,
-                    const std::string& model = "text-embedding-3-small")
+                    const std::string& model = "openai/text-embedding-3-small")
         : api_key_(api_key), model_(model) {}
 
     // Embed a single text, returns a float vector
@@ -67,7 +70,7 @@ public:
         body["model"] = model_;
         body["input"] = json(texts);
 
-        httplib::Client cli("https://api.openai.com");
+        httplib::Client cli("https://openrouter.ai");
         cli.set_read_timeout(30, 0);
 
         httplib::Headers headers = {
@@ -75,7 +78,7 @@ public:
         };
         cli.set_default_headers(headers);
 
-        auto res = cli.Post("/v1/embeddings", body.dump(), "application/json");
+        auto res = cli.Post("/api/v1/embeddings", body.dump(), "application/json");
 
         if (!res || res->status != 200) {
             std::cerr << "[embedding] API error: "
@@ -331,17 +334,16 @@ static std::vector<Document> create_knowledge_base() {
 }
 
 // =========================================================================
-// Main — CLI RAG Agent with OpenAI Embeddings
+// Main — CLI RAG Agent with OpenRouter Embeddings
 // =========================================================================
 
 int main() {
+    try {
     cppdotenv::auto_load_dotenv();
 
-    try {
-    // 1. Check API key
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set OPENAI_API_KEY environment variable "
+        std::cerr << "Set OPENROUTER_API_KEY environment variable "
                      "(or put it in .env beside the binary)\n";
         return 1;
     }
@@ -354,11 +356,13 @@ int main() {
     store->add_documents(create_knowledge_base());
 
     // 4. Create LLM provider
+    neograph::llm::OpenAIProvider::Config llm_config;
+    llm_config.api_key = api_key;
+    llm_config.base_url = "https://openrouter.ai/api";
+    llm_config.default_model = "deepseek/deepseek-v4-flash-0731";
+    llm_config.provider_routing = {{"zdr", true}};
     auto provider = std::shared_ptr<neograph::Provider>(
-        neograph::llm::OpenAIProvider::create({
-            .api_key = api_key,
-            .default_model = "gpt-4o-mini"
-        })
+        neograph::llm::OpenAIProvider::create(llm_config)
     );
 
     // 5. Create tools and ReAct graph
@@ -376,7 +380,7 @@ int main() {
     );
 
     // 6. Interactive CLI loop
-    std::cout << "\n=== NeoGraph RAG Agent (text-embedding-3-small) ===\n";
+    std::cout << "\n=== NeoGraph RAG Agent (OpenRouter embeddings) ===\n";
     std::cout << "Ask questions about NeoGraph. Type 'quit' to exit.\n\n";
 
     std::string input;

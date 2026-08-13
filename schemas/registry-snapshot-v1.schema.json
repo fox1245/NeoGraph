@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/registry-snapshot-v1.schema.json",
+  "title": "NeoGraph RegistrySnapshot manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "fingerprint", "entries"],
+  "properties": {
+    "format": { "const": "neograph-registry-snapshot" },
+    "storage_schema_version": { "const": 1 },
+    "fingerprint": { "$ref": "#/$defs/sha256" },
+    "entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonempty": {
+      "type": "string",
+      "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "stringSet": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nonempty" }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "semantic_version", "implementation_digest"],
+      "properties": {
+        "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "imported"] },
+        "name": { "$ref": "#/$defs/nonempty" },
+        "semantic_version": { "$ref": "#/$defs/semver" },
+        "implementation_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "semantic_version", "implementation_digest", "effect_mode", "attestation_id", "required_capabilities", "declared_effects", "required_executables", "metadata"],
+      "properties": {
+        "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "imported"] },
+        "name": { "$ref": "#/$defs/nonempty" },
+        "semantic_version": { "$ref": "#/$defs/semver" },
+        "implementation_digest": { "$ref": "#/$defs/sha256" },
+        "effect_mode": { "enum": ["brokered", "trusted_native"] },
+        "attestation_id": { "$ref": "#/$defs/nonempty" },
+        "required_capabilities": { "$ref": "#/$defs/stringSet" },
+        "declared_effects": { "$ref": "#/$defs/stringSet" },
+        "required_executables": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identity" }
+        },
+        "metadata": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "node" } } },
+          "then": {
+            "properties": {
+              "metadata": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["config_schema", "effects"],
+                "properties": {
+                  "config_schema": { "type": "object" },
+                  "effects": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "reducer" } } },
+          "then": {
+            "properties": {
+              "metadata": { "type": "object", "maxProperties": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "condition" } } },
+          "then": {
+            "properties": {
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["declared"],
+                    "properties": { "declared": { "const": false } }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["labels", "open"],
+                    "properties": {
+                      "labels": { "$ref": "#/$defs/stringSet" },
+                      "open": { "type": "boolean" }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "provider" } } },
+          "then": {
+            "properties": {
+              "metadata": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["request_schema", "response_schema"],
+                "properties": {
+                  "request_schema": { "type": "object" },
+                  "response_schema": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "tool" } } },
+          "then": {
+            "properties": {
+              "metadata": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["input_schema", "output_schema"],
+                "properties": {
+                  "input_schema": { "type": "object" },
+                  "output_schema": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "imported" } } },
+          "then": {
+            "properties": {
+              "metadata": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["module_id", "export_name", "dependency_digest", "target"],
+                "properties": {
+                  "module_id": { "$ref": "#/$defs/nonempty" },
+                  "export_name": { "$ref": "#/$defs/nonempty" },
+                  "dependency_digest": { "$ref": "#/$defs/sha256" },
+                  "target": {
+                    "allOf": [
+                      { "$ref": "#/$defs/identity" },
+                      {
+                        "properties": {
+                          "kind": {
+                            "enum": ["node", "reducer", "condition", "provider", "tool"]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -3,7 +3,7 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-本仓库中的其他 MCP 示例（03 / 20 / 21 / 22）都会把 MCP client 包进需要 `OPENAI_API_KEY` 的 ReAct loop，而大多数 MCP 教程也假设 server 侧要 `pip install fastmcp`（会拉入约 60 个包）。这掩盖了一个有用事实：
+本仓库中的其他 MCP 示例（03 / 20 / 21 / 22）都会把 MCP client 包进使用固定 OpenRouter DeepSeek 模型的 ReAct loop；大多数 MCP 教程也假设 server 侧要 `pip install fastmcp`（会拉入约 60 个包）。这掩盖了一个有用事实：
 
 > **NeoGraph 内置 MCP client 对 peer 侧唯一的要求，是对方进程会说 wire protocol — 对自身侧唯一的要求，是 `libneograph_mcp`（已经在二进制里）。**
 

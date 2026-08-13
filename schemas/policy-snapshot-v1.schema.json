@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/policy-snapshot-v1.schema.json",
+  "title": "NeoGraph PolicySnapshot stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "fingerprint", "id", "semantic_version", "owner_scope", "admission_profile_fingerprint", "registry_fingerprint", "allowed_capabilities", "allowed_effects", "allowed_module_digests", "budget_ceiling"],
+  "properties": {
+    "format": { "const": "neograph-policy-snapshot" },
+    "storage_schema_version": { "const": 1 },
+    "fingerprint": { "$ref": "#/$defs/sha256" },
+    "id": { "$ref": "#/$defs/nonempty" },
+    "semantic_version": { "$ref": "#/$defs/semver" },
+    "owner_scope": { "$ref": "#/$defs/nonempty" },
+    "admission_profile_fingerprint": { "$ref": "#/$defs/sha256" },
+    "registry_fingerprint": { "$ref": "#/$defs/sha256" },
+    "allowed_capabilities": { "$ref": "#/$defs/stringSet" },
+    "allowed_effects": { "$ref": "#/$defs/stringSet" },
+    "allowed_module_digests": {
+      "type": "array", "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sha256" }
+    },
+    "budget_ceiling": { "$ref": "#/$defs/budget" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonempty": {
+      "type": "string",
+      "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "stringSet": {
+      "type": "array", "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nonempty" }
+    },
+    "positive64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "childDepth": { "type": "integer", "minimum": 0, "maximum": 8 },
+    "positive32": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency", "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth", "max_total_children"],
+      "properties": {
+        "wall_time_ms": { "$ref": "#/$defs/positive64" },
+        "model_tokens": { "$ref": "#/$defs/positive64" },
+        "monetary_microunits": { "$ref": "#/$defs/positive64" },
+        "max_concurrency": { "$ref": "#/$defs/positive32" },
+        "max_program_operations": { "$ref": "#/$defs/positive64" },
+        "max_core_steps": { "$ref": "#/$defs/positive64" },
+        "max_dynamic_compiles": { "$ref": "#/$defs/positive32" },
+        "max_child_depth": { "$ref": "#/$defs/childDepth" },
+        "max_total_children": { "$ref": "#/$defs/uint64" }
+      }
+    }
+  }
+}

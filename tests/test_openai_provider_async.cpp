@@ -11,23 +11,22 @@
 //   3. A 429 with Retry-After surfaces as a typed RateLimitError
 //      carrying the integer wait — required by RateLimitedProvider.
 
-#include <gtest/gtest.h>
-#include <neograph/llm/openai_provider.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/llm/openai_provider.h>
+
+#include <gtest/gtest.h>
+
 #include <future>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
 #include <httplib.h>
 
-#include <asio/io_context.hpp>
-#include <asio/co_spawn.hpp>
-#include <asio/bind_cancellation_slot.hpp>
-#include <asio/detached.hpp>
-#include <asio/this_coro.hpp>
-
 #include <atomic>
-#include <chrono>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -55,17 +54,23 @@ constexpr const char* kOpenAIBody = R"({
 })";
 
 struct MockServer {
-    httplib::Server svr;
-    std::thread     t;
-    int             port = 0;
-    std::atomic<int> request_count{0};
-    std::atomic<bool> hold{false};
-    int             status = 200;
-    std::string     body  = kOpenAIBody;
-    std::string     retry_after;  // header value when status == 429
+    httplib::Server    svr;
+    std::thread        t;
+    int                port = 0;
+    std::atomic<int>   request_count{0};
+    std::atomic<bool>  hold{false};
+    int                status = 200;
+    std::string        body   = kOpenAIBody;
+    std::string        retry_after;  // header value when status == 429
+    mutable std::mutex request_mutex;
+    std::string        request_body;
 
     MockServer() {
-        const auto handler = [this](const httplib::Request&, httplib::Response& res) {
+        const auto handler = [this](const httplib::Request& req, httplib::Response& res) {
+            {
+                std::lock_guard<std::mutex> lock(request_mutex);
+                request_body = req.body;
+            }
             request_count.fetch_add(1, std::memory_order_relaxed);
             while (hold.load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -80,7 +85,7 @@ struct MockServer {
         svr.Post("/api/v1/chat/completions", handler);
 
         port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
+        t    = std::thread([this] { svr.listen_after_bind(); });
         for (int i = 0; i < 200 && !svr.is_running(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
@@ -91,16 +96,19 @@ struct MockServer {
         if (t.joinable()) t.join();
     }
 
-    std::string base_url() const {
-        return "http://127.0.0.1:" + std::to_string(port);
+    std::string base_url() const { return "http://127.0.0.1:" + std::to_string(port); }
+
+    json last_request_json() const {
+        std::lock_guard<std::mutex> lock(request_mutex);
+        return json::parse(request_body);
     }
 };
 
 llm::OpenAIProvider::Config make_config(const MockServer& mock) {
     llm::OpenAIProvider::Config cfg;
-    cfg.api_key = "test-key";
-    cfg.base_url = mock.base_url();
-    cfg.default_model = "gpt-4o-mini";
+    cfg.api_key         = "test-key";
+    cfg.base_url        = mock.base_url();
+    cfg.default_model   = "gpt-4o-mini";
     cfg.timeout_seconds = 5;
     return cfg;
 }
@@ -109,42 +117,43 @@ CompletionParams make_params() {
     CompletionParams p;
     p.model = "gpt-4o-mini";
     ChatMessage u;
-    u.role = "user";
+    u.role    = "user";
     u.content = "ping";
     p.messages.push_back(u);
     return p;
 }
 
-} // namespace
+}  // namespace
 
 TEST(OpenAIProviderAsync, CancelTokenAbortsLocalProviderSocket) {
     MockServer mock;
     mock.hold.store(true, std::memory_order_release);
-    auto provider = llm::OpenAIProvider::create(make_config(mock));
-    auto params = make_params();
-    auto token = std::make_shared<neograph::graph::CancelToken>();
+    auto provider       = llm::OpenAIProvider::create(make_config(mock));
+    auto params         = make_params();
+    auto token          = std::make_shared<neograph::graph::CancelToken>();
     params.cancel_token = token;
 
-    asio::io_context io;
+    asio::io_context   io;
     std::promise<bool> finished;
-    auto result = finished.get_future();
-    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-        try {
-            token->bind_executor(co_await asio::this_coro::executor);
-            (void)co_await provider->complete_async(params);
-            finished.set_value(false);
-        } catch (...) {
-            finished.set_value(true);
-        }
-    }, asio::bind_cancellation_slot(token->slot(), asio::detached));
+    auto               result = finished.get_future();
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                (void)co_await provider->complete_async(params);
+                finished.set_value(false);
+            } catch (...) {
+                finished.set_value(true);
+            }
+        },
+        asio::detached);
     std::thread runner([&] { io.run(); });
     for (int i = 0; i < 200 && mock.request_count.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     ASSERT_EQ(mock.request_count.load(), 1);
     token->cancel();
-    ASSERT_EQ(result.wait_for(std::chrono::milliseconds(500)),
-              std::future_status::ready);
+    ASSERT_EQ(result.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
     EXPECT_TRUE(result.get());
     mock.hold.store(false, std::memory_order_release);
     runner.join();
@@ -155,15 +164,12 @@ TEST(OpenAIProviderAsync, CompleteAsyncReturnsParsedCompletion) {
     ASSERT_GT(mock.port, 0);
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
-    auto params = make_params();
+    auto params   = make_params();
 
     asio::io_context io;
-    ChatCompletion result;
+    ChatCompletion   result;
     asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            result = co_await provider->complete_async(params);
-        },
+        io, [&]() -> asio::awaitable<void> { result = co_await provider->complete_async(params); },
         asio::detached);
     io.run();
 
@@ -176,12 +182,39 @@ TEST(OpenAIProviderAsync, CompleteAsyncReturnsParsedCompletion) {
     EXPECT_EQ(mock.request_count.load(), 1);
 }
 
+TEST(OpenAIProviderAsync, ForwardsObjectProviderRoutingPreferences) {
+    MockServer mock;
+    auto       provider = llm::OpenAIProvider::create(make_config(mock));
+    auto       params   = make_params();
+    params.extra_fields = {
+        {"provider",
+         {
+             {"zdr", true},
+             {"only", json::array({"morph"})},
+             {"allow_fallbacks", false},
+         }},
+    };
+
+    EXPECT_EQ(provider->complete(params).message.content, "pong");
+    EXPECT_EQ(mock.last_request_json().at("provider"), params.extra_fields.at("provider"));
+}
+
+TEST(OpenAIProviderAsync, RejectsNonObjectProviderRoutingPreferences) {
+    MockServer mock;
+    auto       provider = llm::OpenAIProvider::create(make_config(mock));
+    auto       params   = make_params();
+    params.extra_fields = {{"provider", "morph"}};
+
+    EXPECT_THROW(provider->complete(params), std::invalid_argument);
+    EXPECT_EQ(mock.request_count.load(), 0);
+}
+
 TEST(OpenAIProviderAsync, SyncCompleteBridgesThroughRunSync) {
     MockServer mock;
     ASSERT_GT(mock.port, 0);
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
-    auto params = make_params();
+    auto params   = make_params();
 
     auto result = provider->complete(params);
 
@@ -210,12 +243,12 @@ TEST(OpenAIProviderAsync, SyncCompleteAcceptsVersionedAndUnversionedBaseUrls) {
 
 TEST(OpenAIProviderAsync, RateLimitErrorCarriesRetryAfter) {
     MockServer mock;
-    mock.status = 429;
+    mock.status      = 429;
     mock.retry_after = "12";
-    mock.body = R"({"error":"rate limited"})";
+    mock.body        = R"({"error":"rate limited"})";
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
-    auto params = make_params();
+    auto params   = make_params();
 
     try {
         provider->complete(params);
@@ -230,45 +263,44 @@ TEST(OpenAIProviderAsync, RateLimitErrorCarriesRetryAfter) {
 TEST(OpenAIProviderAsync, NonRateLimitErrorSurfacesAsRuntimeError) {
     MockServer mock;
     mock.status = 500;
-    mock.body = R"({"error":"server boom"})";
+    mock.body   = R"({"error":"server boom"})";
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
-    auto params = make_params();
+    auto params   = make_params();
 
     EXPECT_THROW(provider->complete(params), std::runtime_error);
 }
 
 TEST(OpenAIProviderStream, TopLevelErrorIsNotAnEmptySuccess) {
     MockServer mock;
-    mock.body = "data: {\"error\":\"STREAM_EXPLODED\"}\n\n"
-                "data: [DONE]\n\n";
+    mock.body =
+        "data: {\"error\":\"STREAM_EXPLODED\"}\n\n"
+        "data: [DONE]\n\n";
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
     try {
         provider->complete_stream(make_params(), {});
         FAIL() << "expected the stream error to propagate";
     } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("STREAM_EXPLODED"),
-                  std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("STREAM_EXPLODED"), std::string::npos);
     }
 }
 
 TEST(OpenAIProviderStream, ErrorAfterContentStillFailsTheCompletion) {
     MockServer mock;
-    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
-                "data: {\"error\":\"STREAM_EXPLODED\"}\n\n"
-                "data: [DONE]\n\n";
+    mock.body =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
+        "data: {\"error\":\"STREAM_EXPLODED\"}\n\n"
+        "data: [DONE]\n\n";
 
-    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    auto        provider = llm::OpenAIProvider::create(make_config(mock));
     std::string streamed_content;
     try {
-        provider->complete_stream(make_params(), [&](const std::string& chunk) {
-            streamed_content += chunk;
-        });
+        provider->complete_stream(make_params(),
+                                  [&](const std::string& chunk) { streamed_content += chunk; });
         FAIL() << "expected the stream error to propagate";
     } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("STREAM_EXPLODED"),
-                  std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("STREAM_EXPLODED"), std::string::npos);
     }
     EXPECT_EQ(streamed_content, "partial");
 }
@@ -278,8 +310,7 @@ TEST(OpenAIProviderStream, MalformedDataIsNotSilentlySkipped) {
     mock.body = "data: {not-json}\n\ndata: [DONE]\n\n";
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
-    EXPECT_THROW(provider->complete_stream(make_params(), {}),
-                 std::runtime_error);
+    EXPECT_THROW(provider->complete_stream(make_params(), {}), std::runtime_error);
 }
 
 TEST(OpenAIProviderStream, UnterminatedDataIsNotAnEmptySuccess) {
@@ -287,23 +318,21 @@ TEST(OpenAIProviderStream, UnterminatedDataIsNotAnEmptySuccess) {
     mock.body = "data: {\"error\":\"STREAM_EXPLODED\"}";
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
-    EXPECT_THROW(provider->complete_stream(make_params(), {}),
-                 std::runtime_error);
+    EXPECT_THROW(provider->complete_stream(make_params(), {}), std::runtime_error);
 }
 
 TEST(OpenAIProviderStream, SuccessfulContentAndUsageRemainIntact) {
     MockServer mock;
-    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"
-                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,"
-                "\"completion_tokens\":2,\"total_tokens\":9}}\n\n"
-                "data: [DONE]\n\n";
+    mock.body =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,"
+        "\"completion_tokens\":2,\"total_tokens\":9}}\n\n"
+        "data: [DONE]\n\n";
 
-    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    auto        provider = llm::OpenAIProvider::create(make_config(mock));
     std::string streamed_content;
-    auto completion = provider->complete_stream(
-        make_params(), [&](const std::string& chunk) {
-            streamed_content += chunk;
-        });
+    auto        completion = provider->complete_stream(
+        make_params(), [&](const std::string& chunk) { streamed_content += chunk; });
 
     EXPECT_EQ(streamed_content, "pong");
     EXPECT_EQ(completion.message.content, "pong");
@@ -315,12 +344,13 @@ TEST(OpenAIProviderStream, SuccessfulContentAndUsageRemainIntact) {
 
 TEST(OpenAIProviderStream, VersionedBaseUrlDoesNotDuplicateVersionPath) {
     MockServer mock;
-    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"
-                "data: [DONE]\n\n";
+    mock.body =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"
+        "data: [DONE]\n\n";
     auto config = make_config(mock);
     config.base_url += "/api/v1/";
 
-    auto provider = llm::OpenAIProvider::create(config);
+    auto provider   = llm::OpenAIProvider::create(config);
     auto completion = provider->complete_stream(make_params(), {});
 
     EXPECT_EQ(completion.message.content, "pong");
@@ -331,7 +361,7 @@ TEST(OpenAIProviderStream, EmptyChoicesRemainAValidEmptyCompletion) {
     MockServer mock;
     mock.body = "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
 
-    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    auto provider   = llm::OpenAIProvider::create(make_config(mock));
     auto completion = provider->complete_stream(make_params(), {});
     EXPECT_TRUE(completion.message.content.empty());
     EXPECT_TRUE(completion.message.tool_calls.empty());
@@ -340,20 +370,16 @@ TEST(OpenAIProviderStream, EmptyChoicesRemainAValidEmptyCompletion) {
 TEST(OpenAIProviderStream, HttpStatusTakesPrecedenceOverSseBody) {
     MockServer mock;
     mock.status = 500;
-    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"must-not-leak\"}}]}\n\n";
+    mock.body   = "data: {\"choices\":[{\"delta\":{\"content\":\"must-not-leak\"}}]}\n\n";
 
-    auto provider = llm::OpenAIProvider::create(make_config(mock));
-    int callback_count = 0;
+    auto provider       = llm::OpenAIProvider::create(make_config(mock));
+    int  callback_count = 0;
     try {
-        provider->complete_stream(make_params(), [&](const std::string&) {
-            ++callback_count;
-        });
+        provider->complete_stream(make_params(), [&](const std::string&) { ++callback_count; });
         FAIL() << "expected the HTTP error to propagate";
     } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("HTTP 500"),
-                  std::string::npos);
-        EXPECT_NE(std::string(error.what()).find("must-not-leak"),
-                  std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("HTTP 500"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("must-not-leak"), std::string::npos);
     }
     EXPECT_EQ(callback_count, 0);
 }

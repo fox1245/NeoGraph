@@ -605,8 +605,8 @@ NeoGraph自己的 .cpp 文件都一致地定义了宏。仅当下游 TU 也拉�
   静默改变其路由或解析语义。
 - C++ 输入使用 `GraphCompiler::upgrade_to_latest()`，Python 输入使用
   `ng.upgrade_topology()`。被旧版忽略的数据会保存在避免名称冲突的
-  `x-upgraded-*` 注释中。对于 DSL 源，请重新运行 elaborator，以便同时重新生成
-  lockfile 和 source map。
+  `x-upgraded-*` 注释中。严格 Core JSON 是保留的互操作工件；JavaScript
+  源应通过 QuickJS `define()` 重新编译。
 
 ---
 

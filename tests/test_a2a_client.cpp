@@ -156,6 +156,7 @@ TEST(A2AClient, FetchAgentCardReadsWellKnownPath) {
     EXPECT_EQ(card.preferred_transport, "JSONRPC");
 }
 
+#ifdef NEOGRAPH_TESTS_HAVE_HARNESS
 TEST(A2AClient, HarnessAdapterCallsConfiguredAgent) {
     MockA2AServer srv;
     auto client = std::make_shared<A2AClient>(srv.url());
@@ -172,6 +173,7 @@ TEST(A2AClient, HarnessAdapterCallsConfiguredAgent) {
     EXPECT_EQ(result["id"], "task-1");
     EXPECT_EQ(result["status"]["state"], "completed");
 }
+#endif
 
 TEST(A2AClient, FetchAgentCardCachesByDefault) {
     MockA2AServer srv;
@@ -213,7 +215,12 @@ TEST(A2AClient, ConcurrentCallsHaveUniqueRequestIdsWhileTimeoutChanges) {
 
     std::thread config_writer([&] {
         while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-        for (int i = 1; i <= 1000; ++i) client.set_timeout(std::chrono::seconds(i % 3 + 1));
+        // This exercises synchronized snapshotting, not transport-timeout
+        // behavior. Keep every concurrent local request above the server's
+        // worst-case accept backlog so a scheduling blip cannot turn an ID
+        // uniqueness test into a timeout test.
+        for (int i = 1; i <= 1000; ++i)
+            client.set_timeout(std::chrono::seconds(10 + i % 3));
     });
     for (int i = 0; i < callers; ++i) {
         futures.push_back(std::async(std::launch::async, [&] {
@@ -222,8 +229,11 @@ TEST(A2AClient, ConcurrentCallsHaveUniqueRequestIdsWhileTimeoutChanges) {
         }));
     }
     start.store(true, std::memory_order_release);
-    for (auto& future : futures) future.get();
+    // Join before observing async worker exceptions. Otherwise a failed
+    // future unwinds through a joinable std::thread and masks the actual
+    // transport failure with std::terminate.
     config_writer.join();
+    for (auto& future : futures) future.get();
 
     std::lock_guard<std::mutex> lock(srv.observed_mutex);
     std::set<int> ids(srv.request_ids.begin(), srv.request_ids.end());

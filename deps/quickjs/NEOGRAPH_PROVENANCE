@@ -1,0 +1,20 @@
+QuickJS vendor provenance for NeoGraph
+
+Upstream project: https://bellard.org/quickjs/
+Upstream documentation: https://bellard.org/quickjs/quickjs.html
+Release: 2026-06-04
+Archive: https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz
+Archive SHA-256: b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a
+License: MIT (full text: LICENSE)
+Retrieved: 2026-08-08
+
+This directory contains only the embedded engine source needed by the private
+neograph_quickjs target: quickjs.c, cutils.c, dtoa.c, libregexp.c,
+libunicode.c, and their transitive headers. It intentionally excludes
+quickjs-libc.c, quickjs-libc.h, qjs.c, qjsc.c, repl.js, and all standalone
+examples/tests. NeoGraph therefore neither registers QuickJS std/os modules
+nor supplies a dynamic native-module loader.
+
+QuickJS bytecode is never a durable NeoGraph artifact. Durable JavaScript
+identity is source plus the pinned release, archive digest, and NeoGraph build
+configuration.

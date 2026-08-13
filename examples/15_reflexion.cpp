@@ -21,17 +21,17 @@
 // Self-Refine feeds the raw critic output back; Reflexion distills it to a
 // reusable lesson and keeps a history.
 //
-// Wired through SchemaProvider ("claude" schema) so the calls go to the
-// Anthropic /v1/messages endpoint. Sonnet's syllable-counting and
-// constraint-verification is reliable enough for the critic to actually
-// do its job — with a weaker model this loop hallucinates violations and
-// never converges.
+// Wired through SchemaProvider ("openai_responses" schema) so the calls go to
+// OpenRouter's /api/v1/responses endpoint. DeepSeek handles both the
+// draft and critic roles in this bounded loop.
+// This keeps the wire format visible while retaining the schema-driven
+// response parsing.
 //
 // Task: write a haiku about C++ RAII with exact 5-7-5 syllable constraints.
 // The critic is strict, so the first draft almost never passes.
 //
 // Usage:
-//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_reflexion
 // (auto-loads .env from the cwd or any parent directory.)
 
@@ -84,7 +84,7 @@ static ChatCompletion ask(Provider& p,
                           const std::string& user,
                           float temperature = 0.7f) {
     CompletionParams params;
-    params.model = "claude-sonnet-4-6";
+    params.model = "deepseek/deepseek-v4-flash-0731";
     params.temperature = temperature;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user",   user});
@@ -95,27 +95,28 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const char* api_key = std::getenv("ANTHROPIC_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+        std::cerr << "Set OPENROUTER_API_KEY environment variable "
                      "(or put it in .env beside the binary)\n";
         return 1;
     }
 
     llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "claude";
+    cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
-    cfg.default_model = "claude-sonnet-4-6";
+    cfg.base_url_override = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::SchemaProvider::create(cfg);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 15: Reflexion (self-correction)     ║\n"
               <<   "╚══════════════════════════════════════════════════════╝\n\n";
 
-    // The constraints are chosen so that (a) Sonnet can verify them
-    // mechanically but (b) the generator rarely hits every one on its
-    // first attempt — Reflexion needs a task where the first draft is
-    // plausibly wrong, otherwise the loop never fires.
+    // DeepSeek is used for both the generator and evaluator. The task is
+    // deliberately strict so the first draft is plausibly wrong and the
+    // Reflexion loop has work to do.
     const std::string task =
         "Write a haiku about C++ RAII (Resource Acquisition Is Initialization). "
         "ALL of these constraints must hold:\n"

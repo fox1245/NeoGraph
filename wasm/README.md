@@ -70,10 +70,11 @@ em++ -std=c++20 -O3 -flto -fexceptions -pthread \
 
 Run with `node wasm/smoke.js`. No browser flags needed.
 
-`-pthread` is required because `compile()` provisions a default
-thread_pool sized to `hardware_concurrency()`. Single-threaded WASM is
-also possible — pass `-sPTHREAD_POOL_SIZE=0` and call
-`engine->set_worker_count(1)` before `run()`.
+`compile()` defaults to `worker_count=1` and therefore creates no engine-owned
+thread pool. This smoke command still enables a four-thread Emscripten pool so
+callers can opt into parallel fan-out with `set_worker_count(N >= 2)`; the smoke
+itself uses the single-worker default. For a single-thread build, pass
+`-sPTHREAD_POOL_SIZE=0`; no `set_worker_count(1)` call is needed.
 
 ## Phase 2 sketch
 

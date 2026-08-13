@@ -1,0 +1,22 @@
+# Disposable local integration fixture. Do not use for deployment or Q7 final proof.
+# Invoke with this file explicitly; its top-level name isolates Docker labels.
+name: neograph-q7-postgres-test
+
+services:
+  postgres:
+    image: postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+    environment:
+      POSTGRES_DB: neograph_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: neograph-q7-test-only
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -U postgres -d neograph_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 5s

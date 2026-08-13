@@ -173,14 +173,14 @@ static std::optional<Genome> parse_ops(const Genome& g, const std::string& reply
 struct LLMLearner : Learner {
     std::shared_ptr<neograph::Provider> prov;
     explicit LLMLearner(std::shared_ptr<neograph::Provider> p) : prov(std::move(p)) {}
-    const char* label() const override { return "LLM(deepseek-v4-flash)"; }
+    const char* label() const override { return "LLM(deepseek-v4-flash-0731)"; }
     std::optional<Genome> fill(const Genome& g, const ng::NodeContext& ctx) override {
         std::vector<int> plastic;
         for (int i = 0; i < N; ++i) if (g[i] == PLASTIC) plastic.push_back(i);
         if (plastic.empty()) return g;
         ++invocations;
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-flash"; p.temperature = 0.2f; p.max_tokens = 800;
+        p.model = "deepseek/deepseek-v4-flash-0731"; p.temperature = 0.2f; p.max_tokens = 800;
         std::string committed;
         for (int i = 0; i < N; ++i)
             committed += "  stage " + std::to_string(i) + ": " +
@@ -272,14 +272,15 @@ int main(int argc, char** argv) {
                  "Toggle: Baldwinian scores the learner's fill but keeps the gene '?'; Lamarckian\n"
                  "writes the fill into the genome (heritable).\n"
                  "Learner = "
-              << (live ? "the model (deepseek-v4-flash).\n\n"
+              << (live ? "the model (deepseek/deepseek-v4-flash-0731).\n\n"
                        : "deterministic oracle (default; pass --llm with a key for the model).\n\n");
 
     std::shared_ptr<neograph::Provider> provider;
     if (live)
         provider = neograph::llm::OpenAIProvider::create_shared(
             {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "deepseek/deepseek-v4-flash"});
+             .default_model = "deepseek/deepseek-v4-flash-0731",
+             .provider_routing = {{"zdr", true}}});
 
     // A fresh learner per mode so the invocation counters are independent.
     auto make_learner = [&]() -> std::unique_ptr<Learner> {

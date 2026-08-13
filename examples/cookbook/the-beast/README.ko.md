@@ -1,10 +1,10 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=aa9675ba1cbeeb80c64724416d97b82171a94f2261f16551966e181ee742405d -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=737ef3eca8ce61e6c56b52473e9a4369b3c1ee2a54dae21dae71873452355232 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # The Beast — 생성 · 진화 · 롤백
 
 
-> 자체 하네스를 작성하고, DSL 컴파일러 아래에서 그것을 진화시키며,
+> 자체 하네스를 작성하고, strict Core compiler 아래에서 그것을 진화시키며,
 > 체크포인터를 통해 실행을 되감는 자체 진화 에이전트입니다.
 > **생성되었습니다. 진화했습니다. 되감기. 야수는 남아있습니다.**
 
@@ -20,7 +20,7 @@
 checkpointer — 리플레이가 아닌 진정한 시간 여행입니다.
 
 NeoGraph에서 하니스는 **데이터** 즉 토폴로지이기 때문에 안전합니다.
-JSON(#56 문제)에 설명되어 있으며 DSL 컴파일러(#75 문제)는 다음을 수행할 수 있습니다.
+JSON(#56 문제)에 설명되어 있으며 strict Core compiler(#75 문제)는 다음을 수행할 수 있습니다.
 *실행하기 전에 하네스의 일관성을 입증합니다*. 그거 치워버리고 "에이전트요.
 스스로 그래프를 작성하는 기계'는 깨진 그래프를 생성하는 기계일 뿐이다.
 컴파일러는 괴물을 책임에서 범주로 바꾸는 것입니다.
@@ -34,8 +34,8 @@ $ ./build/cookbook_the_beast
 
 ```
 ── ACT I · generate a harness, prove it coherent ──
-  ACCEPTED — 3 gates passed. Core lockfile nodes: s1_n s2_n s3_n
-  (DSL surface expanded away: vars/templates/use gone.)
+  ACCEPTED — strict gates passed. Core lockfile nodes: s1_n s2_n s3_n
+  (strict Core JSON expanded away: strict Core JSON retained.)
 
 ── ACT II · evolve the harness (compiler = fitness) ──
   generations: 4 · offspring: 36 · survived compile gate: 36 · rejected (invalid, never run): 0
@@ -59,29 +59,27 @@ Generated. Evolved. Rewound. The Beast remains.
 
 ## 1막 — 생성 + 게이트
 
-The Beast는 DSL **표면**(`vars` / `templates` /
-`use`) 순서대로 3개의 일관성 게이트를 통과하도록 강제합니다. 하네스
+The Beast는 strict Core JSON의 명시적 노드와 엣지를 만들고 컴파일 및 검증
+게이트를 통과하도록 강제합니다. 하네스
 어떤 게이트라도 실패하면 **폐기됩니다**.
 
 |문|API|캐치|
 |---|---|---|
-|**1. 정교한**|`Elaborator::elaborate`|DSL 좌표에 대한 표면 오류 — 알 수 없는 템플릿, missing/extra `use` 인수, 가변 주기, 노드 이름 충돌. 전체 및 결정론적: 동일한 DSL는 항상 바이트와 동일한 코어를 생성하므로 게이트 2-3은 고정된 아티팩트에 대한 이유를 제시합니다.|
+|**1. 컴파일 + TV**|`GraphCompiler::compile`(엄격, `schema_version: 1`) + `verify_roundtrip`|알 수 없는 키는 하드 오류가 되며 정규화된 strict Core JSON을 검증합니다.|
 |**2. 컴파일 + TV**|`GraphCompiler::compile`(엄격, `schema_version: 1`) + `verify_roundtrip`|오타가 있거나 지원되지 않는 키는 자동 삭제가 아닌 *하드 오류*(사용된 키 계산)입니다. 그런 다음 번역 유효성 검사는 `canon(source) == canon(compile(source).to_json())`를 주장합니다. 컴파일러는 아무 것도 자동으로 다시 연결할 수 없습니다.|
-|**3. 유효성 검사**|`GraphValidator::validate`|그래프 **의미**: 매달린 가장자리(E3), 절대 발사할 수 없는 장벽(E8), 불완전한 경로 지도(E10), 채널 효과 위반(E4/E6). *결코* 옳을 수 없는 구성에 대해서만 오류가 발생합니다. 나머지는 보푸라기입니다.|
+|**2. 유효성 검사**|`GraphValidator::validate`|그래프 **의미**: 매달린 가장자리(E3), 절대 발사할 수 없는 장벽(E8), 불완전한 경로 지도(E10), 채널 효과 위반(E4/E6).|
 
-시드는 `use`를 통해 세 번 인스턴스화된 하나의 `stage` 템플릿입니다.
-정교화를 통해 이를 코어 체인 `s1_n → s2_n → s3_n`로 확장합니다.
+시드는 코어 체인 `s1_n → s2_n → s3_n`을 구성하는 명시적 3개 노드입니다.
 
 ## Act II - 진화(컴파일러는 피트니스 함수임)
 
 `neograph::graph::evolve()`(#80 문제)는 **실제 돌연변이 연산자**를 실행합니다.
-시드 위에 — `swap_template`, `add_use`, `remove_use`, `tune_param`,
-`toggle_conditional_edge`, `toggle_barrier`, `add_edge`, `remove_edge`.
+시드 위에 — `toggle_conditional_edge`, `toggle_barrier`, `add_edge`, `remove_edge`.
 모든 자손은 **컴파일 게이트를 먼저** 통과합니다.: 잘못된 자손 다이
 실행하지 않고도 무료로 제공됩니다. 거부율 그 자체가 건강
 운영자에 대한 측정항목입니다.
 
-주요 설계 선택: 돌연변이 공간은 원시가 아닌 **DSL(M4)입니다.
+주요 설계 선택: 돌연변이 공간은 원시가 아닌 **strict Core(M4)입니다.
 JSON**, 따라서 자손은 *구성에 따라* 구조적으로 유효합니다.
 여기서 거부 횟수가 0인 이유는 다음과 같습니다. 게이트는 다음을 수행하는 안전망입니다.
 제한 없는 진화는 안전하며 모든 어린이에게 무장 상태를 유지합니다.
@@ -111,21 +109,34 @@ interrupt/resume 및 스레드 포크가 내장되어 있습니다.
 실제입니다: 라이브 LLM가 `NodeFactory::export_schema()`에게 전달됩니다.
 (이 엔진 빌드가 허용하는 정확한 팔레트 — 드리프트할 수 없습니다.
 *는* 엔진의 스키마입니다. [`../../52_export_schema.cpp`](../../52_export_schema.cpp)를 참조하세요.
-DSL 표면에서 하네스를 제작하도록 요청했습니다. 그것이 무엇이든 반환
+strict Core 표면에서 하네스를 제작하도록 요청했습니다. 그것이 무엇이든 반환
 같은 세 개의 문을 통과합니다. 거부 시 게이트 진단
 대화에 곧바로 반영되고 모델이 다시 작성됩니다.
 진정한 자가 수리 루프.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
+`the_beast_live.cpp`는 `deepseek/deepseek-v4-flash-0731`을
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`로
+고정한다. 검증 시점에 OpenRouter는 Morph의 데이터 센터를 US로, 해당
+모델/프로바이더 엔드포인트를 ZDR 지원으로 표시했다. 이것은 엄격한 공급자
+선택이지 OpenRouter의 리전 내 데이터 상주 보장은 아니다. 문서상 리전 내
+보장은 현재 엔터프라이즈 EU 경로다. Morph의 적격 엔드포인트를 사용할 수
+없으면 프롬프트를 다른 공급자에게 보내는 대신 요청이 실패한다.
+
+라이브 cookbook은 공급자 타임아웃을 180초로 설정한다. 이 추론 모델의
+4,000토큰 생성 예산은 일반적인 60초 기본값을 정당하게 초과할 수 있다.
+
+
+
 ```
 ── Attempt #1: asking the model to write a harness ──
   model returned 663 chars of JSON.
-  ACCEPTED — all three gates passed.
+  ACCEPTED — all strict gates passed.
   Core lockfile nodes: r_stage c_stage s_stage
 
 ── Spawning the model's harness (checkpointed) ──
@@ -148,6 +159,39 @@ The model wrote it. The compiler proved it. The Beast ran it.
 여기의 노드는 결정적 `beast_node` 작업자이므로 실시간 실행 비용이 듭니다.
 하나의 LLM 호출(저작)이 무료로 실행됩니다. 그것들을 교환해 보세요
 `llm_call` 및 각 노드도 실시간 호출이 됩니다.
+
+## Copy Ninja — 검증된 로컬 capability가 그래프 노드가 되는 경로
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp)는 하나의 좁은
+capability-to-harness 경로를 실행 가능하게 만든다. A2A 카드를 코드로
+바꾸지는 않는다.
+
+1. 합성 loopback 서버가 하나의 well-known Agent Card를 노출한다. 수집기는
+   그 GET만 수행하고 카드가 광고한 RPC URL은 절대로 따라가지 않는다.
+2. `AgentCardCandidateCompiler`는 free-form 카드 텍스트, endpoint,
+   credential, 실행 소스를 제외한 불변의 **unadmitted** descriptor를 만든다.
+3. 독립적으로 제공한 digest-pinned behavioral profile이 유일한
+   `copy-ninja.hello-world-echo.v1` 템플릿을 검증한 뒤 로컬
+   `CopyNinjaNode`로 materialize한다.
+4. 라이브 Beast는 두 채널·한 노드 토폴로지만 작성한다. 일반적인
+   compile/round-trip → validate 게이트 뒤에 네 번째 local
+   binding 게이트가 `__start__`와 `__end__` 사이의 정확히 하나인
+   `copy_ninja_local`을 요구한다.
+
+호출자의 prompt는 LLM 메시지에 의도적으로 넣지 않는다. 모델은 topology만
+작성하고 로컬 그래프만 prompt를 소비한다. 합성 source 서버가 RPC를 하나라도
+관찰하면 실행도 실패한다. 이는 하나의 고정된 로컬 행동에 대한 증거일 뿐,
+source-code 전송, delegation, admission, 일반 행동 등가성의 증거는 아니다.
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+2026-08-08 실제 실행에서는 authoring 모델이 첫 시도에 네 게이트를 모두
+통과했다. 그래프는 discovery GET 1회와 source-agent RPC 0회로
+`Hello, World! I have received your request (Grace)`를 반환했다.
 
 ## Apex — 하네스가 도구를 삼켜 버립니다.
 
@@ -248,7 +292,7 @@ It discovered tools, forged the missing one, and used them all.
 런타임 시 C++ 노드 유형. 그러나 의도는 세 가지 방식으로 다뤄집니다.
 Beast는 데이터에서 구동할 수 *있습니다*:
 
-- **복합 노드** — DSL의 `templates` / `use`(M4)는 모델을
+- **복합 노드** — strict Core의 `explicit nodes` / `explicit edges`(M4)는 모델을
 재사용 가능한 node/topology 단위를 순수하게 데이터로 정의합니다. 그게 바로
 `the_beast.cpp`의 시드가 하는 일.
 - **재귀** — `subgraph` 노드는 전체 하네스를 하나의 노드로 포함합니다.
@@ -277,7 +321,7 @@ express.** `script_node`는 구성이 다음과 같은 사전 컴파일된 C++ �
 데이터, 재컴파일 없음.
 
 일관성은 협상할 수 없는 상태로 유지됩니다. 스크립트는 구성에서 계약을 선언합니다.
-(`reads` / `writes` / `goto_targets`); 하네스는 3개의 DSL를 통과합니다.
+(`reads` / `writes` / `goto_targets`); 하네스는 3개의 strict Core를 통과합니다.
 Gates PLUS a Beast-layer **계약 확인**(선언된 쓰기는 다음과 같아야 함)
 선언된 채널; goto 대상은 실제 노드여야 함) PLUS a **런타임
 선언 외부의 write/goto를 거부하는 래퍼**입니다. 저것
@@ -691,6 +735,6 @@ manuscript: /abs/path/novel_12ch.txt
 `channel_of()` 도우미가 이를 풀어줍니다. 같은 모양 `RunResult::channel`
 읽습니다.
 - 코어 잠금 파일은 정교함을 통해 `schema_version: 1`를 유지합니다.
-게이트 2를 엄격 모드로 선택하는 것 — DSL 표면에서 작성
+게이트 2를 엄격 모드로 선택하는 것 — strict Core 표면에서 작성
 절대로 조용히 다운그레이드하지 않습니다. 일관성이 진화 루프를 보장합니다.
 에 따라 달라집니다.

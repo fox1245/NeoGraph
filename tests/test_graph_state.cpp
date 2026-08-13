@@ -51,6 +51,46 @@ TEST(GraphState, AppendBasic) {
     EXPECT_EQ(msgs[1], "world");
 }
 
+TEST(GraphState, BoundedRetentionKeepsNewestArrayValues) {
+    GraphState state;
+    const ChannelLifecyclePolicy lifecycle{
+        ChannelRetentionPolicy::Bounded, 2, ChannelPersistencePolicy::Checkpoint};
+    state.init_channel("events", ReducerType::APPEND, append_fn(), json::array(), lifecycle);
+    state.write("events", json::array({1}));
+    state.write("events", json::array({2}));
+    state.write("events", json::array({3}));
+
+    EXPECT_EQ(state.get("events"), json::array({2, 3}));
+}
+
+TEST(GraphState, LatestRetentionKeepsOneArrayValue) {
+    GraphState state;
+    const ChannelLifecyclePolicy lifecycle{
+        ChannelRetentionPolicy::Latest, 0, ChannelPersistencePolicy::Checkpoint};
+    state.init_channel("events", ReducerType::APPEND, append_fn(), json::array(), lifecycle);
+    state.write("events", json::array({1, 2}));
+    state.write("events", json::array({3, 4}));
+
+    EXPECT_EQ(state.get("events"), json::array({4}));
+}
+
+TEST(GraphState, EphemeralChannelIsNotCheckpointedOrRestored) {
+    GraphState state;
+    const ChannelLifecyclePolicy lifecycle{
+        ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
+    state.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), json("initial"),
+                       lifecycle);
+    state.write("scratch", json("runtime"));
+    const auto snapshot = state.serialize();
+    EXPECT_FALSE(snapshot["channels"].contains("scratch"));
+
+    GraphState restored;
+    restored.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), json("initial"),
+                          lifecycle);
+    restored.restore(snapshot);
+    EXPECT_EQ(restored.get("scratch"), "initial");
+}
+
 TEST(GraphState, AppendEmpty) {
     GraphState state;
     state.init_channel("msgs", ReducerType::APPEND, append_fn(), json::array());

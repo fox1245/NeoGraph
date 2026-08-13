@@ -8,7 +8,10 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <limits>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <neograph/json.h>
@@ -40,6 +43,10 @@ struct ChatMessage {
     std::vector<ToolCall> tool_calls;    ///< Tool calls made by the assistant (if any).
     std::string tool_call_id;            ///< ID of the tool call being responded to (role == "tool").
     std::string tool_name;               ///< Name of the tool being called.
+    /// Typed terminal status emitted by the shared ToolExecutionController.
+    std::string tool_status;
+    bool tool_retryable = false;
+    bool tool_effect_uncertain = false;
     std::vector<std::string> image_urls; ///< Base64 data URLs or HTTP URLs for vision support.
 };
 
@@ -94,31 +101,117 @@ public:
     ///
     /// Providers that report only `prompt_tokens` and `completion_tokens` and
     /// leave `total_tokens` at zero are normalized here rather than at every
-    /// call site — otherwise the total silently under-reports for those.
+    /// call site. Invalid negative values are ignored, and a total smaller
+    /// than the component sum is promoted to that sum so a provider cannot
+    /// bypass a model-token ceiling by under-reporting usage.
     void add(const ChatCompletion::Usage& u) {
-        const long long total = u.total_tokens != 0
-            ? u.total_tokens
-            : static_cast<long long>(u.prompt_tokens) + u.completion_tokens;
+        std::lock_guard lock(mutex_);
+        add_locked(u);
+    }
 
-        prompt_.fetch_add(u.prompt_tokens, std::memory_order_relaxed);
-        completion_.fetch_add(u.completion_tokens, std::memory_order_relaxed);
-        total_.fetch_add(total, std::memory_order_relaxed);
+    /// Reserve tokens before dispatching a bounded provider request.
+    bool try_reserve(long long tokens, long long ceiling) {
+        if (tokens <= 0 || ceiling <= 0) return false;
+        std::lock_guard lock(mutex_);
+        const auto actual    = total_.load(std::memory_order_relaxed);
+        const auto committed = saturating_sum(actual, reserved_);
+        if (committed > ceiling || tokens > ceiling - committed) return false;
+        reserved_ = saturating_sum(reserved_, tokens);
+        return true;
+    }
+
+    /// Release a reservation when a provider request is not dispatched.
+    ///
+    /// The separate reservation count makes an over-sized release harmless:
+    /// it can consume only reservations, never usage already reported by a provider.
+    void release_reservation(long long tokens) {
+        if (tokens <= 0) return;
+        std::lock_guard lock(mutex_);
+        const auto released = std::min(tokens, reserved_);
+        reserved_ -= released;
+    }
+
+    /// Replace a reservation with the provider's actual usage.
+    void settle_reservation(long long reserved,
+                            const ChatCompletion::Usage& u) {
+        std::lock_guard lock(mutex_);
+        const long long requested = std::max(0LL, reserved);
+        const long long held      = std::min(requested, reserved_);
+        if (held != 0) reserved_ -= held;
+        add_locked(u);
     }
 
     /// Read the running total. Not a consistent snapshot across the three
     /// counters under concurrent writes — read it when the run is done.
-    ChatCompletion::Usage snapshot() const {
+    ChatCompletion::Usage snapshot() const noexcept {
         ChatCompletion::Usage u;
-        u.prompt_tokens     = static_cast<int>(prompt_.load(std::memory_order_relaxed));
-        u.completion_tokens = static_cast<int>(completion_.load(std::memory_order_relaxed));
-        u.total_tokens      = static_cast<int>(total_.load(std::memory_order_relaxed));
+        u.prompt_tokens     = public_counter(prompt_.load(std::memory_order_relaxed));
+        u.completion_tokens = public_counter(completion_.load(std::memory_order_relaxed));
+        u.total_tokens      = public_counter(total_.load(std::memory_order_relaxed));
         return u;
     }
 
+    /// Read the wide running total for hard budget comparisons.
+    long long total_tokens_wide() const noexcept {
+        return total_.load(std::memory_order_relaxed);
+    }
+
 private:
+    static long long nonnegative(int value) noexcept {
+        return value > 0 ? static_cast<long long>(value) : 0;
+    }
+
+    static long long normalized_total(const ChatCompletion::Usage& u,
+                                      long long                    prompt,
+                                      long long                    completion) noexcept {
+        const long long components =
+            prompt > std::numeric_limits<long long>::max() - completion
+                ? std::numeric_limits<long long>::max()
+                : prompt + completion;
+        const long long reported = u.total_tokens > 0
+                                        ? static_cast<long long>(u.total_tokens)
+                                        : 0;
+        return std::max(reported, components);
+    }
+
+    static long long saturating_sum(long long current, long long delta) noexcept {
+        if (current < 0) current = 0;
+        if (delta <= 0) return current;
+        const auto available = std::numeric_limits<long long>::max() - current;
+        return delta > available ? std::numeric_limits<long long>::max()
+                                 : current + delta;
+    }
+
+    void add_locked(const ChatCompletion::Usage& u) {
+        const long long prompt     = nonnegative(u.prompt_tokens);
+        const long long completion = nonnegative(u.completion_tokens);
+        const long long total      = normalized_total(u, prompt, completion);
+        add_counters_locked(prompt, completion, total);
+    }
+
+    void add_counters_locked(long long prompt,
+                             long long completion,
+                             long long total) {
+        prompt_.store(saturating_sum(prompt_.load(std::memory_order_relaxed), prompt),
+                      std::memory_order_relaxed);
+        completion_.store(
+            saturating_sum(completion_.load(std::memory_order_relaxed), completion),
+            std::memory_order_relaxed);
+        total_.store(saturating_sum(total_.load(std::memory_order_relaxed), total),
+                     std::memory_order_relaxed);
+    }
+
+    static int public_counter(long long value) noexcept {
+        if (value <= 0) return 0;
+        const auto maximum = static_cast<long long>(std::numeric_limits<int>::max());
+        return static_cast<int>(std::min(value, maximum));
+    }
+
+    mutable std::mutex     mutex_;
     std::atomic<long long> prompt_{0};
     std::atomic<long long> completion_{0};
     std::atomic<long long> total_{0};
+    long long              reserved_ = 0;
 };
 
 // --- ADL serialization: ChatMessage/ToolCall <-> json ---
@@ -156,6 +249,9 @@ inline void to_json(json& j, const ChatMessage& msg) {
     }
     if (!msg.tool_call_id.empty()) j["tool_call_id"] = msg.tool_call_id;
     if (!msg.tool_name.empty())    j["tool_name"] = msg.tool_name;
+    if (!msg.tool_status.empty())  j["tool_status"] = msg.tool_status;
+    if (msg.tool_retryable)        j["tool_retryable"] = true;
+    if (msg.tool_effect_uncertain) j["tool_effect_uncertain"] = true;
     if (!msg.image_urls.empty())   j["image_urls"] = msg.image_urls;
 }
 
@@ -174,6 +270,9 @@ inline void from_json(const json& j, ChatMessage& msg) {
     }
     msg.tool_call_id = j.value("tool_call_id", "");
     msg.tool_name    = j.value("tool_name", "");
+    msg.tool_status  = j.value("tool_status", "");
+    msg.tool_retryable = j.value("tool_retryable", false);
+    msg.tool_effect_uncertain = j.value("tool_effect_uncertain", false);
     if (j.contains("image_urls") && j["image_urls"].is_array()) {
         msg.image_urls = j["image_urls"].get<std::vector<std::string>>();
     }

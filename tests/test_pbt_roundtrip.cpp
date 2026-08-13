@@ -12,12 +12,13 @@
 // Everything is seeded std::mt19937 — deterministic across runs and
 // platforms (no Date.now()-style flakiness).
 
-#include <gtest/gtest.h>
-#include <neograph/neograph.h>
 #include <neograph/graph/compiler.h>
-#include <neograph/graph/validator.h>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
+#include <neograph/graph/validator.h>
+#include <neograph/neograph.h>
+
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <map>
@@ -35,15 +36,15 @@ class PbtNoopNode : public GraphNode {
 public:
     explicit PbtNoopNode(std::string n) : name_(std::move(n)) {}
     asio::awaitable<NodeOutput> run(NodeInput) override { co_return NodeOutput{}; }
-    std::string get_name() const override { return name_; }
+    std::string                 get_name() const override { return name_; }
+
 private:
     std::string name_;
 };
 
 void ensure_pbt_types() {
     NodeFactory::instance().register_type(
-        "pnoop",
-        [](const std::string& name, const json&, const NodeContext&) {
+        "pnoop", [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<PbtNoopNode>(name);
         });
 }
@@ -62,31 +63,28 @@ struct GenStats {
 struct GenGraph {
     json def;
     // Nodes that carry a conditional edge (route preempts plain edges).
-    std::set<std::string> ce_nodes;
+    std::set<std::string>    ce_nodes;
     std::vector<std::string> node_names;
 };
 
 GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
-    auto chance = [&](int pct) {
-        return std::uniform_int_distribution<int>(0, 99)(rng) < pct;
-    };
-    auto pick = [&](size_t n) {
-        return std::uniform_int_distribution<size_t>(0, n - 1)(rng);
-    };
+    auto chance = [&](int pct) { return std::uniform_int_distribution<int>(0, 99)(rng) < pct; };
+    auto pick   = [&](size_t n) { return std::uniform_int_distribution<size_t>(0, n - 1)(rng); };
 
-    GenGraph g;
-    const int n_nodes = 2 + static_cast<int>(pick(6));   // 2..7
+    GenGraph  g;
+    const int n_nodes = 2 + static_cast<int>(pick(6));  // 2..7
     for (int i = 0; i < n_nodes; ++i) {
         g.node_names.push_back("n" + std::to_string(i));
     }
 
     json nodes = json::object();
-    for (const auto& n : g.node_names) nodes[n] = json{{"type", "pnoop"}};
+    for (const auto& n : g.node_names)
+        nodes[n] = json{{"type", "pnoop"}};
 
     // Channels: __route__ always (route_channel reads it) + extras.
-    json channels = json::object();
+    json channels         = json::object();
     channels["__route__"] = json{{"reducer", "overwrite"}};
-    const int extra_ch = static_cast<int>(pick(3));
+    const int extra_ch    = static_cast<int>(pick(3));
     for (int i = 0; i < extra_ch; ++i) {
         json ch = json{{"reducer", chance(50) ? "append" : "overwrite"}};
         if (chance(40)) ch["initial"] = static_cast<int>(pick(100));
@@ -104,8 +102,8 @@ GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
     // Random extra plain edges (may create cycles — E11 is a warning).
     const int extra_e = static_cast<int>(pick(3));
     for (int i = 0; i < extra_e; ++i) {
-        edges.push_back({g.node_names[pick(g.node_names.size())],
-                         g.node_names[pick(g.node_names.size())]});
+        edges.push_back(
+            {g.node_names[pick(g.node_names.size())], g.node_names[pick(g.node_names.size())]});
     }
 
     // Conditional edge: route_channel with full known-label coverage
@@ -116,16 +114,15 @@ GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
     if (chance(60)) {
         const auto& src = g.node_names[pick(g.node_names.size())];
         g.ce_nodes.insert(src);
-        json routes = json::object();
-        routes["default"] = chance(50) ? "__end__"
-                                       : g.node_names[pick(g.node_names.size())];
-        const int n_keys = 1 + static_cast<int>(pick(2));
+        json routes       = json::object();
+        routes["default"] = chance(50) ? "__end__" : g.node_names[pick(g.node_names.size())];
+        const int n_keys  = 1 + static_cast<int>(pick(2));
         for (int k = 0; k < n_keys; ++k) {
             routes["k" + std::to_string(k)] =
                 chance(30) ? "__end__" : g.node_names[pick(g.node_names.size())];
         }
-        conditional_edges.push_back(json{
-            {"from", src}, {"condition", "route_channel"}, {"routes", routes}});
+        conditional_edges.push_back(
+            json{{"from", src}, {"condition", "route_channel"}, {"routes", routes}});
         stats.with_ce++;
     }
 
@@ -142,26 +139,26 @@ GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
             if (join != u1 && join != u2 && u1 != u2) {
                 edges.push_back({u1, join});
                 edges.push_back({u2, join});
-                nodes[join] = json{{"type", "pnoop"},
-                                   {"barrier", {{"wait_for", json::array({u1, u2})}}}};
+                nodes[join] =
+                    json{{"type", "pnoop"}, {"barrier", {{"wait_for", json::array({u1, u2})}}}};
                 stats.with_barrier++;
             }
         }
     }
 
-    json def = json::object();
+    json def              = json::object();
     def["schema_version"] = 1;
-    def["name"] = "pbt";
-    def["channels"] = std::move(channels);
-    def["nodes"] = std::move(nodes);
-    json earr = json::array();
-    for (const auto& [f, t] : edges) earr.push_back(json{{"from", f}, {"to", t}});
+    def["name"]           = "pbt";
+    def["channels"]       = std::move(channels);
+    def["nodes"]          = std::move(nodes);
+    json earr             = json::array();
+    for (const auto& [f, t] : edges)
+        earr.push_back(json{{"from", f}, {"to", t}});
     def["edges"] = std::move(earr);
     if (!conditional_edges.empty()) def["conditional_edges"] = std::move(conditional_edges);
 
     if (chance(45)) {
-        def["interrupt_before"] =
-            json::array({g.node_names[pick(g.node_names.size())]});
+        def["interrupt_before"] = json::array({g.node_names[pick(g.node_names.size())]});
         stats.with_interrupt++;
     }
 
@@ -172,7 +169,7 @@ GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
 
 constexpr int kSeeds = 300;
 
-} // namespace
+}  // namespace
 
 // =========================================================================
 // Property 1: every generated strict topology compiles, validates
@@ -184,19 +181,22 @@ TEST(PbtRoundTrip, GeneratedCorpusCompilesValidatesAndRoundTrips) {
     GenStats stats;
     for (int seed = 0; seed < kSeeds; ++seed) {
         std::mt19937 rng(seed);
-        auto g = generate_topology(rng, stats);
+        auto         g = generate_topology(rng, stats);
 
         CompiledGraph cg;
         ASSERT_NO_THROW(cg = GraphCompiler::compile(g.def, NodeContext{}))
-            << "seed " << seed << "\n" << g.def.dump(2);
+            << "seed " << seed << "\n"
+            << g.def.dump(2);
 
         auto report = GraphValidator::validate(cg);
-        ASSERT_FALSE(report.has_errors())
-            << "seed " << seed << "\n" << report.summary()
-            << "\n" << g.def.dump(2);
+        ASSERT_FALSE(report.has_errors()) << "seed " << seed << "\n"
+                                          << report.summary() << "\n"
+                                          << g.def.dump(2);
 
-        ASSERT_NO_THROW(GraphCompiler::verify_roundtrip(g.def, cg))
-            << "seed " << seed << "\n" << g.def.dump(2);
+        const auto roundtrip = GraphCompiler::verify_roundtrip_report(g.def, cg.topology());
+        ASSERT_FALSE(roundtrip.has_errors()) << "seed " << seed << "\n"
+                                             << roundtrip.summary() << "\n"
+                                             << g.def.dump(2);
     }
 
     // Feature-coverage gate: "the generator never touched it" must be
@@ -204,8 +204,8 @@ TEST(PbtRoundTrip, GeneratedCorpusCompilesValidatesAndRoundTrips) {
     const double ce_pct        = 100.0 * stats.with_ce / stats.total;
     const double barrier_pct   = 100.0 * stats.with_barrier / stats.total;
     const double interrupt_pct = 100.0 * stats.with_interrupt / stats.total;
-    EXPECT_GE(ce_pct, 30.0)        << "conditional_edges coverage collapsed";
-    EXPECT_GE(barrier_pct, 30.0)   << "barrier coverage collapsed";
+    EXPECT_GE(ce_pct, 30.0) << "conditional_edges coverage collapsed";
+    EXPECT_GE(barrier_pct, 30.0) << "barrier coverage collapsed";
     EXPECT_GE(interrupt_pct, 30.0) << "interrupt coverage collapsed";
 }
 
@@ -221,10 +221,18 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
 
     for (int seed = 0; seed < kSeeds; ++seed) {
         std::mt19937 rng(seed);
-        GenStats ignore;
-        auto g = generate_topology(rng, ignore);
-        const auto compile_fresh = [&]() {
-            return GraphCompiler::compile(g.def, NodeContext{});
+        GenStats     ignore;
+        auto         g             = generate_topology(rng, ignore);
+        const auto   compile_fresh = [&]() { return GraphCompiler::compile(g.def, NodeContext{}); };
+        const auto   expect_roundtrip_diagnostics = [&](const CompiledGraph& cg) {
+            const auto report = GraphCompiler::verify_roundtrip_report(g.def, cg.topology());
+            ASSERT_TRUE(report.has_errors()) << "seed " << seed;
+            for (const auto& diagnostic : report.diagnostics) {
+                EXPECT_EQ(diagnostic.code, "GC_ROUNDTRIP") << "seed " << seed;
+                ASSERT_FALSE(diagnostic.json_pointer.empty()) << "seed " << seed;
+                EXPECT_EQ(diagnostic.json_pointer.front(), '/') << "seed " << seed;
+                EXPECT_TRUE(diagnostic.witness.contains("kind")) << "seed " << seed;
+            }
         };
 
         // drop 1: conditional_edges wholesale (the historical bug).
@@ -232,8 +240,7 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
             auto cg = compile_fresh();
             if (!cg.conditional_edges.empty()) {
                 cg.conditional_edges.clear();
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                expect_roundtrip_diagnostics(cg);
                 applied["drop_conditional_edges"]++;
             }
         }
@@ -241,10 +248,8 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
         {
             auto cg = compile_fresh();
             if (!cg.edges.empty()) {
-                cg.edges.erase(cg.edges.begin()
-                               + static_cast<long>(seed % cg.edges.size()));
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                cg.edges.erase(cg.edges.begin() + static_cast<long>(seed % cg.edges.size()));
+                expect_roundtrip_diagnostics(cg);
                 applied["drop_edge"]++;
             }
         }
@@ -253,8 +258,7 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
             auto cg = compile_fresh();
             if (!cg.barrier_specs.empty()) {
                 cg.barrier_specs.clear();
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                expect_roundtrip_diagnostics(cg);
                 applied["drop_barrier"]++;
             }
         }
@@ -263,8 +267,7 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
             auto cg = compile_fresh();
             if (!cg.interrupt_before.empty()) {
                 cg.interrupt_before.clear();
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                expect_roundtrip_diagnostics(cg);
                 applied["drop_interrupt"]++;
             }
         }
@@ -273,8 +276,7 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
             auto cg = compile_fresh();
             if (!cg.channel_defs.empty()) {
                 cg.channel_defs.pop_back();
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                expect_roundtrip_diagnostics(cg);
                 applied["drop_channel"]++;
             }
         }
@@ -286,12 +288,13 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
             for (auto& ce : cg.conditional_edges) {
                 if (ce.routes.size() < 2) continue;
                 std::set<std::string> targets;
-                for (const auto& [k, v] : ce.routes) targets.insert(v);
+                for (const auto& [k, v] : ce.routes)
+                    targets.insert(v);
                 if (targets.size() < 2) continue;
                 const std::string first = ce.routes.begin()->second;
-                for (auto& [k, v] : ce.routes) v = first;
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                for (auto& [k, v] : ce.routes)
+                    v = first;
+                expect_roundtrip_diagnostics(cg);
                 applied["rewire_routes"]++;
                 break;
             }
@@ -302,10 +305,12 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
             if (!cg.edges.empty() && g.node_names.size() >= 2) {
                 auto& e = cg.edges[seed % cg.edges.size()];
                 for (const auto& cand : g.node_names) {
-                    if (cand != e.to) { e.to = cand; break; }
+                    if (cand != e.to) {
+                        e.to = cand;
+                        break;
+                    }
                 }
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                expect_roundtrip_diagnostics(cg);
                 applied["rewire_edge"]++;
             }
         }
@@ -315,13 +320,12 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
         {
             auto cg = compile_fresh();
             if (!cg.node_defs.empty()) {
-                auto it = cg.node_defs.begin();
-                json def_copy = it->second;
+                auto        it       = cg.node_defs.begin();
+                json        def_copy = it->second;
                 std::string old_name = it->first;
                 cg.node_defs.erase(it);
                 cg.node_defs[old_name + "_impostor"] = std::move(def_copy);
-                EXPECT_THROW(GraphCompiler::verify_roundtrip(g.def, cg),
-                             std::runtime_error) << "seed " << seed;
+                expect_roundtrip_diagnostics(cg);
                 applied["rename_node"]++;
             }
         }
@@ -330,8 +334,7 @@ TEST(PbtMutation, AllSeededBugsAreDetected) {
     // Every mutator class must have fired on a healthy share of the
     // corpus — a mutator that never applies is a hole in the harness.
     for (const auto& [name, count] : applied) {
-        EXPECT_GE(count, kSeeds / 10) << "mutator '" << name
-                                      << "' applied too rarely";
+        EXPECT_GE(count, kSeeds / 10) << "mutator '" << name << "' applied too rarely";
     }
     EXPECT_EQ(applied.size(), 8u);
 }
@@ -347,10 +350,10 @@ namespace {
 // Independent reimplementation of the documented dispatch contract.
 // Deliberately shares no code with Scheduler.
 struct RefModel {
-    std::vector<Edge> edges;
+    std::vector<Edge>            edges;
     std::vector<ConditionalEdge> ces;
-    BarrierSpecs barriers;
-    BarrierState accum;
+    BarrierSpecs                 barriers;
+    BarrierState                 accum;
 
     std::vector<std::string> start() const {
         std::set<std::string> s;
@@ -361,10 +364,8 @@ struct RefModel {
     }
 
     // route_value: what the route_channel condition would return.
-    std::pair<std::vector<std::string>, bool> step(
-        const std::vector<StepRouting>& routings,
-        const std::string& route_value) {
-
+    std::pair<std::vector<std::string>, bool> step(const std::vector<StepRouting>& routings,
+                                                   const std::string&              route_value) {
         bool hit_end = false;
 
         // Command.goto: last writer wins, preempts everything.
@@ -380,9 +381,12 @@ struct RefModel {
         std::map<std::string, std::set<std::string>> signals;
         for (const auto& r : routings) {
             std::vector<std::string> succ;
-            const ConditionalEdge* ce = nullptr;
+            const ConditionalEdge*   ce = nullptr;
             for (const auto& c : ces) {
-                if (c.from == r.node_name) { ce = &c; break; }
+                if (c.from == r.node_name) {
+                    ce = &c;
+                    break;
+                }
             }
             if (ce) {
                 auto it = ce->routes.find(route_value);
@@ -398,19 +402,24 @@ struct RefModel {
                 if (succ.empty()) succ.push_back("__end__");
             }
             for (const auto& s : succ) {
-                if (s == "__end__") hit_end = true;
-                else signals[s].insert(r.node_name);
+                if (s == "__end__")
+                    hit_end = true;
+                else
+                    signals[s].insert(r.node_name);
             }
         }
 
         std::set<std::string> ready;
         for (const auto& [target, signalers] : signals) {
             auto bit = barriers.find(target);
-            if (bit == barriers.end()) { ready.insert(target); continue; }
+            if (bit == barriers.end()) {
+                ready.insert(target);
+                continue;
+            }
             auto& acc = accum[target];
-            for (const auto& s : signalers) acc.insert(s);
-            if (std::includes(acc.begin(), acc.end(),
-                              bit->second.begin(), bit->second.end())) {
+            for (const auto& s : signalers)
+                acc.insert(s);
+            if (std::includes(acc.begin(), acc.end(), bit->second.begin(), bit->second.end())) {
                 ready.insert(target);
                 acc.clear();
             }
@@ -419,38 +428,36 @@ struct RefModel {
     }
 };
 
-} // namespace
+}  // namespace
 
 TEST(PbtDifferential, SchedulerMatchesReferenceModel) {
     ensure_pbt_types();
     for (int seed = 0; seed < kSeeds; ++seed) {
-        std::mt19937 rng(seed + 100000);   // distinct stream from gen
-        GenStats ignore;
-        auto g = generate_topology(rng, ignore);
-        auto cg = GraphCompiler::compile(g.def, NodeContext{});
+        std::mt19937 rng(seed + 100000);  // distinct stream from gen
+        GenStats     ignore;
+        auto         g  = generate_topology(rng, ignore);
+        auto         cg = GraphCompiler::compile(g.def, NodeContext{});
 
-        Scheduler sch(cg.edges, cg.conditional_edges, cg.barrier_specs);
-        RefModel ref{cg.edges, cg.conditional_edges, cg.barrier_specs, {}};
+        Scheduler    sch(cg.edges, cg.conditional_edges, cg.barrier_specs);
+        RefModel     ref{cg.edges, cg.conditional_edges, cg.barrier_specs, {}};
         BarrierState bstate;
 
         // Same start set.
         auto actual_start = sch.plan_start_step();
-        auto ref_start = ref.start();
+        auto ref_start    = ref.start();
         std::sort(actual_start.begin(), actual_start.end());
         EXPECT_EQ(actual_start, ref_start) << "seed " << seed;
 
         // Random route values each super-step, junk included so the explicit
         // default route is exercised too.
         std::vector<std::string> route_pool = {"default", "k0", "k1", "zzz_junk"};
-        auto ready = actual_start;
+        auto                     ready      = actual_start;
         for (int step = 0; step < 12 && !ready.empty(); ++step) {
             const auto& route_value =
-                route_pool[std::uniform_int_distribution<size_t>(
-                    0, route_pool.size() - 1)(rng)];
+                route_pool[std::uniform_int_distribution<size_t>(0, route_pool.size() - 1)(rng)];
 
             GraphState state;
-            state.init_channel("__route__", ReducerType::OVERWRITE, nullptr,
-                               json(route_value));
+            state.init_channel("__route__", ReducerType::OVERWRITE, nullptr, json(route_value));
 
             std::vector<StepRouting> routings;
             for (const auto& n : ready) {
@@ -458,25 +465,23 @@ TEST(PbtDifferential, SchedulerMatchesReferenceModel) {
                 r.node_name = n;
                 // Occasional Command.goto to exercise the override path.
                 if (std::uniform_int_distribution<int>(0, 99)(rng) < 8) {
-                    r.command_goto =
-                        (std::uniform_int_distribution<int>(0, 1)(rng) == 0)
-                            ? std::string("__end__")
-                            : g.node_names[std::uniform_int_distribution<size_t>(
-                                  0, g.node_names.size() - 1)(rng)];
+                    r.command_goto = (std::uniform_int_distribution<int>(0, 1)(rng) == 0)
+                                         ? std::string("__end__")
+                                         : g.node_names[std::uniform_int_distribution<size_t>(
+                                               0, g.node_names.size() - 1)(rng)];
                 }
                 routings.push_back(std::move(r));
             }
 
-            auto plan = sch.plan_next_step(routings, state, bstate);
+            auto plan                 = sch.plan_next_step(routings, state, bstate);
             auto [ref_ready, ref_end] = ref.step(routings, route_value);
 
             auto actual = plan.ready;
             std::sort(actual.begin(), actual.end());
             ASSERT_EQ(actual, ref_ready)
-                << "seed " << seed << " step " << step
-                << " route=" << route_value << "\n" << g.def.dump(2);
-            ASSERT_EQ(plan.hit_end, ref_end)
-                << "seed " << seed << " step " << step;
+                << "seed " << seed << " step " << step << " route=" << route_value << "\n"
+                << g.def.dump(2);
+            ASSERT_EQ(plan.hit_end, ref_end) << "seed " << seed << " step " << step;
 
             if (plan.hit_end) break;
             ready = actual;

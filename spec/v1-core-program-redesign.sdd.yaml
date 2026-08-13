@@ -1,0 +1,542 @@
+# Executable Core migration baseline for docs/V1_ARCHITECTURE.md.
+# Program-language and embedded-runtime work moved to
+# spec/quickjs-control-runtime.sdd.yaml on 2026-08-08.
+
+spec:
+  id: v1-core-program-redesign
+  revision: 1
+  created: "2026-07-31"
+  owner: fox1245
+  status: accepted_core_baseline_program_direction_superseded
+  priority: P0
+  kind: architecture-migration
+  visibility: local-private
+  methodology: [SDD, TDD, EDD]
+  source_baseline: d80c316de1f3a10f0948477c3689a0b1b80d771b
+  canonical_design: docs/V1_ARCHITECTURE.md
+  migration_plan: docs/V1_MIGRATION_PLAN.md
+  program_language_replacement:
+    design: docs/QUICKJS_CONTROL_ARCHITECTURE.md
+    migration: docs/QUICKJS_CONTROL_MIGRATION.md
+    executable_spec: spec/quickjs-control-runtime.sdd.yaml
+  supersedes_direction:
+    - sole Control VM execution cutover
+    - separate Durable Kernel ownership
+    - Harness-only ownership of Program compilation and lifecycle
+  superseded_by_quickjs_direction:
+    - bounded Program JSON operation trees as the permanent general authoring language
+    - VM-free direct typed-plan dispatch as the permanent general Program runtime
+
+completion_state:
+  architecture_decision: accepted
+  repository_and_issue_audit: in_progress
+  core_boundary: not_started
+  program_vertical_slice: not_started
+  orchestration_surface: not_started
+  activation_and_migration: not_started
+  child_programs_and_modules: not_started
+  tenant_and_capability_boundary: not_started
+  public_sdk_cutover: not_started
+  v1_release_gate: not_started
+
+blocking_invariants:
+  one_node_executor:
+    statement: GraphEngine is the only executor of application nodes.
+    proof:
+      - neograph::core does not link neograph::program
+      - ProgramRuntime invokes pinned GraphEngine generations
+      - no bytecode VM or second node scheduler is on the default path
+  two_scheduling_domains:
+    statement: ProgramRuntime is an orchestration scheduler above, not inside, the GraphEngine node scheduler.
+    proof:
+      - ProgramRuntime owns Program-operation readiness, joins, child handles, and the parent cancellation/budget tree
+      - GraphEngine alone owns GraphNode readiness, retry, checkpoint, and teardown within call_core
+      - cancellation, teardown, checkpoint-order, budget, and direct-Core equivalence contract tests cross the boundary
+  core_optional_program:
+    statement: Core-only users pay no Program dependency or runtime branch.
+    proof:
+      - NEOGRAPH_BUILD_PROGRAM=OFF installed-consumer build and run
+      - no Program symbol in the Core link interface
+      - Core baseline benchmark with Program disabled and enabled-but-unused
+  dependency_baseline:
+    statement: The redesign preserves existing dependency choices unless a separate architecture decision approves a substitution.
+    proof:
+      - yyjson, cpp-httplib, standalone Asio, concurrentqueue, cppdotenv, SQLite3, and libpq remain the baseline
+      - protobuf/gRPC and libcurl remain opt-in and heavy optional components remain default-off
+      - any substitution includes performance, allocation, binary-size, compile-time, ABI, license, security, platform, and static/shared installed-consumer evidence
+      - no duplicate old and replacement dependency stack remains
+  immutable_runtime:
+    statement: A visible Core generation and Program bundle are immutable.
+    proof:
+      - compile and bind before publication
+      - new activation uses generation compare-and-swap
+      - in-flight runs pin an exact version
+  no_raw_execution:
+    statement: Raw source and model output never execute.
+    proof:
+      - one rejected fixture for every parse/type/binding/policy diagnostic class
+      - dispatch counters remain zero for every rejected fixture
+  enforceable_run_scope:
+    statement: Every admitted external action is mediated by a Core graph::RunScope budget and effect capability.
+    proof:
+      - provider, tool, MCP, filesystem, and network capabilities reserve and reconcile budget
+      - non-idempotent actions use prepare, commit, or ambiguous effect states
+      - model-authored and multi-tenant admission rejects trusted_native executable entries
+      - direct Core can explicitly allow trusted_native entries without an exact effect-accounting claim
+  executable_identity:
+    statement: Registry metadata identifies implementation semantics, not only public names and schemas.
+    proof:
+      - every executable entry supplies a semantic version and implementation digest
+      - both values enter registry snapshot, bundle, and materialization checks
+      - equal manifests with different implementation digests fail closed
+  closed_authority:
+    statement: Child and replacement authority never exceeds parent authority.
+    proof:
+      - capability closure checked at compile and admission
+      - expansion matrix covers tool, provider, credential, filesystem, network,
+        tenant, concurrency, time, cost, depth, and node count
+  nonrenewable_budget:
+    statement: Resume, retry, child, fork, and replacement never replenish fuel.
+    proof:
+      - one shared durable parent budget ledger
+      - crash/restart and concurrent decrement tests
+  exact_durability:
+    statement: Checkpoint, journal, and effect publication cannot report false success.
+    proof:
+      - crash injection around every publication boundary
+      - stable effect/task/event identity across retries and restart
+      - ambiguous non-idempotent outcomes block for reconciliation
+      - immutable checkpoint write precedes atomic ProgramJournal reference publication
+      - crash before journal publication leaves only an unreferenced GC-safe checkpoint
+  explicit_migration:
+    statement: No incompatible run restarts or approximately reinterprets state.
+    proof:
+      - every transition receives one machine-readable compatibility class
+      - source state remains unchanged on rejected transition
+  scoped_identity:
+    statement: Every retained lookup and capability resolution is owner-scoped.
+    proof:
+      - cross-tenant matrix reuses identical public IDs
+      - existence is not disclosed before scope authorization
+  single_semantics:
+    statement: C++, Harness, MCP, HTTP, CLI, selected Python, A2A, ACP, and gRPC surfaces share Program semantics.
+    proof:
+      - adapters delegate to the public Program API
+      - A2A, ACP, and MCP retain protocol-owned JSON-RPC envelopes rather than creating a generic JSON-RPC execution API
+      - no transport-local compiler, runtime, or persistence branch remains
+  control_data_separation:
+    statement: Program administration and Program execution are separate public capabilities.
+    proof:
+      - ProgramCatalog alone publishes, admits, activates, rolls back, and retires
+      - ProgramRuntime starts or resumes only an explicit version or one resolved active version
+      - a run credential cannot invoke ProgramCatalog administration
+      - an explicit-version start performs no activation lookup
+  stable_v1_boundary:
+    statement: ABI and stored formats have explicit version and migration rules.
+    proof:
+      - pre-v1 rebuild notice
+      - installed static/shared consumers on supported platforms
+      - stored-schema round-trip and forward-rejection fixtures
+
+public_contract:
+  core:
+    cmake_target: neograph::core
+    cpp_namespace: neograph::graph
+    standard_construction:
+      - GraphEngine::build
+      - GraphEngine::build_strict
+    standard_execution:
+      - GraphEngine::run
+      - GraphEngine::run_async
+      - GraphEngine::run_stream
+      - GraphEngine::resume
+    required_execution_scope: graph::RunScope
+    compatibility_candidates:
+      - GraphEngine::compile
+      - post-build GraphEngine configuration setters
+    rule: Existing working graph concepts are not renamed solely to match the Core product label.
+  program:
+    cmake_target: neograph::program
+    cpp_namespace: neograph::program
+    required_types:
+      - ProgramSource
+      - ProgramBuilder
+      - ProgramCompiler
+      - ProgramBundle
+      - ProgramVersion
+      - ProgramCatalog
+      - ProgramRuntime
+      - ProgramHandle
+      - ProgramResult
+      - ProgramStore
+      - ProgramJournal
+      - MigrationPlan
+    storage_extensions:
+      - neograph::program_sqlite
+      - neograph::program_postgres
+  adapters:
+    - Harness C++ service
+    - MCP server
+    - HTTP server
+    - CLI
+    - Python binding when NeoGraph-specific value is proven
+    - A2A
+    - ACP
+    - gRPC when NEOGRAPH_BUILD_GRPC is enabled
+
+program_vocabulary:
+  primitives:
+    - call_core
+    - sequence
+    - parallel
+    - race
+    - branch
+    - loop
+    - spawn
+    - await
+    - checkpoint
+    - emit
+    - cancel
+    - return
+  compiler_sugar:
+    - map
+    - retry
+    - quorum
+    - reviewer_fixer_loop
+  rule: Compiler sugar lowers to primitives and never adds a feature-specific Core branch.
+
+stored_artifacts:
+  program_bundle:
+    immutable: true
+    content_addressed: true
+    required_identity:
+      - source_hash
+      - canonical_program_hash
+      - compiler_build_id
+      - program_schema_version
+      - registry_snapshot_fingerprint
+      - module_dependency_merkle_root
+      - core_compiled_plan_identities
+      - capability_effect_closure
+      - executable_registry_entry_semantic_versions_and_digests
+      - declared_budget_requirements_and_bounds
+      - source_map
+  program_version:
+    immutable: true
+    binds:
+      - program_bundle
+      - admission_profile
+      - policy_snapshot
+      - dependency_receipts
+      - ownership_scope
+      - core_materialization_receipt
+    admission_rule: Compilation grants no authority; admission verifies capabilities, effects, budgets, dependencies, and exact Core materialization before activation.
+    restart_rule: A persisted bundle is hash-verified and rematerialized from sealed strict Core definitions against compatible compiler and registry identities before it can be activated; source is never reinterpreted on the run path.
+  activation:
+    fields:
+      - scope
+      - active_version_id
+      - activation_generation
+      - policy_snapshot_hash
+    concurrency: compare_and_swap
+  program_run:
+    pins:
+      - program_version
+      - policy_snapshot
+      - registry_snapshot
+      - core_generations
+      - budget_ledger
+      - capability_set
+      - cancellation_tree
+      - checkpoint_journal_effect_lineage
+
+performance_baseline:
+  source_commit: 24cbd86d80815b2c2b46aacb02cbf5a570503262
+  protocol:
+    command: taskset -c 0 ./build-v1-baseline/bench_neograph 100000 5000 1 1
+    discarded_warmup_process_runs: 2
+    retained_process_samples: 10
+  seq_three_incrementing_nodes:
+    raw_samples_us: [5.85155, 5.89490, 5.91027, 5.93758, 6.04154, 5.85096, 5.84122, 6.10376, 6.27868, 6.00706]
+    median_us: 5.923925
+    nearest_rank_p95_us: 6.27868
+    population_stddev_us: 0.132166
+  par_five_way_fanout_join_worker_count_1:
+    raw_samples_us: [13.6211, 13.2768, 13.2917, 13.2280, 14.0613, 13.4455, 13.4602, 13.2889, 13.7311, 13.6345]
+    median_us: 13.45285
+    nearest_rank_p95_us: 14.0613
+    population_stddev_us: 0.248471
+  acceptance:
+    median_max_ratio: 1.10
+    nearest_rank_p95_max_ratio: 1.15
+    applies_to:
+      - Program disabled
+      - Program enabled but unused
+    failure_confirmation: one paired 20-sample baseline/candidate rerun under identical pinning, compiler, and flags
+  interpretation:
+    - local same-host comparison baseline, not a portable product guarantee
+    - Program must not regress direct Core execution
+    - Program overhead is measured separately around the same admitted Core graph
+    - median, p95, allocations, RSS, and raw samples are required
+
+phases:
+  P0_decision_and_inventory:
+    objective: Freeze the Core + Program decision and classify current work before implementation.
+    work:
+      - land architecture decision and migration plan
+      - audit every open v1/runtime/Harness/performance issue against source
+      - classify each issue as done, partial, pending, superseded, or reject
+      - inventory public headers, CMake targets, persisted schemas, checkpoints,
+        journals, registries, capabilities, and transport methods
+      - record Core performance and supported-platform build baselines
+      - reconcile historical tag/project metadata and publish one evidence-backed Classic baseline release
+      - update issue and canonical-document statements that still claim VM cutover
+    gates:
+      - no contradictory canonical runtime decision remains
+      - every carried requirement has one architecture owner and one target phase
+      - no open issue is treated as pending solely because it is open
+      - baseline commands and raw evidence are retained
+      - Classic is a bounded pre-v1 support line, not a second permanent architecture
+
+  P1_program_api_foundation:
+    objective: Add the optional Program component without changing Core behavior.
+    work:
+      - add NEOGRAPH_BUILD_PROGRAM and neograph::program target
+      - add owned ProgramSource and stable diagnostics
+      - add immutable compilation-registry, admission, and policy snapshot values
+      - add versioned ProgramBundle and ProgramVersion schemas and serializers
+      - add ProgramCompiler support for one strict Core call
+      - add Core graph::RunScope contract and nonblocking sync-checkpoint adapter
+      - add executable semantic versions and implementation digests to registry snapshots
+      - use private implementation storage for long-lived Program service objects
+      - install/export the Program CMake component only when built
+    tests_first:
+      - Core-only installed consumer with Program disabled
+      - Program installed consumer with Program enabled
+      - deterministic compile produces byte-identical bundle
+      - changed source, registry, or compiler identity changes bundle identity
+      - identical registry manifests with different implementation digests produce different bundles
+      - sync-only checkpoint backend does not block the coroutine executor
+      - changed admission profile, policy, owner, dependency, or materialization receipt changes ProgramVersion identity
+      - invalid source performs zero node/provider/tool dispatch
+    exit:
+      - one Core graph compiles to a ProgramBundle
+      - Core test and benchmark behavior is unchanged
+
+  P2_vertical_slice_and_harness_delegation:
+    objective: Execute one call_core Program end to end and make Harness delegate to it.
+    work:
+      - add ProgramCatalog, ProgramRuntime, ProgramHandle, ProgramResult, and in-memory ProgramStore
+      - cache and pin immutable GraphEngine generations
+      - execute one Program call through GraphEngine
+      - thread graph::RunScope through call_core and enforce brokered capabilities
+      - add minimal ProgramJournal commit for Program continuation, remaining budget, and Core checkpoint links
+      - adapt the existing durable Harness record store for vertical-slice reconnect; replace it with ProgramStore persistence in P4
+      - map Core checkpoint and events into Program lineage
+      - add nonblocking adapter coverage for legacy CheckpointStore implementations
+      - translate current bounded Harness DSL/Core sources to ProgramSource
+      - route Harness compile/start/get/resume/cancel/list-events through Program
+      - preserve current MCP wire contracts during the pre-v1 adapter window
+    tests_first:
+      - ProgramCatalog administration is inaccessible through a run-only capability
+      - Core-direct and Program-wrapped semantic equivalence
+      - current Harness conformance fixtures through the delegated path
+      - cancellation, interrupt/resume, retry, and terminal error equivalence
+      - budget overrun inside a node is denied before the next brokered provider/tool dispatch
+      - effect broker crash matrix covers prepare, commit, and ambiguous
+      - trusted_native executable is rejected for model-authored and multi-tenant admission
+      - crash between Core checkpoint save and ProgramJournal publication yields no visible false success
+      - retained artifact reconnect and tamper rejection
+      - Program-overhead benchmark around the built-in Core `seq` graph
+    exit:
+      - no Harness-only execution engine remains
+      - one source of compile/admission/run semantics serves C++ and MCP
+
+  P3_orchestration_surface:
+    objective: Implement the complete non-child Program vocabulary without adding a VM.
+    order:
+      - sequence_branch_return
+      - bounded_loop_retry_sugar
+      - parallel_race_cancel
+      - await_emit_checkpoint
+    work:
+      - represent operations as typed immutable plan nodes with source coordinates
+      - schedule ready operations using the existing asynchronous substrate
+      - lower map, retry, quorum, and reviewer/fixer conveniences
+      - enforce one run-wide budget and cancellation tree
+      - define stable Program terminal statuses and event schema
+    tests_first:
+      - type and control-flow validation
+      - deterministic join and race winner rules
+      - cancel losing race children before handle destruction
+      - retry attempt and budget identity across checkpoint/resume
+      - timeout, budget exhaustion, provider error, and tool error classification
+      - randomized model tests against a simple reference semantics
+    exit:
+      - representative agent workflow uses every P3 primitive
+      - full vocabulary completion including spawn remains blocked until P6
+      - no operation invokes application nodes outside GraphEngine
+      - no feature-specific branch is added to GraphEngine
+
+  P4_versions_activation_and_persistence:
+    objective: Add owner-scoped version lifecycle, atomic activation, and durable storage.
+    work:
+      - extend ProgramCatalog with owner-scoped ProgramVersion admission and activation lifecycle
+      - persist bundles, versions, activations, and live-run references through ProgramStore
+      - add generation compare-and-swap activation
+      - pin admitted runs to complete version/policy/registry tuples
+      - add SQLite and PostgreSQL implementations with one backend-neutral persistence contract suite; PostgreSQL remains opt-in but is required for v1 parity when enabled
+      - add reference-aware retention and garbage collection
+      - add pre-activation Core materialization, capability preflight, and optional warmup
+    tests_first:
+      - concurrent activate, rollback, admit, and collect races
+      - old run remains pinned while new run observes new activation
+      - identical public IDs cannot cross owner scope
+      - restart restores exact activation generation and references
+      - ordinary run performs no per-step activation lookup
+      - SQLite and PostgreSQL share restart, atomic publication, owner-isolation, reconnect, fork, corruption/tamper, retention, and garbage-collection fixtures
+    exit:
+      - two scopes activate different versions without process restart
+      - rollback affects new admissions only
+      - enabled SQLite and PostgreSQL backends pass the same persistence contract suite across a real process restart
+
+  P5_migration_and_effect_safety:
+    objective: Support only proven checkpoint-compatible forks and exact effect recovery.
+    work:
+      - add versioned MigrationPlan and compatibility diagnostics
+      - cover channels, continuations, barriers, pending work, retry, cancellation,
+        interrupt, budget, authority, checkpoints, journal, effects, caches, and output
+      - extend the minimal ProgramJournal with migration publication and durable effect outbox boundaries
+      - implement narrow compatible mappings; reject everything else by default
+      - add operator reconciliation state for ambiguous non-idempotent effects
+    tests_first:
+      - migration compatibility matrix
+      - crash before/after source checkpoint, target publication, and effect commit
+      - rejected migration preserves source-visible state, published lineage, journal, and effects; unreferenced immutable attempt records are GC-safe
+      - replay reproduces transitions without live effects
+      - resume, fork, and replacement preserve remaining budget and authority
+    exit:
+      - one compatible fork succeeds with full lineage
+      - every incompatible case receives an explicit classification
+      - no false success or silent redispatch is observed under crash injection
+
+  P6_child_programs_and_modules:
+    objective: Add bounded hierarchical composition and verified reusable modules.
+    work:
+      - add typed parent/child ports and child handles
+      - compile/admit children before dispatch
+      - enforce depth/count/budget/authority attenuation
+      - add immutable module coordinates, dependency resolver, and compile receipts
+      - require whole-Program compile after module composition
+      - add revocation, quarantine, deprecation, and reference-aware retention
+    tests_first:
+      - child expansion denial matrix
+      - parent cancellation drains child callbacks before destruction
+      - incompatible individually valid modules fail whole-Program compile
+      - dependency cycles, unpinned imports, hidden effects, and collisions fail closed
+      - lineage visualization and replay include every child and module version
+    exit:
+      - representative Program composes and invokes a verified child module
+      - no child can mutate parent state or widen authority directly
+
+  P7_tenant_and_capability_boundary:
+    objective: Make the Program control plane safe for multi-tenant use.
+    work:
+      - finish tenant-scoped stores, providers, tools, credentials, caches, quotas, and IDs
+      - separate publish/admit/activate permissions from run permission
+      - require authenticated publishers and module attestations
+      - reject ambient host-login, global MCP, and OS-user CLI authority in multi-tenant mode
+      - add authenticated tenant brokers where product requirements justify them
+      - bind brokered/trusted-native classification to host-signed allowlists and implementation digests
+      - reject or out-of-process isolate untrusted native executable code
+    tests_first:
+      - cross-tenant CRUD/run/resume/replay/fork/cancel/artifact matrix
+      - credential, provider, tool, cache, and budget isolation
+      - policy revocation during admission and while pinned runs drain
+      - forged publisher, stale attestation, and revoked dependency rejection
+      - forged brokered classification and implementation-digest substitution fail closed
+    exit:
+      - two tenants safely share one process with no observable cross-scope access
+
+  P8_public_sdk_and_v1_cutover:
+    objective: Converge every adapter and freeze the v1 public contract.
+    work:
+      - remove or deprecate pre-v1 Core construction mutators per ABI policy
+      - publish standard Core and Program quickstarts
+      - classify every existing example and cookbook entry as Core-kept, Program-ported, protocol-adapter-ported, historical-only, or removed with rationale
+      - compile every retained example and smoke-test representative SQLite, PostgreSQL, MCP, A2A, ACP, and gRPC examples when enabled
+      - expose Harness as a Program application/service
+      - make MCP, HTTP, CLI, selected Python, A2A, ACP, and gRPC surfaces thin adapters
+      - remove historical ControlVm and superseded VM schemas/docs
+      - migrate or explicitly drain retained legacy artifacts
+      - synchronize CMake exports, headers, schemas, changelog, and translations
+      - preserve the dependency baseline or land each approved substitution as a separate evidenced architecture decision
+    python_binding_decision:
+      implement:
+        - Program compile/run/checkpoint/activation/lineage operations that cannot
+          be reproduced by ordinary Python libraries
+      do_not_duplicate:
+        - generic JSON editing
+        - JSON Schema construction
+        - provider SDK configuration already handled naturally by provider SDKs
+      revisit_when:
+        - missing binding prevents cancellation, checkpoint, replay, tool policy,
+          activation, or lifecycle integration
+    exit:
+      - one public C++ quickstart for Core and one for Program
+      - every existing example and cookbook has an explicit disposition and every retained entry has build/run proof
+      - all supported transports pass the same Program conformance suite plus protocol-specific wire tests
+      - enabled SQLite and PostgreSQL stores pass the same backend-neutral persistence suite
+      - dependency baseline is unchanged or every substitution has separate approval, evidence, and complete old-stack removal
+      - announced rebuild and stored-data migration boundary is complete
+
+  P9_release_gate:
+    objective: Prove behavior, performance, compatibility, and packaging before 1.0.
+    required_evidence:
+      - focused behavior and conformance tests
+      - full available CTest
+      - ASan and UBSan full available suite
+      - applicable TSan concurrency and teardown stress
+      - persistence crash/restart/replay matrix
+      - installed static/shared consumers on supported platforms
+      - wheel import and selected Program binding smoke tests
+      - Core and Program performance report with raw samples and variance
+      - security review of tenant, capability, module, and effect boundaries
+      - independent code review and independent final verification
+    exit:
+      - zero unresolved blocking invariant
+      - zero contradictory public contract
+      - all preregistered budgets evaluated without hiding negative results
+      - v1 ABI and storage schemas frozen
+
+migration_rules:
+  default: clean cutover within the pre-v1 redesign branch
+  preserve:
+    - strict Core JSON semantics
+    - GraphEngine direct-use path
+    - checkpoint and replay meaning for compatible retained data
+    - stable MCP wire behavior during the announced adapter window
+  translate:
+    HarnessAdmissionProfile: program::AdmissionProfile
+    retained_harness_artifact: program::ProgramBundle_or_explicit_legacy_record
+    Harness_service_methods: program_public_API_plus_transport_adapter
+    bounded_Harness_DSL: program::ProgramSource_frontend
+    GraphProgramVersion_proposal: program::ProgramVersion
+  retire_after_equivalence:
+    - ControlVm production direction
+    - programmable-harness VM integration specification
+    - Harness-local compiler/runtime semantics
+    - process-global executable registry fallback for admitted programs
+  never:
+    - reinterpret incompatible checkpoints
+    - retain two permanent public names for one concept
+    - add source-level shims after all callers migrate
+    - silently widen capabilities or reset budgets
+
+change_discipline:
+  branch_policy: isolated worktree per implementation slice
+  author_review_separation: required
+  tests_before_fix: required for every behavioral contract
+  performance_frequency: compare to pinned baseline at least every three performance-relevant commits and before integration
+  merge_unit: one independently revertible phase or narrow subphase
+  documentation: update only after the behavior is smoke-tested, except this architecture contract

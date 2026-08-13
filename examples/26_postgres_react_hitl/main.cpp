@@ -25,13 +25,12 @@
 //   ./example_postgres_react_hitl status <thread_id>
 //
 // Required environment (read from process env or ./.env via cppdotenv):
-//   ANTHROPIC_API_KEY  Claude API key
-//   POSTGRES_URL       libpq connection string
-//                      e.g. postgresql://postgres:test@localhost:55432/neograph
+//   OPENROUTER_API_KEY  OpenRouter API key
+//   POSTGRES_URL        libpq connection string
+//                       e.g. postgresql://postgres:test@localhost:55432/neograph
 //
 // Optional environment:
-//   CRAWL4AI_URL       defaults to http://localhost:11235
-//   DR_MODEL           defaults to claude-sonnet-4-5
+//   CRAWL4AI_URL        defaults to http://localhost:11235
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
@@ -87,7 +86,10 @@ static std::string url_encode(const std::string& s) {
 
 class Crawl4AIClient {
 public:
-    explicit Crawl4AIClient(std::string base_url) : base_url_(std::move(base_url)) {}
+    explicit Crawl4AIClient(std::string base_url, std::string api_token = {})
+        : base_url_(std::move(base_url))
+        , api_token_(std::move(api_token)) {}
+
     std::string fetch_markdown(const std::string& url,
                                const std::string& query_hint = {}) const {
         json body = json::object();
@@ -100,10 +102,19 @@ public:
         httplib::Client cli(host);
         cli.set_read_timeout(60, 0);
         cli.set_connection_timeout(15, 0);
-        auto res = cli.Post(prefix + "md", body.dump(), "application/json");
+
+        httplib::Headers headers;
+        if (!api_token_.empty()) {
+            headers.emplace("Authorization", "Bearer " + api_token_);
+        }
+        auto res = cli.Post(prefix + "md", headers, body.dump(), "application/json");
+
         if (!res) throw std::runtime_error(
             "Crawl4AI connection failed: " + httplib::to_string(res.error()) +
             " (is the crawl4ai container reachable at " + base_url_ + "?)");
+        if (res->status == 401 && api_token_.empty()) throw std::runtime_error(
+            "Crawl4AI /md requires CRAWL4AI_API_TOKEN; configure the same "
+            "bearer token for the client and server");
         if (res->status != 200) throw std::runtime_error(
             "Crawl4AI /md returned HTTP " + std::to_string(res->status) +
             ": " + res->body);
@@ -114,6 +125,7 @@ public:
     }
 private:
     std::string base_url_;
+    std::string api_token_;
 };
 
 class WebSearchTool : public Tool {
@@ -194,9 +206,9 @@ struct AppCtx {
 };
 
 static AppCtx build_app(bool with_human_review) {
-    const char* api_key = std::getenv("ANTHROPIC_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) throw std::runtime_error(
-        "ANTHROPIC_API_KEY missing (process env or ./.env)");
+        "OPENROUTER_API_KEY missing (process env or ./.env)");
     const char* pg_url = std::getenv("POSTGRES_URL");
     if (!pg_url) throw std::runtime_error(
         "POSTGRES_URL missing (process env or ./.env). "
@@ -204,20 +216,23 @@ static AppCtx build_app(bool with_human_review) {
 
     const char* crawl_env = std::getenv("CRAWL4AI_URL");
     std::string crawl_url = crawl_env ? crawl_env : "http://localhost:11235";
+    const char* crawl_token_env = std::getenv("CRAWL4AI_API_TOKEN");
+    const std::string crawl_token = crawl_token_env ? crawl_token_env : "";
 
-    const char* model_env = std::getenv("DR_MODEL");
-    std::string model = model_env ? model_env : "claude-sonnet-4-5";
+    const std::string model = "deepseek/deepseek-v4-flash-0731";
 
-    auto raw_claude = llm::SchemaProvider::create({
-        .schema_path     = "claude",
-        .api_key         = api_key,
-        .default_model   = model,
-        .timeout_seconds = 120
+    auto raw_openrouter = llm::SchemaProvider::create({
+        .schema_path       = "openai_responses",
+        .api_key           = api_key,
+        .default_model     = model,
+        .timeout_seconds   = 120,
+        .base_url_override = "https://openrouter.ai/api",
+        .provider_routing  = {{"zdr", true}}
     });
     std::shared_ptr<Provider> provider =
-        llm::RateLimitedProvider::create(std::move(raw_claude));
+        llm::RateLimitedProvider::create(std::move(raw_openrouter));
 
-    auto crawl = std::make_shared<Crawl4AIClient>(crawl_url);
+    auto crawl = std::make_shared<Crawl4AIClient>(crawl_url, crawl_token);
     std::vector<std::unique_ptr<Tool>> tools;
     tools.push_back(std::make_unique<WebSearchTool>(crawl));
     tools.push_back(std::make_unique<FetchUrlTool>(crawl));
@@ -285,9 +300,8 @@ static int print_usage() {
         "  example_postgres_react_hitl resume <thread_id> \"approve|feedback\"\n"
         "  example_postgres_react_hitl status <thread_id>\n"
         "\n"
-        "Required env: ANTHROPIC_API_KEY, POSTGRES_URL.\n"
-        "Optional env: CRAWL4AI_URL (default http://localhost:11235),\n"
-        "              DR_MODEL (default claude-sonnet-4-5).\n";
+        "Required env: OPENROUTER_API_KEY, POSTGRES_URL.\n"
+        "Optional env: CRAWL4AI_URL (default http://localhost:11235).\n";
     return 2;
 }
 

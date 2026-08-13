@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fox1245.github.io/NeoGraph/spec/program-journal-v1.schema.json",
+  "title": "NeoGraph Program Journal Record v1",
+  "description": "One immutable, content-addressed Program continuation and budget record. Cross-record sequence, identity, transition, and monotone-budget invariants are enforced atomically by ProgramJournal::compare_append.",
+  "type": "object",
+  "required": [
+    "format",
+    "storage_schema_version",
+    "id",
+    "previous_id",
+    "run_id",
+    "program_version_id",
+    "bundle_id",
+    "sequence",
+    "continuation",
+    "remaining_budget",
+    "inflight_reservation",
+    "core_checkpoint",
+    "timestamp_ms"
+  ],
+  "properties": {
+    "format": {"const": "neograph-program-journal-record"},
+    "storage_schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/sha256_identity"},
+    "previous_id": {
+      "anyOf": [
+        {"const": ""},
+        {"$ref": "#/$defs/sha256_identity"}
+      ]
+    },
+    "run_id": {"$ref": "#/$defs/token"},
+    "program_version_id": {"$ref": "#/$defs/sha256_identity"},
+    "bundle_id": {"$ref": "#/$defs/sha256_identity"},
+    "sequence": {"$ref": "#/$defs/uint64_positive"},
+    "continuation": {"$ref": "#/$defs/continuation"},
+    "remaining_budget": {"$ref": "#/$defs/budget"},
+    "inflight_reservation": {
+      "$ref": "#/$defs/budget",
+      "$comment": "Each dimension is additionally required by the C++ value validator to be no greater than the matching remaining_budget dimension."
+    },
+    "core_checkpoint": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/core_checkpoint"}
+      ]
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"sequence": {"const": 1}},
+        "required": ["sequence"]
+      },
+      "then": {
+        "properties": {
+          "previous_id": {"const": ""},
+          "continuation": {
+            "properties": {
+              "operation_id": {"const": "root"},
+              "state": {"const": "running"},
+              "attempt": {"const": 1}
+            }
+          },
+          "core_checkpoint": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "previous_id": {"$ref": "#/$defs/sha256_identity"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "continuation": {
+            "properties": {"state": {"not": {"const": "running"}}},
+            "required": ["state"]
+          }
+        },
+        "required": ["continuation"]
+      },
+      "then": {
+        "properties": {
+          "inflight_reservation": {"$ref": "#/$defs/zero_budget"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "continuation": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "interrupted",
+                  "completed",
+                  "budget_exhausted",
+                  "checkpoint_incompatible"
+                ]
+              }
+            },
+            "required": ["state"]
+          }
+        },
+        "required": ["continuation"]
+      },
+      "then": {
+        "properties": {
+          "core_checkpoint": {"$ref": "#/$defs/core_checkpoint"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "sequence": {"minimum": 2},
+          "continuation": {
+            "properties": {"state": {"const": "running"}},
+            "required": ["state"]
+          }
+        },
+        "required": ["sequence", "continuation"]
+      },
+      "then": {
+        "properties": {
+          "core_checkpoint": {"$ref": "#/$defs/core_checkpoint"}
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "sha256_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^(?! )[^\\u0000-\\u001f\\u007f]*[^ \\u0000-\\u001f\\u007f]$"
+    },
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "uint64_positive": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "uint32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "child_depth": { "type": "integer", "minimum": 0, "maximum": 8 },
+    "continuation": {
+      "type": "object",
+      "required": ["operation_id", "state", "attempt"],
+      "properties": {
+        "operation_id": {"const": "root"},
+        "state": {
+          "enum": [
+            "running",
+            "interrupted",
+            "completed",
+            "cancelled",
+            "budget_exhausted",
+            "timed_out",
+            "failed",
+            "checkpoint_incompatible"
+          ]
+        },
+        "attempt": {"$ref": "#/$defs/uint64_positive"}
+      },
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "required": [
+        "wall_time_ms",
+        "model_tokens",
+        "monetary_microunits",
+        "max_concurrency",
+        "max_program_operations",
+        "max_core_steps",
+        "max_dynamic_compiles",
+        "max_child_depth",
+        "max_total_children"
+      ],
+      "properties": {
+        "wall_time_ms": {"$ref": "#/$defs/uint64"},
+        "model_tokens": {"$ref": "#/$defs/uint64"},
+        "monetary_microunits": {"$ref": "#/$defs/uint64"},
+        "max_concurrency": {"$ref": "#/$defs/uint32"},
+        "max_program_operations": {"$ref": "#/$defs/uint64"},
+        "max_core_steps": {"$ref": "#/$defs/uint64"},
+        "max_dynamic_compiles": {"$ref": "#/$defs/uint64"},
+        "max_child_depth": {"$ref": "#/$defs/child_depth"},
+        "max_total_children": {"$ref": "#/$defs/uint64"}
+      },
+      "additionalProperties": false
+    },
+    "zero_budget": {
+      "type": "object",
+      "required": [
+        "wall_time_ms",
+        "model_tokens",
+        "monetary_microunits",
+        "max_concurrency",
+        "max_program_operations",
+        "max_core_steps",
+        "max_dynamic_compiles",
+        "max_child_depth",
+        "max_total_children"
+      ],
+      "properties": {
+        "wall_time_ms": {"const": 0},
+        "model_tokens": {"const": 0},
+        "monetary_microunits": {"const": 0},
+        "max_concurrency": {"const": 0},
+        "max_program_operations": {"const": 0},
+        "max_core_steps": {"const": 0},
+        "max_dynamic_compiles": {"const": 0},
+        "max_child_depth": {"const": 0},
+        "max_total_children": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "core_checkpoint": {
+      "type": "object",
+      "required": [
+        "core_name",
+        "core_generation_id",
+        "core_thread_id",
+        "checkpoint_id",
+        "checkpoint_schema_version"
+      ],
+      "properties": {
+        "core_name": {"$ref": "#/$defs/token"},
+        "core_generation_id": {"$ref": "#/$defs/sha256_identity"},
+        "core_thread_id": {"$ref": "#/$defs/token"},
+        "checkpoint_id": {"$ref": "#/$defs/token"},
+        "checkpoint_schema_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

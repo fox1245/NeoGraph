@@ -1,30 +1,26 @@
-// NeoGraph Example 33: OpenAI Responses API over WebSocket
+// NeoGraph Example 33: OpenRouter Responses API transport toggle
 //
-// Same ReAct loop as example 13, but the streaming path runs over
-// wss://api.openai.com/v1/responses instead of HTTP/SSE. Toggle is
-// a single Config field — no caller code changes.
+// Same ReAct loop as example 13, but the provider is explicitly configured
+// for OpenRouter's Responses-compatible endpoint. Toggle is a single Config
+// field — no caller code changes.
 //
-// Per OpenAI's docs (developers.openai.com/api/docs/guides/websocket-mode)
-// this transport claims ~40% lower end-to-end latency on agentic
-// rollouts with 20+ tool calls, because the connection-local response
-// state cache avoids a full HTTP setup per turn.
+// OpenRouter's Responses endpoint currently documents SSE. This example keeps
+// the WebSocket flag visible and disabled so the active path is reproducible.
+// The connection still exercises the same schema-driven agent path.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_openai_responses_ws
 //
 // Troubleshooting — if you get
 //   "openai-responses ws: server closed before response.completed (close=1000)"
 // the TLS handshake + Upgrade succeeded but the server sent no events
 // before closing normally. Most likely causes, in order of frequency:
-//   1. Your API key / org doesn't have WebSocket-mode access yet (the
-//      feature is gated; HTTP /v1/responses on the same key may still
-//      work).
-//   2. The selected model isn't WS-enabled. Try a frontier model the
-//      docs example uses rather than gpt-4o-mini.
-//   3. A required beta header has been added since this example
-//      shipped; check the live docs and pass it via a future Config
-//      field if so.
+//   1. The OpenRouter account/model route does not expose the requested
+//      transport yet; HTTP/SSE on the same key may still work.
+//   2. The selected DeepSeek route does not support the requested transport.
+//   3. A required provider header or capability has changed; validate the
+//      HTTP Responses example first to isolate transport from account issues.
 // Validate the same key/model with the HTTP example (13_openai_responses)
 // first to isolate transport vs account issues.
 
@@ -64,9 +60,9 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-        const char* api_key = std::getenv("OPENAI_API_KEY");
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENAI_API_KEY environment variable "
+            std::cerr << "Set OPENROUTER_API_KEY environment variable "
                          "(or put it in .env beside the binary)\n";
             return 1;
         }
@@ -74,10 +70,11 @@ int main() {
         neograph::llm::SchemaProvider::Config config;
         config.schema_path   = "openai_responses";
         config.api_key       = api_key;
-        config.default_model = "gpt-4o-mini";
-        // The single line that swaps SSE for WebSocket transport.
-        config.use_websocket = true;
-
+        config.base_url_override = "https://openrouter.ai/api";
+        config.default_model = "deepseek/deepseek-v4-flash-0731";
+        config.provider_routing = {{"zdr", true}};
+        // OpenRouter Responses currently documents SSE, not WebSocket.
+        config.use_websocket = false;
         auto provider = neograph::llm::SchemaProvider::create(config);
 
         std::vector<std::unique_ptr<neograph::Tool>> tools;

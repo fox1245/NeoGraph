@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=beca50aa71f45489f6f78556e6a7225c04c3891ac9c093f5aeda1a4fe50a0620 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=db24e5932e8c6357d88b133d6230abaaffdeeb4c0cf8453e7afd97d0dae66e76 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # NeoGraph 대 Python graph/pipeline 프레임워크 — 엔진 오버헤드 벤치마크
@@ -234,16 +234,51 @@ AutoGen은 상당한 나무를 가져옵니다).
 독립형 벤치 명령이 사용한 것; CMake 빌드는 항상
 `Release`를 `-O3`로 해결했습니다.
 
-## 낳다
+## Reproduce
 
 ```bash
-# Build NeoGraph (Release — MUST set BUILD_TYPE explicitly; the
-# empty default configures the build without -O3):
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_BUILD_BENCHMARKS=ON
-cmake --build build --target bench_neograph -j
+# Build native Core + v1 Program benchmarks (Release is required for
+# representative timings; the default CMake build type is not optimized).
+cmake -B build-program-bench -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_ASYNC=ON
+cmake --build build-program-bench --target \
+    bench_neograph bench_program bench_program_dispatch \
+    bench_program_serialization_poc bench_program_binary_poc -j
 
-./build/bench_neograph                   # defaults: seq=10000, par=5000
+# Positional arguments are iterations, warmup runs, and measured samples.
+# bench_neograph additionally accepts par_workers before warmup/samples.
+# bench_program's optional fourth argument measures closed-batch outer-run concurrency.
+# Its burst rows are throughput-equivalent time, not individual request latency.
+./build-program-bench/bench_neograph 10000 5000 1 10 5
+./build-program-bench/bench_neograph 10000 5000 auto 10 5
+./build-program-bench/bench_program 1000 10 5
+./build-program-bench/bench_program 1000 10 5 8
+./build-program-bench/bench_program_dispatch 100000 10 5
+./build-program-bench/bench_program_serialization_poc 25 100
+./build-program-bench/bench_program_binary_poc 25 100
 
+# Build the opt-in protobuf/Cap'n Proto transport-envelope experiment.
+# This target alone requires protoc/libprotobuf and capnp/libcapnp.
+cmake -S . -B build-program-codec-poc -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_PROGRAM_CODEC_POC=ON
+cmake --build build-program-codec-poc --target bench_program_codec_poc -j
+taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
+```
+
+Each native benchmark prints `config`, `runtime`, `header`, and `result`
+records. Report the median of the measured samples after the explicit warmup;
+do not compare a single short run. `bench_program` uses in-memory stores and
+no provider/network calls. `bench_program_dispatch` measures only immutable
+`ProgramPlan` lookup and descriptor traversal, not Core execution.
+
+The Python framework comparison remains optional and requires third-party
+packages:
+
+```bash
 # Shared Python venv for every Python framework:
 python3 -m venv /tmp/bench_venv
 /tmp/bench_venv/bin/pip install \
@@ -261,13 +296,19 @@ python3 -m venv /tmp/bench_venv
 /tmp/bench_venv/bin/python benchmarks/bench_autogen.py        10000 5000
 
 # Peak RSS + wall time:
-/usr/bin/time -f "%e s, %M KB" ./build/bench_neograph
+/usr/bin/time -f "%e s, %M KB" ./build-program-bench/bench_neograph
 ```
 
-출력 형식은 `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us`입니다.
-모든면에서 차이점을 찾는 것은 사소한 일입니다.
+The service-backed checkpoint, HTTP, and concurrent Docker benchmarks are
+separate experiments; they are not required for the deterministic native
+Core/Program run above.
 
-## 2026-04-19 번호에 사용된 환경
+Output format is tab-separated `config`, `runtime`, `header`, `result`, or
+`metric` records. The native result rows contain median total time and
+per-iteration time; Python scripts retain their historical
+`workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` rows.
+
+## Environment used for the 2026-04-19 numbers
 
 ```
 OS:        Linux 6.6.87.2-microsoft-standard-WSL2 (Ubuntu 24.04 userland)
@@ -278,5 +319,5 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
            llama-index-core 0.14.20, autogen-agentchat 0.7.5
 ```
 
-숫자는 하드웨어에 따라 다르지만 비율은 안정적이어야 합니다.
-~20% 이내.
+Numbers will vary on your hardware, but the ratios should be stable to
+within ~20%.

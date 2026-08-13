@@ -11,9 +11,11 @@
  *   - POST /                                — JSON-RPC dispatcher
  *
  * Methods:
- *   - message/send    — sync round-trip (graph runs, response wrapped as Task)
- *   - message/stream  — SSE-framed status updates while graph runs
- *   - tasks/get       — recall a Task from the in-memory store
+ *   - message/send    — sync round-trip (GraphEngine or ProgramRuntime,
+ *                        response wrapped as Task)
+ *   - message/stream  — SSE-framed status updates while a run executes
+ *   - tasks/get       — recall a Task, reconnecting Program-backed runs when
+ *                        their durable transition record is available
  *   - tasks/cancel    — request cancellation (stops further super-steps)
  *
  * Built on httplib (already a dep) — one OS thread per connection,
@@ -25,13 +27,30 @@
 #include <neograph/a2a/types.h>
 #include <neograph/graph/engine.h>
 
+#ifdef NEOGRAPH_A2A_PROGRAM
+#include <neograph/a2a/collaboration.h>
+#include <neograph/a2a/program_adapter.h>
+#endif
+
 #include <functional>
 #include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+namespace neograph::program {
+class ProgramRuntime;
+class ProgramVersion;
+}  // namespace neograph::program
+#endif
 
 namespace neograph::a2a {
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+class ProgramAgentAdapter;
+#endif
 
 #ifdef NEOGRAPH_A2A_TESTING
 namespace test { class A2AServerTestAccess; }
@@ -96,6 +115,10 @@ class NEOGRAPH_API StructuredOutputAdapter final : public GraphAgentAdapter {
  * a2a::A2AServer server(my_engine, card);
  * server.start("0.0.0.0", 8080);   // blocks until stop()
  * @endcode
+ *
+ * When NEOGRAPH_BUILD_PROGRAM is enabled, the ProgramAgentAdapter overload
+ * projects an admitted ProgramVersion through ProgramRuntime while retaining
+ * the same JSON-RPC methods and legacy GraphEngine constructor.
  */
 class NEOGRAPH_API A2AServer {
   public:
@@ -105,6 +128,36 @@ class NEOGRAPH_API A2AServer {
     A2AServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
               AgentCard card,
               std::shared_ptr<GraphAgentAdapter> adapter = {});
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+    /// Expose one admitted ProgramVersion through the existing A2A surface.
+    /// The overload keeps legacy GraphEngine construction source-compatible.
+    /**
+     * Resolve the HTTP Authorization header into an identity the application
+     * has authenticated. The server never retains the header or credentials.
+     * Collaboration envelopes require a non-empty, matching result; ordinary
+     * legacy A2A messages retain their existing unauthenticated behavior.
+     */
+    using CollaborationAuthenticator = std::function<std::optional<CollaborationPeerIdentity>(
+        std::string_view authorization_header)>;
+
+    A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
+              AgentCard card,
+              CollaborationAuthenticator collaboration_authenticator = {});
+
+    A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
+              neograph::program::ProgramVersion version,
+              std::string owner_scope,
+              AgentCard card,
+              std::shared_ptr<CollaborationMailbox> mailbox = {},
+              CollaborationAuthenticator collaboration_authenticator = {});
+    A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
+              neograph::program::ProgramVersion version,
+              AgentCard card,
+              std::string owner_scope,
+              std::shared_ptr<CollaborationMailbox> mailbox = {},
+              CollaborationAuthenticator collaboration_authenticator = {});
+#endif
 
     ~A2AServer();
 

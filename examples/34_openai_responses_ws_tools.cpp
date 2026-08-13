@@ -1,9 +1,10 @@
-// NeoGraph Example 34: OpenAI Responses-API built-in tools tour over WebSocket
+// NeoGraph Example 34: OpenRouter Responses-compatible built-in tools tour
+// over WebSocket.
 //
-// Walks every tool type the Responses API exposes — custom function,
+// Walks every tool type the OpenRouter Responses API exposes — custom function,
 // web_search, image_generation, file_search, tool_search, skills,
 // shell — by sending one `response.create` per section over a fresh
-// wss://api.openai.com/v1/responses connection and printing what
+// `wss://openrouter.ai/api/v1/responses` connection and printing what
 // comes back.
 //
 // Talks to neograph::async::ws_connect directly (no SchemaProvider)
@@ -14,11 +15,11 @@
 //
 // Sections that need extra setup are gated on env vars and skip
 // gracefully when missing:
-//   - file_search:     OPENAI_VECTOR_STORE_ID  (a pre-built store)
-//   - skills (custom): OPENAI_SKILL_ID         (override the curated default)
+//   - file_search:     OPENROUTER_VECTOR_STORE_ID (a pre-built store)
+//   - skills (custom): OPENROUTER_SKILL_ID         (override the curated default)
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_openai_responses_ws_tools
 //
 // Each section:
@@ -27,7 +28,7 @@
 //   - drains events until response.completed (or error / close)
 //   - prints a one-line summary + any tool-specific output
 
-#include <neograph/async/ws_client.h>
+#include <neograph/async/http_client.h>
 #include <neograph/json.h>
 
 #include <neograph/async/run_sync.h>
@@ -42,6 +43,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -123,22 +125,11 @@ void render(const std::string& section, const Summary& s) {
 // codegen and trips an internal compiler error
 // (build_special_member_call at cp/call.cc:11096).
 [[gnu::noinline]]
-bool consume_event(const ws::WsMessage& msg, Summary& out) {
-    if (msg.op == ws::WsOpcode::Close) {
-        out.closed_early = true;
-        if (msg.payload.size() >= 2) {
-            out.close_code =
-                (static_cast<unsigned char>(msg.payload[0]) << 8) |
-                 static_cast<unsigned char>(msg.payload[1]);
-            if (msg.payload.size() > 2)
-                out.close_reason = msg.payload.substr(2);
-        }
-        return true;
-    }
+bool consume_event(std::string_view payload, Summary& out) {
     out.events++;
 
     json j;
-    try { j = json::parse(msg.payload); }
+    try { j = json::parse(payload); }
     catch (const std::exception&) { return false; }
 
     std::string type = j.value("type", std::string{});
@@ -167,8 +158,6 @@ bool consume_event(const ws::WsMessage& msg, Summary& out) {
         out.fn_call_args += j.value("delta", std::string{});
         return false;
     }
-    // image_generation events: partial_image (base64 chunks) or a
-    // single non-partial run delivered inside response.completed.
     if (type.rfind("response.image_generation", 0) == 0) {
         out.image_chunks++;
         std::string b64 = j.value("partial_image_b64", std::string{});
@@ -183,10 +172,7 @@ bool consume_event(const ws::WsMessage& msg, Summary& out) {
         out.server_error = m;
         return true;
     }
-    if (type == "response.completed") {
-        return true;
-    }
-    return false;
+    return type == "response.completed";
 }
 
 // GCC 13 has two coroutine codegen bugs that have to be dodged here
@@ -206,13 +192,54 @@ asio::awaitable<void> run_section(
     std::string_view api_key,
     std::string_view body_json,
     Summary* out) {
-    auto wsc = co_await ws::ws_connect(
-        ex, "api.openai.com", "443", "/v1/responses",
-        {{"Authorization", "Bearer " + std::string{api_key}}},
-        /*tls=*/true);
-    co_await wsc->send_text(std::string{body_json});
-    while (true) {
-        if (consume_event(co_await wsc->recv(), *out)) break;
+    json request = json::parse(std::string{body_json});
+    request["model"] = "deepseek/deepseek-v4-flash-0731";
+    request["stream"] = true;
+    request["provider"] = {{"zdr", true}};
+
+    std::string pending;
+    bool done = false;
+    auto process_event = [&](std::string_view event) {
+        const auto data_pos = event.find("data:");
+        if (data_pos == std::string_view::npos || done) return;
+        std::string payload(event.substr(data_pos + 5));
+        while (!payload.empty() &&
+               (payload.front() == ' ' || payload.front() == '\t')) {
+            payload.erase(payload.begin());
+        }
+        while (!payload.empty() &&
+               (payload.back() == '\r' || payload.back() == '\n' ||
+                payload.back() == ' ')) {
+            payload.pop_back();
+        }
+        if (payload == "[DONE]") {
+            done = true;
+            return;
+        }
+        if (consume_event(payload, *out)) done = true;
+    };
+
+    std::vector<std::pair<std::string, std::string>> headers = {
+        {"Authorization", "Bearer " + std::string{api_key}},
+        {"Content-Type", "application/json"},
+    };
+    ws::RequestOptions opts;
+    opts.timeout = std::chrono::seconds(120);
+    auto response = co_await ws::async_post_stream(
+        ex, "openrouter.ai", "443", "/api/v1/responses",
+        request.dump(), std::move(headers), /*tls=*/true,
+        [&](std::string_view chunk) {
+            pending.append(chunk.data(), chunk.size());
+            std::size_t separator = 0;
+            while ((separator = pending.find("\n\n")) != std::string::npos) {
+                const std::string event = pending.substr(0, separator);
+                pending.erase(0, separator + 2);
+                process_event(event);
+            }
+        }, opts);
+    if (!pending.empty()) process_event(pending);
+    if (response.status != 200 && out->server_error.empty()) {
+        out->server_error = "HTTP " + std::to_string(response.status);
     }
     co_return;
 }
@@ -232,9 +259,9 @@ using namespace tools_demo;
 
 int main() {
     cppdotenv::auto_load_dotenv();
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set OPENAI_API_KEY (or put it in .env)\n";
+        std::cerr << "Set OPENROUTER_API_KEY (or put it in .env)\n";
         return 1;
     }
 
@@ -249,11 +276,7 @@ int main() {
 
     std::vector<Section> sections;
 
-    // Use gpt-5.4 throughout — it's the only model in the docs that
-    // supports tool_search and skills+shell, and it accepts every
-    // other tool listed below. gpt-4o-mini works for most but not
-    // tool_search.
-    const std::string MODEL = "gpt-5.4";
+    const std::string MODEL = "deepseek/deepseek-v4-flash-0731";
 
     sections.push_back({
         "function (custom calculator)",
@@ -324,7 +347,7 @@ int main() {
     sections.push_back({
         "file_search",
         [&]{
-            const char* vs = std::getenv("OPENAI_VECTOR_STORE_ID");
+            const char* vs = std::getenv("OPENROUTER_VECTOR_STORE_ID");
             json body;
             body["model"] = MODEL;
             body["input"] = user_input(
@@ -340,14 +363,14 @@ int main() {
             return body;
         },
         []{
-            return std::getenv("OPENAI_VECTOR_STORE_ID")
+            return std::getenv("OPENROUTER_VECTOR_STORE_ID")
                 ? std::string{}
-                : std::string{"set OPENAI_VECTOR_STORE_ID to a pre-built store"};
+                : std::string{"set OPENROUTER_VECTOR_STORE_ID to a pre-built store"};
         },
     });
 
     sections.push_back({
-        "tool_search (gpt-5.4+ only)",
+        "tool_search (OpenRouter DeepSeek)",
         [&]{
             json body;
             body["model"] = MODEL;
@@ -395,7 +418,7 @@ int main() {
     sections.push_back({
         "skills (mounted in shell.environment)",
         [&]{
-            const char* skill_id = std::getenv("OPENAI_SKILL_ID");
+            const char* skill_id = std::getenv("OPENROUTER_SKILL_ID");
             json body;
             body["model"] = MODEL;
             body["input"] = user_input(

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=5822dcf16aca038ab00fde8ea9ffb59be2f05e725c5feeef8c4d61ef86a2742b -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=0c6d156e7378f114498c63578e7981c6401394ada5684fc924fb72ec7c867849 -->
 # 自己進化するチャットボット
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -40,8 +40,8 @@ LangChain/LangGraph の StateGraph は Python クラス インスタンスです
 
 ## コアメカニズム
 
-各ターンの終了時に、LLM ジャッジ (gpt-4o-mini) は会話履歴と現在の会話を調べます。
-トポロジーを作成し、一言で最適な値を返します。
+各ターンの終了時、OpenRouter の固定 DeepSeek モデルが LLM ジャッジとして
+会話履歴と現在のトポロジーを調べ、最適な値を一言で返します。
 
 - `simple` — 1 LLM コール、短い直接応答 (事実上の Q に適しています)
 - `reflexive` — 3 つの LLM コール (ドラフト → 批評 → 最終) (正確さを求めるのに適しています)
@@ -205,10 +205,10 @@ if (turn % EVAL_INTERVAL == 0) {
 
 - **防振ガード** — イブケースに対応します。過去Nターン以内に進化した場合はロックアウト、
   またはヒステリシス (現在のトポロジが次の候補より N% 低くない場合は変更されません)。
-- **LLM によって生成されたgraph_def** — 現在、3 つの事前定義されたトポロジから選択されます。
-  さらに野心的なのは、LLM がgraph_def JSON を最初から生成することです。 NG
-  [v0.5.0 example 23 evolving chat agent](../../23_*.cpp)フォーク+
-  メタアセンブリパターンはこの方向に進みます。
+- **LLM によって生成された graph_def** — 現在は 3 つの事前定義トポロジから選択します。
+  graph_def JSON を最初から生成する例は
+  [`the-beast/`](../the-beast/) cookbook のモデル作成トポロジと
+  コンパイル/検証ゲートを参照してください。
 - **顧客の並列処理** — 連続デモ 7 分、顧客あたりの並列処理 = ~1.5 分。
   `asio::thread_pool` + コンパイル キャッシュを直接使用します。
 - **A/B フレームワーク** — 同じ顧客に対して 2 つのトポロジを同時に運用し、勝者を決定します。

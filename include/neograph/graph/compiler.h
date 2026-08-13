@@ -15,9 +15,10 @@
 #pragma once
 
 #include <neograph/api.h>
-#include <neograph/graph/types.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/scheduler.h>
+#include <neograph/graph/types.h>
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -31,6 +32,18 @@ namespace neograph::graph {
 inline constexpr int TOPOLOGY_SCHEMA_VERSION = 1;
 
 class GraphRegistry;
+/**
+ * @brief One stable, machine-readable compiler finding.
+ *
+ * json_pointer is an RFC 6901 pointer into the authored document. Messages
+ * remain compatibility-oriented human text and must not be parsed by callers.
+ */
+struct NEOGRAPH_API CompilerDiagnostic {
+    std::string code;
+    std::string json_pointer;
+    std::string message;
+    json        witness;
+};
 
 class GraphNode;
 
@@ -41,15 +54,20 @@ class GraphNode;
  * it independently of the engine.
  */
 struct ChannelDef {
-    std::string  name;
-    ReducerType  type = ReducerType::OVERWRITE;
-    std::string  reducer_name = "overwrite";
-    json         initial_value;
+    std::string name;
+    ReducerType type         = ReducerType::OVERWRITE;
+    std::string reducer_name = "overwrite";
+    json        initial_value;
     /// True iff the JSON channel definition carried an explicit
     /// "initial" key. Distinguishes `"initial": null` from an absent
     /// key so CompiledGraph::to_json() can re-emit exactly what was
     /// declared (round-trip fidelity).
-    bool         has_initial = false;
+    bool has_initial = false;
+    /// Retention is applied after reducer combination.
+    ChannelRetentionPolicy   retention = ChannelRetentionPolicy::Unbounded;
+    std::uint64_t             retention_limit = 0;
+    /// Ephemeral channels are omitted from checkpoint snapshots.
+    ChannelPersistencePolicy persistence = ChannelPersistencePolicy::Checkpoint;
 };
 
 /**
@@ -60,18 +78,38 @@ struct ChannelDef {
  * canonicalizes barrier declarations from barrier_specs.
  */
 struct NEOGRAPH_API TopologySpec {
-    std::string name;
-    std::vector<ChannelDef> channel_defs;
-    std::vector<Edge> edges;
+    std::string                  name;
+    std::vector<ChannelDef>      channel_defs;
+    std::vector<Edge>            edges;
     std::vector<ConditionalEdge> conditional_edges;
-    BarrierSpecs barrier_specs;
-    std::set<std::string> interrupt_before;
-    std::set<std::string> interrupt_after;
-    std::optional<RetryPolicy> retry_policy;
-    int schema_version = 0;
-    std::map<std::string, json> node_defs;
+    BarrierSpecs                 barrier_specs;
+    std::set<std::string>        interrupt_before;
+    std::set<std::string>        interrupt_after;
+    std::optional<RetryPolicy>   retry_policy;
+    int                          schema_version = 0;
+    std::map<std::string, json>  node_defs;
 
     json to_json() const;
+};
+/**
+ * @brief Total result of parsing a topology document.
+ *
+ * topology is populated exactly when diagnostics is empty.
+ */
+struct NEOGRAPH_API ParseReport {
+    std::optional<TopologySpec>     topology;
+    std::vector<CompilerDiagnostic> diagnostics;
+
+    bool        has_errors() const noexcept;
+    std::string summary() const;
+};
+
+/// @brief Total result of translation-validation.
+struct NEOGRAPH_API RoundTripReport {
+    std::vector<CompilerDiagnostic> diagnostics;
+
+    bool        has_errors() const noexcept;
+    std::string summary() const;
 };
 
 /**
@@ -87,14 +125,14 @@ struct NEOGRAPH_API TopologySpec {
  * GraphEngine::compile().
  */
 struct CompiledGraph {
-    std::string name;
-    std::vector<ChannelDef> channel_defs;
+    std::string                                       name;
+    std::vector<ChannelDef>                           channel_defs;
     std::map<std::string, std::unique_ptr<GraphNode>> nodes;
-    std::vector<Edge> edges;
-    std::vector<ConditionalEdge> conditional_edges;
-    BarrierSpecs barrier_specs;
-    std::set<std::string> interrupt_before;
-    std::set<std::string> interrupt_after;
+    std::vector<Edge>                                 edges;
+    std::vector<ConditionalEdge>                      conditional_edges;
+    BarrierSpecs                                      barrier_specs;
+    std::set<std::string>                             interrupt_before;
+    std::set<std::string>                             interrupt_after;
     /// Present iff the JSON defined a top-level "retry_policy" object.
     /// When absent, GraphEngine keeps its RetryPolicy default-constructed.
     std::optional<RetryPolicy> retry_policy;
@@ -128,10 +166,10 @@ struct CompiledGraph {
      * compiler dropped or rewired something silently — exactly the
      * v0.1.0–v0.1.7 conditional_edges regression class.
      */
-    json to_json() const;
+    NEOGRAPH_API json to_json() const;
 
     /// @brief Copy the declarative portion without live GraphNode instances.
-    TopologySpec topology() const;
+    NEOGRAPH_API TopologySpec topology() const;
 };
 
 /**
@@ -150,16 +188,28 @@ public:
     /// @brief Pure parse using a local-first registry for schema metadata.
     static TopologySpec parse(const json& definition, const GraphRegistry& registry);
 
+    /// @brief Pure parse that rejects every executable absent from the registry instance.
+    static TopologySpec parse_local(const json& definition, const GraphRegistry& registry);
+    /// @brief Total pure parse using local-first registry metadata.
+    static ParseReport parse_report(const json& definition, const GraphRegistry& registry);
+
+    /// @brief Total pure parse requiring every executable in the local registry.
+    static ParseReport parse_local_report(const json& definition, const GraphRegistry& registry);
+
     /**
      * @brief Instantiate runtime nodes from an already parsed topology.
      */
-    static CompiledGraph link(TopologySpec topology,
-                              const NodeContext& default_context);
+    static CompiledGraph link(TopologySpec topology, const NodeContext& default_context);
 
     /// @brief Instantiate nodes using a local-first registry overlay.
-    static CompiledGraph link(TopologySpec topology,
-                              const NodeContext& default_context,
+    static CompiledGraph link(TopologySpec         topology,
+                              const NodeContext&   default_context,
                               const GraphRegistry& registry);
+
+    /// @brief Instantiate nodes exclusively through the registry instance.
+    static CompiledGraph link_local(TopologySpec         topology,
+                                    const NodeContext&   default_context,
+                                    const GraphRegistry& registry);
 
     /**
      * @brief Parse a JSON graph definition into a CompiledGraph.
@@ -202,8 +252,7 @@ public:
      * lenient behavior byte-for-byte. `schema_version` above the
      * engine's supported version (currently 1) is always an error.
      */
-    static CompiledGraph compile(const json& definition,
-                                 const NodeContext& default_context);
+    static CompiledGraph compile(const json& definition, const NodeContext& default_context);
 
     /**
      * @brief Compile with a local-first registry overlay.
@@ -216,6 +265,11 @@ public:
     static CompiledGraph compile(const json&          definition,
                                  const NodeContext&   default_context,
                                  const GraphRegistry& registry);
+
+    /// @brief Parse and link without process-global registry fallback.
+    static CompiledGraph compile_local(const json&          definition,
+                                       const NodeContext&   default_context,
+                                       const GraphRegistry& registry);
 
     /**
      * @brief Canonicalize a topology JSON document for equivalence
@@ -278,12 +332,14 @@ public:
      * one-shot warning to stderr when lenient (legacy documents keep
      * compiling, but silent drops become visible).
      */
-    static void verify_roundtrip(const json& definition,
-                                  const CompiledGraph& cg);
+    static void verify_roundtrip(const json& definition, const CompiledGraph& cg);
 
     /// @brief Translation validation before runtime node instantiation.
-    static void verify_roundtrip(const json& definition,
-                                 const TopologySpec& topology);
+    static void verify_roundtrip(const json& definition, const TopologySpec& topology);
+
+    /// @brief Total translation-validation before runtime node instantiation.
+    static RoundTripReport verify_roundtrip_report(const json&         definition,
+                                                   const TopologySpec& topology);
 };
 
-} // namespace neograph::graph
+}  // namespace neograph::graph

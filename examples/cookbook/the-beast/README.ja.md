@@ -1,10 +1,10 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=aa9675ba1cbeeb80c64724416d97b82171a94f2261f16551966e181ee742405d -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=737ef3eca8ce61e6c56b52473e9a4369b3c1ee2a54dae21dae71873452355232 -->
 # ビースト — 生成、進化、ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 > 独自のハーネスを作成し、それを
-> DSL コンパイラを実行し、チェックポインタを通じてその実行を巻き戻します。
+> strict Core compilerを実行し、チェックポインタを通じてその実行を巻き戻します。
 > **生成されました。進化した。巻き戻し。野獣は残ります。**
 
 ほとんどの「エージェント フレームワーク」では、グラフを *構築* できます。野獣は3つやる
@@ -19,7 +19,7 @@
    チェックポインター — リプレイではなく、本物のタイムトラベル。
 
 NeoGraph ではハーネスは **データ**、つまりトポロジであるため、これが安全であるだけです。
-JSON (問題 #56) で説明されています。DSL コンパイラ (問題 #75) では、
+JSON (問題 #56) で説明されています。strict Core compiler (問題 #75) では、
 *実行前にハーネスが一貫していることを証明します*。それを取り去って「エージェント」
 独自のグラフを作成する」は、壊れたグラフを作成するための単なるマシンです。
 コンパイラは、モンスターを負債からカテゴリーに変えるものです。
@@ -33,8 +33,8 @@ $ ./build/cookbook_the_beast
 
 ```
 ── ACT I · generate a harness, prove it coherent ──
-  ACCEPTED — 3 gates passed. Core lockfile nodes: s1_n s2_n s3_n
-  (DSL surface expanded away: vars/templates/use gone.)
+  ACCEPTED — strict gates passed. Core lockfile nodes: s1_n s2_n s3_n
+  (strict Core JSON expanded away: strict Core JSON retained.)
 
 ── ACT II · evolve the harness (compiler = fitness) ──
   generations: 4 · offspring: 36 · survived compile gate: 36 · rejected (invalid, never run): 0
@@ -58,29 +58,27 @@ Generated. Evolved. Rewound. The Beast remains.
 
 ## 第 1 幕 — 生成 + ゲート
 
-Beast は DSL **サーフェス** (`vars` / `templates` /) でハーネスを作成します
-`use`) を実行し、3 つのコヒーレンス ゲートを順番に通過させます。ハーネス
+Beast は strict Core JSON の明示的なノードとエッジでハーネスを作成し、
+コンパイルと検証ゲートを順番に通過させます。ハーネス
 いずれかのゲートに失敗したものは**破棄**されます。
 
 |ゲート | API |キャッチ |
 |---|---|---|
-| **1.詳細** | `Elaborator::elaborate` | DSL 座標に対するサーフェス エラー — 不明なテンプレート、欠落または余分な `use` 引数、変数サイクル、ノード名の衝突。全体的かつ決定的: 同じ DSL は常にバイト同一のコアを生成するため、ゲート 2 ～ 3 は固定アーティファクトについて推論します。 |
+| **1.コンパイル + TV** | `GraphCompiler::compile` (厳密、`schema_version: 1`) + `verify_roundtrip` | 不明なキーはハードエラーになり、正規化された strict Core JSON が検証されます。 |
 | **2.コンパイル + TV** | `GraphCompiler::compile` (厳密、`schema_version: 1`) + `verify_roundtrip` |タイプミスまたはサポートされていないキーは、サイレント ドロップではなく *ハード エラー* (消費キー アカウンティング) です。次に、変換検証で `canon(source) == canon(compile(source).to_json())` がアサートされます。コンパイラーが何もかも静かに再配線することはできません。 |
-| **3.検証** | `GraphValidator::validate` |グラフの**意味**: ぶら下がりエッジ (E3)、決して発射できないバリア (E8)、不完全なルート マップ (E10)、チャネル効果違反 (E4/E6)。エラーは、決して正しいとは言えない構成要素のみに発生します。残りは糸くずです。 |
+| **2.検証** | `GraphValidator::validate` |グラフの**意味**: ぶら下がりエッジ (E3)、決して発射できないバリア (E8)、不完全なルート マップ (E10)、チャネル効果違反 (E4/E6)。 |
 
-シードは、`use` 経由で 3 回インスタンス化された 1 つの `stage` テンプレートです。
-詳細化により、コア チェーン `s1_n → s2_n → s3_n` に拡張されます。
+シードには、コア チェーン `s1_n → s2_n → s3_n` を構成する明示的な 3 ノードがあります。
 
 ## 第 2 幕 — 進化 (コンパイラはフィットネス関数です)
 
 `neograph::graph::evolve()` (問題 #80) は **実際の突然変異演算子** を実行します
-シード上 — `swap_template`、`add_use`、`remove_use`、`tune_param`、
-`toggle_conditional_edge`、`toggle_barrier`、`add_edge`、`remove_edge`。
+シード上 — `toggle_conditional_edge`、`toggle_barrier`、`add_edge`、`remove_edge`。
 すべての子は **コンパイル ゲートを最初に通過します**: 無効な子は消滅します
 実行することなく、無料で。拒否率自体が健康状態
 演算子のメトリック。
 
-重要な設計上の選択: 突然変異スペースは raw ではなく **DSL (M4) です
+重要な設計上の選択: 突然変異スペースは raw ではなく **strict Core (M4) です
 JSON** であるため、子孫は *構造上* 構造的に有効です。つまり、
 ここで拒否数が 0 になっているのはなぜですか。ゲートは安全策です。
 制約のない進化は安全であり、すべての子供たちに武装し続けます。
@@ -110,21 +108,36 @@ JSON** であるため、子孫は *構造上* 構造的に有効です。つま
 本物です: ライブ LLM が渡されます `NodeFactory::export_schema()`
 (このエンジンのビルドが受け入れる正確なパレット — ドリフトすることはできません。
 *は* エンジンのスキーマです。[`../../52_export_schema.cpp`](../../52_export_schema.cpp)を参照してください)
-そして、DSL サーフェスでハーネスを作成するように依頼されました。それが何を返しても
+そして、strict Core サーフェスでハーネスを作成するように依頼されました。それが何を返しても
 同じ 3 つの門を通過します。拒否された場合のゲートの診断
 会話に直接フィードバックされ、モデルが書き換えられます。
 本物の自己修復ループ。
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
+`the_beast_live.cpp` は `deepseek/deepseek-v4-flash-0731` を
+`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}` に
+固定します。検証時点で OpenRouter は Morph のデータセンターを US、その
+モデル/プロバイダー エンドポイントを ZDR 対応として表示していました。
+これは厳格なプロバイダー選択であり、OpenRouter のリージョン内データ
+レジデンシー保証ではありません。文書化されたリージョン内保証は現在
+エンタープライズ EU ルートです。Morph の適格なエンドポイントを利用
+できない場合、プロンプトを別プロバイダーへ送らずリクエストは失敗します。
+
+ライブ cookbook はプロバイダーのタイムアウトを 180 秒に設定します。
+この推論モデルの 4,000 トークン生成予算は、一般的な 60 秒の既定値を
+正当に超過する可能性があります。
+
+
+
 ```
 ── Attempt #1: asking the model to write a harness ──
   model returned 663 chars of JSON.
-  ACCEPTED — all three gates passed.
+  ACCEPTED — all strict gates passed.
   Core lockfile nodes: r_stage c_stage s_stage
 
 ── Spawning the model's harness (checkpointed) ──
@@ -147,6 +160,42 @@ lint: ダイヤモンド (E9) のバリアが失われており、到達不能�
 ここのノードは決定論的な `beast_node` ワーカーであるため、ライブ実行にはコストがかかります
 1 回の LLM 呼び出し (オーサリング) は無料で実行されます。それらを交換してください
 `llm_call` と各ノードもライブ コールになります。
+
+## Copy Ninja — 検証済みローカル capability をグラフノードにする経路
+
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) は、一つの狭い
+capability-to-harness 経路を実行可能にする。A2A Card をコードへ変換
+するものではない。
+
+1. 合成 loopback サーバーが一つの well-known Agent Card を公開する。
+   collector はその GET だけを行い、Card が広告する RPC URL には決して
+   接続しない。
+2. `AgentCardCandidateCompiler` は free-form Card text、endpoint、
+   credential、実行可能な source を除外した不変の **unadmitted**
+   descriptor を作る。
+3. 独立に与える digest-pinned behavioral profile が唯一の
+   `copy-ninja.hello-world-echo.v1` template を検証してから、ローカル
+   `CopyNinjaNode` として materialize する。
+4. live Beast が書けるのは二つの channel と一つの node の topology
+   だけである。通常の compile/round-trip → validate の後、
+   第四の local-binding gate が `__start__` と `__end__` の間に
+   `copy_ninja_local` が一つだけあることを要求する。
+
+呼び出し元の prompt は意図的に LLM message に含めない。モデルは
+topology だけを書き、prompt を消費するのは local graph だけである。
+合成 source server が RPC を一件でも観測すれば実行は失敗する。これは
+一つの固定された local behavior の証拠にすぎず、source-code transfer、
+delegation、admission、一般的な behavioral equivalence の証拠ではない。
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
+$ cmake --build build --target cookbook_the_beast_copy_ninja
+$ ./build/cookbook_the_beast_copy_ninja "Grace"
+```
+
+2026-08-08 の実行では authoring model が最初の試行で四つの gate を通過
+した。graph は discovery GET 1 回、source-agent RPC 0 回で
+`Hello, World! I have received your request (Grace)` を返した。
 
 ## Apex — ハーネスがツールを食い荒らす
 
@@ -247,7 +296,7 @@ It discovered tools, forged the missing one, and used them all.
 実行時の C++ ノード タイプ。しかし、その意図は 3 つの方法でカバーされています。
 Beast はデータから運転*できます:
 
-- **複合ノード** — DSL の `templates` / `use` (M4) はモデルを
+- **複合ノード** — strict Core の `explicit nodes` / `explicit edges` (M4) はモデルを
   再利用可能なノード/トポロジ ユニットを純粋にデータ内で定義します。それはまさに
   `the_beast.cpp` のシードが何をするか。
 - **再帰** — `subgraph` ノードはハーネス全体を 1 つのノードとして埋め込みます。
@@ -276,7 +325,7 @@ Express.** `script_node` は、コンパイル済みの 1 つの C++ ノード�
 データを再コンパイルせずに保存します。
 
 一貫性は交渉の余地のないものです。スクリプトは設定でコントラクトを宣言します
-(`reads` / `writes` / `goto_targets`);ハーネスは 3 つの DSL を通過します
+(`reads` / `writes` / `goto_targets`);ハーネスは 3 つの strict Core を通過します
 ゲートに加えて、Beast-layer **コントラクト チェック** (宣言された書き込みは
 宣言されたチャネル。 goto ターゲットは実際のノードである必要があります) プラス ** ランタイム
 Wrapper** は、宣言外の write/goto を拒否します。それ
@@ -690,6 +739,6 @@ runtime-backstop パターン)、追加する明らかな次のノードとし�
   `channel_of()` ヘルパーがそれをアンラップします。同形状 `RunResult::channel`
   読みます。
 - コアのロックファイルは、エラボレーションを通じて `schema_version: 1` を保持します。
-  これは、ゲート 2 を厳密モードにオプトインするものです — DSL サーフェスでのオーサリング
+  これは、ゲート 2 を厳密モードにオプトインするものです — strict Core サーフェスでのオーサリング
   黙ってダウングレードすることはありません。一貫性は進化ループを保証します。
   に依存します。

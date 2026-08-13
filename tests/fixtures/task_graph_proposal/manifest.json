@@ -1,0 +1,10 @@
+{
+  "_comment": "TaskGraphProposal parser corpus. Expected is the sorted stable diagnostic-code multiset; valid documents have an empty array.",
+  "expected": {
+    "valid.json": [],
+    "e_duplicate_task.json": ["P_PROPOSAL_DUPLICATE_TASK"],
+    "e_unknown_template.json": ["P_PROPOSAL_TEMPLATE"],
+    "e_cycle.json": ["P_PROPOSAL_CYCLE"],
+    "e_forbidden_authority.json": ["P_PROPOSAL_UNKNOWN_FIELD"]
+  }
+}
