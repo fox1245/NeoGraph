@@ -366,7 +366,7 @@ jobs:
             -DNEOGRAPH_BUILD_BENCHMARKS=OFF `
             -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
             -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
-            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO /DEBUG"
 
       - name: Build Program and QuickJS sanitizer targets
         shell: pwsh
@@ -377,16 +377,49 @@ jobs:
       - name: Run QuickJS boundary tests under MSVC AddressSanitizer
         shell: pwsh
         run: |
+          $env:ASAN_SAVE_DUMPS = Join-Path `
+            (Resolve-Path "build-windows-asan") "quickjs-asan.dmp"
+          ctest --test-dir build-windows-asan -C Release `
+            --output-on-failure `
+            -R "^QuickJS[.]CEmbeddingSmoke$"
           ctest --test-dir build-windows-asan -C Release `
             --output-on-failure -j `
+            -E "^QuickJS[.]CEmbeddingSmoke$" `
             -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
+
+      - name: Analyze MSVC AddressSanitizer dump
+        if: failure()
+        shell: pwsh
+        run: |
+          $dump = Get-ChildItem build-windows-asan -Recurse -Filter "*.dmp" |
+            Select-Object -First 1
+          if (-not $dump) {
+            Write-Output "MSVC AddressSanitizer did not produce a dump"
+            exit 0
+          }
+          $debugger = Get-ChildItem `
+            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $debugger) {
+            Write-Output "cdb.exe is unavailable; preserving $($dump.FullName)"
+            exit 0
+          }
+          & $debugger.FullName -z $dump.FullName `
+            -c ".symfix; .reload; !analyze -v; kP; q" |
+            Tee-Object build-windows-asan/asan-analysis.txt
 
       - name: Upload sanitizer logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs-windows-asan
-          path: build-windows-asan/Testing/Temporary/LastTest.log
+          path: |
+            build-windows-asan/Testing/Temporary/LastTest.log
+            build-windows-asan/asan-analysis.txt
+            build-windows-asan/**/*.dmp
+            build-windows-asan/tests/Release/neograph_quickjs_c_smoke.exe
+            build-windows-asan/tests/Release/neograph_quickjs_c_smoke.pdb
+            build-windows-asan/Release/neograph_quickjs.pdb
           if-no-files-found: ignore
 
   # ──────────────────────────────────────────────────────────────────
