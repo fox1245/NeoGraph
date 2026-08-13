@@ -374,24 +374,32 @@ jobs:
           cmake --build build-windows-asan --config Release -j `
             --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
 
+      - name: Install ProcDump for fast-fail capture
+        shell: pwsh
+        run: choco install procdump -y --no-progress
+
       - name: Run QuickJS boundary tests under MSVC AddressSanitizer
         shell: pwsh
         run: |
-          $env:ASAN_SAVE_DUMPS = Join-Path `
-            (Resolve-Path "build-windows-asan") "quickjs-asan.dmp"
-          ctest --test-dir build-windows-asan -C Release `
-            --output-on-failure `
-            -R "^QuickJS[.]CEmbeddingSmoke$"
+          $dumpDir = Join-Path (Resolve-Path "build-windows-asan") "crash-dumps"
+          New-Item -ItemType Directory -Force $dumpDir | Out-Null
+          $smoke = Resolve-Path `
+            "build-windows-asan/tests/Release/neograph_quickjs_c_smoke.exe"
+          & procdump -accepteula -ma -e 1 -f "" -x $dumpDir $smoke
+          $smokeExit = $LASTEXITCODE
           ctest --test-dir build-windows-asan -C Release `
             --output-on-failure -j `
             -E "^QuickJS[.]CEmbeddingSmoke$" `
             -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
+          if ($smokeExit -ne 0) {
+            throw "QuickJS C embedding smoke exited with $smokeExit"
+          }
 
       - name: Analyze MSVC AddressSanitizer dump
         if: failure()
         shell: pwsh
         run: |
-          $dump = Get-ChildItem build-windows-asan -Recurse -Filter "*.dmp" |
+          $dump = Get-ChildItem build-windows-asan/crash-dumps -Filter "*.dmp" |
             Select-Object -First 1
           if (-not $dump) {
             Write-Output "MSVC AddressSanitizer did not produce a dump"
@@ -416,7 +424,7 @@ jobs:
           path: |
             build-windows-asan/Testing/Temporary/LastTest.log
             build-windows-asan/asan-analysis.txt
-            build-windows-asan/**/*.dmp
+            build-windows-asan/crash-dumps/*.dmp
             build-windows-asan/tests/Release/neograph_quickjs_c_smoke.exe
             build-windows-asan/tests/Release/neograph_quickjs_c_smoke.pdb
             build-windows-asan/Release/neograph_quickjs.pdb
