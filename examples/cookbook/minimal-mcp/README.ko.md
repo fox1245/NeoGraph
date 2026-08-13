@@ -5,7 +5,7 @@
 
 
 이 저장소(03/20/21/22)의 다른 모든 MCP 예제는 MCP를 래핑합니다.
-`OPENAI_API_KEY` 및 대부분의 MCP가 필요한 ReAct 루프 내부의 클라이언트
+고정된 OpenRouter DeepSeek 모델을 사용하는 ReAct 루프 내부의 클라이언트
 튜토리얼에서는 `pip install fastmcp`(~60개의 패키지를 가져옴)를 가정합니다.
 서버 측에서. 여기에는 유용한 사실이 숨겨져 있습니다.
 

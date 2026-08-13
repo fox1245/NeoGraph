@@ -9,18 +9,23 @@
 //            its index; summarizer counts.
 //
 // Graph is compiled once; invoke() is the hot loop.
-// Usage: bench_neograph [seq_iters] [par_iters] [par_workers]
-// par_workers is 1 (default), auto, or an explicit positive integer.
+// Usage: bench_neograph [seq_iters] [par_iters] [par_workers] [warmup] [samples]
+// Each timing row reports the median of `samples` after `warmup` single-run
+// warmups; par_workers is 1 (default), auto, or an explicit positive integer.
 
 #include <neograph/neograph.h>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -157,33 +162,46 @@ struct BenchResult {
     double per_iter_us;
 };
 
-static BenchResult bench(GraphEngine* engine, int iters) {
-    RunConfig cfg;  // no thread_id → checkpoint coordinator disabled
-
-    auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < iters; ++i) {
-        (void)engine->run(cfg);
+template <class Operation>
+static BenchResult bench(int iters, int samples, Operation&& operation) {
+    std::vector<double> timings;
+    timings.reserve(static_cast<std::size_t>(samples));
+    for (int sample = 0; sample < samples; ++sample) {
+        const auto started = std::chrono::steady_clock::now();
+        operation(iters);
+        const auto total_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        timings.push_back(total_ms);
     }
-    const auto total_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    return {total_ms, (total_ms * 1000.0) / iters};
+    std::sort(timings.begin(), timings.end());
+    const double median_ms = timings[timings.size() / 2];
+    return {median_ms, median_ms * 1000.0 / static_cast<double>(iters)};
 }
 
-static BenchResult bench_stream(GraphEngine* engine, int iters, StreamMode mode) {
+static std::size_t parse_positive(std::string_view text, const char* name) {
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() || value == 0 ||
+        value > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument(
+            std::string(name) + " must be a positive integer");
+    }
+    return value;
+}
+
+static void run_graph(GraphEngine* engine, int iters) {
+    RunConfig cfg;  // no thread_id → checkpoint coordinator disabled
+    for (int i = 0; i < iters; ++i) (void)engine->run(cfg);
+}
+
+static void run_stream(GraphEngine* engine, int iters, StreamMode mode) {
     RunConfig cfg;
     cfg.stream_mode = mode;
     const GraphStreamCallback discard = [](const GraphEvent&) {};
-
-    auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < iters; ++i) {
-        (void)engine->run_stream(cfg, discard);
-    }
-    const auto total_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    return {total_ms, (total_ms * 1000.0) / iters};
+    for (int i = 0; i < iters; ++i) (void)engine->run_stream(cfg, discard);
 }
+
 
 static std::string configure_par_workers(GraphEngine& engine,
                                          const std::string& mode) {
@@ -192,55 +210,108 @@ static std::string configure_par_workers(GraphEngine& engine,
         return "auto(" + std::to_string(
             std::max(std::thread::hardware_concurrency(), 1u)) + ")";
     }
-
-    std::size_t parsed = 0;
-    const auto workers = std::stoull(mode, &parsed);
-    if (parsed != mode.size() || workers == 0) {
-        throw std::invalid_argument(
-            "par_workers must be 'auto' or a positive integer");
-    }
-    engine.set_worker_count(static_cast<std::size_t>(workers));
+    const auto workers = parse_positive(mode, "par_workers");
+    engine.set_worker_count(workers);
     return std::to_string(workers);
 }
-
 int main(int argc, char** argv) {
-    const int seq_iters = (argc > 1) ? std::atoi(argv[1]) : 10000;
-    const int par_iters = (argc > 2) ? std::atoi(argv[2]) : 5000;
-    const std::string par_worker_mode = (argc > 3) ? argv[3] : "1";
+    try {
+        if (argc > 6) {
+            throw std::invalid_argument(
+                "usage: bench_neograph [seq_iters] [par_iters] [par_workers] "
+                "[warmup] [samples]");
+        }
+        const int seq_iters = argc > 1
+            ? static_cast<int>(parse_positive(argv[1], "seq_iters")) : 10000;
+        const int par_iters = argc > 2
+            ? static_cast<int>(parse_positive(argv[2], "par_iters")) : 5000;
+        const std::string par_worker_mode = argc > 3 ? argv[3] : "1";
+        const int warmup = argc > 4
+            ? static_cast<int>(parse_positive(argv[4], "warmup")) : 10;
+        const int samples = argc > 5
+            ? static_cast<int>(parse_positive(argv[5], "samples")) : 5;
 
-    register_types();
+        register_types();
 
-    // --- Sequential ---
-    auto seq_engine = GraphEngine::compile(seq_graph(), NodeContext{});
-    for (int i = 0; i < 10; ++i) (void)seq_engine->run(RunConfig{});
-    auto seq = bench(seq_engine.get(), seq_iters);
-    std::cout << "seq\t" << seq_iters << "\t" << seq.total_ms
-              << "\t" << seq.per_iter_us << "\n";
+        std::cout << "config\tseq_iters\t" << seq_iters << '\n'
+                  << "config\tpar_iters\t" << par_iters << '\n'
+                  << "config\twarmup\t" << warmup << '\n'
+                  << "config\tsamples\t" << samples << '\n'
+                  << "runtime\tos\tLinux\n"
+                  << "runtime\tarch\t"
+#if defined(__x86_64__)
+                  << "x86_64\n"
+#elif defined(__aarch64__)
+                  << "aarch64\n"
+#else
+                  << "unknown\n"
+#endif
+                  << "runtime\tcompiler\t" << __VERSION__ << '\n'
+#ifdef NEOGRAPH_BENCH_BUILD_TYPE
+                  << "runtime\tbuild_type\t" << NEOGRAPH_BENCH_BUILD_TYPE << '\n'
+#else
+                  << "runtime\tbuild_type\tunspecified\n"
+#endif
+#if defined(NDEBUG)
+                  << "runtime\toptimization\toptimized\n"
+#else
+                  << "runtime\toptimization\tunoptimized\n"
+#endif
+                  << "runtime\thardware_concurrency\t"
+                  << std::max(std::thread::hardware_concurrency(), 1u) << '\n';
 
-    auto sync_engine = GraphEngine::compile(
-        seq_graph("seq_sync", "sync_inc"), NodeContext{});
-    for (int i = 0; i < 10; ++i) (void)sync_engine->run(RunConfig{});
-    auto seq_sync = bench(sync_engine.get(), seq_iters);
-    std::cout << "seq_sync\t" << seq_iters << "\t" << seq_sync.total_ms
-              << "\t" << seq_sync.per_iter_us << "\n";
+        // --- Sequential ---
+        auto seq_engine = GraphEngine::compile(seq_graph(), NodeContext{});
+        for (int i = 0; i < warmup; ++i) run_graph(seq_engine.get(), 1);
+        const auto seq = bench(seq_iters, samples, [&](int n) {
+            run_graph(seq_engine.get(), n);
+        });
+        std::cout << "seq\t" << seq_iters << "\t" << seq.total_ms
+                  << "\t" << seq.per_iter_us << "\n";
 
-    // --- Parallel ---
-    auto par_engine = GraphEngine::compile(par_graph(), NodeContext{});
-    const auto par_workers = configure_par_workers(*par_engine, par_worker_mode);
-    std::cout << "config\tpar_workers\t" << par_workers << "\n";
-    auto par = bench(par_engine.get(), par_iters);
-    std::cout << "par\t" << par_iters << "\t" << par.total_ms
-              << "\t" << par.per_iter_us << "\n";
+        auto sync_engine = GraphEngine::compile(
+            seq_graph("seq_sync", "sync_inc"), NodeContext{});
+        for (int i = 0; i < warmup; ++i) run_graph(sync_engine.get(), 1);
+        const auto seq_sync = bench(seq_iters, samples, [&](int n) {
+            run_graph(sync_engine.get(), n);
+        });
+        std::cout << "seq_sync\t" << seq_iters << "\t" << seq_sync.total_ms
+                  << "\t" << seq_sync.per_iter_us << "\n";
 
-    // A callback with TOKENS emits nothing for this graph. Comparing it with
-    // EVENTS isolates lifecycle-event construction and callback dispatch.
-    auto seq_stream_idle = bench_stream(seq_engine.get(), seq_iters, StreamMode::TOKENS);
-    std::cout << "seq_stream_idle\t" << seq_iters << "\t" << seq_stream_idle.total_ms
-              << "\t" << seq_stream_idle.per_iter_us << "\n";
+        // --- Parallel ---
+        auto par_engine = GraphEngine::compile(par_graph(), NodeContext{});
+        const auto par_workers = configure_par_workers(*par_engine, par_worker_mode);
+        std::cout << "config\tpar_workers\t" << par_workers << "\n";
+        for (int i = 0; i < warmup; ++i) run_graph(par_engine.get(), 1);
+        const auto par = bench(par_iters, samples, [&](int n) {
+            run_graph(par_engine.get(), n);
+        });
+        std::cout << "par\t" << par_iters << "\t" << par.total_ms
+                  << "\t" << par.per_iter_us << "\n";
 
-    auto seq_events = bench_stream(seq_engine.get(), seq_iters, StreamMode::EVENTS);
-    std::cout << "seq_events\t" << seq_iters << "\t" << seq_events.total_ms
-              << "\t" << seq_events.per_iter_us << "\n";
+        // A callback with TOKENS emits nothing for this graph. Comparing it
+        // with EVENTS isolates lifecycle-event construction and callback
+        // dispatch.
+        for (int i = 0; i < warmup; ++i)
+            run_stream(seq_engine.get(), 1, StreamMode::TOKENS);
+        const auto seq_stream_idle = bench(seq_iters, samples, [&](int n) {
+            run_stream(seq_engine.get(), n, StreamMode::TOKENS);
+        });
+        std::cout << "seq_stream_idle\t" << seq_iters << "\t"
+                  << seq_stream_idle.total_ms << "\t"
+                  << seq_stream_idle.per_iter_us << "\n";
 
-    return 0;
+        for (int i = 0; i < warmup; ++i)
+            run_stream(seq_engine.get(), 1, StreamMode::EVENTS);
+        const auto seq_events = bench(seq_iters, samples, [&](int n) {
+            run_stream(seq_engine.get(), n, StreamMode::EVENTS);
+        });
+        std::cout << "seq_events\t" << seq_iters << "\t"
+                  << seq_events.total_ms << "\t" << seq_events.per_iter_us
+                  << "\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "error: " << error.what() << '\n';
+        return 2;
+    }
 }

@@ -163,6 +163,28 @@ TEST(GraphCompiler, ChannelInitialValuePreserved) {
     EXPECT_EQ(cg.channel_defs[0].initial_value.get<int>(), 42);
 }
 
+TEST(GraphCompiler, ChannelLifecyclePoliciesRoundTrip) {
+    const json def = {
+        {"schema_version", 1},
+        {"channels",
+         {{"events",
+           {{"reducer", "append"},
+            {"retention", "bounded"},
+            {"retention_limit", 2},
+            {"persistence", "ephemeral"}}}}}};
+    const auto cg = GraphCompiler::compile(def, NodeContext{});
+    ASSERT_EQ(cg.channel_defs.size(), 1u);
+    EXPECT_EQ(cg.channel_defs[0].retention, ChannelRetentionPolicy::Bounded);
+    EXPECT_EQ(cg.channel_defs[0].retention_limit, 2u);
+    EXPECT_EQ(cg.channel_defs[0].persistence, ChannelPersistencePolicy::Ephemeral);
+
+    const auto emitted = cg.to_json();
+    EXPECT_EQ(emitted["channels"]["events"]["retention"], "bounded");
+    EXPECT_EQ(emitted["channels"]["events"]["retention_limit"], 2u);
+    EXPECT_EQ(emitted["channels"]["events"]["persistence"], "ephemeral");
+    EXPECT_NO_THROW(GraphCompiler::verify_roundtrip(def, cg));
+}
+
 // =========================================================================
 // Nodes + barriers
 // =========================================================================

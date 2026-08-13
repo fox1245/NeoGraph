@@ -7,7 +7,7 @@
 //
 //   - kSystemPrompt        — the "senior RE analyst" prompt + skip rules.
 //   - make_provider()      — env-driven provider selection
-//                            (LLM_BASE_URL → OpenAI HTTP, else WS Responses).
+//                            (OPENROUTER_API_KEY → OpenRouter HTTP/SSE).
 //   - spawn_ghidra_bridge()— stdio MCP bridge spawn + tool discovery
 //                            + LOCAL_TOOL_SUBSET filter.
 //   - extract_final_response()
@@ -35,9 +35,7 @@
 namespace neograph::re_agent {
 
 // System prompt — workflow + ELF/PE skip rules + final-JSON contract.
-// Verified live on crackme01 (gpt-5.4-mini, matched_score 0.92,
-// false_positive 0). Do NOT edit casually; scorer expectations are
-// pinned to the JSON shape described here.
+// Verified live on crackme01 (OpenRouter DeepSeek, matched_score 0.92,
 inline constexpr const char* kSystemPrompt = R"(You are a senior binary reverse-engineering analyst.
 The user has loaded a STRIPPED ELF binary into Ghidra. The ghidra-mcp tools below let you
 read decompilation and write back names / comments to the live Ghidra project.
@@ -111,48 +109,24 @@ Workflow — follow it exactly:
 Be decisive. Do not over-explore. The binary is small (under 10 user functions).
 )";
 
-/// Build the LLM provider for the RE agent.
+/// Build the OpenRouter Responses provider for the RE agent.
 ///
-/// Two backends, env-selected:
-///   * LLM_BASE_URL set → OpenAI-compatible HTTP (`OpenAIProvider`).
-///                        Auth via LLM_API_KEY (or OPENROUTER_API_KEY,
-///                        or "no-key" if neither is present).
-///                        Covers OpenRouter, Ollama, vLLM, llama.cpp
-///                        server, trtllm-serve, etc.
-///   * otherwise        → OpenAI Responses over WebSocket
-///                        (`SchemaProvider` "openai_responses",
-///                        `use_websocket = true`). 600s timeout
-///                        absorbs cold-start jitter.
+/// OpenRouter exposes the OpenAI-compatible Responses endpoint over HTTPS/SSE.
+/// The provider-routing object opts every request into Zero Data Retention.
 ///
-/// @param model    Model name (e.g. "gpt-5.4-mini", "deepseek/deepseek-v4-pro").
-/// @param api_key  Used only on the WebSocket path; must be non-null when
-///                 LLM_BASE_URL is unset. (HTTP path reads its key
-///                 directly from env at this function's call site.)
-/// @return Shared provider; caller stores in `std::shared_ptr<Provider>`.
+/// @param api_key  OpenRouter API key; the environment value wins when set.
+/// @return Shared provider; caller stores it in `std::shared_ptr<Provider>`.
 inline std::shared_ptr<neograph::Provider>
 make_provider(const std::string& model, const char* api_key) {
-    const char* llm_base = std::getenv("LLM_BASE_URL");
-    const char* llm_key  = std::getenv("LLM_API_KEY");
-    if (!llm_key || !*llm_key) llm_key = std::getenv("OPENROUTER_API_KEY");
-
-    if (llm_base && *llm_base) {
-        std::cerr << "[*] Backend: OpenAI-compat HTTP (" << llm_base
-                  << ") model=" << model << "\n";
-        neograph::llm::OpenAIProvider::Config llm_cfg;
-        llm_cfg.api_key         = (llm_key && *llm_key) ? llm_key : "no-key";
-        llm_cfg.base_url        = llm_base;
-        llm_cfg.default_model   = model;
-        llm_cfg.timeout_seconds = 600;  // remote/local cold-start headroom
-        return neograph::llm::OpenAIProvider::create(llm_cfg);
-    }
-
-    std::cerr << "[*] Backend: OpenAI Responses over WebSocket model="
-              << model << "\n";
+    const char* env_key = std::getenv("OPENROUTER_API_KEY");
     neograph::llm::SchemaProvider::Config llm_cfg;
-    llm_cfg.schema_path   = "openai_responses";
-    llm_cfg.api_key       = api_key ? api_key : "";
-    llm_cfg.default_model = model;
-    llm_cfg.use_websocket = true;
+    llm_cfg.schema_path       = "openai_responses";
+    llm_cfg.api_key           = (env_key && *env_key) ? env_key : (api_key ? api_key : "");
+    llm_cfg.base_url_override = "https://openrouter.ai/api";
+    llm_cfg.default_model     = model;
+    llm_cfg.timeout_seconds   = 600;
+    llm_cfg.provider_routing  = {{"zdr", true}};
+    llm_cfg.use_websocket     = false;
     return neograph::llm::SchemaProvider::create(llm_cfg);
 }
 

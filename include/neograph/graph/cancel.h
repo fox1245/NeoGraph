@@ -21,12 +21,11 @@
  *      socket is closed and the LLM request aborts on the wire. This
  *      is what closes the cost-leak gap reported in v0.2.3.
  *
- * The signal must be ``emit()``ed on the executor that owns it (asio
- * rule). ``cancel()`` may be called from any thread; it stores the
- * flag eagerly and posts the emit onto the bound executor so the
- * actual signal fires on the right strand. ``bind_executor`` is
- * called by the engine on the first co_await after spawning, before
- * any HTTP work.
+ * The signal must be ``emit()``ed and connected on one serial executor
+ * (asio rule). ``cancel()`` may be called from any thread; it stores the
+ * flag eagerly and posts the emit onto the returned serial executor.
+ * ``bind_executor`` is called before the operation is spawned, and the
+ * slot-bound ``co_spawn`` setup runs on that same executor.
  */
 #pragma once
 
@@ -35,6 +34,7 @@
 #include <asio/any_io_executor.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/post.hpp>
+#include <asio/strand.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -104,23 +104,20 @@ public:
             return;  // already cancelled
         }
 
-        // Snapshot the executor under the mutex; bind_executor and
-        // cancel may race across threads.
-        asio::any_io_executor ex_snapshot;
+        // Keep the executor serialized with unbind_executor(): once a
+        // completed operation releases its private io_context binding, no
+        // concurrent cancel() may retain that dead executor and post to it.
+        // Fetch the optional self-retainer before taking mu_; fork() only
+        // owns children_mu_, so this order has no inverse lock path.
+        auto keep_alive = self_keep_alive_for_post();
         {
             std::lock_guard<std::mutex> lk(mu_);
-            ex_snapshot = ex_;
-        }
-        if (ex_snapshot) {
-            // A forked operation child records a weak self-reference and can
-            // retain itself through this posted emit. Directly constructed
-            // tokens return an empty keep_alive and preserve the 0.11.x
-            // caller-owned lifetime contract.
-            auto keep_alive = self_keep_alive_for_post();
-            asio::post(ex_snapshot,
-                       [this, keep_alive = std::move(keep_alive)]() {
-                           sig_.emit(asio::cancellation_type::all);
-                       });
+            if (ex_) {
+                asio::post(ex_,
+                           [this, keep_alive = std::move(keep_alive)]() {
+                               sig_.emit(asio::cancellation_type::all);
+                           });
+            }
         }
 
         // v1.0 (9c): the legacy ``add_cancel_hook`` / hooks_ iteration
@@ -157,38 +154,67 @@ public:
     }
 
     /**
-     * @brief Bind the executor that will handle ``cancellation_signal``
-     *        emits. Called once by the engine's run-spawn lambda.
+     * @brief Bind a serial executor that owns this token's
+     *        ``cancellation_signal``.
      *
-     * If ``cancel()`` has already been requested (caller cancelled
-     * before the run started) the bind also schedules an immediate
-     * emit so the just-spawned coroutine unwinds at its first
-     * co_await checkpoint.
+     * Returns the serial executor that **must** initiate every
+     * ``co_spawn`` bound to ``slot()``. Callers running on another
+     * executor first hop with ``co_await asio::post(bound,
+     * asio::use_awaitable)``. This keeps slot connection/destruction and
+     * ``emit()`` on one strand; generic multi-threaded executors do not
+     * provide that guarantee themselves.
+     *
+     * If ``cancel()`` has already been requested, bind schedules an
+     * immediate emit. The coroutine started on the returned executor must
+     * still check ``throw_if_cancelled()`` before beginning I/O, because
+     * that queued emit may precede its slot connection.
      *
      * @warning Outside GraphEngine, the caller owns the lifetime contract:
      * keep a directly constructed token alive until the bound executor drains.
      */
-    void bind_executor(asio::any_io_executor ex) {
-        bool fire_immediately = false;
+    [[nodiscard]] asio::any_io_executor bind_executor(asio::any_io_executor ex) {
+        asio::any_io_executor bound;
+        bool                   fire_immediately = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            ex_ = std::move(ex);
+            ex_ = ex ? asio::any_io_executor(asio::make_strand(std::move(ex)))
+                     : asio::any_io_executor{};
+            bound = ex_;
             fire_immediately = cancelled_.load(std::memory_order_acquire);
         }
-        if (fire_immediately) {
-            asio::any_io_executor ex_snapshot;
-            {
-                std::lock_guard<std::mutex> lk(mu_);
-                ex_snapshot = ex_;
-            }
-            if (ex_snapshot) {
-                auto keep_alive = self_keep_alive_for_post();
-                asio::post(ex_snapshot,
-                           [this, keep_alive = std::move(keep_alive)]() {
-                               sig_.emit(asio::cancellation_type::all);
-                           });
-            }
+        if (fire_immediately && bound) {
+            auto keep_alive = self_keep_alive_for_post();
+            asio::post(bound,
+                       [this, keep_alive = std::move(keep_alive)]() {
+                           sig_.emit(asio::cancellation_type::all);
+                       });
         }
+        return bound;
+    }
+
+    /**
+     * @brief Detach the serial executor after every bound operation drained.
+     *
+     * This is not a cancellation barrier. The caller must first ensure that
+     * no signal handler or slot-bound operation remains active, then call it
+     * before destroying the executor's execution context. It serializes with
+     * ``cancel()`` so a concurrent cancellation cannot retain the released
+     * executor and post after that context begins teardown.
+     *
+     * GraphEngine and the synchronous bridges call this on their internal
+     * operation children. Direct callers of ``bind_executor()`` must do the
+     * same after draining their executor when they retain the token longer
+     * than that executor.
+     */
+    void unbind_executor() noexcept {
+        asio::any_io_executor released;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            released = std::move(ex_);
+        }
+        // Keep the former executor alive through this method's end, while its
+        // execution context is still known to be alive to the caller.
+        static_cast<void>(released);
     }
 
     /**
@@ -312,6 +338,27 @@ private:
     mutable std::mutex children_mu_;
     std::vector<std::weak_ptr<CancelToken>> children_;
 };
+
+
+// Keeps a token's executor binding scoped to the operation that drained it.
+// Construct after the token is bound; destruction must occur before the
+// corresponding io_context or thread_pool is torn down.
+class CancelExecutorLease final {
+public:
+    explicit CancelExecutorLease(std::shared_ptr<CancelToken> token) noexcept
+        : token_(std::move(token)) {}
+
+    CancelExecutorLease(const CancelExecutorLease&) = delete;
+    CancelExecutorLease& operator=(const CancelExecutorLease&) = delete;
+
+    ~CancelExecutorLease() noexcept {
+        if (token_) token_->unbind_executor();
+    }
+
+private:
+    std::shared_ptr<CancelToken> token_;
+};
+
 
 // v1.0 (9d): the `current_cancel_token()` thread_local +
 // `CurrentCancelTokenScope` RAII smuggling channel is gone.

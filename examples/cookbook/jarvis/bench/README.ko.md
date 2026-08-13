@@ -9,10 +9,10 @@ NeoGraph(C++ 모의 빌드) 및 LangGraph(Python 트윈 `langgraph_twin.py`)에�
 동일한 제약 조건(`--cpus=2 --memory=2g`) 컨테이너에서 측정합니다.
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
-## 측정 결과 (2026-07-05, WSL2, --cpus=2 --memory=2g)
+## 과거 측정 결과 (2026-07-05, OpenRouter 전환 전; Groq)
 
 |미터법|네오그래프|랭그래프|델타|
 |---|---|---|---|
@@ -33,7 +33,7 @@ GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns ×
 ## E2E 라운드 — 실제 MCP 도구 왕복 포함(2026-07-05)
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_e2e.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 ```
 
 공유 데모 MCP 서버 컨테이너(time/calc/weather) + 24회전 혼합 세트(직접 공구 호출 ·
@@ -62,7 +62,7 @@ e2e 턴 대기 시간은 프레임워크의 우월성을 결정할 수 없으며
 ## 경계 측정 라운드 — 공급자 분산 제거(2026-07-05)
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_proxy.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
 프록시 경계 측정을 통해 E2E의 "분산이 델타를 삼키는" 문제를 해결합니다.
@@ -136,6 +136,6 @@ MCP_URL가 설정된 경우 공식 mcp SDK 영구 세션)
 - `driver.py` / `analyze.py` — 측정 · 비교표
 - `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — 벤치마크 이미지
 - `run_bench.sh`(코어) / `run_bench_e2e.sh`(실제 도구 E2E) — 러너
-- `turns_mock.txt`(200) / `turns_groq.txt`(20) / `turns_e2e.txt`(24) — 턴 세트
+- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — 턴 세트
 - `../config-bench/` — 빈 카탈로그(채팅 경로 고정) /
 `../config-bench-e2e/` — 공유 MCP 서버 카탈로그

@@ -12,6 +12,129 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Isolated PostgreSQL Program-store integration fixture.** Added
+  digest-pinned, loopback-only `tests/fixtures/q7-postgres/compose.yaml` with
+  tmpfs storage and a health gate. When `NEOGRAPH_TEST_POSTGRES_URL` names a
+  disposable test database, `ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility`
+  covers publish, activation, reopen, and owner isolation. This is test
+  infrastructure, not a Q7 final-proof snapshot.
+
+- **Fail-closed QuickJS legacy-drain audit.** Added
+  `scripts/audit_legacy_drain.py` and its CTest contract. The tool produces a
+  canonical, content-addressed proof from an explicitly enumerated frozen
+  Program/Harness storage snapshot; it rejects unknown or mutable records,
+  unclassified legacy sources, drain-only records, and active or recoverable
+  legacy runs. SQLite inputs with live `-wal`, `-shm`, or `-journal` sidecars
+  are rejected before opening, so raw copies of active WAL databases cannot
+  serve as final proof. This establishes the Q7 evidence mechanism but does
+  not claim the deployment-specific final drain or legacy-parser deletion is
+  complete.
+
+- **PostgreSQL final-drain archive scan.** The legacy-drain auditor now
+  accepts a frozen `program_postgres_dump` custom archive and invokes
+  `pg_restore` only in data-only, strict-table, script-output mode; it never
+  restores into a database. It validates the Program bundle, version, and
+  activation tables against their persisted identities, rejects an archive that
+  omits or changes any required table, and treats an activation of a legacy
+  Program version as a final-removal blocker.
+
+- **No-deployment Q7 final-proof mode.** The legacy-drain auditor now accepts
+  a named operator attestation only when no pre-release or production NeoGraph
+  deployment ever existed. That mode accepts neither storage targets nor
+  historical legacy artifacts, labels the emitted proof
+  `evidence_mode: "no_deployment_attestation"`, and fails closed for any
+  mixed or unattested empty inventory. It cannot cover drained, deleted, lost,
+  or inaccessible historical state.
+
+- **OpenRouter provider routing.** `OpenAIProvider` now forwards an object
+  passed at `CompletionParams::extra_fields.provider` into the Chat Completions
+  request body as `provider`; non-object values fail before an HTTP request.
+  This exposes OpenRouter's documented per-call routing preferences while
+  leaving other native `extra_fields` keys ignored. The live Beast cookbook
+  pins its provider and uses an explicit 180-second timeout for its
+  4,000-token generation budget.
+
+- **Copy Ninja local graph-node bridge.** Added transport-free
+  `a2a::CopyNinjaNode`, which wraps a separately materialized Copy Ninja
+  harness, reads `prompt`, and overwrites `response`. Added the
+  `cookbook_the_beast_copy_ninja` live cookbook: its LLM may author only this
+  fixed local node, must pass a fourth local-binding gate after the normal
+  Core gates, and fails if the synthetic source agent observes an RPC. Card
+  text, endpoint, credentials, and source remain excluded from the unadmitted
+  candidate and the caller prompt never enters the authoring LLM request.
+
+
+- **Optional Program component boundary.** Added the opt-in
+  `NEOGRAPH_BUILD_PROGRAM` switch, exported `neograph::program` target, and
+  `<neograph/program/program.h>` entry point. Installed package component
+  discovery now reports Program only when built; Core-only installs keep the
+  existing `neograph::core` link interface.
+
+- **Immutable Program value model.** Added stable typed diagnostics, deeply
+  owned canonical-JSON and C++-builder `ProgramSource` inputs, immutable
+  content-addressed `ProgramBundle`/`ProgramVersion` values, canonical
+  serialization, SHA-256 algorithm-tagged identities, source maps, imports,
+  and strict versioned stored-value schemas. `neograph::program` is now a
+  compiled exported library while remaining dependent only on Core.
+  Bundle/version v1 projections now require sealed Core definitions and plan
+  identities, semantic-versioned executable digests, contracts, closures,
+  bounds, and typed admission/materialization receipts. Their identities bind
+  the format and storage version, semantic sets use stable ordering, and
+  diagnostics reject invalid pointers, reversed spans, and unknown enums while
+  leaving parser spans absent when no exact offset is available.
+
+- **Sealed Program admission closure.** Added immutable `RegistrySnapshot`,
+  `AdmissionProfile`, and `PolicySnapshot` values with builder-time callable
+  capture, strict canonical manifests, domain-separated fingerprints, and
+  fail-closed cross-fingerprint validation in `ProgramVersion`. Core now
+  exposes explicitly named local-only parse/link/validate entry points for
+  Program materialization; existing local-first/global-fallback overloads
+  remain unchanged.
+  Registry entries now record canonical exact executable dependency edges for
+  transitive admission closure, and local-only condition checks cover legacy
+  keyed-edge documents without consulting process-global registries.
+
+- **Single-root `call_core` Program compiler.** Added `ProgramCompiler`, which
+  accepts only the closed Program-v1 envelope, performs pure local Core
+  parse/round-trip/validation before sealing, and emits aggregate typed
+  diagnostics with RFC 6901 pointers and source-map attribution. Compilation
+  derives the canonical Program, registry, transitive executable closure,
+  capability/effect, import Merkle, sealed-definition, and Core plan identities
+  without invoking factories or callables. The authored document schema,
+  complete finite budget contract, zero-dispatch rejection tests, and static
+  and shared installed-consumer coverage ship with the compiler. Core gained
+  additive total parse/round-trip and local validation reports while legacy
+  throwing APIs retain their existing behavior.
+
+- **Pinned Program runtime vertical slice.** Added `ProgramCatalog`,
+  `EngineGenerationCache`, `ProgramRuntime`, shared `ProgramHandle`,
+  immutable `ProgramResult`, typed Program event envelopes, in-memory
+  `ProgramStore`, and an append-only CAS `ProgramJournal`. Admission recomputes
+  untrusted bundle semantics before materialization; each attempt pins one
+  immutable Core generation and invokes the existing `GraphEngine` async path.
+  Runtime execution now maps completion, interruption, exact-checkpoint resume,
+  cancellation, timeout, Core step exhaustion, checkpoint incompatibility, and
+  failures to typed terminal states while preserving nonrenewable budget and
+  checkpoint lineage. Journal commits precede checkpoint/terminal event
+  delivery, concurrent resume has one CAS winner, and the PR6 slice rejects
+  effectful or nonempty-schema Programs until the Core broker exists.
+
+- **QuickJS control-language frontend.** Added opt-in
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`, sealed
+  `ProgramSource::from_javascript(...)`, and a private compile-only QuickJS
+  context. The source envelope pins engine/language/host-API versions; its only
+  `ng` host surface is a versioned graph builder, and memory, stack, and
+  interrupt-poll limits fail closed. JavaScript produces one immutable
+  `call_core` Program plan and never becomes a runtime VM, bytecode artifact,
+  or Core dependency.
+
+- **A2A Agent Card compatibility candidates.** Added a one-request,
+  unauthenticated, no-redirect well-known-card collector and a factory-only
+  immutable candidate compiler. Candidates retain only digest-pinned
+  provenance, bounded protocol facts, and safe skill IDs; free-form card text,
+  advertised RPC endpoints, provider/security configuration, and credentials
+  are excluded. The Copy Ninja PoC additionally requires independently observed
+  behavior pinned to that digest and never dispatches the source agent.
 
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
@@ -35,10 +158,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   their own directory. Pre-v1 releases use ABI generation 0 but may declare
   mandatory rebuild boundaries. All C++ consumers built against `0.11.1` or
   earlier must rebuild for the release containing bounded `NodeCache`, because
-  `NodeCache` and `EngineConfig` public layouts changed. Version 1.0 changes the
-  ABI generation to 1 and freezes the supported v1 layouts. CI now builds and
-  runs isolated static and shared installed consumers and checks ELF/Mach-O
-  loader metadata. See [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md).
+  `NodeCache` and `EngineConfig` public layouts changed. The release containing
+  bounded `UsageAccumulator` reservations is another mandatory rebuild boundary:
+  its public object layout now carries reservation accounting state. Version 1.0
+  changes the ABI generation to 1 and freezes the supported v1 layouts. CI now
+  builds and runs isolated static and shared installed consumers and checks
+  ELF/Mach-O loader metadata. See [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md).
 - **`GraphNode::run(input)` migration guide complete.** Python `GraphNode` base class
   no longer references deleted `execute*` methods; when `run(input)` is missing it
   raises a `NotImplementedError` containing the migration documentation path.
@@ -65,6 +190,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **QuickJS `all` join startup race.** Completion handlers now wait for initial
+  member-launch registration before closing a JavaScript join. An immediately
+  completing child can no longer resume the generator before its sibling initial
+  or replacement commands dispatch; repeated runtime regressions cover both paths.
 - **Harness aggregate finding provenance (issue #174).** Details now include a
   `finding_sources` array aligned with the existing flat `findings` array.
   Every entry records its aggregate index, source worker ID, and worker-local

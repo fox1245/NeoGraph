@@ -124,6 +124,13 @@ class NEOGRAPH_API Agent {
      */
     void set_tool_gate(ToolGate gate) { tool_gate_ = std::move(gate); }
 
+    /// Inject a host-shared resource admission boundary for tool execution.
+    /// Empty restores the conservative process-default controller.
+    void set_tool_execution_controller(
+        std::shared_ptr<ToolExecutionController> controller) {
+        tool_execution_controller_ = std::move(controller);
+    }
+
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
@@ -140,6 +147,10 @@ class NEOGRAPH_API Agent {
 
     /// #89 — tool interception; empty means every call runs.
     ToolGate tool_gate_;
+
+    /// Optional host-shared resource admission controller. The dispatcher uses
+    /// the process default when this is empty.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller_;
 
     void ensure_system_message(std::vector<ChatMessage>& messages);
     std::vector<ChatTool> get_tool_definitions() const;

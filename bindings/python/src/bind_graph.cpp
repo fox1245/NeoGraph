@@ -50,6 +50,7 @@
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
 #include <neograph/tool_dispatch.h>
+#include <neograph/tool_execution.h>
 
 #ifdef NEOGRAPH_PYBIND_HAS_POSTGRES
 #include <neograph/graph/postgres_checkpoint.h>
@@ -692,6 +693,61 @@ void init_graph(py::module_& m) {
             "be written uniformly against the abstract interface.");
 #endif
 
+    // ── Host-owned tool execution policy ─────────────────────────────────
+    //
+    // The default controller serializes repeated calls to one named tool.
+    // Python hosts must opt in only after they establish that the remote
+    // resource is re-entrant or has the declared capacity.
+    py::enum_<ToolConcurrency>(m, "ToolConcurrency",
+        "Host-declared concurrency contract for one named tool.")
+        .value("Reentrant", ToolConcurrency::Reentrant)
+        .value("KeyedExclusive", ToolConcurrency::KeyedExclusive)
+        .value("Exclusive", ToolConcurrency::Exclusive)
+        .value("Capacity", ToolConcurrency::Capacity)
+        .value("SingleFlight", ToolConcurrency::SingleFlight)
+        .value("ExternalLimited", ToolConcurrency::ExternalLimited);
+
+    py::class_<ToolExecutionPolicy>(m, "ToolExecutionPolicy",
+        "Host-owned execution policy. The default is keyed-exclusive: repeated "
+        "calls to one tool serialize until the host explicitly widens it.")
+        .def(py::init<>())
+        .def_readwrite("concurrency", &ToolExecutionPolicy::concurrency)
+        .def_readwrite("capacity", &ToolExecutionPolicy::capacity)
+        .def_readwrite("max_pending", &ToolExecutionPolicy::max_pending)
+        .def_readwrite("resource_key_template",
+                       &ToolExecutionPolicy::resource_key_template)
+        .def("validate", &ToolExecutionPolicy::validate);
+
+    py::class_<ToolExecutionPolicyRegistry,
+               std::shared_ptr<ToolExecutionPolicyRegistry>>(
+        m, "ToolExecutionPolicyRegistry",
+        "Thread-safe host-owned policies keyed by exact tool name.")
+        .def(py::init<>())
+        .def("upsert", &ToolExecutionPolicyRegistry::upsert,
+             py::arg("tool_name"), py::arg("policy"),
+             "Replace the host policy for one exact tool name.")
+        .def("erase", &ToolExecutionPolicyRegistry::erase,
+             py::arg("tool_name"))
+        .def("set_default", &ToolExecutionPolicyRegistry::set_default,
+             py::arg("policy"))
+        .def("resolve", &ToolExecutionPolicyRegistry::resolve,
+             py::arg("tool_name"));
+
+    py::class_<ToolExecutionController,
+               std::shared_ptr<ToolExecutionController>>(
+        m, "ToolExecutionController",
+        "Host-shareable boundary that enforces ToolExecutionPolicyRegistry "
+        "before every graph tool invocation.")
+        .def(py::init([](std::shared_ptr<ToolExecutionPolicyRegistry> policies) {
+                ToolExecutionControllerConfig config;
+                config.policies = std::move(policies);
+                return std::make_shared<ToolExecutionController>(std::move(config));
+             }),
+             py::arg("policies") = nullptr,
+             "Create a controller. Pass one registry to share resource limits "
+             "across engines.")
+        .def_property_readonly("policies", &ToolExecutionController::policies);
+
     // ── GraphEngine ──────────────────────────────────────────────────────
     //
     // Holder is shared_ptr so NodeContext sharing across engines stays
@@ -824,6 +880,13 @@ void init_graph(py::module_& m) {
             "the dangerous tool would run unchecked. Set it once; it holds for "
             "every run and resume.\n\n"
             "Pass None to remove it.")
+
+        .def("set_tool_execution_controller",
+             &GraphEngine::set_tool_execution_controller,
+             py::arg("controller"),
+             "Install the host-owned tool execution controller. Its policies "
+             "survive run() and resume(); configure before concurrent use. "
+             "Pass None to restore the conservative process-default policy.")
 
         .def("resume",
             [](GraphEngine& self,

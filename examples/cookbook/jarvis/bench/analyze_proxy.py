@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""경계 계측 잔차 분석 — 프록시 로그의 콜별 상류(WAN+Groq) 시간을 턴에서 차감.
+"""경계 계측 잔차 분석 — 프록시 로그의 콜별 상류(OpenRouter) 시간을 턴에서 차감.
 
   잔차 = 턴 왕복시간 − Σ(그 턴 시간창 안에 완료된 콜의 upstream_response_time)
        = 클라이언트측 순수 시간 (그래프 + HTTP 클라이언트 직렬화 + 로컬 MCP + 파이프)
@@ -9,7 +9,7 @@
 공유해도 시간창이 겹치지 않으므로 자동 분리된다.
 
 사용:
-  python3 analyze_proxy.py <groq.log> <label1>:<jsonl1> [<label2>:<jsonl2> ...]
+  python3 analyze_proxy.py <openrouter.log> <label1>:<jsonl1> [<label2>:<jsonl2> ...]
 """
 import json
 import statistics as st

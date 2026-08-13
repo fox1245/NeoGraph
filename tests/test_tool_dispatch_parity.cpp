@@ -1,21 +1,17 @@
-// Tool dispatch: what actually runs concurrently, and on which path (issue #87).
+// Tool dispatch concurrency and resource-admission parity.
 //
-// Two claims are under test here, and the point of the file is to hold them to
-// numbers rather than to reasoning:
-//
-//   1. A *sync* tool — one that implements only execute() — never overlaps,
-//      even on the "parallel" ToolNode path. Tool::execute_async's default body
-//      is `co_return execute(arguments);`, which runs to completion before the
-//      coroutine's first suspension, so co_spawn'ing three of them into a
-//      parallel_group still runs them end to end. This matters far beyond
-//      performance: it means a stateful sync tool cannot race, and unifying the
-//      dispatch paths cannot introduce a data race into one.
-//
-//   2. An *async* tool — one that overrides execute_async and actually suspends
-//      — does overlap on ToolNode, and does NOT on Agent, which is the defect.
+// 1. Legacy synchronous Tool::execute implementations run on the bounded
+// blocking executor, so distinct tools overlap instead of pinning the graph
+// loop.
+// 2. The conservative default policy is keyed-exclusive: repeated calls to
+// the same tool name serialize until a host explicitly declares a wider
+// policy.
+// 3. Native asynchronous tools retain their overlap, and Agent shares the
+// exact dispatch boundary with ToolDispatchNode.
 //
 // Timing assertions use generous bounds (a 3x300ms serial run vs a ~300ms
-// concurrent one) so they discriminate the two regimes without being flaky.
+// concurrent one) so they discriminate the two regimes without depending on
+// scheduler microseconds.
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
@@ -43,7 +39,8 @@ namespace {
 
 constexpr auto kToolDelay = 300ms;
 
-// Sleeps on the calling thread. Implements only execute() — the common shape.
+// Sleeps on a blocking worker thread. Implements only execute() — the common
+// legacy shape that must no longer pin the graph event loop.
 class SyncSleepTool : public Tool {
 public:
     explicit SyncSleepTool(std::string name) : name_(std::move(name)) {}
@@ -162,10 +159,9 @@ NodeOutput drive(GraphNode& node, const GraphState& state) {
 
 }  // namespace
 
-// Claim 1. Sync tools do NOT overlap on ToolNode, despite the parallel_group.
-// This is the load-bearing compatibility fact: a stateful sync tool is never
-// re-entered, so unifying Agent onto this dispatch cannot race one.
-TEST(ToolDispatchParity, SyncToolsDoNotOverlapOnToolNode) {
+// Distinct legacy synchronous tools overlap after the default async bridge
+// offloads each call to the bounded blocking pool.
+TEST(ToolDispatchParity, SyncToolsOverlapOnToolNode) {
     SyncSleepTool a("a"), b("b"), c("c");
     NodeContext ctx;
     ctx.tools = {&a, &b, &c};
@@ -175,8 +171,8 @@ TEST(ToolDispatchParity, SyncToolsDoNotOverlapOnToolNode) {
     seed(state, {assistant_calling({"a", "b", "c"})});
 
     auto elapsed = timed([&] { drive(node, state); });
-    EXPECT_GE(elapsed, 3 * kToolDelay - 50ms)
-        << "sync tools appear to overlap — the no-race assumption behind #87 is wrong";
+    EXPECT_LT(elapsed, 2 * kToolDelay)
+        << "distinct synchronous tools did not leave the graph event loop";
 }
 
 // Claim 2a. Async tools DO overlap on ToolNode. This is the behavior Agent lacks.
@@ -269,22 +265,25 @@ TEST(ToolDispatchParity, AgentOverlapsAsyncTools) {
         << "Agent ran the tool calls serially; ToolNode overlaps them (#87)";
 }
 
-// How far does the win actually scale? Three tools gave 3x, but that says
-// nothing about twenty — a single-threaded io_context drives these coroutines,
-// so anything that does not genuinely suspend serializes on that one thread no
-// matter how many calls are in flight.
-//
-// The serial reference is measured, not assumed: sync tools still run one at a
-// time (SyncToolsDoNotOverlapOnToolNode), so N sync tools on this same binary
-// and this same machine IS what the old serial Agent cost. Both regimes are
-// timed side by side and the ratio is printed.
+// How far does the win actually scale? Twenty distinct legacy tools should
+// stay near one tool's latency, while repeated calls to one tool stay
+// keyed-exclusive. Both reference regimes are measured on the same binary.
 TEST(ToolDispatchParity, ScalingToTwentyTools) {
     constexpr int kN = 20;
 
     std::vector<std::string> names;
     for (int i = 0; i < kN; ++i) names.push_back("t" + std::to_string(i));
 
-    // Serial reference: N sync tools through the same dispatch.
+    // Serial reference: repeated calls to one resource key.
+    SyncSleepTool shared("shared");
+    NodeContext serial_ctx;
+    serial_ctx.tools = {&shared};
+    ToolDispatchNode serial_node("tools", serial_ctx);
+    GraphState serial_state;
+    seed(serial_state, {assistant_calling(std::vector<std::string>(kN, "shared"))});
+    auto serial = timed([&] { drive(serial_node, serial_state); });
+
+    // Concurrent: N distinct synchronous tools through the same dispatch.
     std::vector<std::unique_ptr<SyncSleepTool>> sync_owned;
     std::vector<Tool*> sync_tools;
     for (const auto& n : names) {
@@ -296,21 +295,7 @@ TEST(ToolDispatchParity, ScalingToTwentyTools) {
     ToolDispatchNode sync_node("tools", sync_ctx);
     GraphState sync_state;
     seed(sync_state, {assistant_calling(names)});
-    auto serial = timed([&] { drive(sync_node, sync_state); });
-
-    // Concurrent: N async tools through the same dispatch.
-    std::vector<std::unique_ptr<AsyncSleepTool>> async_owned;
-    std::vector<Tool*> async_tools;
-    for (const auto& n : names) {
-        async_owned.push_back(std::make_unique<AsyncSleepTool>(n));
-        async_tools.push_back(async_owned.back().get());
-    }
-    NodeContext async_ctx;
-    async_ctx.tools = async_tools;
-    ToolDispatchNode async_node("tools", async_ctx);
-    GraphState async_state;
-    seed(async_state, {assistant_calling(names)});
-    auto concurrent = timed([&] { drive(async_node, async_state); });
+    auto concurrent = timed([&] { drive(sync_node, sync_state); });
 
     const double ratio = static_cast<double>(serial.count()) /
                          static_cast<double>(std::max<long long>(1, concurrent.count()));
@@ -319,10 +304,11 @@ TEST(ToolDispatchParity, ScalingToTwentyTools) {
               << "concurrent " << concurrent.count() << "ms, "
               << "speedup " << ratio << "x\n";
 
-    // The claim under test is that concurrency holds at N=20 — i.e. the wall
-    // clock stays near one tool's latency instead of growing with N.
-    EXPECT_LT(concurrent, 2 * kToolDelay)
-        << "concurrency collapsed at N=" << kN;
+    // The shared pool is deliberately bounded between 2 and 16 workers, so
+    // absolute wall time depends on the host. The same-process ratio must
+    // still prove overlap against the keyed-exclusive reference path.
+    EXPECT_GT(ratio, 1.5)
+        << "synchronous tools did not overlap at N=" << kN;
     EXPECT_GE(serial, kN * kToolDelay - 200ms)
-        << "the serial reference did not actually serialize";
+        << "same-key tool calls bypassed keyed-exclusive admission";
 }

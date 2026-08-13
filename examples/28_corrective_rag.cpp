@@ -9,24 +9,22 @@
 //                              \  AMBIGUOUS  ->  refine(KB) + web  ->  generate
 //                               \ INCORRECT  ->  web only          ->  generate
 //
-// The web-search branch hits OpenAI's built-in web_search tool over
-// /v1/responses (developers.openai.com/api/docs/guides/tools-web-search)
-// — a hosted tool the model invokes server-side, so this example needs
-// only OPENAI_API_KEY (no Brave / Tavily / DuckDuckGo key). To swap in
-// a different search backend, only web_search() below changes — the
-// routing logic is unchanged.
-//
+// The web-search branch hits OpenRouter's built-in web_search tool over
+// /api/v1/responses (OpenRouter-compatible Responses API).
+// It is a hosted tool the model invokes server-side, so this example needs
+// only OPENROUTER_API_KEY (no Brave / Tavily / DuckDuckGo key). To swap in
+// a different search backend, only web_search() below changes — the routing
+// logic is unchanged.
 // Implementation note: the LLM steps that take *function* tools
 // (evaluate / refine / generate — all zero-tool here) go through
 // SchemaProvider("openai_responses"). The web-search call uses a
 // *hosted* built-in tool, which SchemaProvider's function-shape
-// abstraction doesn't model, so it's a direct POST to /v1/responses
-// via neograph::async::async_post. Both code paths hit the same
+// abstraction doesn't model, so it's a direct POST to /api/v1/responses
 // endpoint and exercise the chunked-response handling in the
 // async HTTP client.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_corrective_rag
 // (auto-loads .env from the cwd or any parent directory.)
 
@@ -294,9 +292,9 @@ static std::string refine(Provider& p, const std::string& question,
 // Query rewriter (Yan et al. §3.5) — rewrites the user question into a
 // concise keyword query suitable for a web search engine. The paper's
 // INCORRECT branch routes through this *before* invoking external
-// search; previously this example fed the raw question to OpenAI's
-// hosted web_search tool, which works but skips the documented
-// rewriting step.
+// search; previously this example fed the raw question to OpenRouter's
+// hosted web_search tool, which works but skips the documented rewriting
+// step.
 static std::string rewrite_query(Provider& p, const std::string& question) {
     CompletionParams cp;
     cp.messages.push_back({"system",
@@ -346,11 +344,10 @@ post_web_search(neograph::async::AsyncEndpoint endpoint,
         opts);
 }
 
-// Real web search via OpenAI's built-in `web_search` tool, hosted
-// inside /v1/responses. The model decides when to invoke it, runs
-// the search server-side, and folds the citations back into its
-// final assistant message — we just read the resulting text out of
-// output[].
+// Real web search via OpenRouter's built-in `web_search` tool, hosted
+// inside /v1/responses. The model decides when to invoke it, runs the
+// search server-side, and folds the citations back into its final assistant
+// message — we just read the resulting text out of output[].
 //
 // Bypasses SchemaProvider because hosted built-in tools don't follow
 // the function-tool shape (no name/parameters), so they don't fit
@@ -364,8 +361,9 @@ static std::string web_search(const std::string& api_key,
     body["model"] = model;
     body["input"] = question;
     body["tools"] = json::array({json{{"type", "web_search"}}});
+    body["provider"] = {{"zdr", true}};
 
-    auto endpoint = na::split_async_endpoint("https://api.openai.com");
+    auto endpoint = na::split_async_endpoint("https://openrouter.ai/api");
     auto resp = na::run_sync(post_web_search(
         endpoint, body.dump(), "Bearer " + api_key));
 
@@ -425,25 +423,23 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-        const char* api_key = std::getenv("OPENAI_API_KEY");
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENAI_API_KEY environment variable "
+            std::cerr << "Set OPENROUTER_API_KEY environment variable "
                          "(or put it in .env beside the binary)\n";
             return 1;
         }
 
-        // SchemaProvider with the built-in "openai_responses" schema —
-        // every LLM call below hits /v1/responses, exercising the
-        // input[] request shape, output[] response parsing, and the
-        // SSE-events streaming format declared in
-        // schemas/openai_responses.json.
-        const std::string model = "gpt-5.4-mini";
+        // SchemaProvider with the OpenRouter-compatible Responses schema.
+        const std::string model = "deepseek/deepseek-v4-flash-0731";
 
         llm::SchemaProvider::Config cfg;
         cfg.schema_path     = "openai_responses";
         cfg.api_key         = api_key;
+        cfg.base_url_override = "https://openrouter.ai/api";
         cfg.default_model   = model;
         cfg.timeout_seconds = 60;
+        cfg.provider_routing = {{"zdr", true}};
         auto provider = llm::SchemaProvider::create(cfg);
 
         // Three questions chosen to exercise each branch of the router.

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-migration-plan-v1.schema.json",
+  "title": "NeoGraph Program MigrationPlan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "storage_schema_version",
+    "id",
+    "source_version_id",
+    "target_version_id",
+    "owner_scope",
+    "compatibility",
+    "blockers",
+    "diagnostics",
+    "mappings"
+  ],
+  "properties": {
+    "format": { "const": "neograph-program-migration-plan" },
+    "storage_schema_version": { "const": 1 },
+    "legacy_schema_version": { "const": 0 },
+    "id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source_version_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "target_version_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "owner_scope": { "type": "string", "minLength": 1 },
+    "compatibility": {
+      "enum": ["new_runs_only", "fork_compatible", "drain_only", "operator_reconciliation", "blocked"]
+    },
+    "blockers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "mappings": { "type": "array", "items": { "$ref": "#/$defs/mapping" } }
+  },
+  "$defs": {
+    "dimension": {
+      "enum": [
+        "channels", "continuation", "pending_input", "pending_effect", "retry",
+        "cancellation", "interrupt", "budget", "authority", "checkpoint", "journal",
+        "effects", "caches", "output", "compiler", "registry",
+        "materialization", "contract", "recovery"
+      ]
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimension", "code", "message", "source", "target"],
+      "properties": {
+        "dimension": { "$ref": "#/$defs/dimension" },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "source": {},
+        "target": {}
+      }
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimension", "rule", "source", "target"],
+      "properties": {
+        "dimension": { "$ref": "#/$defs/dimension" },
+        "rule": { "type": "string", "minLength": 1 },
+        "source": {},
+        "target": {}
+      }
+    }
+  }
+}

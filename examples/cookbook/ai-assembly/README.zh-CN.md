@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=828f35d27b957d55c8c766d3ce714ae4094397f9f2d4f0cabea710750619cb9a -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=4fc02b6c921618283b005ec1a6e8819e815c28840f34ad72b347d1ad86ff4e4b -->
 # AI 国会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -11,10 +11,9 @@
 ## 它做什么
 
 四名国会议员监听在不同端口上，
-每一个都是由不同 persona prompt 和同一个 OpenAI 模型（`gpt-5.4-mini`）支撑的 A2A endpoint。
-Speaker（国会议长）是一个独立程序，通过 NeoGraph 的 `A2AClient`
-并行向每位成员广播一份法案，从回复中解析每位成员的投票，
-并宣布结果。
+每一个都是由不同 persona prompt 和同一个 OpenRouter 路由（固定 DeepSeek 模型）支撑的 A2A endpoint。
+Speaker（国会议长）是独立程序，通过 NeoGraph 的 `A2AClient`
+并行向每位成员广播法案，从回复中解析投票并宣布结果。
 
 ```
                           ┌──────────────────┐
@@ -26,14 +25,14 @@ Speaker（国会议长）是一个独立程序，通过 NeoGraph 的 `A2AClient`
             ▼          ▼                       ▼          ▼
        :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
        Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
-       (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
+       (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
 每位成员都是一个单节点 NeoGraph（`__start__ → persona → __end__`），
 由 `a2a::A2AServer` 提供服务。graph 读取 `prompt` channel 并写入 `response` channel；
 A2A server 默认的 `GraphAgentAdapter` 会通过 JSON-RPC 暴露这些 channel。
 
-## 现场转录（gpt-5.4-mini，2026-04-29）
+## 现场转录（DeepSeek via OpenRouter，2026-04-29）
 
 法案：[`bills/basic_income.txt`](bills/basic_income.txt) — 普遍
 基本收入，每月 500,000 韩元，由土地税 + 碳税 + 累进税资助。
@@ -57,24 +56,29 @@ A2A server 默认的 `GraphAgentAdapter` 会通过 JSON-RPC 暴露这些 channel
 ## 构建并运行（在 NeoGraph 源码树中）
 
 ```bash
-# from NeoGraph repo root
-cmake --build build-pybind --target \
+# from NeoGraph repo root; A2A and LLM are optional build components
+cmake -S . -B build-cookbook \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_A2A=ON \
+    -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENAI_API_KEY=sk-...' > .env
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
+成员服务器会调用 OpenRouter，因此需要 `OPENROUTER_API_KEY` 和网络访问。
+编译本身可以离线验证。
+
 ## Python speaker 变体（v0.2.1+，跨语言 A2A）
 
-同一个 speaker 逻辑，用约 100 行 Python 实现，对接同一组
-C++ 成员服务器 — 证明 A2A 协议可以干净地跨语言桥接：
-
 ```bash
-pip install neograph-engine          # >= 0.2.1
+pip install 'neograph-engine>=0.2.1'
 # (start the C++ members in another terminal as above)
-PYTHONPATH=build-pybind python3 examples/cookbook/ai-assembly/speaker.py \
+PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
     http://127.0.0.1:8103 http://127.0.0.1:8104
@@ -84,9 +88,6 @@ Python A2A binding（`neograph_engine.a2a`）随 v0.2.1 发布。
 服务器端（graph-as-A2A-endpoint）目前仍然只支持 C++。
 
 ## 摩擦点记录 — NeoGraph 新用户踩到的问题
-
-这些是构建本 cookbook 时发现的粗糙边缘。**四个都已在 v0.2.1 修复** —
-保留在这里作为记录。
 
 ### 1. A2A 曾经只支持 C++ — Python binding 没有暴露它（已在 v0.2.1 修复）
 
@@ -128,17 +129,16 @@ README 现在有一个“从你的 CMake 项目使用 NeoGraph”小节，
 - 对自由格式韩文文本使用 `parse_vote` regex 能工作，是因为模型
   在被要求时可靠遵守 `vote: support/oppose/abstain`。Persona 输出
   保持在格式内，使它成为一个 5 行计票函数。
-- 构建很干净 — FetchContent 拉取 v0.2.0，不需要手动依赖
-  安装。原版 Ubuntu 上的 OpenSSL/CURL 就足够了。
+- 源码树内的 CMake 构建是自包含的；请像上面一样配置
+  `NEOGRAPH_BUILD_A2A=ON` 和 `NEOGRAPH_BUILD_LLM=ON`。
 
 ## 文件
 
 ```
-ai-national-assembly/
-├── CMakeLists.txt              # FetchContent NeoGraph v0.2.0
-├── src/
-│   ├── member_server.cpp       # one binary, configurable persona
-│   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
+ai-assembly/
+├── member_server.cpp           # one configurable persona server
+├── speaker.cpp                 # orchestrator, broadcasts bill, tallies
+├── speaker.py                  # Python A2A client variant
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)

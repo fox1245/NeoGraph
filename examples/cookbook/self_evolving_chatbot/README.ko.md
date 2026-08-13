@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=5822dcf16aca038ab00fde8ea9ffb59be2f05e725c5feeef8c4d61ef86a2742b -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=0c6d156e7378f114498c63578e7981c6401394ada5684fc924fb72ec7c867849 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # 스스로 진화하는 챗봇
@@ -41,8 +41,8 @@ LangChain/LangGraph의 StateGraph는 Python 클래스 인스턴스입니다. 피
 
 ## 핵심 메커니즘
 
-각 턴이 끝나면 LLM 심사위원(gpt-4o-mini)이 대화 내역 + 현재를 살펴봅니다.
-토폴로지와 한 단어로 가장 잘 어울리는 응답:
+각 턴이 끝나면 OpenRouter의 고정 DeepSeek 모델이 LLM 심사위원으로서
+대화 내역 + 현재 토폴로지를 살펴보고 가장 적합한 형태를 한 단어로 반환합니다.
 
 - `simple` — 1개의 LLM 통화, 짧은 직접 응답(사실적 Q에 적합)
 - `reflexive` — 3개의 LLM 호출(초안 → 비평 → 최종)(정확성 추구에 적합)
@@ -207,9 +207,9 @@ if (turn % EVAL_INTERVAL == 0) {
 - **진동 방지 가드** — 모든 케이스를 처리합니다. 마지막 N 턴 동안 진화한 경우 잠금,
 또는 히스테리시스(현재 토폴로지가 다음 후보보다 N% 낮지 않은 경우 변경하지 마십시오).
 - **LLM 생성 graph_def** — 현재 사전 정의된 토폴로지 3개 중에서 선택합니다.
-보다 야심차게 LLM는 처음부터 graph_def JSON를 생성합니다. NG
-[v0.5.0 example 23 evolving chat agent](../../23_*.cpp) 포크 +
-메타 어셈블리 패턴은 이 방향으로 진행됩니다.
+처음부터 graph_def JSON을 생성하는 방법은
+[`the-beast/`](../the-beast/) cookbook의 모델 작성 토폴로지와
+컴파일/검증 게이트를 참고하세요.
 - **병렬 고객 처리** — 순차 데모 7분, 고객당 병렬 = ~1.5분.
 `asio::thread_pool` + 컴파일 캐시를 직접 사용하세요.
 - **A/B 프레임워크** — 동일한 고객에 대해 2개의 토폴로지를 동시에 운영하고 승자를 결정합니다.

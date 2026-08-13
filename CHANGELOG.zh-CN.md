@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2aec329226eb4b687367daba27af8d37f751c54aed3dc50c013cf129db79a27d -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,7 +12,110 @@ NeoGraph 的所有显著变更均记录于本文件。
 
 ## [未发布]
 
+
 ### 新增
+- **隔离的 PostgreSQL Program-store 集成 fixture。** 新增了带 tmpfs storage 和
+  health gate 的 digest-pinned、loopback-only
+  `tests/fixtures/q7-postgres/compose.yaml`。当 `NEOGRAPH_TEST_POSTGRES_URL`
+  指向一次性 test database 时，
+  `ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility`
+  会覆盖 publish、activation、reopen 和 owner isolation。这是 test
+  infrastructure，不是 Q7 final-proof snapshot。
+
+- **失败封闭的 QuickJS legacy-drain 审计。** 新增
+  `scripts/audit_legacy_drain.py` 及其 CTest 契约。该工具从明确枚举的冻结
+  Program/Harness 存储快照生成 canonical、content-addressed 的 proof，并拒绝
+  未知或发生变化的 record、未分类的 legacy source、drain-only record，以及
+  active 或可恢复的 legacy run。带有活动 `-wal`、`-shm` 或 `-journal`
+  sidecar 的 SQLite 输入会在打开前被拒绝，因此不会将活动 WAL 数据库的 raw
+  copy 当作 final proof。这建立了 Q7 evidence mechanism，但并不声称
+  deployment 专属的 final drain 或 legacy parser 删除已经完成。
+
+- **PostgreSQL final-drain 归档扫描。** legacy-drain 审计器现在接受冻结的
+  `program_postgres_dump` custom archive，并且只会以 data-only、strict-table、
+  script-output 模式调用 `pg_restore`，绝不向数据库执行 restore。它会验证
+  Program bundle、version 和 activation table 的 persisted identity，拒绝缺少
+  任一必需 table 或在扫描期间发生变化的 archive，并将仍选择 legacy Program
+  version 的 activation 作为 final-removal blocker。
+
+- **无部署 Q7 final-proof 模式。** legacy-drain 审计器仅在从未存在过
+  pre-release 或 production NeoGraph deployment 时才接受具名的 operator
+  attestation。该模式既不接受 storage target，也不接受历史 legacy artifact，
+  会将生成的 proof 标记为
+  `evidence_mode: "no_deployment_attestation"`，并对混合的或未 attested 的空
+  inventory 失败封闭。它不能覆盖已 drain、已删除、已丢失或不可访问的历史 state。
+
+- **OpenRouter 提供商路由。** `OpenAIProvider` 现在会将
+  `CompletionParams::extra_fields.provider` 中传入的对象作为 `provider`
+  转发到 Chat Completions 请求体；非对象值会在发出 HTTP 请求前失败。
+  这公开了 OpenRouter 已文档化的逐调用路由偏好，同时仍会忽略其他原生
+  `extra_fields` 键。实时 Beast cookbook 会固定提供商，并为 4,000-token
+  生成预算使用显式的 180 秒超时。
+
+- **Copy Ninja 本地图节点桥接。** 新增无 transport 的 `a2a::CopyNinjaNode`：
+  它包装独立 materialize 的 Copy Ninja harness，读取 `prompt` 并 overwrite
+  `response`。同时新增 live cookbook `cookbook_the_beast_copy_ninja`：其 LLM
+  只能编写该固定 local node，须在常规 Core gate 之后通过第四个 local-binding
+  gate；若合成 source agent 观察到 RPC，运行即失败。Card text、endpoint、
+  credential 和 source 仍被排除在 unadmitted candidate 之外，caller prompt
+  不会进入 authoring LLM request。
+
+
+- **可选 Program 组件边界。** 新增了选择启用的
+  `NEOGRAPH_BUILD_PROGRAM` 开关、导出的 `neograph::program` 目标以及
+  `<neograph/program/program.h>` 入口。安装包仅在构建 Program 时报告该
+  组件；仅 Core 安装会保持现有的 `neograph::core` 链接接口。
+
+- **不可变 Program 值模型。** 新增稳定的类型化诊断、深度拥有的 canonical
+  JSON/C++ 构建器 `ProgramSource` 输入、不可变的内容寻址
+  `ProgramBundle`/`ProgramVersion` 值、规范序列化、带 SHA-256 算法标签的
+  标识、源映射、import 以及严格的版本化存储值模式。`neograph::program`
+  现在是仅依赖 Core 的已编译导出库。
+  Bundle/version v1 投影现要求封存的 Core 定义与计划标识、带语义版本的可执行项
+  摘要、契约、闭包、边界以及类型化的准入/物化回执。标识会绑定格式和存储版本，
+  语义集合按稳定顺序规范化；诊断会拒绝无效指针、反向 span 和未知 enum，并在
+  无精确解析器偏移量时保持 span 为空。
+
+- **封存的 Program 准入闭包。** 新增不可变的 `RegistrySnapshot`、
+  `AdmissionProfile` 和 `PolicySnapshot` 值，支持在构建器阶段捕获可调用对象、
+  严格的规范清单及域分离指纹；`ProgramVersion` 会以故障关闭方式校验跨对象
+  指纹一致性。Core 新增了用于 Program 物化的显式仅本地
+  parse/link/validate 入口，现有本地优先/全局回退重载保持不变。
+  注册表条目现以规范形式记录精确的可执行对象依赖边，用于传递式准入闭包；
+  仅本地条件检查也会覆盖旧版键值 edge 文档，且不会查询进程全局注册表。
+
+- **单根 `call_core` Program 编译器。** 新增 `ProgramCompiler`，仅接受封闭的
+  Program-v1 信封，在封存前纯执行仅本地 Core parse/round-trip/validation，
+  并输出带 RFC 6901 指针和源映射归属的聚合类型化诊断。编译过程不会调用
+  factory 或 callable，而是确定性派生 canonical Program、注册表、传递式
+  可执行项闭包、capability/effect、import Merkle、封存定义及 Core 计划标识。
+  同时提供创作文档模式、完整有限预算契约、zero-dispatch 拒绝测试，以及静态和
+  共享安装使用者验证。Core 新增 total parse/round-trip 和仅本地 validation
+  报告，同时保持现有抛异常 API 的行为不变。
+
+- **固定 Program 运行时垂直切片。** 新增 `ProgramCatalog`、
+  `EngineGenerationCache`、`ProgramRuntime`、共享 `ProgramHandle`、不可变
+  `ProgramResult`、类型化 Program 事件信封、内存 `ProgramStore` 以及仅追加
+  CAS `ProgramJournal`。准入会在物化前重新计算不可信 bundle 的语义；每次
+  attempt 固定一个不可变 Core generation，并且只调用现有 `GraphEngine`
+  异步路径。完成、中断、精确 checkpoint 恢复、取消、超时、Core 步数耗尽、
+  checkpoint 不兼容和失败均映射为类型化终态，同时保留不可补充预算与
+  checkpoint 谱系。Journal 提交先于 checkpoint/terminal 事件交付；并发恢复
+  仅允许一个 CAS 胜者；在 Core broker 就绪前拒绝 effectful 或非空 schema
+  Program。
+
+- **QuickJS 控制语言前端。** 新增选择启用的
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`、封存的
+  `ProgramSource::from_javascript(...)` 以及私有的仅编译 QuickJS 上下文。
+  源信封固定引擎/语言/主机 API 版本；唯一的 `ng` 主机表面是带版本的图构建器，
+  内存、栈和中断轮询限制均以故障关闭方式处理。JavaScript 只生成一个不可变的
+  `call_core` Program 计划，绝不会成为运行时 VM、字节码工件或 Core 依赖。
+
+- **A2A Agent Card 兼容候选。** 新增一次请求、无认证且不跟随重定向的
+  well-known 卡片收集器，以及仅工厂构造的不可变候选编译器。候选只保留摘要固定的
+  provenance、受限协议事实和安全 skill ID；会排除自由文本卡片内容、声明的 RPC
+  endpoint、provider/security 配置和 credential。Copy Ninja PoC 还要求与该
+  摘要固定的独立观察行为，且绝不调度源 agent。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、
@@ -61,6 +164,9 @@ NeoGraph 的所有显著变更均记录于本文件。
 
 ### 修复
 
+- **QuickJS `all` join 初始化竞争。** 完成处理程序现在会在初始成员 launch
+  注册完成后才关闭 JavaScript join。立即完成的子项不能再在同级初始或替换命令
+  dispatch 前使 generator 恢复；重复运行时回归测试覆盖两条路径。
 - **Harness 聚合发现来源（issue #174）。** 详情现在包括与现有扁平
   `findings` 数组对齐的 `finding_sources` 数组。每个条目记录其聚合索引、
   来源工作器 ID 和工作器本地索引，而不更改经过模式验证的工作器输出或

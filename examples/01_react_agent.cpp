@@ -15,9 +15,9 @@
 // improve on.
 //
 // Usage:
-//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_react_agent
-// (auto-loads .env from the cwd or any parent directory; OPENAI_API_KEY
+// (auto-loads .env from the cwd or any parent directory; OPENROUTER_API_KEY
 // from the process environment takes precedence if already set.)
 
 #include <neograph/neograph.h>
@@ -146,16 +146,18 @@ int main() {
 
     try {
         // 1. Create provider
-        const char* api_key = std::getenv("OPENAI_API_KEY");
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENAI_API_KEY environment variable "
+            std::cerr << "Set OPENROUTER_API_KEY environment variable "
                          "(or put it in .env beside the binary)\n";
             return 1;
         }
 
         neograph::llm::OpenAIProvider::Config config;
         config.api_key = api_key;
-        config.default_model = "gpt-4o-mini";
+        config.base_url = "https://openrouter.ai/api";
+        config.default_model = "deepseek/deepseek-v4-flash-0731";
+        config.provider_routing = {{"zdr", true}};
         auto provider = neograph::llm::OpenAIProvider::create(config);
 
         // 2. Create tools
@@ -165,14 +167,9 @@ int main() {
         // 3. Create agent.
         //
         // The system prompt elicits ReAct's Thought line before every
-        // tool call. Deliberately NO example trajectory: any textual
-        // rendering of an action — 'Action: calculator({...})', even a
-        // '[invokes calculator ...]' placeholder — gets imitated
-        // verbatim by gpt-4o-mini, which then writes the call into
-        // content instead of the tool_calls channel; the agent loop
-        // sees no tool call and returns that text as the final answer.
-        // Measured 2026-07 against the live API: with an exemplar 0/4
-        // responses made a real tool call; without one, 3/3 did.
+        // tool call. Deliberately NO example trajectory: textual
+        // renderings of an action can be copied into content instead of
+        // the tool_calls channel. Keep the wire contract explicit.
         const std::string react_system =
             "You are a ReAct agent. Before every tool call, first write one\n"
             "plain-text line:\n"

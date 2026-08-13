@@ -1,0 +1,16 @@
+// Opt-in benchmark schema for ProgramTransitionPublication.
+//
+// This is deliberately a transport envelope, not a replacement persistence
+// contract. Each nested immutable Program record remains canonical JSON so
+// its existing parser, validation, and SHA-256 identity contract stay intact.
+syntax = "proto3";
+
+package neograph.bench;
+
+message ProgramPublicationEnvelope {
+  bytes run_record = 1;
+  bytes journal_record = 2;
+  repeated bytes events = 3;
+  repeated bytes effects = 4;
+  optional bytes migration_plan = 5;
+}

@@ -42,7 +42,6 @@ HarnessTask parse_task(const json& j) {
         t.has_barrier = e.value("has_barrier", false);
         t.has_interrupt = e.value("has_interrupt", false);
         t.has_tool_calls = e.value("has_tool_calls", false);
-        t.has_template_vars = e.value("has_template_vars", false);
     }
     return t;
 }

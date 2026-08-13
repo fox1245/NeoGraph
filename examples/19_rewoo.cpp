@@ -22,7 +22,7 @@
 // (web search, SQL, RAG) without touching the orchestration.
 //
 // Usage:
-//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_rewoo
 // (auto-loads .env from the cwd or any parent directory.)
 
@@ -50,13 +50,14 @@ struct Step {
 };
 
 // A fresh provider per worker — avoids sharing one cpp-httplib client
-// across threads. Uses SchemaProvider with the "claude" built-in schema
-// so requests go to Anthropic's /v1/messages endpoint.
+// across threads. Uses the OpenRouter-compatible Responses schema.
 static std::unique_ptr<Provider> make_provider(const std::string& api_key) {
     llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "claude";
+    cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
-    cfg.default_model = "claude-sonnet-4-6";
+    cfg.base_url_override = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     return llm::SchemaProvider::create(cfg);
 }
 
@@ -65,7 +66,7 @@ static std::string complete_one(Provider& p,
                                 const std::string& user,
                                 float temperature) {
     CompletionParams params;
-    params.model = "claude-sonnet-4-6";
+    params.model = "deepseek/deepseek-v4-flash-0731";
     params.temperature = temperature;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user", user});
@@ -124,9 +125,9 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const char* api_key_env = std::getenv("ANTHROPIC_API_KEY");
+    const char* api_key_env = std::getenv("OPENROUTER_API_KEY");
     if (!api_key_env) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+        std::cerr << "Set OPENROUTER_API_KEY environment variable "
                      "(or put it in .env beside the binary)\n";
         return 1;
     }

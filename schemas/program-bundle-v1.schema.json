@@ -1,0 +1,437 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-bundle-v1.schema.json",
+  "title": "NeoGraph ProgramBundle stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "storage_schema_version",
+    "id",
+    "source_kind",
+    "source_hash",
+    "canonical_program_hash",
+    "compiler_build_id",
+    "program_schema_version",
+    "registry_snapshot_fingerprint",
+    "module_dependency_merkle_root",
+    "input_contract",
+    "output_contract",
+    "orchestration_plan",
+    "sealed_core_definitions",
+    "core_plan_identities",
+    "capability_effect_closure",
+    "executable_registry_identities",
+    "declared_budget_requirements",
+    "source_map",
+    "diagnostics"
+  ],
+  "properties": {
+    "format": { "const": "neograph-program-bundle" },
+    "storage_schema_version": { "const": 1 },
+    "source_kind": { "enum": ["canonical_json", "cpp_builder", "javascript"] },
+    "id": { "$ref": "#/$defs/sha256" },
+    "source_hash": { "$ref": "#/$defs/sha256" },
+    "canonical_program_hash": { "$ref": "#/$defs/sha256" },
+    "compiler_build_id": { "$ref": "#/$defs/nonemptyString" },
+    "program_schema_version": { "const": 1 },
+    "registry_snapshot_fingerprint": { "$ref": "#/$defs/sha256" },
+    "module_dependency_merkle_root": { "$ref": "#/$defs/sha256" },
+    "quickjs_release": { "$ref": "#/$defs/nonemptyString" },
+    "quickjs_archive_digest": { "$ref": "#/$defs/sha256" },
+    "quickjs_build_options": { "$ref": "#/$defs/nonemptyString" },
+    "javascript_profile": { "$ref": "#/$defs/nonemptyString" },
+    "javascript_profile_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "ng_api_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "module_coordinates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/moduleCoordinate" }
+    },
+    "input_contract": { "$ref": "#/$defs/contract" },
+    "output_contract": { "$ref": "#/$defs/contract" },
+    "orchestration_plan": { "$ref": "#/$defs/orchestrationPlan" },
+    "sealed_core_definitions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sealedCoreDefinition" }
+    },
+    "core_plan_identities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/corePlanIdentity" }
+    },
+    "capability_effect_closure": { "$ref": "#/$defs/capabilityEffectClosure" },
+    "executable_registry_identities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/executableIdentity" }
+    },
+    "declared_budget_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/budgetRequirement" }
+    },
+    "source_map": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sourceMapEntry" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/diagnostic" },
+          {
+            "properties": { "severity": { "enum": ["warning", "note"] } },
+            "required": ["severity"]
+          }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source_kind": { "const": "javascript" }
+        }
+      },
+      "then": {
+        "required": [
+          "quickjs_release",
+          "quickjs_archive_digest",
+          "quickjs_build_options",
+          "javascript_profile",
+          "javascript_profile_version",
+          "ng_api_version"
+        ],
+        "properties": {
+          "quickjs_release": { "const": "2026-06-04" },
+          "quickjs_archive_digest": {
+            "const": "sha256:b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a"
+          },
+          "quickjs_build_options": {
+            "const": "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;DYNAMIC_MODULES=disabled"
+          },
+          "javascript_profile": { "const": "sealed-v1" },
+          "javascript_profile_version": { "const": 1 },
+          "ng_api_version": { "const": 1 }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["quickjs_release"] },
+            { "required": ["quickjs_archive_digest"] },
+            { "required": ["quickjs_build_options"] },
+            { "required": ["javascript_profile"] },
+            { "required": ["javascript_profile_version"] },
+            { "required": ["ng_api_version"] }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nonemptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "moduleCoordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "name", "semantic_version", "content_identity"],
+      "properties": {
+        "namespace": { "$ref": "#/$defs/nonemptyString" },
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "semantic_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "content_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "jsonPointer": {
+      "type": "string",
+      "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "schema"],
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "schema": { "type": "object" }
+      }
+    },
+    "orchestrationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "plan"],
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "plan": { "type": "object" }
+      }
+    },
+    "coreChannel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reducer": { "$ref": "#/$defs/nonemptyString" },
+        "initial": true
+      }
+    },
+    "coreBarrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wait_for"],
+      "properties": {
+        "wait_for": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        }
+      }
+    },
+    "coreNode": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+      "required": ["type"],
+      "properties": {
+        "type": { "$ref": "#/$defs/nonemptyString" },
+        "barrier": { "$ref": "#/$defs/coreBarrier" }
+      },
+      "additionalProperties": true
+    },
+    "coreRegularEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/nonemptyString" },
+        "to": { "$ref": "#/$defs/nonemptyString" }
+      }
+    },
+    "coreConditionalEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "condition"],
+      "properties": {
+        "from": { "$ref": "#/$defs/nonemptyString" },
+        "condition": { "$ref": "#/$defs/nonemptyString" },
+        "routes": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+          "additionalProperties": { "$ref": "#/$defs/nonemptyString" }
+        }
+      }
+    },
+    "coreInlineConditionalEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "condition"],
+      "properties": {
+        "from": { "$ref": "#/$defs/nonemptyString" },
+        "condition": { "$ref": "#/$defs/nonemptyString" },
+        "type": { "const": "conditional" },
+        "routes": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+          "additionalProperties": { "$ref": "#/$defs/nonemptyString" }
+        }
+      }
+    },
+    "coreRetryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "initial_delay_ms": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "backoff_multiplier": {
+          "type": "number",
+          "minimum": -3.4028234663852886e38,
+          "maximum": 3.4028234663852886e38
+        },
+        "max_delay_ms": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      }
+    },
+    "strictCoreDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "nodes"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "channels": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+          "additionalProperties": { "$ref": "#/$defs/coreChannel" }
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+          "additionalProperties": { "$ref": "#/$defs/coreNode" }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/coreRegularEdge" },
+              { "$ref": "#/$defs/coreInlineConditionalEdge" }
+            ]
+          }
+        },
+        "conditional_edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/coreConditionalEdge" }
+        },
+        "interrupt_before": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        },
+        "interrupt_after": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        },
+        "retry_policy": { "$ref": "#/$defs/coreRetryPolicy" }
+      }
+    },
+    "sealedCoreDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "definition_hash", "definition"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "definition_hash": { "$ref": "#/$defs/sha256" },
+        "definition": { "$ref": "#/$defs/strictCoreDefinition" }
+      }
+    },
+    "corePlanIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "compiled_plan_identity"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "compiled_plan_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "capabilityEffectClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities", "effects"],
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        },
+        "effects": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        }
+      }
+    },
+    "executableIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "semantic_version", "implementation_digest"],
+      "properties": {
+        "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "imported"] },
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "semantic_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "implementation_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "budgetRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": { "$ref": "#/$defs/nonemptyString" },
+        "minimum": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "maximum": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    },
+    "sourceSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byte_begin", "byte_end", "line_begin", "column_begin", "line_end", "column_end"],
+      "properties": {
+        "byte_begin": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "byte_end": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "line_begin": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "column_begin": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "line_end": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "column_end": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "sourceCoordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "json_pointer", "span"],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/nonemptyString" },
+        "json_pointer": { "$ref": "#/$defs/jsonPointer" },
+        "span": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sourceSpan" }
+          ]
+        }
+      }
+    },
+    "sourceMapEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generated_pointer", "authored"],
+      "properties": {
+        "generated_pointer": { "$ref": "#/$defs/jsonPointer" },
+        "authored": { "$ref": "#/$defs/sourceCoordinate" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "code", "severity", "primary", "message", "witness", "related"],
+      "properties": {
+        "phase": {
+          "enum": ["source", "schema", "normalize", "resolve", "type_check", "core_parse", "core_validate", "seal"]
+        },
+        "code": { "$ref": "#/$defs/nonemptyString" },
+        "severity": { "enum": ["error", "warning", "note"] },
+        "primary": { "$ref": "#/$defs/sourceCoordinate" },
+        "message": { "$ref": "#/$defs/nonemptyString" },
+        "witness": {},
+        "related": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sourceCoordinate" }
+        }
+      }
+    }
+  }
+}

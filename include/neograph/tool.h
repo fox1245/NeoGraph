@@ -8,13 +8,17 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/tool_execution.h>
 #include <neograph/types.h>
 
 #include <asio/awaitable.hpp>
 
+#include <chrono>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
-
+#include <vector>
 namespace neograph::graph {
 class CancelToken;
 }
@@ -26,10 +30,19 @@ namespace neograph {
  *
  * Existing `Tool::execute_async(arguments)` overrides remain valid. Tools that
  * need to stop in-flight work can also implement `ContextualAsyncTool` and
- * poll or propagate `cancel_token` to their transport.
+ * poll or propagate `cancel_token` to their transport. Dispatchers populate
+ * controller and identity so the invocation remains inside the host's
+ * resource-admission boundary rather than bypassing it.
  */
 struct ToolExecutionContext {
     std::shared_ptr<graph::CancelToken> cancel_token;
+    std::shared_ptr<ToolExecutionController> controller;
+    ToolExecutionIdentity identity;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    /// Policy-derived priority request; depth never supplies this value.
+    std::uint8_t requested_priority = 0;
+    /// Bounded critical-path inheritance supplied by the parent policy.
+    std::uint8_t inherited_priority = 0;
 };
 
 /**
@@ -45,6 +58,36 @@ class NEOGRAPH_API ContextualAsyncTool {
 
     virtual asio::awaitable<std::string> execute_async(
         const json& arguments, ToolExecutionContext context) = 0;
+};
+
+/**
+ * @brief Description of a subprocess invocation owned by a ProcessTool.
+ *
+ * `argv[0]` is the executable. Environment entries use `NAME=VALUE` form and
+ * replace inherited values with the same name. The process bridge never
+ * executes a shell, so arguments cannot expand shell syntax accidentally.
+ */
+struct NEOGRAPH_API ToolProcessSpec {
+    std::vector<std::string> argv;
+    std::vector<std::string> environment;
+    std::string working_directory;
+    std::string stdin_data;
+    bool interactive = false;
+};
+
+/**
+ * @brief Optional extension for tools implemented by a real subprocess.
+ *
+ * A process is placed in its own process group. The controller drains output,
+ * enforces limits, polls cancellation, and escalates TERM to KILL. Interactive
+ * tools must return `interactive=true` when they need a human input turn; the
+ * bridge returns `InputRequired` instead of leaving a worker blocked on stdin.
+ */
+class NEOGRAPH_API ProcessTool {
+public:
+    virtual ~ProcessTool() = default;
+    virtual ToolProcessSpec prepare_process(
+        const json& arguments, const ToolExecutionContext& context) const = 0;
 };
 
 /**
@@ -87,13 +130,11 @@ class NEOGRAPH_API Tool {
     /**
      * @brief Canonical async entry point for tool execution.
      *
-     * The default bridges to the sync execute() so every existing Tool
-     * keeps working unchanged. I/O-bound tools (HTTP fetch, MCP RPC)
-     * override this with a real coroutine so that a node dispatching
-     * several tool calls at once can overlap their in-flight I/O
-     * instead of running them one-by-one through the blocking
-     * execute() facade. ToolDispatchNode awaits all calls of one
-     * assistant turn through a parallel group on this method.
+     * The default offloads the sync execute() implementation to NeoGraph's
+     * bounded blocking pool, so a legacy synchronous tool no longer pins the
+     * graph event loop or serializes unrelated tool calls. I/O-bound tools
+     * (HTTP fetch, MCP RPC) override this with a real coroutine. Dispatchers
+     * apply ToolExecutionController policy before calling either path.
      */
     virtual asio::awaitable<std::string> execute_async(const json& arguments);
 };

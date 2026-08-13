@@ -298,6 +298,7 @@ TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughPostgres) {
     auto store = std::make_shared<PostgresCheckpointStore>(url);
 
     auto engine = GraphEngine::compile(make_graph(fanout), NodeContext{}, store);
+    engine->set_worker_count(fanout);
 
     RunConfig cfg;
     cfg.thread_id = "crashy-pg";

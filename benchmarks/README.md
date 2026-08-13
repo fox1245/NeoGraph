@@ -235,13 +235,65 @@ because the then-current 2.15.0 API no longer supported the benchmark's
 ## Reproduce
 
 ```bash
-# Build NeoGraph (Release — MUST set BUILD_TYPE explicitly; the
-# empty default configures the build without -O3):
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_BUILD_BENCHMARKS=ON
-cmake --build build --target bench_neograph -j
+# Build native Core + v1 Program benchmarks (Release is required for
+# representative timings; the default CMake build type is not optimized).
+cmake -B build-program-bench -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_ASYNC=ON
+cmake --build build-program-bench --target \
+    bench_neograph bench_program bench_program_dispatch \
+    bench_program_serialization_poc bench_program_binary_poc -j
 
-./build/bench_neograph                   # defaults: seq=10000, par=5000
+# Positional arguments are iterations, warmup runs, and measured samples.
+# bench_neograph additionally accepts par_workers before warmup/samples.
+# bench_program's optional fourth argument measures closed-batch outer-run concurrency.
+# Its burst rows are throughput-equivalent time, not individual request latency.
+./build-program-bench/bench_neograph 10000 5000 1 10 5
+./build-program-bench/bench_neograph 10000 5000 auto 10 5
+./build-program-bench/bench_program 1000 10 5
+./build-program-bench/bench_program 1000 10 5 8
+./build-program-bench/bench_program_dispatch 100000 10 5
+./build-program-bench/bench_program_serialization_poc 25 100
+./build-program-bench/bench_program_binary_poc 25 100
 
+# Build the opt-in protobuf/Cap'n Proto transport-envelope experiment.
+# This target alone requires protoc/libprotobuf and capnp/libcapnp.
+cmake -S . -B build-program-codec-poc -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_PROGRAM_CODEC_POC=ON
+cmake --build build-program-codec-poc --target bench_program_codec_poc -j
+taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
+```
+
+Each native benchmark prints `config`, `runtime`, `header`, and `result`
+records. Report the median of the measured samples after the explicit warmup;
+do not compare a single short run. `bench_program` uses in-memory stores and
+no provider/network calls. `bench_program_dispatch` measures only immutable
+`ProgramPlan` lookup and descriptor traversal, not Core execution.
+
+The serialization POCs are offline, in-memory measurements. They capture
+immutable publications from completed Program runs; the serialization POC
+measures canonical-byte reuse, while the binary POC compares the current
+canonical JSON envelope with a length-prefixed envelope that retains each
+nested record's canonical bytes. The binary result is a lower-bound experiment,
+not a replacement persistence contract.
+
+`bench_program_codec_poc` is separately opt-in and compares protobuf and
+Cap'n Proto **transport envelopes** over the same nested canonical bytes.
+`*_envelope_only_*` measures only envelope construction after those bytes are
+already available. `*_transport_total_lower_bound_*` also builds the nested
+canonical bytes, but deliberately skips `ProgramTransitionPublication`'s outer
+cross-record validation; it is not a persistence or identity-format benchmark.
+The recovery metrics parse back into owning Program records and are the only
+codec numbers that model a full receiving consumer. None of these POCs measures
+SQLite/Postgres transaction latency or end-to-end `ProgramRuntime` latency.
+
+The Python framework comparison remains optional and requires third-party
+packages:
+
+```bash
 # Shared Python venv for every Python framework:
 python3 -m venv /tmp/bench_venv
 /tmp/bench_venv/bin/pip install \
@@ -259,11 +311,17 @@ python3 -m venv /tmp/bench_venv
 /tmp/bench_venv/bin/python benchmarks/bench_autogen.py        10000 5000
 
 # Peak RSS + wall time:
-/usr/bin/time -f "%e s, %M KB" ./build/bench_neograph
+/usr/bin/time -f "%e s, %M KB" ./build-program-bench/bench_neograph
 ```
 
-Output format is `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` on
-every side so diffing is trivial.
+The service-backed checkpoint, HTTP, and concurrent Docker benchmarks are
+separate experiments; they are not required for the deterministic native
+Core/Program run above.
+
+Output format is tab-separated `config`, `runtime`, `header`, `result`, or
+`metric` records. The native result rows contain median total time and
+per-iteration time; Python scripts retain their historical
+`workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` rows.
 
 ## Environment used for the 2026-04-19 numbers
 

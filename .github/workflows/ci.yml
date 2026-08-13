@@ -85,6 +85,8 @@ jobs:
             -DNEOGRAPH_BUILD_UTIL=ON \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_PYBIND=ON \
+            -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
@@ -93,6 +95,9 @@ jobs:
 
       - name: ccache stats
         run: ccache --show-stats
+
+      - name: Run focused Program value tests
+        run: ./build/tests/neograph_program_tests
 
       - name: Install Python test dependencies
         run: python -m pip install -U pytest pydantic certifi
@@ -178,6 +183,8 @@ jobs:
             -DNEOGRAPH_BUILD_UTIL=ON \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_SQLITE=ON \
+            -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
@@ -218,6 +225,8 @@ jobs:
             -DNEOGRAPH_BUILD_UTIL=ON \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
       - name: Build
@@ -254,9 +263,9 @@ jobs:
     #     with their own vcpkg / choco setup.
     #   * OpenSSL comes from the runner's preinstalled copy (choco
     #     installs it by default into `C:\Program Files\OpenSSL-Win64`).
-    # This still exercises neograph_core / neograph_async (TLS path) /
-    # neograph_mcp (both HTTP and stdio transports) / neograph_llm
-    # — the layers with 2.0 Windows-specific code.
+    # This exercises neograph_core / neograph_program + embedded QuickJS /
+    # neograph_async (TLS path) / neograph_mcp (HTTP + stdio) / neograph_llm,
+    # including native MSVC compilation of the sealed control runtime.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -276,7 +285,7 @@ jobs:
           echo "OpenSSL installed at: $ssl"
           "OPENSSL_ROOT_DIR=$ssl" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
-      - name: Configure (MCP + async only; PG + SQLite + libcurl disabled on Windows CI)
+      - name: Configure (Program + QuickJS + MCP + async; PG + SQLite + libcurl disabled)
         shell: pwsh
         run: |
           cmake -B build `
@@ -290,11 +299,21 @@ jobs:
             -DNEOGRAPH_BUILD_POSTGRES=OFF `
             -DNEOGRAPH_BUILD_SQLITE=OFF `
             -DNEOGRAPH_BUILD_TESTS=ON `
+            -DNEOGRAPH_BUILD_PROGRAM=ON `
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON `
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
       - name: Build
         shell: pwsh
         run: cmake --build build --config Release -j
+
+      # Keep the C-header consumer ABI separate from the much larger C++ suite:
+      # MSVC's C aggregate initialization has previously corrupted QuickJS's
+      # static function tables while C++ callers remained healthy.
+      - name: Smoke test QuickJS C embedding under MSVC
+        shell: pwsh
+        working-directory: build
+        run: ctest -C Release --output-on-failure -R "^QuickJS[.]CEmbeddingSmoke$"
 
       - name: Run tests (no Postgres; MCP stdio uses bundled `python`)
         shell: pwsh
@@ -307,6 +326,75 @@ jobs:
         with:
           name: ctest-logs-windows
           path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  build-windows-asan:
+    # Focused native-MSVC sanitizer canary for the Program/QuickJS boundary.
+    # Release mode avoids /RTC incompatibility; /Zi retains actionable stacks.
+    # VS 2022's MSVC 19.44 miscomputes the frame address used by an ASan-
+    # instrumented coroutine catch funclet (run_one_async$_ResumeCoro$1::catch$0).
+    # Use the current production toolset, which also lets this job retain the
+    # complete ProgramRuntime coverage instead of suppressing the affected tests.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (MSVC AddressSanitizer, Program + QuickJS only)
+        shell: pwsh
+        run: |
+          cmake -B build-windows-asan `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DNEOGRAPH_BUILD_LLM=OFF `
+            -DNEOGRAPH_BUILD_MCP=OFF `
+            -DNEOGRAPH_BUILD_UTIL=OFF `
+            -DNEOGRAPH_BUILD_ASYNC=OFF `
+            -DNEOGRAPH_BUILD_MCP_CLIENT=OFF `
+            -DNEOGRAPH_BUILD_MCP_SERVER=OFF `
+            -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF `
+            -DNEOGRAPH_BUILD_A2A=OFF `
+            -DNEOGRAPH_BUILD_ACP=OFF `
+            -DNEOGRAPH_BUILD_PYBIND=OFF `
+            -DNEOGRAPH_BUILD_GRPC=OFF `
+            -DNEOGRAPH_USE_LIBCURL=OFF `
+            -DNEOGRAPH_BUILD_POSTGRES=OFF `
+            -DNEOGRAPH_BUILD_SQLITE=OFF `
+            -DNEOGRAPH_BUILD_PROGRAM=ON `
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON `
+            -DNEOGRAPH_BUILD_TESTS=ON `
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF `
+            -DNEOGRAPH_BUILD_BENCHMARKS=OFF `
+            -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
+
+      - name: Build Program and QuickJS sanitizer targets
+        shell: pwsh
+        run: |
+          cmake --build build-windows-asan --config Release -j `
+            --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
+
+      - name: Run QuickJS boundary tests under MSVC AddressSanitizer
+        shell: pwsh
+        run: |
+          # These tests enforce their own wall-time ceilings. Running every
+          # ASan-instrumented process concurrently can exhaust the four-core
+          # hosted runner and turn scheduler delay into a false timeout.
+          ctest --test-dir build-windows-asan -C Release `
+            --output-on-failure -j 1 `
+            -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
+
+      - name: Upload sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows-asan
+          path: build-windows-asan/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
   # ──────────────────────────────────────────────────────────────────
@@ -385,6 +473,38 @@ jobs:
           echo "$auto_out"
           echo "$auto_out" | awk -F'\t' '$1=="config" && $2=="par_workers" && $3 ~ /^auto\(/ {found=1} END {exit !found}'
 
+  # Blocking Release gate for the preregistered QuickJS performance matrix.
+  # Enabled-but-unused Core overhead is capped at 1.10x median / 1.15x p95;
+  # one failed pass receives the documented paired 20-sample rerun. The script
+  # configures only the optional Program/QuickJS targets and their matched Core
+  # probe, keeping unrelated optional components disabled.
+  quickjs-performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential python3
+
+      - name: Run blocking QuickJS matrix (Core median 1.10x / p95 1.15x)
+        run: |
+          mkdir -p artifacts
+          scripts/build_quickjs_performance_matrix.sh \
+            "$RUNNER_TEMP/neograph-quickjs-performance" \
+            "$GITHUB_WORKSPACE/artifacts/quickjs-performance.json"
+
+      - name: Upload QuickJS performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-performance-report
+          path: artifacts/quickjs-performance.json
+          if-no-files-found: error
+          retention-days: 30
+
   # Compile + ctest under -fsanitize=address,undefined and run the
   # no-network examples in the same configuration. ASan caught a
   # false-positive in the recursion guard during the 2026-04-29 audit
@@ -437,6 +557,8 @@ jobs:
             -DNEOGRAPH_JARVIS_FORCE_MOCK=ON \
             -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
@@ -679,12 +801,30 @@ jobs:
           - name: linux-shared
             os: ubuntu-latest
             args: --shared
+          - name: linux-core-static
+            os: ubuntu-latest
+            args: --core-only
+          - name: linux-core-shared
+            os: ubuntu-latest
+            args: --core-only --shared
+          - name: linux-program-static
+            os: ubuntu-latest
+            args: --program --quickjs
+          - name: linux-program-shared
+            os: ubuntu-latest
+            args: --program --quickjs --shared
           - name: macos-shared
             os: macos-latest
             args: --shared
+          - name: macos-program-shared
+            os: macos-latest
+            args: --program --quickjs --shared
           - name: windows-shared
             os: windows-2022
             args: --shared
+          - name: windows-program-shared
+            os: windows-2022
+            args: --program --shared
 
     steps:
       - uses: actions/checkout@v4

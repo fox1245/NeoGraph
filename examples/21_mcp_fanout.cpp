@@ -12,7 +12,7 @@
 // Usage (after starting examples/demo_mcp_server.py):
 //   ./example_mcp_fanout
 //
-// No OpenAI required: planner hand-picks three MCP tool calls (time /
+// No remote LLM required: planner hand-picks three MCP tool calls (time /
 // weather / calculator) so the demo is deterministic and stays offline
 // for the LLM axis.
 

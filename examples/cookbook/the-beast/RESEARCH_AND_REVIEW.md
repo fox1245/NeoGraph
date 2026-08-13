@@ -12,8 +12,8 @@ The cookbook builds up, variant by variant, to a self-authoring agent system:
 
 | Program | What it demonstrates |
 |---|---|
-| `the_beast.cpp` | Generate a topology in a DSL, `evolve()` it, roll back via the checkpointer. Offline, deterministic. |
-| `the_beast_live.cpp` | An LLM authors the harness; three gates validate it; diagnostics drive a self-repair loop. |
+| `the_beast.cpp` | Generate a topology in a strict Core JSON, `evolve()` it, roll back via the checkpointer. Offline, deterministic. |
+| `the_beast_live.cpp` | An LLM authors the harness; compiler and validation gates validate it; diagnostics drive a self-repair loop. |
 | `the_beast_apex.cpp` | The model writes a ReAct tool-calling agent; it runs with tools bound and calls them autonomously. |
 | `the_beast_forge.cpp` | Discovers tools over MCP; when one is missing, the LLM **writes a Python MCP server**, launches it, and re-discovers it. |
 | `the_beast_script.cpp` | A `script_node` runs LLM-written Python that controls its own `goto` flow, under a gate+runtime effect contract, optionally isolated by Google Sandbox2. |
@@ -140,7 +140,7 @@ rejection*, translation-validated, memetically-evolved agent-topology system.
 ### Weaknesses a reviewer will demand (the gate to publishable)
 
 1. **No formal semantics or soundness proof** for the validator / effect system.
-   "Correct by construction" is a slogan until the DSL has a semantics and the
+   "Correct by construction" is a slogan until the strict Core JSON has a semantics and the
    analyzer has a soundness theorem (reject ⟹ genuinely incoherent; accept ⟹ no
    such fault at runtime). Translation validation proves *one* property
    (compilation didn't rewire this artifact) and is *identity-only* (canonical-
@@ -170,7 +170,7 @@ rejection*, translation-validated, memetically-evolved agent-topology system.
 
 1. Frame the gate with the verified-compiler lineage (CompCert, Pnueli TV);
    position MermaidFlow / Lean4Agent as the agent-side incarnations you extend.
-2. Give the DSL a small-step semantics and prove the effect system sound
+2. Give the strict Core JSON a small-step semantics and prove the effect system sound
    (progress + preservation over the effect lattice) — the highest-leverage
    academic upgrade.
 3. Constrained decoding (SynCode / Outlines / CRANE) to shift validity from
@@ -200,7 +200,7 @@ policy — this review proceeds with **(c)**, because it is the one that:
   risk of an inconclusive LLM-in-the-loop result;
 - **is a self-contained novel contribution** — report C calls "seccomp policy
   auto-derived per node from its declared effect contract" a clean research
-  contribution, and it ties the DSL's effect system to kernel-level enforcement,
+  contribution, and it ties the strict Core JSON's effect system to kernel-level enforcement,
   connecting two things the system already has;
 - **builds directly on what was just shipped** (the effect contracts + the
   Sandbox2 path), so it deepens rather than sprawls.

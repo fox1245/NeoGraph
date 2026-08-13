@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ja source_sha256=097ce5a3394ec214d04a7245b7e4e7e6d937754bb1c18e589a850dc1bc41f54d -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ja source_sha256=a2b7c4a93e6564fc5ecb36f4c559d811fa6c61325ef48a930e1917817b8359d5 -->
 # Python モード ベンチマーク — NeoGraph-from-Python と LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,13 +12,17 @@ NeoGraph-from-Python = リーン Python (10MB/30ms) + 単一のコンパイル�
 ## 測定結果 (2026-07-05、WSL2、python3.12)
 
 ```bash
-cd <neograph>/build-pybind
-LD=$(pwd)
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/perturn.py   neograph 5000
-python3 <bench>/pybind/startup_rss.py langgraph          # bare
-python3 <bench>/pybind/startup_rss.py langgraph_openai   # actual chatbot stack
-python3 <bench>/pybind/perturn.py   langgraph 5000
+cmake -S . -B build-pybind \
+  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-pybind --target _neograph -j
+LD="$PWD/build-pybind"
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
 |メトリック (すべての Python プロセス) | NeoGraph から Python |ランググラフ |利点 |

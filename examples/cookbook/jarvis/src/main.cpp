@@ -1,10 +1,11 @@
 // jarvis/src/main.cpp — 자비스 진입점
 //
 // 흐름:
-//   1. .env / 환경변수 로드 (OPENAI_API_KEY 등)
+//   1. .env / 환경변수 로드 (OPENROUTER_API_KEY 등)
 //   2. config/mcp_catalog.json  → McpCatalog (MCP 서버 연결 + 도구 캐시)
 //   3. config/agent_registry.json → AgentDispatcher (A2A 에이전트 카드 fetch)
-//   4. LLM Provider 선택: OPENAI_API_KEY 있으면 OpenAIProvider, 없으면 MockProvider
+//   4. LLM Provider 선택: OPENROUTER_API_KEY 있으면 OpenAI-compatible
+//      OpenRouterProvider, 없으면 MockProvider
 //   5. NodeFactory 에 자비스 커스텀 노드 타입 전부 등록
 //   6. config/jarvis_graph.json 컴파일 → GraphEngine
 //   7. 자비스 자신을 A2A 서버로 노출 (agent_registry.json self.enabled=true 일 때)
@@ -58,7 +59,7 @@ void install_signal_handlers() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MockProvider — OPENAI_API_KEY 없을 때 사용하는 echo 제공자.
+// MockProvider — OPENROUTER_API_KEY 없을 때 사용하는 echo 제공자.
 //
 // IntentRouterNode 가 호출하면:
 //   - 시스템 프롬프트 내용에 관계없이 항상 라우팅 mock JSON 을 반환.
@@ -648,16 +649,10 @@ void register_custom_node_types(
                     }
 
                     // ── messages 배열 조립: system → 이력(user/assistant 교대) → 현재 턴 ──
-                    // JARVIS_SYNTH_MODEL — 그래프 JSON 재작성 없이 합성 모델 교체
-                    // (Groq/Cerebras 등 OpenAI 호환 엔드포인트 벤치·운영용)
-                    static const std::string model_env = [] {
-                        const char* v = std::getenv("JARVIS_SYNTH_MODEL");
-                        return std::string(v ? v : "");
-                    }();
+                    // All live Jarvis calls use the pinned OpenRouter model;
+                    // mock mode is selected before this node is invoked.
                     neograph::CompletionParams p;
-                    p.model       = !model_env.empty()
-                                    ? model_env
-                                    : cfg_.value("model", std::string("gpt-4o"));
+                    p.model       = "deepseek/deepseek-v4-flash-0731";
                     p.temperature = 0.4f;
                     p.max_tokens  = 220;
                     p.messages.push_back({"system", sys});
@@ -809,7 +804,7 @@ neograph::json load_json_file(const std::string& path) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
-    // .env 파일 자동 로드 (OPENAI_API_KEY 등)
+    // .env 파일 자동 로드 (OPENROUTER_API_KEY 등)
     cppdotenv::auto_load_dotenv();
     install_signal_handlers();
 
@@ -828,31 +823,24 @@ int main(int argc, char** argv) {
             config_root + "/agent_registry.json");
 
         // ── 3) LLM Provider 선택 ─────────────────────────────────────────────
-        //    OPENAI_API_KEY 환경변수 있으면 실제 OpenAI, 없으면 mock
+        //    OPENROUTER_API_KEY 환경변수 있으면 실제 OpenRouter, 없으면 mock
         std::shared_ptr<neograph::Provider> router_provider;
         std::shared_ptr<neograph::Provider> synth_provider;
 
-        const char* api_key_env = std::getenv("OPENAI_API_KEY");
+        const char* api_key_env = std::getenv("OPENROUTER_API_KEY");
+        const char* base_url_env = std::getenv("OPENROUTER_BASE_URL");
         if (api_key_env && std::string(api_key_env).size() > 0) {
-            std::cerr << "[jarvis] OpenAI Provider 사용 (OPENAI_API_KEY 감지됨)\n";
-            // OPENAI_BASE_URL — OpenAI 호환 엔드포인트 교체 (Groq/Cerebras 등).
-            // 예: https://api.groq.com/openai → <base>/v1/chat/completions
-            const char* base_url_env = std::getenv("OPENAI_BASE_URL");
-
+            std::cerr << "[jarvis] OpenRouter Provider 사용 (OPENROUTER_API_KEY 감지됨)\n";
             neograph::llm::OpenAIProvider::Config pcfg;
-            pcfg.api_key      = api_key_env;
-            pcfg.default_model = "gpt-4o-mini";
-            if (base_url_env && base_url_env[0]) pcfg.base_url = base_url_env;
+            pcfg.api_key = api_key_env;
+            pcfg.base_url = (base_url_env && *base_url_env)
+                ? base_url_env : "https://openrouter.ai/api";
+            pcfg.default_model = "deepseek/deepseek-v4-flash-0731";
+            pcfg.provider_routing = {{"zdr", true}};
             router_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
-
-            // 합성기용 — 더 큰 모델 사용
-            neograph::llm::OpenAIProvider::Config synth_cfg;
-            synth_cfg.api_key      = api_key_env;
-            synth_cfg.default_model = "gpt-4o";
-            if (base_url_env && base_url_env[0]) synth_cfg.base_url = base_url_env;
-            synth_provider = neograph::llm::OpenAIProvider::create_shared(synth_cfg);
+            synth_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
         } else {
-            std::cerr << "[jarvis] Mock Provider 사용 (OPENAI_API_KEY 없음)\n";
+            std::cerr << "[jarvis] Mock Provider 사용 (OPENROUTER_API_KEY 없음)\n";
             router_provider = std::make_shared<MockProvider>();
             synth_provider  = std::make_shared<MockProvider>();
         }

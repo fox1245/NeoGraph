@@ -29,37 +29,68 @@
 #pragma once
 
 #if defined(NEOGRAPH_STATIC_BUILD)
-    // Static-only build: no decoration, every symbol is a normal
-    // member of the static archive.
-    #define NEOGRAPH_API
+// Static-only build: no decoration, every symbol is a normal
+// member of the static archive.
+#define NEOGRAPH_API
 #elif defined(_WIN32) || defined(__CYGWIN__)
-    #if defined(NEOGRAPH_BUILDING_LIBRARY)
-        #define NEOGRAPH_API __declspec(dllexport)
-    #else
-        #define NEOGRAPH_API __declspec(dllimport)
-    #endif
-#elif defined(__GNUC__) && __GNUC__ >= 4
-    // Linux/macOS: explicit default visibility so a downstream
-    // library built with -fvisibility=hidden still sees these.
-    #define NEOGRAPH_API __attribute__((visibility("default")))
+#if defined(NEOGRAPH_BUILDING_LIBRARY)
+#define NEOGRAPH_API __declspec(dllexport)
 #else
-    #define NEOGRAPH_API
+#define NEOGRAPH_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+// Linux/macOS: explicit default visibility so a downstream
+// library built with -fvisibility=hidden still sees these.
+#define NEOGRAPH_API __attribute__((visibility("default")))
+#else
+#define NEOGRAPH_API
 #endif
 
 // Harness declarations belong to neograph_mcp_server but are also consumed by
 // the MCP client, A2A adapter, and SQLite store libraries.
 #if defined(NEOGRAPH_STATIC_BUILD)
-    #define NEOGRAPH_MCP_SERVER_API
+#define NEOGRAPH_MCP_SERVER_API
 #elif defined(_WIN32) || defined(__CYGWIN__)
-    #if defined(NEOGRAPH_BUILDING_MCP_SERVER)
-        #define NEOGRAPH_MCP_SERVER_API __declspec(dllexport)
-    #else
-        #define NEOGRAPH_MCP_SERVER_API __declspec(dllimport)
-    #endif
-#elif defined(__GNUC__) && __GNUC__ >= 4
-    #define NEOGRAPH_MCP_SERVER_API __attribute__((visibility("default")))
+#if defined(NEOGRAPH_BUILDING_MCP_SERVER)
+#define NEOGRAPH_MCP_SERVER_API __declspec(dllexport)
 #else
-    #define NEOGRAPH_MCP_SERVER_API
+#define NEOGRAPH_MCP_SERVER_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define NEOGRAPH_MCP_SERVER_API __attribute__((visibility("default")))
+#else
+#define NEOGRAPH_MCP_SERVER_API
+#endif
+
+// Harness declarations are owned by the top-level neograph_harness adapter.
+#if defined(NEOGRAPH_STATIC_BUILD)
+#define NEOGRAPH_HARNESS_API
+#elif defined(_WIN32) || defined(__CYGWIN__)
+#if defined(NEOGRAPH_BUILDING_HARNESS)
+#define NEOGRAPH_HARNESS_API __declspec(dllexport)
+#else
+#define NEOGRAPH_HARNESS_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define NEOGRAPH_HARNESS_API __attribute__((visibility("default")))
+#else
+#define NEOGRAPH_HARNESS_API
+#endif
+
+// Program value declarations are owned by neograph_program. A distinct macro
+// prevents Windows consumers from importing them from neograph_core.
+#if defined(NEOGRAPH_STATIC_BUILD)
+#define NEOGRAPH_PROGRAM_API
+#elif defined(_WIN32) || defined(__CYGWIN__)
+#if defined(NEOGRAPH_BUILDING_PROGRAM)
+#define NEOGRAPH_PROGRAM_API __declspec(dllexport)
+#else
+#define NEOGRAPH_PROGRAM_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define NEOGRAPH_PROGRAM_API __attribute__((visibility("default")))
+#else
+#define NEOGRAPH_PROGRAM_API
 #endif
 
 // PR 4 (v0.4.0): cross-compiler deprecation-warning suppression.
@@ -76,20 +107,15 @@
 //   // ... legacy default chain body ...
 //   NEOGRAPH_POP_IGNORE_DEPRECATED
 #if defined(__GNUC__) || defined(__clang__)
-    #define NEOGRAPH_PUSH_IGNORE_DEPRECATED                            \
-        _Pragma("GCC diagnostic push")                                  \
-        _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
-    #define NEOGRAPH_POP_IGNORE_DEPRECATED                              \
-        _Pragma("GCC diagnostic pop")
+#define NEOGRAPH_PUSH_IGNORE_DEPRECATED \
+    _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+#define NEOGRAPH_POP_IGNORE_DEPRECATED _Pragma("GCC diagnostic pop")
 #elif defined(_MSC_VER)
-    #define NEOGRAPH_PUSH_IGNORE_DEPRECATED                             \
-        __pragma(warning(push))                                          \
-        __pragma(warning(disable : 4996))
-    #define NEOGRAPH_POP_IGNORE_DEPRECATED                              \
-        __pragma(warning(pop))
+#define NEOGRAPH_PUSH_IGNORE_DEPRECATED __pragma(warning(push)) __pragma(warning(disable : 4996))
+#define NEOGRAPH_POP_IGNORE_DEPRECATED __pragma(warning(pop))
 #else
-    #define NEOGRAPH_PUSH_IGNORE_DEPRECATED
-    #define NEOGRAPH_POP_IGNORE_DEPRECATED
+#define NEOGRAPH_PUSH_IGNORE_DEPRECATED
+#define NEOGRAPH_POP_IGNORE_DEPRECATED
 #endif
 
 // =========================================================================
@@ -123,8 +149,8 @@
 // build flags — last-resort escape for downstream TUs that have a
 // genuine reason to mismatch (vanishingly rare; the canonical fix is
 // to define the macro consistently).
-#if defined(CPPHTTPLIB_HTTPLIB_H)                            \
-    && !defined(CPPHTTPLIB_OPENSSL_SUPPORT)                  \
-    && !defined(NEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD)
-#  error "NeoGraph: <httplib.h> was included before this NeoGraph header without CPPHTTPLIB_OPENSSL_SUPPORT defined. NeoGraph's bundled cpp-httplib is built with TLS support ON; a mismatched macro state between TUs is an ODR violation that silently SEGVs inside getaddrinfo at runtime (issue #16). Fix: `#define CPPHTTPLIB_OPENSSL_SUPPORT` BEFORE `#include <httplib.h>` in this TU, OR add `target_compile_definitions(<your_target> PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)` to your CMakeLists. See docs/troubleshooting.md \"C++ consumers — httplib.h macro consistency\". Last-resort opt-out: `-DNEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD=1`."
+#if defined(CPPHTTPLIB_HTTPLIB_H) && !defined(CPPHTTPLIB_OPENSSL_SUPPORT) && \
+    !defined(NEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD)
+#error \
+    "NeoGraph: <httplib.h> was included before this NeoGraph header without CPPHTTPLIB_OPENSSL_SUPPORT defined. NeoGraph's bundled cpp-httplib is built with TLS support ON; a mismatched macro state between TUs is an ODR violation that silently SEGVs inside getaddrinfo at runtime (issue #16). Fix: `#define CPPHTTPLIB_OPENSSL_SUPPORT` BEFORE `#include <httplib.h>` in this TU, OR add `target_compile_definitions(<your_target> PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)` to your CMakeLists. See docs/troubleshooting.md \"C++ consumers — httplib.h macro consistency\". Last-resort opt-out: `-DNEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD=1`."
 #endif

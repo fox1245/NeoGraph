@@ -110,6 +110,15 @@ public:
     /// `load_latest_async` + `get_writes_async` on the store so the
     /// resume path doesn't block the io_context's worker.
     asio::awaitable<ResumeContext> load_for_resume_async() const;
+    /**
+     * @brief Load one exact checkpoint and its pending writes by ID.
+     *
+     * Unlike load_for_resume_async(), this never consults the latest
+     * checkpoint. A found checkpoint must belong to this coordinator's
+     * thread; a mismatch is rejected before a ResumeContext is returned.
+     */
+    asio::awaitable<ResumeContext> load_for_resume_by_id_async(
+        std::string checkpoint_id) const;
 
     /**
      * @brief Durably record a completed node's writes under parent_cp_id.

@@ -86,7 +86,7 @@ std::string extract_section(const std::string& text, const std::string& section)
 }
 
 // ---------------------------------------------------------------------------
-// MockProvider — OPENAI_API_KEY 없을 때 사용.
+// MockProvider — OPENROUTER_API_KEY 없을 때 사용.
 // 연구 응답 + [SUMMARY] 규약을 흉내낸다.
 // ---------------------------------------------------------------------------
 class MockProvider : public Provider {
@@ -138,7 +138,8 @@ public:
         //   user_text += "\n\n[검색 결과]\n" + search_result;
 
         CompletionParams p;
-        p.model       = provider_->get_name() == "mock" ? "mock" : "gpt-4o-mini";
+        p.model       = provider_->get_name() == "mock"
+                            ? "mock" : "deepseek/deepseek-v4-flash-0731";
         p.temperature = 0.3f; // 연구 응답은 정확성 위주 — 온도 낮게
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user",   user_text});
@@ -182,7 +183,8 @@ public:
 
         // 없으면 LLM 에게 25 단어 이하 요약 한 줄 추가 요청
         CompletionParams p;
-        p.model       = provider_->get_name() == "mock" ? "mock" : "gpt-4o-mini";
+        p.model       = provider_->get_name() == "mock"
+                            ? "mock" : "deepseek/deepseek-v4-flash-0731";
         p.temperature = 0.2f;
         p.messages.push_back({
             "system",
@@ -308,18 +310,21 @@ int main(int argc, char** argv) {
             "provide a thorough answer. End with [SUMMARY] <≤25 words>.";
     }
 
-    // Provider 분기 — OPENAI_API_KEY 있으면 OpenAI, 없으면 Mock
+    // Provider: OpenRouter when configured, otherwise MockProvider.
     std::shared_ptr<Provider> provider;
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (api_key && *api_key) {
         llm::OpenAIProvider::Config cfg;
         cfg.api_key       = api_key;
-        cfg.default_model = "gpt-4o-mini";
+        cfg.base_url      = "https://openrouter.ai/api";
+        cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+        cfg.provider_routing = {{"zdr", true}};
         provider = llm::OpenAIProvider::create_shared(cfg);
-        std::cout << "[researcher-specialist] OpenAI provider (gpt-4o-mini)\n";
+        std::cout << "[researcher-specialist] OpenRouter provider "
+                     "(deepseek/deepseek-v4-flash-0731)\n";
     } else {
         provider = std::make_shared<MockProvider>();
-        std::cout << "[researcher-specialist] OPENAI_API_KEY 없음 — mock provider 사용\n";
+        std::cout << "[researcher-specialist] OPENROUTER_API_KEY 없음 — mock provider 사용\n";
     }
 
     // 그래프 조립

@@ -80,15 +80,15 @@ cmake --build build --target cookbook_multi_tenant_mock
 Works without OpenAI key. Measures NG engine capacity (1000 concurrent requests /
 compile cache hit rate / memory).
 
-### Live LLM version (real OpenAI gpt-4o-mini)
+### Live LLM version (OpenRouter DeepSeek)
 
 ```bash
-# .env must contain OPENAI_API_KEY at repo root
+# .env must contain OPENROUTER_API_KEY at repo root
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
 ```
 
-**Cost ≈ $0.06 / 1000 requests** (2330 LLM calls × gpt-4o-mini rate).
+**Cost ≈ provider-dependent** (2330 calls through the pinned DeepSeek route).
 
 ## Measurements
 
@@ -103,8 +103,8 @@ cmake --build build --target cookbook_multi_tenant_live
 | Compile cache hit rate | 99.7% | 94% | **99.4%** |
 | Distinct engines | 3 | 6 | 6 |
 
-**Measurement environment**: WSL2 / 32-thread asio thread pool / single host / real
-OpenAI API call.
+**Measurement environment**: WSL2 / 32-thread asio thread pool / single host /
+real OpenRouter DeepSeek API call.
 
 Key numbers:
 
@@ -147,7 +147,7 @@ Scenarios possible on `t2.micro` (1 vCPU / 1 GB RAM, ~$0.01/hour):
 
 * Assumption: ~8 KB per connection + ~10 KB per compile-cache entry + 5 MB base.
 
-Of course, t2.micro 1 vCPU and OpenAI tier RPM limits are *throughput* ceiling;
+Of course, OpenRouter rate limits are the throughput ceiling;
 **the key point is marginal customer cost is ~0**.
 
 > LangGraph on t2.micro 1 GB for 100 customers = 100 processes =
@@ -166,8 +166,8 @@ would be customer edits graph JSON in web UI → DB save → next request uses n
 
 - **CheckpointStore integration** — Currently passes history as input per request.
   With Postgres CheckpointStore, automatic persistence per thread_id.
-- **Per-customer Provider** — alice=gpt-4o-mini, bob=claude-haiku style
-  different model/provider per customer. NodeContext::provider changes per customer.
+- **Pinned Provider** — every customer uses the same OpenRouter DeepSeek model;
+  `NodeContext::provider` can still carry customer-specific context.
 - **Streaming response** — `run(input)` with `input.stream_cb` + SSE for token-level
   streaming. Use NG's `run(NodeInput)` path with the stream callback directly.
 - **A/B experiment framework** — Traffic split via graph_def hash + customer_id sticky split.

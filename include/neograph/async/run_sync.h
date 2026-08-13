@@ -32,6 +32,7 @@
 #include <asio/detached.hpp>
 #include <asio/error.hpp>
 #include <asio/io_context.hpp>
+#include <asio/post.hpp>
 #include <asio/system_error.hpp>
 #include <asio/thread_pool.hpp>
 
@@ -44,11 +45,12 @@ namespace neograph::async {
 
 namespace detail {
 
-// Drive an engine operation using the exact child token already forked by the
-// GraphEngine entry point. The public run_sync(awaitable, CancelToken*) path
-// below intentionally forks because its raw token is a caller-owned parent;
-// using it here would create a grandchild and make RunContext's token differ
-// from the slot bound to the operation's co_spawn.
+// Drive an engine operation with two cancellation scopes. The operation token
+// is exposed through RunContext to node/provider code; the private execution
+// child is reserved for the wrapper's co_spawn. Asio cancellation signals have
+// one mutable slot, so binding both layers to the same token lets a nested
+// consumer replace the wrapper handler and can leave its awaitable frame
+// clearing freed slot state during teardown.
 template <typename T>
 T run_sync_operation(
     asio::awaitable<T> aw,
@@ -61,8 +63,10 @@ T run_sync_operation(
     std::optional<T> result;
     std::exception_ptr err;
 
-    auto body = [&]() -> asio::awaitable<void> {
+    auto body = [&](std::shared_ptr<neograph::graph::CancelToken> execution)
+        -> asio::awaitable<void> {
         try {
+            if (execution) execution->throw_if_cancelled("run_sync operation execution entry");
             result.emplace(co_await std::move(aw));
         } catch (...) {
             err = std::current_exception();
@@ -71,14 +75,24 @@ T run_sync_operation(
     };
 
     if (operation) {
-        operation->bind_executor(io.get_executor());
-        asio::co_spawn(
-            io, body(),
-            asio::bind_cancellation_slot(operation->slot(), asio::detached));
+        // Keep the token visible to the operation's direct consumers while
+        // reserving a distinct signal for the wrapper's awaitable frame.
+        const auto operation_executor = operation->bind_executor(io.get_executor());
+        neograph::graph::CancelExecutorLease operation_lease(operation);
+        auto execution = operation->fork();
+        const auto execution_executor = execution->bind_executor(operation_executor);
+        neograph::graph::CancelExecutorLease execution_lease(execution);
+        asio::post(execution_executor, [execution_executor, execution, &body] {
+            asio::co_spawn(
+                execution_executor, body(execution),
+                asio::bind_cancellation_slot(execution->slot(), asio::detached));
+        });
+        io.run();
     } else {
-        asio::co_spawn(io, body(), asio::detached);
+        asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
+                       asio::detached);
+        io.run();
     }
-    io.run();
 
     if (err) {
         if (operation && operation->is_cancelled()) {
@@ -95,7 +109,8 @@ T run_sync_operation(
         std::rethrow_exception(err);
     }
     if (!result && operation && operation->is_cancelled()) {
-        throw neograph::graph::CancelledException("run_sync operation aborted before entry");
+        throw neograph::graph::CancelledException(
+            "run_sync operation aborted before entry");
     }
     return std::move(*result);
 }
@@ -138,8 +153,10 @@ T run_sync(asio::awaitable<T> aw,
     std::optional<T> result;
     std::exception_ptr err;
 
-    auto body = [&]() -> asio::awaitable<void> {
+    auto body = [&](std::shared_ptr<neograph::graph::CancelToken> child)
+        -> asio::awaitable<void> {
         try {
+            if (child) child->throw_if_cancelled("run_sync execution entry");
             result.emplace(co_await std::move(aw));
         } catch (...) {
             err = std::current_exception();
@@ -176,10 +193,13 @@ T run_sync(asio::awaitable<T> aw,
         // strictly as a tiny optimization (skip io_context
         // construction altogether).
         auto child = cancel->fork();
-        child->bind_executor(io.get_executor());
-        asio::co_spawn(io, body(),
-            asio::bind_cancellation_slot(child->slot(),
-                                          asio::detached));
+        const auto child_executor = child->bind_executor(io.get_executor());
+        neograph::graph::CancelExecutorLease child_lease(child);
+        asio::post(child_executor, [child_executor, child, &body] {
+            asio::co_spawn(
+                child_executor, body(child),
+                asio::bind_cancellation_slot(child->slot(), asio::detached));
+        });
         io.run();
         // ``child`` goes out of scope at end of block → parent's
         // weak_ptr expires → next parent.cancel()/fork() prunes it.
@@ -193,7 +213,8 @@ T run_sync(asio::awaitable<T> aw,
             throw neograph::graph::CancelledException("run_sync inner abort");
         }
     } else {
-        asio::co_spawn(io, body(), asio::detached);
+        asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
+                       asio::detached);
         io.run();
     }
 
@@ -213,8 +234,10 @@ inline void run_sync(asio::awaitable<void> aw,
     asio::io_context io;
     std::exception_ptr err;
 
-    auto body = [&]() -> asio::awaitable<void> {
+    auto body = [&](std::shared_ptr<neograph::graph::CancelToken> child)
+        -> asio::awaitable<void> {
         try {
+            if (child) child->throw_if_cancelled("run_sync execution entry");
             co_await std::move(aw);
         } catch (...) {
             err = std::current_exception();
@@ -226,10 +249,13 @@ inline void run_sync(asio::awaitable<void> aw,
         // above for the full rationale; this is the bit-for-bit
         // void specialization.
         auto child = cancel->fork();
-        child->bind_executor(io.get_executor());
-        asio::co_spawn(io, body(),
-            asio::bind_cancellation_slot(child->slot(),
-                                          asio::detached));
+        const auto child_executor = child->bind_executor(io.get_executor());
+        neograph::graph::CancelExecutorLease child_lease(child);
+        asio::post(child_executor, [child_executor, child, &body] {
+            asio::co_spawn(
+                child_executor, body(child),
+                asio::bind_cancellation_slot(child->slot(), asio::detached));
+        });
         io.run();
         if (err && cancel->is_cancelled()) {
             throw neograph::graph::CancelledException("run_sync inner abort");
@@ -237,7 +263,8 @@ inline void run_sync(asio::awaitable<void> aw,
         if (err) std::rethrow_exception(err);
         return;
     } else {
-        asio::co_spawn(io, body(), asio::detached);
+        asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
+                       asio::detached);
     }
 
     io.run();
@@ -258,17 +285,15 @@ T run_sync_pool(asio::awaitable<T> aw, std::size_t n_threads) {
     std::optional<T> result;
     std::exception_ptr err;
 
-    asio::co_spawn(
-        pool.get_executor(),
-        [&]() -> asio::awaitable<void> {
-            try {
-                result.emplace(co_await std::move(aw));
-            } catch (...) {
-                err = std::current_exception();
-            }
-            co_return;
-        },
-        asio::detached);
+    auto body = [&]() -> asio::awaitable<void> {
+        try {
+            result.emplace(co_await std::move(aw));
+        } catch (...) {
+            err = std::current_exception();
+        }
+        co_return;
+    };
+    asio::co_spawn(pool.get_executor(), body(), asio::detached);
 
     pool.join();
 
@@ -281,16 +306,14 @@ inline void run_sync_pool(asio::awaitable<void> aw, std::size_t n_threads) {
     asio::thread_pool pool(n_threads > 0 ? n_threads : 1);
     std::exception_ptr err;
 
-    asio::co_spawn(
-        pool.get_executor(),
-        [&]() -> asio::awaitable<void> {
-            try {
-                co_await std::move(aw);
-            } catch (...) {
-                err = std::current_exception();
-            }
-        },
-        asio::detached);
+    auto body = [&]() -> asio::awaitable<void> {
+        try {
+            co_await std::move(aw);
+        } catch (...) {
+            err = std::current_exception();
+        }
+    };
+    asio::co_spawn(pool.get_executor(), body(), asio::detached);
 
     pool.join();
 

@@ -2,9 +2,9 @@
 //
 // Spawns an MCP stdio server (subprocess), discovers its tools, then calls
 // each tool directly and prints the result. This isolates the MCP protocol
-// round-trip from any OpenAI dependency: the other bundled MCP examples
-// (03 / 20 / 22) wrap the client in a ReAct loop that needs OPENAI_API_KEY,
-// which hides the fact that the protocol layer itself is key-free and
+// round-trip from any LLM dependency: the other bundled MCP examples
+// (03 / 20 / 22) wrap the client in a ReAct loop using the pinned
+// OpenRouter DeepSeek model, which hides the fact that the protocol layer
 // peer-agnostic.
 //
 // Pair it with min_stdio_server.py (a ~60-line stdlib server, no fastmcp):

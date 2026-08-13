@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1111,6 +1112,56 @@ TEST_F(PostgresCheckpointTest, AsyncPendingWritesRoundTrip) {
 
     // After clear, a subsequent sync get returns empty.
     EXPECT_TRUE(store->get_writes("t-pw", parent.id).empty());
+}
+
+TEST_F(PostgresCheckpointTest, ConcurrentAsyncPendingWritesUseSeparatePoolSlots) {
+    constexpr int kWrites = 4;
+
+    // A parallel graph records one completion per worker against the same
+    // parent checkpoint. Exercise the real nonblocking transaction path on
+    // distinct pool slots; a serial round-trip cannot expose ownership bugs
+    // in the captured parameter vectors.
+    store = std::make_unique<PostgresCheckpointStore>(pg_url(), /*pool_size=*/kWrites);
+    store->drop_schema();
+    auto parent = make_state_cp("t-pw-parallel", 0, {{"x", {1, 1}}});
+    store->save(parent);
+
+    std::vector<PendingWrite> writes(kWrites);
+    for (int i = 0; i < kWrites; ++i) {
+        writes[i].task_id = "task-" + std::to_string(i);
+        writes[i].task_path = "s1:worker[" + std::to_string(i) + "]";
+        writes[i].node_name = "worker";
+        writes[i].writes = json::array({{{"channel", "results"}, {"value", i}}});
+        writes[i].command = nullptr;
+        writes[i].sends = json::array();
+        writes[i].step = 1;
+        writes[i].timestamp = 100 + i;
+    }
+
+    asio::io_context io;
+    std::array<std::exception_ptr, kWrites> errors{};
+    std::atomic<int> completed{0};
+    for (int i = 0; i < kWrites; ++i) {
+        asio::co_spawn(io,
+            [&, i]() -> asio::awaitable<void> {
+                co_await store->put_writes_async(
+                    "t-pw-parallel", parent.id, writes[static_cast<size_t>(i)]);
+            },
+            [&, i](std::exception_ptr error) {
+                errors[static_cast<size_t>(i)] = error;
+                completed.fetch_add(1, std::memory_order_relaxed);
+            });
+    }
+    io.run();
+
+    EXPECT_EQ(completed.load(std::memory_order_relaxed), kWrites);
+    for (const auto& error : errors) EXPECT_EQ(error, nullptr);
+
+    auto loaded = store->get_writes("t-pw-parallel", parent.id);
+    ASSERT_EQ(loaded.size(), static_cast<size_t>(kWrites));
+    std::set<std::string> task_ids;
+    for (const auto& write : loaded) task_ids.insert(write.task_id);
+    EXPECT_EQ(task_ids, (std::set<std::string>{"task-0", "task-1", "task-2", "task-3"}));
 }
 
 TEST_F(PostgresCheckpointTest, AsyncSavesOverlapAcrossPoolSlots) {

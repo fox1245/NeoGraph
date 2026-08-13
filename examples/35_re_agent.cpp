@@ -2,10 +2,8 @@
 //
 // Wires ghidra-mcp (stdio bridge → Ghidra GUI 18080 plugin) into a NeoGraph
 // ReAct loop and recovers meaningful names + summaries for every user-defined
-// function in a stripped binary. Verified end-to-end: matched_score 0.92 on
-// a 6-function crackme (gpt-5.4-mini) and 62 functions on a real ~100-func
-// PE DLL (z-ai/glm-5.1 via OpenRouter).
-//
+// function in a stripped binary. Verified end-to-end against the pinned
+// DeepSeek model through OpenRouter.
 // This example is the "engine showcase" cut: the cpp + re_agent_common.h
 // are everything you need to drive ghidra-mcp from NeoGraph. The full RE
 // pipeline (Docker compose for Ghidra + GhidraMCPPlugin, target binaries,
@@ -18,14 +16,14 @@
 //   1. Start Ghidra (native or via the re-agent docker/compose.yaml).
 //   2. New project → Import a stripped binary → CodeBrowser → auto-analyze.
 //      Plugin exposes HTTP on 127.0.0.1:18080 (or :8080 for native install).
-//   3. echo "OPENAI_API_KEY=sk-..." > .env
+//   3. echo "OPENROUTER_API_KEY=sk-or-..." > .env
 //
 // Usage:
 //   ./example_re_agent
-//   ./example_re_agent --max-steps 80 --model gpt-5.4-mini
-//   # OpenAI-compat HTTP backend (OpenRouter / Ollama / vLLM / trtllm-serve):
-//   LLM_BASE_URL=https://openrouter.ai/api LLM_API_KEY=sk-or-v1-... \
-//     ./example_re_agent --model z-ai/glm-5.1
+//   ./example_re_agent --max-steps 80
+//
+// The model is fixed to deepseek/deepseek-v4-flash-0731 and the provider is
+// fixed to OpenRouter's Responses-compatible endpoint.
 //
 // The agent's final tool-free message is a JSON summary on stdout; trace
 // goes to stderr.
@@ -50,19 +48,15 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     int max_steps = 80;
-    // Default to OpenAI Responses over WebSocket (commit d7c61d0). Avoids
-    // v1/chat_completions REST entirely. gpt-5.4-mini chosen for stronger
-    // tool-use reasoning at low cost.
-    std::string model = "gpt-5.4-mini";
+    const std::string model = "deepseek/deepseek-v4-flash-0731";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--max-steps" && i + 1 < argc) max_steps = std::atoi(argv[++i]);
-        else if (a == "--model" && i + 1 < argc) model = argv[++i];
     }
 
-    const char* api_key = std::getenv("OPENAI_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "OPENAI_API_KEY not set (env or .env file)\n";
+        std::cerr << "OPENROUTER_API_KEY not set (env or .env file)\n";
         return 1;
     }
 
@@ -75,8 +69,7 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        // 2. LLM provider — env-selected (LLM_BASE_URL → OpenAIProvider HTTP,
-        //    else SchemaProvider WS Responses). See re_agent_common.h.
+        // 2. OpenRouter Responses provider configured in re_agent_common.h.
         auto provider = neograph::re_agent::make_provider(model, api_key);
 
         // 3. ReAct graph with ghidra-mcp tools wired in.

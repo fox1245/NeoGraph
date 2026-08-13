@@ -48,6 +48,7 @@ Version 1.0 ends this exception by freezing the generation 1 layouts.
 |---|---|---|
 | Any pre-`0.9.0` build to `0.9.0+` | Rebuild all C++ consumers and custom nodes. | `GraphNode` removed eight legacy virtual methods and changed its vtable. |
 | `0.11.1` or earlier to the next release containing bounded `NodeCache` | Rebuild all C++ consumers. | `NodeCache` and `EngineConfig` public object layouts changed. `SyncGraphNode` itself is additive and does not change the `GraphNode` vtable. |
+| `0.11.1` or earlier to the release containing bounded `UsageAccumulator` reservations | Rebuild all C++ consumers. | `UsageAccumulator` gained public reservation accounting state and its object layout changed. |
 | Any `0.x` build to `1.0.0` | Rebuild all C++ consumers. | The supported v1 layouts are frozen and the loader ABI generation changes from 0 to 1. |
 
 Never copy a new shared library over an existing pre-v1 installation without

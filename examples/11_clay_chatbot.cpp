@@ -5,7 +5,7 @@
 //
 // Build: cmake .. -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON && make example_clay_chatbot
 // Run:   ./example_clay_chatbot          (Mock)
-//        ./example_clay_chatbot --live   (OpenAI API)
+//        ./example_clay_chatbot --live   (OpenRouter / DeepSeek)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
@@ -148,9 +148,14 @@ int main(int argc, char** argv) {
 
     std::shared_ptr<neograph::Provider> provider;
     if (g_live) {
-        const char* key = std::getenv("OPENAI_API_KEY");
-        if (!key) { fprintf(stderr, "OPENAI_API_KEY not set\n"); return 1; }
-        provider = neograph::llm::OpenAIProvider::create({.api_key = key, .default_model = "gpt-4o-mini"});
+        const char* key = std::getenv("OPENROUTER_API_KEY");
+        if (!key) { fprintf(stderr, "OPENROUTER_API_KEY not set\n"); return 1; }
+        neograph::llm::OpenAIProvider::Config config;
+        config.api_key = key;
+        config.base_url = "https://openrouter.ai/api";
+        config.default_model = "deepseek/deepseek-v4-flash-0731";
+        config.provider_routing = {{"zdr", true}};
+        provider = neograph::llm::OpenAIProvider::create(config);
     } else {
         provider = std::make_shared<ChatMockProvider>();
     }

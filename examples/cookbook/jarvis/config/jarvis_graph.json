@@ -62,12 +62,11 @@
     "router": {
       "type": "intent_classifier",
       "_comment": [
-        "작은/빠른 LLM 으로 JSON 결정 출력.",
+        "DeepSeek로 JSON 결정을 출력.",
         "출력: {mode, tool_calls, delegate_to, skip_synthesis}",
         "도구 카탈로그와 에이전트 레지스트리는 main.cpp 에서 시스템 프롬프트에 주입."
       ],
-      "model": "gpt-4o-mini",
-      "routes": ["chat", "direct", "delegate", "parallel"],
+      "model": "deepseek/deepseek-v4-flash-0731",
       "output_channel": "route_decision",
       "prompt_file": "config/persona.txt",
       "prompt_section": "router"
@@ -103,7 +102,7 @@
         "사용자 언어(user_lang)에 맞춰 한 문장-두 문장으로 답함.",
         "route_decision.skip_synthesis=true 면 이 노드는 우회 (조건부 엣지로)."
       ],
-      "model": "gpt-4o",
+      "model": "deepseek/deepseek-v4-flash-0731",
       "prompt_file": "config/persona.txt",
       "prompt_section": "synth",
       "output_channel": "final_text"

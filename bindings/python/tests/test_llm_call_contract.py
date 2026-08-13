@@ -10,8 +10,8 @@ import neograph_engine as ng
 
 COOKBOOK_GRAPHS = [
     "examples/cookbook/byo-openai/hybrid.py",
-    "examples/cookbook/ollama-provider/via_openai_compat.py",
-    "examples/cookbook/ollama-provider/via_native_api.py",
+    "examples/cookbook/openrouter-provider/via_openai_compat.py",
+    "examples/cookbook/openrouter-provider/via_http.py",
 ]
 
 

@@ -147,21 +147,22 @@ void to_json(json& j, const ContentBlock& b) {
 }
 
 void from_json(const json& j, ContentBlock& b) {
+    // Clear optional variant fields when decoding into a reused object.
+    b = ContentBlock{};
     b.type = j.value("type", std::string("text"));
     if (b.type == "text") {
         b.text = j.value("text", std::string());
     } else if (b.type == "image" || b.type == "audio") {
-        b.data      = j.value("data", std::string());
+        b.data = j.value("data", std::string());
         b.mime_type = j.value("mimeType", std::string());
-        if (j.contains("uri")) b.uri = j.value("uri", std::string());
+        if (j.contains("uri") && j["uri"].is_string()) b.uri = j["uri"].get<std::string>();
     } else if (b.type == "resource_link") {
-        b.uri  = j.value("uri",  std::string());
+        b.uri = j.value("uri", std::string());
         b.name = j.value("name", std::string());
-        if (j.contains("mimeType"))    b.mime_type   = j["mimeType"].get<std::string>();
-        if (j.contains("title"))       b.title       = j["title"].get<std::string>();
-        if (j.contains("description")) b.description = j["description"].get<std::string>();
-        if (j.contains("size") && j["size"].is_number_integer())
-            b.size = j["size"].get<std::int64_t>();
+        if (j.contains("mimeType") && j["mimeType"].is_string()) b.mime_type = j["mimeType"].get<std::string>();
+        if (j.contains("title") && j["title"].is_string()) b.title = j["title"].get<std::string>();
+        if (j.contains("description") && j["description"].is_string()) b.description = j["description"].get<std::string>();
+        if (j.contains("size") && j["size"].is_number_integer()) b.size = j["size"].get<std::int64_t>();
     } else if (b.type == "resource") {
         if (j.contains("resource")) b.resource = j["resource"];
     }
@@ -217,12 +218,23 @@ void from_json(const json& j, McpServerConfig& c) { c.raw = j; }
 void to_json(json& j, const NewSessionRequest& r) {
     j = json::object();
     j["cwd"] = r.cwd;
+    if (!r.additional_directories.empty()) {
+        auto dirs = json::array();
+        for (const auto& path : r.additional_directories) dirs.push_back(path);
+        j["additionalDirectories"] = std::move(dirs);
+    }
     auto arr = json::array();
     for (auto& s : r.mcp_servers) arr.push_back(s.raw.is_null() ? json::object() : s.raw);
     j["mcpServers"] = std::move(arr);
 }
 void from_json(const json& j, NewSessionRequest& r) {
     r.cwd = j.value("cwd", std::string());
+    r.additional_directories.clear();
+    if (j.contains("additionalDirectories") && j["additionalDirectories"].is_array()) {
+        for (const auto& path : j["additionalDirectories"]) {
+            if (path.is_string()) r.additional_directories.push_back(path.get<std::string>());
+        }
+    }
     r.mcp_servers.clear();
     if (j.contains("mcpServers") && j["mcpServers"].is_array()) {
         for (auto s : j["mcpServers"]) {
@@ -251,6 +263,11 @@ void to_json(json& j, const ResumeSessionRequest& r) {
     j = json::object();
     j["sessionId"] = r.session_id;
     j["cwd"] = r.cwd;
+    if (!r.additional_directories.empty()) {
+        auto dirs = json::array();
+        for (const auto& path : r.additional_directories) dirs.push_back(path);
+        j["additionalDirectories"] = std::move(dirs);
+    }
     auto arr = json::array();
     for (const auto& server : r.mcp_servers) {
         arr.push_back(server.raw.is_null() ? json::object() : server.raw);
@@ -261,6 +278,12 @@ void to_json(json& j, const ResumeSessionRequest& r) {
 void from_json(const json& j, ResumeSessionRequest& r) {
     r.session_id = j.at("sessionId").get<std::string>();
     r.cwd = j.at("cwd").get<std::string>();
+    r.additional_directories.clear();
+    if (j.contains("additionalDirectories") && j["additionalDirectories"].is_array()) {
+        for (const auto& path : j["additionalDirectories"]) {
+            if (path.is_string()) r.additional_directories.push_back(path.get<std::string>());
+        }
+    }
     r.mcp_servers.clear();
     if (j.contains("mcpServers") && j["mcpServers"].is_array()) {
         for (const auto& value : j["mcpServers"]) {
@@ -344,25 +367,25 @@ void from_json(const json& j, ReadTextFileResponse& r) {
 void to_json(json& j, const WriteTextFileRequest& r) {
     j = json::object();
     j["sessionId"] = r.session_id;
-    j["path"]      = r.path;
-    j["content"]   = r.content;
-}
-void from_json(const json& j, WriteTextFileRequest& r) {
-    r.session_id = j.value("sessionId", std::string());
-    r.path       = j.value("path",      std::string());
-    r.content    = j.value("content",   std::string());
+    j["path"] = r.path;
+    j["content"] = r.content;
 }
 
-// ---------------------------------------------------------------------------
-// ToolCallUpdate
-// ---------------------------------------------------------------------------
+void from_json(const json& j, WriteTextFileRequest& r) {
+    r.session_id = j.value("sessionId", std::string());
+    r.path = j.value("path", std::string());
+    r.content = j.value("content", std::string());
+}
 void to_json(json& j, const ToolCallUpdate& t) {
     j = t.raw.is_null() || t.raw.empty() ? json::object() : t.raw;
     j["toolCallId"] = t.tool_call_id;
-    j["toolName"]   = t.tool_name;
-    if (!t.input.is_null())     j["input"]  = t.input;
-    if (!t.kind.empty())        j["kind"]   = t.kind;
-    if (!t.status.empty())      j["status"] = t.status;
+    // toolName/input were used by pre-v1 peers but are not current ACP
+    // ToolCallUpdate fields. Preserve them only when explicitly supplied.
+    if (!t.tool_name.empty())    j["toolName"] = t.tool_name;
+    if (!t.input.is_null())      j["input"] = t.input;
+    if (!t.title.empty())        j["title"] = t.title;
+    if (!t.kind.empty())         j["kind"] = t.kind;
+    if (!t.status.empty())       j["status"] = t.status;
     if (!t.content.empty()) {
         auto arr = json::array();
         for (auto& b : t.content) {
@@ -374,11 +397,12 @@ void to_json(json& j, const ToolCallUpdate& t) {
 }
 
 void from_json(const json& j, ToolCallUpdate& t) {
-    t.raw          = j;
+    t.raw = j;
     t.tool_call_id = j.value("toolCallId", std::string());
-    t.tool_name    = j.value("toolName",   std::string());
-    if (j.contains("input"))  t.input  = j["input"];
-    t.kind   = j.value("kind",   std::string());
+    t.tool_name = j.value("toolName", std::string());
+    t.input = j.contains("input") ? j["input"] : json();
+    t.title = j.value("title", std::string());
+    t.kind = j.value("kind", std::string());
     t.status = j.value("status", std::string());
     t.content.clear();
     if (j.contains("content") && j["content"].is_array()) {

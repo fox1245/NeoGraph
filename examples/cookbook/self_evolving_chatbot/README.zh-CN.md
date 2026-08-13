@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=5822dcf16aca038ab00fde8ea9ffb59be2f05e725c5feeef8c4d61ef86a2742b -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=0c6d156e7378f114498c63578e7981c6401394ada5684fc924fb72ec7c867849 -->
 # 自演化聊天机器人
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -35,7 +35,7 @@ LangChain/LangGraph 的 StateGraph 是 Python class instance — pickle 也会�
 
 ## 核心机制
 
-每个 turn 结束时，LLM judge（gpt-4o-mini）查看 conversation history + current topology，并用一个词回答最适合的形态：
+每个 turn 结束时，OpenRouter 的固定 DeepSeek 模型作为 LLM judge 查看 conversation history + current topology，并用一个词回答最适合的形态：
 
 - `simple` — 1 次 LLM 调用，简短直接回答（适合 factual Q）
 - `reflexive` — 3 次 LLM 调用（draft → critique → final）（适合追求准确性）
@@ -181,7 +181,7 @@ if (turn % EVAL_INTERVAL == 0) {
 ## 未来扩展
 
 - **防摇摆保护** — 处理 eve case。如果最近 N turns 内已演化，则 lockout；或使用 hysteresis（如果当前 topology 不比下一候选低 N%，就不切换）。
-- **LLM 生成 graph_def** — 当前从 3 个预定义拓扑中选择。更大胆地说，LLM 可以从零生成 graph_def JSON。NG 的 [v0.5.0 example 23 evolving chat agent](../../23_*.cpp) fork + meta assembly pattern 正朝这个方向走。
+- **LLM 生成 graph_def** — 当前从 3 个预定义拓扑中选择。更大胆地说，LLM 可以从零生成 graph_def JSON。请参考 [`the-beast/`](../the-beast/) cookbook 中的模型编写拓扑及编译/验证门控。
 - **并行客户处理** — 顺序 demo 7 分钟，按客户并行 = ~1.5 分钟。直接使用 `asio::thread_pool` + compile cache。
 - **A/B 框架** — 同时为同一客户运行 2 个拓扑，根据响应满意度决定赢家。按 graph_id sticky split。
 - **CheckpointStore 集成** — Postgres + 上述 SQL schema，面向真实生产可用。

@@ -10,6 +10,7 @@
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
+#include <asio/post.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
@@ -215,6 +216,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->checkpoint_store_    = std::move(config.checkpoint_store);
     engine->store_               = std::move(config.store);
     engine->tool_gate_           = std::move(config.tool_gate);
+    engine->tool_execution_controller_ = std::move(config.tool_execution_controller);
     engine->owned_tools_         = std::move(resources.tools).release();
     engine->node_cache_.set_max_entries(config.node_cache_max_entries);
     for (const auto& node_name : config.cached_nodes) {
@@ -590,14 +592,25 @@ asio::awaitable<RunResult> GraphEngine::run_async_with_runtime(
     }
 
     auto executor = co_await asio::this_coro::executor;
-    operation->bind_executor(executor);
+    const auto operation_executor = operation->bind_executor(executor);
+    CancelExecutorLease operation_lease(operation);
     operation->throw_if_cancelled("run_async entry");
+
+    // ``operation`` is the token exposed through RunContext. Keep the
+    // wrapper's co_spawn on a separate child signal: an async node is allowed
+    // to bind operation->slot() for its own timer/socket, and Asio cancellation
+    // slots have only one mutable handler.
+    auto execution = operation->fork();
+    const auto execution_executor = execution->bind_executor(operation_executor);
+    CancelExecutorLease execution_lease(execution);
+    co_await asio::post(execution_executor, asio::use_awaitable);
+    execution->throw_if_cancelled("run_async execution entry");
     try {
         co_return co_await asio::co_spawn(
-            executor,
+            execution_executor,
             execute_graph_async(config, cb, {}, nullptr, metadata, &resources),
             asio::bind_cancellation_slot(
-                operation->slot(), asio::use_awaitable));
+                execution->slot(), asio::use_awaitable));
     } catch (const asio::system_error& error) {
         if (operation->is_cancelled() &&
             error.code() == asio::error::operation_aborted) {
@@ -636,6 +649,27 @@ GraphEngine::run_stream_async(RunConfig config,
                               RunMetadata metadata) {
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata), {});
+}
+
+asio::awaitable<RunResult>
+GraphEngine::run_stream_async(RunConfig config,
+                              GraphStreamCallback cb,
+                              RunMetadata metadata,
+                              RunResources resources) {
+    RuntimeResources runtime_resources;
+    if (resources.checkpoint_store) {
+        runtime_resources.checkpoint_store =
+            std::move(resources.checkpoint_store);
+    }
+    if (resources.store) {
+        runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
+    co_return co_await run_async_with_runtime(
+        std::move(config), std::move(cb), std::move(metadata),
+        std::move(runtime_resources));
 }
 
 RunResult GraphEngine::resume(const std::string& thread_id,
@@ -686,40 +720,173 @@ asio::awaitable<RunResult> GraphEngine::resume_async(
         std::move(metadata), {});
 }
 
+asio::awaitable<RunResult> GraphEngine::resume_async(
+    RunConfig config,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RunResources resources) {
+    RuntimeResources runtime_resources;
+    if (resources.checkpoint_store) {
+        runtime_resources.checkpoint_store =
+            std::move(resources.checkpoint_store);
+    }
+    if (resources.store) {
+        runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
+    co_return co_await resume_async_with_runtime(
+        std::move(config), std::move(resume_value), std::move(cb),
+        std::move(metadata), std::move(runtime_resources));
+}
+
+RunResult GraphEngine::resume_from(
+    RunConfig config,
+    std::string checkpoint_id,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RunResources resources) {
+    return neograph::async::run_sync(resume_from_async(
+        std::move(config), std::move(checkpoint_id), std::move(resume_value),
+        std::move(cb), std::move(metadata), std::move(resources)));
+}
+
+asio::awaitable<RunResult> GraphEngine::resume_from_async(
+    RunConfig config,
+    std::string checkpoint_id,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RunResources resources) {
+    if (checkpoint_id.empty()) {
+        throw std::invalid_argument(
+            "Cannot resume from checkpoint: checkpoint_id is required");
+    }
+
+    RuntimeResources runtime_resources;
+    if (resources.checkpoint_store) {
+        runtime_resources.checkpoint_store =
+            std::move(resources.checkpoint_store);
+    }
+    if (resources.store) {
+        runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
+    co_return co_await resume_async_with_runtime(
+        std::move(config), std::move(resume_value), std::move(cb),
+        std::move(metadata), std::move(runtime_resources),
+        std::move(checkpoint_id));
+}
+
 asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
     RunConfig config,
     json resume_value,
     GraphStreamCallback cb,
     RunMetadata metadata,
-    RuntimeResources resources) {
-    // Sem 3.7.5: real async resume. Mirrors sync resume() but the
-    // load_latest and the downstream super-step loop go through
-    // their *_async peers, so the whole resume path is non-blocking.
+    RuntimeResources resources,
+    std::optional<std::string> checkpoint_id) {
+    auto operation = config.cancel_token
+        ? config.cancel_token->fork()
+        : std::shared_ptr<CancelToken>{};
+    config.cancel_token = operation;
+    if (!operation) {
+        co_return co_await resume_execute_async(
+            std::move(config), std::move(resume_value), std::move(cb),
+            std::move(metadata), std::move(resources),
+            std::move(checkpoint_id));
+    }
+
+    auto executor = co_await asio::this_coro::executor;
+    const auto operation_executor = operation->bind_executor(executor);
+    CancelExecutorLease operation_lease(operation);
+    operation->throw_if_cancelled("resume_async entry");
+
+    // Keep the RunContext token and the resume wrapper's co_spawn on
+    // independent cancellation signals; nested node consumers may bind the
+    // former without replacing the latter's awaitable handler.
+    auto execution = operation->fork();
+    const auto execution_executor = execution->bind_executor(operation_executor);
+    CancelExecutorLease execution_lease(execution);
+    co_await asio::post(execution_executor, asio::use_awaitable);
+    execution->throw_if_cancelled("resume_async execution entry");
+    try {
+        co_return co_await asio::co_spawn(
+            execution_executor,
+            resume_execute_async(
+                std::move(config), std::move(resume_value), std::move(cb),
+                std::move(metadata), std::move(resources),
+                std::move(checkpoint_id)),
+            asio::bind_cancellation_slot(
+                execution->slot(), asio::use_awaitable));
+    } catch (const asio::system_error& error) {
+        if (operation->is_cancelled() &&
+            error.code() == asio::error::operation_aborted) {
+            throw CancelledException("resume_async operation aborted");
+        }
+        throw;
+    }
+}
+
+asio::awaitable<RunResult> GraphEngine::resume_execute_async(
+    RunConfig config,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RuntimeResources resources,
+    std::optional<std::string> checkpoint_id) {
     auto checkpoint_store = resources.checkpoint_store
         ? *resources.checkpoint_store
         : checkpoint_store_;
-    if (!checkpoint_store)
-        throw std::runtime_error("Cannot resume: no checkpoint store configured");
-
+    if (!checkpoint_store) {
+        throw std::runtime_error(
+            "Cannot resume: no checkpoint store configured");
+    }
     if (config.thread_id.empty()) {
         throw std::invalid_argument("Cannot resume: thread_id is required");
     }
-    const auto& thread_id = config.thread_id;
 
-    auto cp_opt = co_await checkpoint_store->load_latest_async(thread_id);
-    if (!cp_opt)
-        throw std::runtime_error("No checkpoint found for thread: " + thread_id);
+    CheckpointCoordinator coordinator(checkpoint_store, config.thread_id);
+    ResumeContext resume_context;
+    if (checkpoint_id) {
+        resume_context =
+            co_await coordinator.load_for_resume_by_id_async(*checkpoint_id);
+    } else {
+        resume_context = co_await coordinator.load_for_resume_async();
+    }
+    if (!resume_context.have_cp) {
+        if (checkpoint_id) {
+            throw std::runtime_error(
+                "No checkpoint found for id: " + *checkpoint_id);
+        }
+        throw std::runtime_error(
+            "No checkpoint found for thread: " + config.thread_id);
+    }
 
-    if (cp_opt->next_nodes.size() == 1 &&
-        cp_opt->next_nodes[0] == std::string(END_NODE)) {
+    if (resume_context.next_nodes.size() == 1 &&
+        resume_context.next_nodes[0] == std::string(END_NODE)) {
         RunResult result;
-        result.output = cp_opt->channel_values;
-        result.checkpoint_id = cp_opt->id;
+        result.output = resume_context.channel_values;
+
+        result.checkpoint_id = resume_context.checkpoint_id;
         co_return result;
     }
 
+    // Keep the historical latest-resume behavior for snapshots with no
+    // continuation: the legacy path treated an empty next_nodes vector as a
+    // fresh run. Exact resume remains pinned to the requested snapshot.
+    if (!checkpoint_id && resume_context.next_nodes.empty()) {
+        co_return co_await execute_graph_async(
+            config, cb, std::nullopt, &resume_value, metadata, &resources);
+    }
+
     co_return co_await execute_graph_async(
-        config, cb, cp_opt->next_nodes, &resume_value, metadata, &resources);
+        config, cb, std::move(resume_context), &resume_value,
+        metadata, &resources);
 }
 
 asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
@@ -727,8 +894,10 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     const RunContext& parent,
     GraphStreamCallback cb) {
     RunMetadata metadata;
-    metadata.deadline = parent.deadline;
-    metadata.trace_id = parent.trace_id;
+    metadata.deadline            = parent.deadline;
+    metadata.trace_id            = parent.trace_id;
+    metadata.run_id              = parent.run_id;
+    metadata.budget_cancel_token = parent.budget_cancel_token;
 
     RuntimeResources resources;
     auto parent_runtime = detail::runtime_for(parent);
@@ -779,13 +948,14 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
 // co_await it directly.
 
 asio::awaitable<RunResult>
-GraphEngine::execute_graph_async(const RunConfig& config,
-                                  const GraphStreamCallback& cb,
-                                  const std::vector<std::string>& resume_from,
-                                  const json* resume_value,
-                                  const RunMetadata& metadata,
-                                  const RuntimeResources* resources) {
-    const bool is_resume = !resume_from.empty();
+GraphEngine::execute_graph_async(
+    const RunConfig& config,
+    const GraphStreamCallback& cb,
+    std::optional<ResumeContext> resume_context,
+    const json* resume_value,
+    const RunMetadata& metadata,
+    const RuntimeResources* resources) {
+    const bool is_resume = resume_context.has_value();
 
     // RAII inc/dec on the inflight-run counter — set_worker_count()
     // checks this is zero before swapping executors. Designed to run
@@ -827,6 +997,14 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     // node bodies never have to check.
     ctx.usage        = config.usage ? config.usage
                                      : std::make_shared<UsageAccumulator>();
+    ctx.model_token_budget = config.model_token_budget;
+    ctx.budget_exhausted   = config.budget_exhausted;
+    ctx.run_id             = metadata.run_id;
+    ctx.budget_cancel_token =
+        metadata.budget_cancel_token
+            ? metadata.budget_cancel_token
+            : (ctx.cancel_token ? ctx.cancel_token->fork()
+                                 : std::make_shared<CancelToken>());
     ctx.deadline     = metadata.deadline;
     ctx.trace_id     = metadata.trace_id;
     ctx.thread_id    = config.thread_id;
@@ -843,6 +1021,10 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         ? *resources->parent_tool_gate
         : ToolGate{};
     ctx.tool_gate = compose_tool_gates(std::move(parent_tool_gate), tool_gate_);
+    ctx.tool_execution_controller = tool_execution_controller_;
+    ctx.tool_execution_identity.owner_scope = metadata.owner_scope;
+    ctx.tool_execution_identity.root_run_id = metadata.run_id;
+    ctx.tool_execution_identity.thread_id = config.thread_id;
 
     auto runtime = std::make_shared<detail::RunContextRuntime>();
     runtime->checkpoint_store = checkpoint_store;
@@ -858,36 +1040,36 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     std::unordered_map<std::string, NodeResult> replay_results;
     BarrierState barrier_state;
 
+    std::vector<std::string> ready;
     if (is_resume) {
-        auto ctx = co_await coord.load_for_resume_async();
-        if (ctx.have_cp) {
-            state.restore(ctx.channel_values);
-            last_checkpoint_id = ctx.checkpoint_id;
-            start_step         = ctx.start_step;
-            replay_results     = std::move(ctx.replay_results);
-            barrier_state      = std::move(ctx.barrier_state);
+        auto& loaded = *resume_context;
+        state.restore(loaded.channel_values);
+        last_checkpoint_id = loaded.checkpoint_id;
+        start_step         = loaded.start_step;
+        ready              = std::move(loaded.next_nodes);
+        replay_results     = std::move(loaded.replay_results);
+        barrier_state      = std::move(loaded.barrier_state);
 
-            // Chat-shaped graphs have always received the resume value as a
-            // user turn on the "messages" channel, and still do. But a graph
-            // without that channel used to *throw* here ("Write to unknown
-            // channel: 'messages'"), which made resume-with-a-value unusable
-            // for anything that isn't a chat — including the approval prompt
-            // dynamic interrupts exist for. Every node now reads the answer
-            // from ``ctx.resume_value`` regardless; this write stays for the
-            // graphs that were relying on it (issue #94).
-            if (resume_value && !resume_value->is_null()
-                && state.has_channel("messages")) {
-                // Build the resume message outside the brace-init that
-                // would otherwise nest inside the coroutine body. Same
-                // GCC 13 ICE shape; same workaround.
-                std::string content = resume_value->is_string()
-                    ? resume_value->get<std::string>()
-                    : resume_value->dump();
-                json resume_msg;
-                resume_msg["role"]    = "user";
-                resume_msg["content"] = content;
-                state.write("messages", json::array({resume_msg}));
-            }
+        // Chat-shaped graphs have always received the resume value as a
+        // user turn on the "messages" channel, and still do. But a graph
+        // without that channel used to *throw* here ("Write to unknown
+        // channel: 'messages'"), which made resume-with-a-value unusable
+        // for anything that isn't a chat — including the approval prompt
+        // dynamic interrupts exist for. Every node now reads the answer
+        // from ``ctx.resume_value`` regardless; this write stays for the
+        // graphs that were relying on it (issue #94).
+        if (resume_value && !resume_value->is_null()
+            && state.has_channel("messages")) {
+            // Build the resume message outside the brace-init that
+            // would otherwise nest inside the coroutine body. Same
+            // GCC 13 ICE shape; same workaround.
+            std::string content = resume_value->is_string()
+                ? resume_value->get<std::string>()
+                : resume_value->dump();
+            json resume_msg;
+            resume_msg["role"]    = "user";
+            resume_msg["content"] = content;
+            state.write("messages", json::array({resume_msg}));
         }
     } else {
         // v0.3.1: opt-in auto-resume. When the caller asks to continue
@@ -909,22 +1091,39 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         apply_input(state, config.input);
     }
 
-    std::vector<std::string> ready =
-        is_resume ? resume_from : scheduler_->plan_start_step();
+    if (!is_resume) {
+        ready = scheduler_->plan_start_step();
+    }
 
     std::vector<std::string> trace;
     bool hit_end = false;
-
     std::vector<Send> pending_sends;
-
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         ctx.step = step;
-        // v0.3: cooperative cancel checkpoint. Polled at the super-step
-        // boundary so any future node work is suppressed; in-flight
-        // HTTP work inside the just-finished step is aborted via the
-        // operation child's asio cancellation_signal bound by run_async /
-        // run_stream_async (or the sync bridge for blocking entry points).
-        // Both layers are needed to close the cost-leak gap from v0.2.3.
+        // A budget-aware node cancels the shared sibling scope, not the
+        // operation token that owns this graph. Finish the current
+        // super-step, persist its exact state, and return a step-limit
+        // result so the Program layer can publish a durable terminal record.
+        if (ctx.budget_exhausted &&
+            ctx.budget_exhausted->load(std::memory_order_acquire)) {
+            if (coord.enabled()) {
+                const std::string trace_tag =
+                    trace.empty() ? (std::string("__budget__") + std::to_string(step))
+                                  : trace.back();
+                const std::string parent_cp_id = last_checkpoint_id;
+                last_checkpoint_id = co_await coord.save_super_step_async(
+                    state, trace_tag, ready, CheckpointPhase::Completed, step,
+                    parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+                co_await coord.clear_pending_writes_async(parent_cp_id);
+            }
+            RunResult result;
+            result.usage = ctx.usage->snapshot();
+            result.output = state.serialize();
+            if (!ready.empty()) result.output["_neograph"] = json{{"max_steps_exhausted", true}};
+            result.checkpoint_id = last_checkpoint_id;
+            result.execution_trace = std::move(trace);
+            co_return result;
+        }
         if (ctx.cancel_token) {
             ctx.cancel_token->throw_if_cancelled(
                 "step " + std::to_string(step));

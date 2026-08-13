@@ -66,12 +66,14 @@
 #pragma once
 
 #include <neograph/graph/checkpoint.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Forward-declare libpq's opaque PGconn. Keeps libpq-fe.h out of
@@ -89,13 +91,13 @@ class PostgresCheckpointStoreTestAccess;
 /// the pool's slot-index access pattern (pool owns unique_ptr<PgConn>).
 struct PgConn {
     pg_conn* raw = nullptr;
-    PgConn() = default;
+    PgConn()     = default;
     explicit PgConn(pg_conn* p) : raw(p) {}
     ~PgConn();
-    PgConn(const PgConn&) = delete;
+    PgConn(const PgConn&)            = delete;
     PgConn& operator=(const PgConn&) = delete;
-    PgConn(PgConn&&) = delete;
-    PgConn& operator=(PgConn&&) = delete;
+    PgConn(PgConn&&)                 = delete;
+    PgConn& operator=(PgConn&&)      = delete;
 };
 
 /**
@@ -135,8 +137,7 @@ public:
     ///        pools. Set to 1 for embedded / single-thread use to save
     ///        one PG backend per store. Must be >= 1.
     /// @throws std::runtime_error on connection or DDL failure.
-    explicit PostgresCheckpointStore(const std::string& conn_str,
-                                      size_t pool_size = 8);
+    explicit PostgresCheckpointStore(const std::string& conn_str, size_t pool_size = 8);
 
     /// Number of times a pool slot's connection was replaced after a
     /// broken connection or an interrupted async exchange. Cumulative;
@@ -152,24 +153,22 @@ public:
 
     // Non-copyable, non-movable — mutex would need rebinding on move
     // and connection pool slots are keyed by stable indices.
-    PostgresCheckpointStore(const PostgresCheckpointStore&) = delete;
+    PostgresCheckpointStore(const PostgresCheckpointStore&)            = delete;
     PostgresCheckpointStore& operator=(const PostgresCheckpointStore&) = delete;
 
-    void save(const Checkpoint& cp) override;
+    void                      save(const Checkpoint& cp) override;
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override;
     std::optional<Checkpoint> load_by_id(const std::string& id) override;
-    std::vector<Checkpoint> list(const std::string& thread_id,
-                                  int limit = 100) override;
-    void delete_thread(const std::string& thread_id) override;
+    std::vector<Checkpoint>   list(const std::string& thread_id, int limit = 100) override;
+    void                      delete_thread(const std::string& thread_id) override;
 
-    void put_writes(const std::string& thread_id,
-                    const std::string& parent_checkpoint_id,
-                    const PendingWrite& write) override;
-    std::vector<PendingWrite> get_writes(
-        const std::string& thread_id,
-        const std::string& parent_checkpoint_id) override;
-    void clear_writes(const std::string& thread_id,
-                      const std::string& parent_checkpoint_id) override;
+    void                      put_writes(const std::string&  thread_id,
+                                         const std::string&  parent_checkpoint_id,
+                                         const PendingWrite& write) override;
+    std::vector<PendingWrite> get_writes(const std::string& thread_id,
+                                         const std::string& parent_checkpoint_id) override;
+    void                      clear_writes(const std::string& thread_id,
+                                           const std::string& parent_checkpoint_id) override;
 
     // ── Async peers (Sem 4 follow-up) ───────────────────────────────────
     //
@@ -183,26 +182,21 @@ public:
     // sync peers. Async connection setup/replacement additionally follows
     // the global deadline policy documented on this class.
 
-    asio::awaitable<void> save_async(const Checkpoint& cp) override;
-    asio::awaitable<std::optional<Checkpoint>>
-    load_latest_async(const std::string& thread_id) override;
-    asio::awaitable<std::optional<Checkpoint>>
-    load_by_id_async(const std::string& id) override;
-    asio::awaitable<std::vector<Checkpoint>>
-    list_async(const std::string& thread_id, int limit = 100) override;
-    asio::awaitable<void>
-    delete_thread_async(const std::string& thread_id) override;
+    asio::awaitable<void>                      save_async(const Checkpoint& cp) override;
+    asio::awaitable<std::optional<Checkpoint>> load_latest_async(
+        const std::string& thread_id) override;
+    asio::awaitable<std::optional<Checkpoint>> load_by_id_async(const std::string& id) override;
+    asio::awaitable<std::vector<Checkpoint>>   list_async(const std::string& thread_id,
+                                                          int                limit = 100) override;
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override;
 
-    asio::awaitable<void> put_writes_async(
-        const std::string& thread_id,
-        const std::string& parent_checkpoint_id,
-        const PendingWrite& write) override;
+    asio::awaitable<void>                      put_writes_async(const std::string&  thread_id,
+                                                                const std::string&  parent_checkpoint_id,
+                                                                const PendingWrite& write) override;
     asio::awaitable<std::vector<PendingWrite>> get_writes_async(
-        const std::string& thread_id,
-        const std::string& parent_checkpoint_id) override;
-    asio::awaitable<void> clear_writes_async(
-        const std::string& thread_id,
-        const std::string& parent_checkpoint_id) override;
+        const std::string& thread_id, const std::string& parent_checkpoint_id) override;
+    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
+                                             const std::string& parent_checkpoint_id) override;
 
     /// Drop all `neograph_*` tables. Test-only utility — destroys data.
     /// Useful in test fixtures that want a clean slate per test case.
@@ -229,24 +223,26 @@ private:
     /// Async peer of with_conn. `fn(pg_conn*)` must return an
     /// asio::awaitable<T>; the helper co_awaits it, replaces the
     /// slot's connection on BrokenConnection, and retries once.
-    /// Defined in the .cpp file — only instantiated from within
-    /// the same TU so no explicit instantiation is required.
+    ///
+    /// `fn` deliberately accepts only a named lvalue. A capturing coroutine
+    /// lambda stores a pointer to its closure in its coroutine frame, so a
+    /// temporary closure could be destroyed while its operation is suspended.
+    /// Every internal caller keeps the named operation alive until this
+    /// immediately-awaited helper returns.
     template <typename Fn>
-    auto with_conn_async(Fn fn) -> decltype(fn(std::declval<pg_conn*>()));
+    auto with_conn_async(Fn& fn) -> decltype(fn(std::declval<pg_conn*>()));
 
     /// Acquire a free pool slot index (blocks if none available).
     /// MUST be paired with `release_slot`.
-    size_t acquire_slot();
-    asio::awaitable<size_t> acquire_slot_async();
-    void release_slot(size_t idx);
-    void rebuild_slot(size_t idx);
-    asio::awaitable<void> rebuild_slot_async(size_t idx);
-    size_t waiter_count_for_test();
+    size_t                       acquire_slot();
+    asio::awaitable<size_t>      acquire_slot_async();
+    void                         release_slot(size_t idx);
+    void                         rebuild_slot(size_t idx);
+    asio::awaitable<void>        rebuild_slot_async(size_t idx);
+    size_t                       waiter_count_for_test();
     static asio::awaitable<bool> wait_socket_either_for_test(int fd);
-    static void set_async_connection_test_seams(int poll_delay_ms,
-                                                int timeout_ms);
-    static int async_connection_timeout_ms_for_test(
-        const std::string& conn_str);
+    static void                  set_async_connection_test_seams(int poll_delay_ms, int timeout_ms);
+    static int                   async_connection_timeout_ms_for_test(const std::string& conn_str);
 
     /// Original connection string, retained so individual pool slots
     /// can be rebuilt on demand after a broken-connection detection.
@@ -259,8 +255,8 @@ private:
     /// Free slot indices, drained on acquire and refilled on release.
     /// Guarded by `pool_mutex_`. Fair mixed waiter state lives in an
     /// out-of-object sidecar so this exported class keeps its original ABI.
-    std::queue<size_t> free_;
-    std::mutex pool_mutex_;
+    std::queue<size_t>      free_;
+    std::mutex              pool_mutex_;
     std::condition_variable pool_cv_;  // Retained at its original ABI offset.
 
     /// Cumulative count of connection slot replacements.
@@ -271,4 +267,4 @@ private:
     friend class test_access::PostgresCheckpointStoreTestAccess;
 };
 
-} // namespace neograph::graph
+}  // namespace neograph::graph

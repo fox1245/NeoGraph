@@ -28,7 +28,7 @@
 // not framework machinery.
 //
 // Usage:
-//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_multi_agent_debate
 // (auto-loads .env from the cwd or any parent directory.)
 
@@ -49,7 +49,7 @@ static std::string speak(Provider& p,
                          const std::string& transcript,
                          float temperature) {
     CompletionParams params;
-    params.model = "claude-sonnet-4-6";
+    params.model = "deepseek/deepseek-v4-flash-0731";
     params.temperature = temperature;
     params.messages.push_back({"system", role_system});
     params.messages.push_back({"user", transcript});
@@ -60,17 +60,19 @@ int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const char* api_key = std::getenv("ANTHROPIC_API_KEY");
+    const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+        std::cerr << "Set OPENROUTER_API_KEY environment variable "
                      "(or put it in .env beside the binary)\n";
         return 1;
     }
 
     llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "claude";
+    cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
-    cfg.default_model = "claude-sonnet-4-6";
+    cfg.base_url_override = "https://openrouter.ai/api";
+    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::SchemaProvider::create(cfg);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"

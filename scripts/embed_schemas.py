@@ -8,17 +8,45 @@ Example:
     python3 embed_schemas.py schemas/ build/generated/builtin_schemas.h
 """
 
-import os
-import sys
 import json
+import os
+import re
+import sys
 
 
-def escape_for_raw_string(content: str) -> str:
-    """Check if content is safe for R\"(...)\" raw string literal."""
-    if ')\"' in content:
-        # Use a delimiter to avoid ambiguity
-        return None
-    return content
+def cpp_identifier(name: str) -> str:
+    """Return a deterministic C++ identifier for an arbitrary schema filename."""
+    identifier = re.sub(r"[^0-9A-Za-z_]", "_", name)
+    if identifier and identifier[0].isdigit():
+        identifier = "_" + identifier
+    return "schema_" + identifier
+
+
+def raw_string_delimiter(content: str) -> str:
+    """Return a C++ raw-string delimiter absent from the schema content."""
+    for candidate in (f"NG{index:X}" for index in range(1_000_000)):
+        if f'){candidate}"' not in content:
+            return candidate
+    raise ValueError("Unable to choose a collision-free C++ raw-string delimiter")
+
+MAX_RAW_LITERAL_BYTES = 12 * 1024
+
+
+def split_raw_string_content(content: str):
+    """Split UTF-8 content below MSVC's per-literal size ceiling."""
+    chunks = []
+    current = []
+    current_bytes = 0
+    for character in content:
+        character_bytes = len(character.encode("utf-8"))
+        if current and current_bytes + character_bytes > MAX_RAW_LITERAL_BYTES:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(character)
+        current_bytes += character_bytes
+    chunks.append("".join(current))
+    return chunks
 
 
 def main():
@@ -50,17 +78,22 @@ def main():
         out.write("#include <map>\n\n")
         out.write("namespace neograph::llm::builtin {\n\n")
 
+        identifiers = {name: cpp_identifier(name) for name in schemas}
+        if len(set(identifiers.values())) != len(identifiers):
+            raise ValueError("Schema filenames collide after C++ identifier normalization")
         for name, content in schemas.items():
-            var_name = f"schema_{name}"
-            out.write(f'inline const char* {var_name} = R"(\n')
-            out.write(content)
-            out.write('\n)";\n\n')
+            var_name = identifiers[name]
+            out.write(f"inline const char* {var_name} =\n")
+            for chunk in split_raw_string_content(f"\n{content}\n"):
+                delimiter = raw_string_delimiter(chunk)
+                out.write(f'R"{delimiter}({chunk}){delimiter}"\n')
+            out.write(";\n\n")
 
         # Registry map
         out.write("inline const std::map<std::string, const char*>& schemas() {\n")
         out.write("    static const std::map<std::string, const char*> m = {\n")
-        for name in schemas:
-            out.write(f'        {{"{name}", schema_{name}}},\n')
+        for name, var_name in identifiers.items():
+            out.write(f'        {{"{name}", {var_name}}},\n')
         out.write("    };\n")
         out.write("    return m;\n")
         out.write("}\n\n")

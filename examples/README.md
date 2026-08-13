@@ -2,7 +2,9 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Fifty-six runnable C++ programs covering the NeoGraph engine surface.
+The numbered examples cover the NeoGraph engine surface, with one focused Core
+quickstart and one focused Program quickstart. The complete cutover inventory is
+the machine-readable [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json).
 Each is a single file in this directory (with one Docker-Compose
 exception, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — copy
 one into your own project, link against `neograph::core` +
@@ -10,27 +12,38 @@ one into your own project, link against `neograph::core` +
 
 ## Build
 
-The default CMake build builds every example:
+The default CMake configuration builds the examples supported by the enabled
+components. The Program quickstart and Program-backed examples require
+`-DNEOGRAPH_BUILD_PROGRAM=ON`; gRPC and Python bindings are opt-in, and
+examples behind those components are omitted unless their options are enabled.
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ```
 
-Pass `-DNEOGRAPH_BUILD_EXAMPLES=OFF` to skip them. Examples that need
-extra deps (Crawl4AI Docker, Postgres, MCP servers, Clay+Raylib) are
-gated by an explicit CMake option or a runtime probe — see the
+For the complete C++ example set, also enable Program and A2A:
+
+```bash
+cmake -S . -B build \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_A2A=ON
+cmake --build build -j$(nproc)
+```
+
+Pass `-DNEOGRAPH_BUILD_EXAMPLES=OFF` to skip examples. Examples that need
+extra deps (Crawl4AI Docker, Postgres, MCP servers, Clay+Raylib) are gated
+by an explicit CMake option or a runtime probe — see the
 "Setup" column below.
 
 ## Setup
 
 Examples that hit a real LLM auto-load `.env` from the cwd (or any
-parent) via cppdotenv. The two recognised keys are:
+parent) via cppdotenv. The live examples use one key:
 
 ```
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
+OPENROUTER_API_KEY=sk-or-...
 ```
 
 Examples without a "Setup" entry below need no API key — they use the
@@ -42,11 +55,13 @@ If this is your first time:
 
 | First | What you learn |
 |---|---|
+| [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | **Core quickstart** — the installed `neograph::core` target, one strict graph, one typed channel. No optional component or API key. |
+| [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | **Program quickstart** — compile, admit, and run one `call_core` Program through the installed `neograph::program` target. Requires `-DNEOGRAPH_BUILD_PROGRAM=ON`. |
 | [`51_minimal.cpp`](51_minimal.cpp) | The smallest working program — build, run, read `result.channel<T>("name")`. No API key. |
 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | Build a JSON graph definition, run it. No API key. |
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | Async fan-out with `make_parallel_group`. No API key. |
 | [`10_send_command.cpp`](10_send_command.cpp) | `Send` (dynamic fan-out) + `Command` (routing override). No API key. |
-| [`01_react_agent.cpp`](01_react_agent.cpp) | ReAct loop with a real LLM + a calculator tool. **Needs `OPENAI_API_KEY`.** |
+| [`01_react_agent.cpp`](01_react_agent.cpp) | ReAct loop with a real LLM + a calculator tool. **Needs `OPENROUTER_API_KEY`.** |
 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | Plan → parallel sub-tasks → solver, with crash-recovery via the checkpoint store. No API key. |
 
 Once those make sense, the rest below is grouped by what they
@@ -69,29 +84,29 @@ demonstrate, not by file number.
 | 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | offline | Cross-thread `Store` reached from inside a node via `in.ctx.store` — per-user node behaviour from shared namespaced memory. |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | offline | The shortest working program — build, run, `result.channel<T>("name")`. The fresh-user template. |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | offline | `NodeFactory::export_schema()` → topology JSON Schema dump. The version-locked source of truth a codeless visual editor builds its palette from. |
-| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | offline (optional OpenAI) | Bounded message window — when history exceeds the budget the dropped prefix is replaced by an LLM-written summary. Mock provider by default. |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | offline (optional OpenRouter) | Bounded message window — when history exceeds the budget the dropped prefix is replaced by an LLM-written summary. Mock provider by default. |
 
 ### Real LLM — providers, tools, ReAct
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenAI | The ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. Calculator tool. |
-| 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenAI | RAG with real `text-embedding-3-small` embeddings + in-memory cosine search. |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenAI | Same ReAct loop, but wired to `/v1/responses` via `SchemaProvider("openai_responses")`. One config flip, no provider subclass. |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | Responses API over WebSocket — `wss://api.openai.com/v1/responses`. ~40% lower latency on multi-tool agentic loops. |
-| 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenAI | Tour every Responses-API built-in tool — web_search, image_generation, file_search, tool_search, skills, shell. Wire-level (no SchemaProvider). |
-| 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenAI | Debug aid: dump the raw `/v1/responses` JSON envelope for one tool-call request. Bypasses SchemaProvider on purpose. |
-| 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenAI | Sweep `reasoning_effort` in `{minimal, low, medium, high}` on one prompt — see latency / hidden CoT tokens / answer quality tradeoff. |
+| 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | The ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. Calculator tool. |
+| 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | RAG with real OpenRouter-compatible embeddings + in-memory cosine search. |
+| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | Same ReAct loop, wired to OpenRouter's `/api/v1/responses` via `SchemaProvider("openai_responses")`. |
+| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses-compatible transport toggle; the reproducible active path is HTTP/SSE. |
+| 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Wire-level tour of Responses-compatible built-in tool shapes. |
+| 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | Debug aid: dump the raw `/api/v1/responses` JSON envelope for one tool-call request. |
+| 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | Sweep the pinned DeepSeek reasoning-effort values on one prompt — see latency / reasoning-token tradeoffs. |
 
 ### Reasoning patterns
 
 | # | File | Setup | Pattern |
 |---|------|-------|---------|
-| 15 | [`15_reflexion.cpp`](15_reflexion.cpp) | Anthropic | Reflexion — generator ↔ critic loop until the critic says ACCEPT (Shinn et al. 2023). Haiku constraint task. |
-| 16 | [`16_tree_of_thoughts.cpp`](16_tree_of_thoughts.cpp) | Anthropic | Tree of Thoughts — at each depth, generate N candidate thoughts, score them, keep top-K, expand. Game of 24. |
-| 17 | [`17_self_ask.cpp`](17_self_ask.cpp) | Anthropic | Self-Ask — explicit "Are follow-up questions needed?" decomposition for multi-hop reasoning (Press et al. 2022). |
-| 18 | [`18_multi_agent_debate.cpp`](18_multi_agent_debate.cpp) | Anthropic | Researcher / Skeptic / Judge — three system prompts, shared transcript, judge adjudicates. |
-| 19 | [`19_rewoo.cpp`](19_rewoo.cpp) | Anthropic | REWOO — planner commits a full plan with `#E1 / #E2` placeholders, worker fans out tools in parallel, solver synthesizes. |
+| 15 | [`15_reflexion.cpp`](15_reflexion.cpp) | OpenRouter | Reflexion — generator ↔ critic loop until the critic says ACCEPT (Shinn et al. 2023). |
+| 16 | [`16_tree_of_thoughts.cpp`](16_tree_of_thoughts.cpp) | OpenRouter | Tree of Thoughts — generate, score, retain, and expand candidate thoughts. |
+| 17 | [`17_self_ask.cpp`](17_self_ask.cpp) | OpenRouter | Self-Ask — explicit follow-up decomposition for multi-hop reasoning (Press et al. 2022). |
+| 18 | [`18_multi_agent_debate.cpp`](18_multi_agent_debate.cpp) | OpenRouter | Researcher / Skeptic / Judge — three system prompts and a shared transcript. |
+| 19 | [`19_rewoo.cpp`](19_rewoo.cpp) | OpenRouter | REWOO — planner placeholders, parallel tool workers, and solver synthesis. |
 
 ### Persistence & HITL
 
@@ -99,7 +114,7 @@ demonstrate, not by file number.
 |---|------|-------|---------------|
 | 04 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | offline | `interrupt_before` a payment node, persist checkpoint, resume after operator approval. Mock provider. |
 | 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | offline | Plan-and-Executor with simulated mid-fan-out failure — checkpoint replay only re-runs the failed sibling. Pending-writes machinery in action. |
-| 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenAI WS + Postgres + Crawl4AI | Process-discontinuous deep-research HITL — PG-backed checkpoints survive `exit` between report and resume. Docker-Compose driven. |
+| 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenRouter + Postgres + Crawl4AI | Process-discontinuous deep-research HITL — PG-backed checkpoints survive `exit` between report and resume. Docker-Compose driven. |
 | 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | offline | LangGraph-style multi-turn chat — `resume_if_exists` reloads the prior checkpoint and appends the new turn. Mock provider. |
 | 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | offline | `SqliteCheckpointStore` — single-file durable runs, no server. Same `CheckpointStore` interface as InMemory/Postgres. |
 
@@ -107,19 +122,19 @@ demonstrate, not by file number.
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | OpenAI + MCP HTTP server | Discover tools from a streamable-http MCP server, drive a ReAct loop. |
-| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | OpenAI + Python stdio script | Same as 03 but the MCP server is a child subprocess over stdin/stdout — no network stack. |
-| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenAI + 2 servers | One agent, two MCP servers (HTTP + stdio), tools merged into one list — LLM picks across both transparently. |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | OpenRouter + MCP HTTP server | Discover tools from a streamable-http MCP server, drive a ReAct loop. |
+| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | OpenRouter + Python stdio script | Same as 03 but the MCP server is a child subprocess over stdin/stdout — no network stack. |
+| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 servers | One agent, two MCP servers (HTTP + stdio), tools merged into one list — LLM picks across both transparently. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP server (no LLM) | Planner emits one Send per MCP call; `make_parallel_group` runs them concurrently. Deterministic — LLM hand-picks tools so the demo stays offline on the LLM axis. |
-| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenAI + MCP HTTP server | `interrupt_before` any MCP tool call — operator sees the pending tool name + args, approves, resumes. |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenAI + MCP HTTP server | Operator reads the agent's draft answer and types feedback; the second run incorporates that feedback as new conversational context. |
+| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP server | `interrupt_before` any MCP tool call — operator sees the pending tool name + args, approves, resumes. |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | Operator reads the agent's draft answer and types feedback; the second run incorporates that feedback as new conversational context. |
 
 ### Async, concurrency, performance
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
 | 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | offline | Three agent runs interleave on one `io_context` thread via `engine->run_async()` — wall ≈ 50 ms instead of 3×50 ms. Stage-4 async-end-to-end. |
-| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenAI | Outer `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` driving a ReAct loop, with the LLM node's tokens streaming to stdout via `co_await provider->complete_stream_async(...)` against `SchemaProvider("openai_responses")`. **Exact shape that segfaulted pre-PR-#10** — runs cleanly post-fix; tool round-trip + final answer in ~4s. |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | Outer `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` driving a ReAct loop, with the LLM node's tokens streaming to stdout via `co_await provider->complete_stream_async(...)` against `SchemaProvider("openai_responses")`. **Exact shape that segfaulted pre-PR-#10** — runs cleanly post-fix; tool round-trip + final answer in ~4s. |
 | 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | offline | Fixed-worker pool with backpressure (`neograph::util::RequestQueue`) — bounded in-flight work, no unbounded growth under load. |
 | 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | offline | Cooperative cancellation — `CancelToken::fork()` per child, parent `cancel()` cascades to all in-flight children. |
 | 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | offline | Per-node result cache keyed on node + input — skip recompute on identical inputs across runs. |
@@ -155,8 +170,8 @@ Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 25 | [`25_deep_research.cpp`](25_deep_research.cpp) | Anthropic + Crawl4AI Docker | C++ port of `langchain-ai/open_deep_research`. Supervisor plans, fans out parallel sub-researchers (each its own ReAct loop), synthesizes a markdown report. |
-| 28 | [`28_corrective_rag.cpp`](28_corrective_rag.cpp) | OpenAI | CRAG (Yan et al. 2024). Retrieve → grade → route to refine(KB) / refine+web / web-only depending on relevance. Web search via `/v1/responses` built-in tool. |
+| 25 | [`25_deep_research.cpp`](25_deep_research.cpp) | OpenRouter DeepSeek + Crawl4AI Docker | C++ port of `langchain-ai/open_deep_research`. Supervisor plans, fans out parallel sub-researchers (each its own ReAct loop), synthesizes a markdown report. |
+| 28 | [`28_corrective_rag.cpp`](28_corrective_rag.cpp) | OpenRouter | CRAG (Yan et al. 2024). Retrieve → grade → route to refine(KB) / refine+web / web-only depending on relevance. Web search via `/api/v1/responses` built-in tool. |
 
 ### Local / hybrid LLM backends
 
@@ -169,7 +184,7 @@ Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
 | 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Multi-turn chat with a Clay/Raylib UI. Pure-C++ desktop app, NeoGraph backend. Mock or `--live`. |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenAI + Ghidra + ghidra-mcp | Reverse-engineering agent — recovers function names + summaries from a stripped binary via Ghidra. End-to-end verified (matched_score 0.92, 6-fn crackme). Full pipeline in [`fox1245/re-agent`](https://github.com/fox1245/re-agent). |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | Reverse-engineering agent — recovers function names + summaries from a stripped binary via Ghidra. End-to-end verified (matched_score 0.92, 6-fn crackme). Full pipeline in [`fox1245/re-agent`](https://github.com/fox1245/re-agent). |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | offline | Five small "classifiers" (sentiment / toxicity / language / topic / intent) fan out via Send and run in parallel. Wall time ≈ max(per-classifier), not sum — the small-model edge story. Mock 5 ms latency stand-in for a DistilBERT/MiniLM pass; inline `[ONNX SWAP-IN]` block shows the 30-line replacement using `Ort::Session`. No inference runtime dependency. |
 
 ## Mental model — three layers, JSON in the middle
@@ -183,10 +198,9 @@ Each example is one of three setups:
    exact `run(NodeInput)` body — emit `ChannelWrite`, `Send`, or
    `Command` through `NodeOutput`. This is where Send fan-out and
    Command routing overrides live.
-3. **`SchemaProvider` for non-OpenAI shapes** (13, 15, 16, 17, 33):
-   one JSON schema describes the wire shape (Anthropic, Gemini, the
-   OpenAI Responses API, raw WebSocket), so the same `Agent` /
-   `llm_call` node hits a different endpoint without subclassing.
+3. **Schema-driven response shapes** (13, 15, 16, 17, 33):
+   one JSON schema describes the wire shape while every live example uses
+   the same OpenRouter provider and pinned DeepSeek model.
 
 The graph definition is JSON-shaped (`std::map<std::string, json>`)
 either way — examples 14 and 15 in the [Python examples](../bindings/python/examples/)
@@ -196,10 +210,12 @@ show how the same definition round-trips through `json.dumps` and back.
 
 | Provider | Examples |
 |---|---|
-| `OPENAI_API_KEY` | 01, 03, 12, 13, 20, 22, 23, 24, 28, 29, 30, 33, 34, 35, 40 |
-| `ANTHROPIC_API_KEY` | 15, 16, 17, 18, 19, 25 |
+| `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 33, 34, 35, 40 |
 | local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
+
+Examples 25 and 26 also use local Crawl4AI. Current secure Crawl4AI Docker
+images require a non-empty `CRAWL4AI_API_TOKEN`; see example 26's `.env.example`.
 
 Thirty-one examples run with no API key — that is the "kick the tyres"
 floor. Examples 21 (MCP fanout, deterministic planner) and 27 (async
@@ -207,7 +223,7 @@ concurrency, `steady_timer` stand-in for LLM latency) in particular
 demonstrate engine plumbing without spending a token. The gRPC suite
 (52–55, 57) is also key-free but needs `-DNEOGRAPH_BUILD_GRPC=ON`
 (`grpc++` / `protoc`); 56 (`history_compaction`) defaults to a mock
-provider and only touches OpenAI if a key is present.
+provider and only touches OpenRouter if a key is present.
 
 ## Re-running after CMake config
 

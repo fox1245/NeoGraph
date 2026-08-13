@@ -17,8 +17,12 @@
 
 // Foundation types
 #include <neograph/completion_provider.h>
+#include <neograph/artifact_provider.h>
 #include <neograph/provider.h>
+#include <neograph/host_admission.h>
+#include <neograph/research/evidence_ledger.h>
 #include <neograph/tool.h>
+#include <neograph/tool_execution.h>
 #include <neograph/tool_set.h>
 #include <neograph/types.h>
 
@@ -27,6 +31,7 @@
 #include <neograph/graph/channel_key.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
+#include <neograph/graph/invocation.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/react_graph.h>

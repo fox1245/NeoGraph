@@ -83,39 +83,6 @@ json request(json workers = json::array({worker("reviewer")})) {
     };
 }
 
-json dsl_request(std::string judge_name, std::string worker_results_reducer = "append") {
-    auto       value       = request();
-    const auto worker_node = "worker_0";
-    value["harness"]       = {
-        {"mode", "dsl"},
-        {"definition",
-               {
-             {"schema_version", 1},
-             {"name", "fork_compatibility_test"},
-             {"channels",
-                    {
-                  {"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
-                  {"worker_results",
-                         {{"reducer", std::move(worker_results_reducer)}, {"initial", json::array()}}},
-                  {"final_result", {{"reducer", "overwrite"}, {"initial", nullptr}}},
-              }},
-             {"nodes",
-                    {
-                  {worker_node, {{"type", "neograph_harness_worker"}, {"worker_id", "reviewer"}}},
-                  {judge_name,
-                         {{"type", "neograph_harness_judge"},
-                          {"barrier", {{"wait_for", json::array({worker_node})}}}}},
-              }},
-             {"edges", json::array({
-                           {{"from", "__start__"}, {"to", worker_node}},
-                           {{"from", worker_node}, {"to", judge_name}},
-                           {{"from", judge_name}, {"to", "__end__"}},
-                       })},
-         }},
-    };
-    return value;
-}
-
 class AdmissionNoopNode final : public neograph::graph::GraphNode {
 public:
     explicit AdmissionNoopNode(std::string name) : name_(std::move(name)) {}
@@ -1092,38 +1059,6 @@ TEST(HarnessServiceTest, TraceIsReadableBeforeRunDetailsExist) {
     release_worker.store(true, std::memory_order_release);
     EXPECT_TRUE(trace["result"]["execution_trace"].empty());
     EXPECT_EQ(wait_terminal(service, run_id)["status"], "completed");
-}
-
-TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
-    HarnessService service;
-    auto preset_request = request(json::array({worker("a"), worker("b")}));
-    auto preset = service.compile(preset_request);
-    ASSERT_TRUE(preset["ok"].get<bool>()) << preset.dump();
-
-    const auto has_final_result_e6 = [](const json& diagnostics) {
-        for (const auto& diagnostic : diagnostics) {
-            if (diagnostic["code"] == "E6" &&
-                diagnostic["path"] == "channels.final_result") {
-                return true;
-            }
-        }
-        return false;
-    };
-    EXPECT_FALSE(has_final_result_e6(preset["diagnostics"])) << preset.dump();
-
-    auto dsl_request = preset_request;
-    dsl_request["harness"] = {
-        {"mode", "dsl"},
-        {"definition", preset["artifacts"]["core_lockfile"]["content"]},
-    };
-    auto dsl = service.compile(dsl_request);
-    ASSERT_TRUE(dsl["ok"].get<bool>()) << dsl.dump();
-    EXPECT_FALSE(has_final_result_e6(dsl["diagnostics"])) << dsl.dump();
-    EXPECT_EQ(preset["diagnostics"], dsl["diagnostics"]);
-
-    EXPECT_EQ(
-        neograph::graph::GraphCompiler::canon(preset["artifacts"]["core_lockfile"]["content"]),
-        neograph::graph::GraphCompiler::canon(dsl["artifacts"]["core_lockfile"]["content"]));
 }
 
 #if GTEST_HAS_STREAM_REDIRECTION
@@ -2600,7 +2535,7 @@ TEST(HarnessServiceTest, CompatibleForkResumesExactCheckpointWithTargetArtifact)
     };
     HarnessService service(std::move(config));
 
-    const auto source_artifact = service.compile(dsl_request("judge"));
+    const auto source_artifact = service.compile(request());
     ASSERT_TRUE(source_artifact["ok"].get<bool>()) << source_artifact.dump();
     const auto source_start  = service.start({{"artifact_id", source_artifact["artifact_id"]}});
     const auto source_run_id = source_start["run_id"].get<std::string>();
@@ -2616,7 +2551,7 @@ TEST(HarnessServiceTest, CompatibleForkResumesExactCheckpointWithTargetArtifact)
     }
     ASSERT_FALSE(source_checkpoint_id.empty());
 
-    auto repaired_request                          = dsl_request("judge");
+    auto repaired_request                          = request();
     repaired_request["workers"][0]["instructions"] = "Repaired worker instructions";
     const auto target_artifact                     = service.compile(repaired_request);
     ASSERT_TRUE(target_artifact["ok"].get<bool>()) << target_artifact.dump();
@@ -2702,7 +2637,7 @@ TEST(HarnessServiceTest, CompatibleForkLoadsSourceAndTargetAcrossSqliteReconnect
             });
         };
         HarnessService service(std::move(config));
-        const auto     source_artifact = service.compile(dsl_request("judge"));
+        const auto     source_artifact = service.compile(request());
         ASSERT_TRUE(source_artifact["ok"].get<bool>()) << source_artifact.dump();
         const auto source_start = service.start({{"artifact_id", source_artifact["artifact_id"]}});
         source_run_id           = source_start["run_id"].get<std::string>();
@@ -2715,7 +2650,7 @@ TEST(HarnessServiceTest, CompatibleForkLoadsSourceAndTargetAcrossSqliteReconnect
         }
         ASSERT_FALSE(source_checkpoint_id.empty());
 
-        auto repaired                          = dsl_request("judge");
+        auto repaired                          = request();
         repaired["workers"][0]["instructions"] = "Durably repaired instructions";
         const auto target_artifact             = service.compile(repaired);
         ASSERT_TRUE(target_artifact["ok"].get<bool>()) << target_artifact.dump();
@@ -2746,68 +2681,6 @@ TEST(HarnessServiceTest, CompatibleForkLoadsSourceAndTargetAcrossSqliteReconnect
         EXPECT_EQ(finished["result"]["findings"][0]["evidence"], "durable source");
     }
     EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 1);
-}
-
-TEST(HarnessServiceTest, IncompatibleForkReturnsChannelAndContinuationDiagnosticsBeforeRun) {
-    const auto           root = unique_temp_path("neograph-harness-incompatible-fork");
-    TempDirectoryCleanup cleanup(root);
-    std::filesystem::create_directories(root);
-    auto records     = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
-    auto checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    HarnessServiceConfig config;
-    config.record_store     = records;
-    config.checkpoint_store = checkpoints;
-    config.max_runs         = 1;
-    config.worker_executor  = [](const HarnessWorkerCall&, const auto&) {
-        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
-    };
-    HarnessService service(std::move(config));
-
-    const auto source_artifact = service.compile(dsl_request("source_judge"));
-    ASSERT_TRUE(source_artifact["ok"].get<bool>()) << source_artifact.dump();
-    const auto source_start  = service.start({{"artifact_id", source_artifact["artifact_id"]}});
-    const auto source_run_id = source_start["run_id"].get<std::string>();
-    ASSERT_EQ(wait_terminal(service, source_run_id)["status"], "completed");
-
-    std::string source_checkpoint_id;
-    for (const auto& checkpoint : checkpoints->list(source_run_id)) {
-        if (checkpoint.next_nodes.size() == 1 && checkpoint.next_nodes[0] == "source_judge") {
-            source_checkpoint_id = checkpoint.id;
-            break;
-        }
-    }
-    ASSERT_FALSE(source_checkpoint_id.empty());
-
-    const auto target_artifact = service.compile(dsl_request("target_judge", "overwrite"));
-    ASSERT_TRUE(target_artifact["ok"].get<bool>()) << target_artifact.dump();
-    const auto rejected = service.start({
-        {"fork",
-         {{"source_run_id", source_run_id},
-          {"checkpoint_id", source_checkpoint_id},
-          {"artifact_id", target_artifact["artifact_id"]}}},
-    });
-    ASSERT_FALSE(rejected["started"].get<bool>());
-    EXPECT_EQ(rejected["status"], "incompatible_fork");
-    EXPECT_EQ(rejected["source_checkpoint_id"], source_checkpoint_id);
-
-    bool saw_reducer   = false;
-    bool saw_next_node = false;
-    for (const auto& diagnostic : rejected["diagnostics"]) {
-        EXPECT_EQ(diagnostic["phase"], "compatibility");
-        EXPECT_TRUE(diagnostic.contains("witness"));
-        if (diagnostic["code"] == "H_FORK_CHANNEL_REDUCER") {
-            EXPECT_EQ(diagnostic["witness"]["channel"], "worker_results");
-            EXPECT_EQ(diagnostic["witness"]["source_reducer"], "append");
-            EXPECT_EQ(diagnostic["witness"]["target_reducer"], "overwrite");
-            saw_reducer = true;
-        }
-        if (diagnostic["code"] == "H_FORK_NEXT_NODE") {
-            EXPECT_EQ(diagnostic["witness"]["node_id"], "source_judge");
-            saw_next_node = true;
-        }
-    }
-    EXPECT_TRUE(saw_reducer) << rejected.dump();
-    EXPECT_TRUE(saw_next_node) << rejected.dump();
 }
 
 TEST(HarnessServiceTest, RecordedReplaySurvivesReconnectWithoutCallingLiveExecutor) {
@@ -3292,68 +3165,6 @@ TEST(HarnessServiceTest, AmbiguousHostEffectCanBeReconciledAsFailed) {
 }
 #endif
 
-TEST(HarnessServiceTest, BindingDiagnosticCarriesElaboratorSourceCoordinate) {
-    HarnessService service;
-    auto authored = request();
-    authored["harness"]     = {
-        {"mode", "dsl"},
-        {"definition",
-             {
-             {"schema_version", 1},
-             {"channels",
-                  {
-                  {"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
-                  {"worker_results", {{"reducer", "append"}, {"initial", json::array()}}},
-                  {"final_result", {{"reducer", "overwrite"}, {"initial", nullptr}}},
-              }},
-             {"nodes",
-                  {
-                  {"judge",
-                       {
-                       {"type", "neograph_harness_judge"},
-                       {"barrier", {{"wait_for", json::array({"panel_worker"})}}},
-                   }},
-              }},
-             {"edges", json::array({
-                           {{"from", "__start__"}, {"to", "panel_worker"}},
-                           {{"from", "panel_worker"}, {"to", "judge"}},
-                           {{"from", "judge"}, {"to", "__end__"}},
-                       })},
-             {"templates",
-                  {
-                  {"worker",
-                       {
-                       {"params", json::array()},
-                       {"nodes",
-                            {
-                            {"worker",
-                                 {
-                                 {"type", "neograph_harness_worker"},
-                                 {"worker_id", "undeclared"},
-                             }},
-                        }},
-                   }},
-              }},
-             {"use", json::array({{
-                         {"template", "worker"},
-                         {"prefix", "panel"},
-                         {"args", json::object()},
-                     }})},
-         }},
-    };
-
-    auto compiled = service.compile(authored);
-    ASSERT_FALSE(compiled["ok"].get<bool>());
-    bool found = false;
-    for (const auto& diagnostic : compiled["diagnostics"]) {
-        if (diagnostic["code"] != "H_UNKNOWN_WORKER") continue;
-        found = true;
-        EXPECT_NE(diagnostic["source"].get<std::string>().find("use[0]"), std::string::npos);
-        EXPECT_NE(diagnostic["source"].get<std::string>().find("'worker'"), std::string::npos);
-    }
-    EXPECT_TRUE(found) << compiled.dump();
-}
-
 TEST(HarnessServiceTest, RepairsInvalidWorkerOutputBeforeJudgeAndReportsZeroFindings) {
     std::atomic<int> calls{0};
     HarnessServiceConfig config;
@@ -3550,31 +3361,6 @@ TEST(HarnessServiceTest, CooperativeCancellationHasDistinctRunState) {
     EXPECT_TRUE(service.cancel(run_id));
     auto finished = wait_terminal(service, run_id);
     EXPECT_EQ(finished["status"], "cancelled") << finished.dump();
-}
-
-TEST(HarnessServiceTest, ExhaustedMaxStepsHasDistinctRunState) {
-    HarnessServiceConfig config;
-    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
-        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
-    };
-    HarnessService service(std::move(config));
-    auto loop_request = request();
-    auto preset = service.compile(loop_request);
-    ASSERT_TRUE(preset["ok"].get<bool>()) << preset.dump();
-    auto core = preset["artifacts"]["core_lockfile"]["content"];
-    core["edges"] = json::array({
-        {{"from", "__start__"}, {"to", "worker_0"}},
-        {{"from", "worker_0"}, {"to", "worker_0"}},
-        {{"from", "worker_0"}, {"to", "judge"}},
-        {{"from", "judge"}, {"to", "__end__"}},
-    });
-    loop_request["harness"] = {{"mode", "dsl"}, {"definition", core}};
-    loop_request["budgets"]["max_steps"] = 2;
-    auto compiled = service.compile(loop_request);
-    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
-    auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
-    auto finished = wait_terminal(service, started["run_id"].get<std::string>());
-    EXPECT_EQ(finished["status"], "max_steps_exhausted") << finished.dump();
 }
 
 } // namespace

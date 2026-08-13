@@ -104,7 +104,7 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 ### 実走時の参考数値
 
 上記のマルチモーダル RAG デモの完全な実行、再開、再開サイクル
-(2 回の監督ラウンド × 各 2 人の研究員、claude-sonnet-4-5)
+(2 回の監督ラウンド × 各 2 人の研究員、OpenRouter 経由の固定 DeepSeek)
 これらの PG 番号が生成されました。
 
 |メトリック |値 |メモ |
@@ -127,7 +127,7 @@ HITL ゲートがフィードバックをフィードバックしたため、ス
 1. 資格情報をコピーして入力します。
    ```
    cp .env.example .env
-   # edit ANTHROPIC_API_KEY
+   # OPENROUTER_API_KEY を設定し、CRAWL4AI_API_TOKEN には新しい `openssl rand -hex 32` の値を設定します。
    ```
 2. サポート サービスを起動します。
    ```
@@ -157,7 +157,9 @@ cmake --build build --target example_postgres_react_hitl -j
 ```
 
 ホスト側の .env の `POSTGRES_URL=postgresql://postgres:test@localhost:55432/neograph`
-構成公開ポートを指します。 `CRAWL4AI_URL`も同様です。
+は compose 公開ポートを指し、`CRAWL4AI_URL` も Crawl4AI で同様です。
+`CRAWL4AI_API_TOKEN` は Bearer 資格情報として送信されます。compose は空の値を
+拒否し、Crawl4AI を `127.0.0.1` にのみ公開します。
 
 ## このスタックに対して統合テストを実行する
 

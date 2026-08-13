@@ -7,10 +7,10 @@ in NeoGraph (C++ mock build) and LangGraph (Python twin `langgraph_twin.py`),
 measures in identical constraints (`--cpus=2 --memory=2g`) container.
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
-## Measured Results (2026-07-05, WSL2, --cpus=2 --memory=2g)
+## Historical Results (2026-07-05, pre-OpenRouter migration; Groq)
 
 | Metric | NeoGraph | LangGraph | Delta |
 |---|---|---|---|
@@ -31,7 +31,7 @@ Interpretation:
 ## E2E Round — Including Real MCP Tool Round-Trip (2026-07-05)
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_e2e.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 ```
 
 Shared demo MCP server container (time/calc/weather) + 24-turn mixed set (direct tool call ·
@@ -60,7 +60,7 @@ of framework.
 ## Boundary Measurement Round — Eliminating Provider Dispersion (2026-07-05)
 
 ```bash
-GROQ_API_KEY=... bash bench/run_bench_proxy.sh
+OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
 Solve E2E's "dispersion swallows delta" problem with proxy boundary measurement:
@@ -134,6 +134,6 @@ but **perceived TTFT is tied in streaming and provider dispersion dominates**. E
 - `driver.py` / `analyze.py` — Measurement · comparison table
 - `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — Benchmark images
 - `run_bench.sh`(core) / `run_bench_e2e.sh`(real tool E2E) — Runners
-- `turns_mock.txt`(200) / `turns_groq.txt`(20) / `turns_e2e.txt`(24) — Turn sets
+- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — Turn sets
 - `../config-bench/` — Empty catalog (chat path fixed) /
   `../config-bench-e2e/` — Shared MCP server catalog

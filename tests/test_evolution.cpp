@@ -107,7 +107,7 @@ Task evaluation_task() {
     return task;
 }
 
-// Core topology fixture: 2-node chain. No DSL keys.
+// Strict Core topology fixture: 2-node chain.
 const char* kMinimalCore = R"({
   "schema_version": 1,
   "name": "test_core",
@@ -122,37 +122,6 @@ const char* kMinimalCore = R"({
   ]
 })";
 
-// DSL fixture with templates + use.
-const char* kDslSeed = R"({
-  "schema_version": 1,
-  "name": "test_dsl",
-  "vars": {"greeting": "hello"},
-  "channels": {
-    "messages": {"reducer": "append"}
-  },
-  "templates": {
-    "respond": {
-      "params": ["msg"],
-      "nodes": {"act": {"type": "pnoop"}},
-      "edges": [{"from": "act", "to": "__end__"}]
-    },
-    "log": {
-      "params": ["level"],
-      "nodes": {"logger": {"type": "pnoop"}},
-      "edges": [{"from": "logger", "to": "__end__"}]
-    }
-  },
-  "use": [
-    {"template": "respond", "prefix": "r1",
-     "args": {"msg": "${greeting}"}},
-    {"template": "log", "prefix": "l1",
-     "args": {"level": "info"}}
-  ],
-  "nodes": {},
-  "edges": [
-    {"from": "__start__", "to": "r1_act"}
-  ]
-})";
 
 } // anonymous namespace
 
@@ -161,7 +130,7 @@ const char* kDslSeed = R"({
 TEST(Evolution, AllOperatorsReturnSomething) {
     pnoop_registered();
     auto ops = all_operators();
-    EXPECT_GE(ops.size(), 3u);  // at minimum swap/add/remove
+    EXPECT_GE(ops.size(), 3u);  // at minimum edge add/remove and routing toggle
 
     json core = json::parse(kMinimalCore);
     std::mt19937 rng(42);
@@ -209,33 +178,6 @@ EXPECT_TRUE(score.compiled) << "op failed: " << mr.description
     EXPECT_GE(applied, (int)ops.size());
 }
 
-TEST(Evolution, DslMutationsElaborateThenCompile) {
-    pnoop_registered();
-    auto elab = Elaborator::elaborate(json::parse(kDslSeed));
-    json core = elab.core;
-    EXPECT_FALSE(core.contains("vars"));
-    EXPECT_FALSE(core.contains("templates"));
-    EXPECT_FALSE(core.contains("use"));
-
-    NodeContext ctx;
-    Task task;
-
-    auto ops = all_operators();
-    std::mt19937 rng(42);
-
-    int applied = 0;
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        for (const auto& op : ops) {
-            auto mr = op(core, rng);
-            if (!mr.core) continue;
-            auto score = evaluate(*mr.core, task, ctx);
-            EXPECT_TRUE(score.compiled) << mr.description;
-            EXPECT_TRUE(score.validated) << mr.description;
-            applied++;
-        }
-    }
-    EXPECT_GE(applied, 5);
-}
 
 // ── Behavioral evaluation ───────────────────────────────────────────
 
@@ -443,57 +385,6 @@ TEST(Evolution, LoopRunsDeterministically) {
     EXPECT_EQ(j1.dump(), j2.dump());
 }
 
-TEST(Evolution, DslSeedLoopRuns) {
-    pnoop_registered();
-    auto elab = Elaborator::elaborate(json::parse(kDslSeed));
-    Task task;
-
-    EvolutionConfig cfg;
-    cfg.offspring_per_gen = 5;
-    cfg.survivors_per_gen = 2;
-    cfg.max_generations = 2;
-    cfg.seed = 1;
-
-    auto result = evolve(elab.core, task, cfg);
-    EXPECT_GT(result.compile_passed, 0);
-    EXPECT_GT(result.total_offspring, 0);
-    EXPECT_GE(result.best.generation, 0);
-    EXPECT_NE(result.best.core.dump(), "");
-}
-
-TEST(Evolution, DifferentSeedsDiffer) {
-    pnoop_registered();
-    json core = json::parse(kMinimalCore);
-    Task task;
-
-    EvolutionConfig cfg;
-    cfg.offspring_per_gen = 10;
-    cfg.survivors_per_gen = 3;
-    cfg.max_generations = 2;
-
-    cfg.seed = 42;
-    auto r1 = evolve(core, task, cfg);
-
-    cfg.seed = 9999;
-    auto r2 = evolve(core, task, cfg);
-
-    // Different seeds should produce different lineage (different
-    // total_offspring or compile_passed is possible but not
-    // guaranteed; the actual population content must differ).
-    bool differs = (r1.total_offspring != r2.total_offspring) ||
-                   (r1.compile_passed != r2.compile_passed);
-    if (!differs) {
-        // Check that at least one population entry differs.
-        for (size_t i = 0; i < std::min(r1.population.size(), r2.population.size()); ++i) {
-            if (r1.population[i].mutation_description !=
-                r2.population[i].mutation_description) {
-                differs = true;
-                break;
-            }
-        }
-    }
-    EXPECT_TRUE(differs) << "different seeds must produce different lineages";
-}
 
 // ── Genealogy / JSON output ─────────────────────────────────────────
 

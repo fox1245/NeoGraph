@@ -1,23 +1,20 @@
 // NeoGraph Cookbook — "The Beast"
 // =================================================================
 // A self-evolving agent that WRITES its own harness, EVOLVES it under
-// the DSL compiler as fitness oracle, and can ROLL BACK a running
+// the strict Core compiler as fitness oracle, and can ROLL BACK a running
 // harness to any prior super-step via the checkpointer.
 //
 // Three real capabilities, all offline & deterministic (no API key):
 //
-//   ACT I  — GENERATE + GATE.  A harness is authored in the DSL surface
-//            (vars / templates / use) and forced through the three
-//            coherence gates before anything runs:
-//              1. Elaborator::elaborate   surface → core lockfile
-//              2. GraphCompiler::compile   strict (consumed-key) + TV
+//   ACT I  — GENERATE + GATE.  A harness is authored as strict Core JSON
+//            and forced through the compiler/validator coherence gates:
+//              1. GraphCompiler::compile   strict (consumed-key) + TV
 //                 + verify_roundtrip
-//              3. GraphValidator::validate static semantics (E3/E8/E10…)
+//              2. GraphValidator::validate static semantics (E3/E8/E10…)
 //            A harness that fails any gate is DISCARDED.
 //
 //   ACT II — EVOLVE.  neograph::graph::evolve() runs REAL mutation
-//            operators (swap/add/remove template use, tune params,
-//            toggle barrier/conditional-edge, add/remove edge) over the
+//            operators (toggle barrier/conditional-edge, add/remove edge) over the
 //            seed. Every offspring passes the compile gate FIRST — the
 //            compiler is the fitness function, so invalid offspring die
 //            for free, without execution. The run emits a diffable
@@ -37,7 +34,6 @@
 // Run:    ./build/cookbook_the_beast
 
 #include <neograph/neograph.h>
-#include <neograph/graph/elaborator.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/checkpoint.h>
@@ -86,28 +82,20 @@ void register_beast_node() {
 }
 
 // -----------------------------------------------------------------
-// The seed harness — authored entirely in the DSL surface. One `stage`
-// template instantiated three times via `use`; elaboration expands it
-// into a 3-node core chain (s1_n → s2_n → s3_n).
+// The seed harness — authored directly as strict Core JSON. The explicit
+// nodes form a 3-node core chain (s1_n → s2_n → s3_n).
 // -----------------------------------------------------------------
 json seed_harness() {
     return {
         {"schema_version", 1},
         {"name", "beast_seed"},
-        {"_comment", "authored by the Beast in the DSL surface"},
+        {"_comment", "authored by the Beast as strict Core JSON"},
         {"channels", {{"trail", {{"reducer", "append"}}}}},
-        {"templates", {
-            {"stage", {
-                {"params", json::array({"id"})},
-                {"nodes", {{"n", {{"type", "beast_node"}, {"x-id", "@{id}"}}}}}
-            }}
+        {"nodes", {
+            {"s1_n", {{"type", "beast_node"}}},
+            {"s2_n", {{"type", "beast_node"}}},
+            {"s3_n", {{"type", "beast_node"}}}
         }},
-        {"nodes", json::object()},
-        {"use", json::array({
-            {{"template", "stage"}, {"prefix", "s1"}, {"args", {{"id", "1"}}}},
-            {{"template", "stage"}, {"prefix", "s2"}, {"args", {{"id", "2"}}}},
-            {{"template", "stage"}, {"prefix", "s3"}, {"args", {{"id", "3"}}}}
-        })},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "s1_n"}},
             {{"from", "s1_n"}, {"to", "s2_n"}},
@@ -118,7 +106,7 @@ json seed_harness() {
 }
 
 // -----------------------------------------------------------------
-// The three coherence gates. Returns the validated core lockfile, or the
+// The strict Core coherence gates. Returns the validated interchange JSON, or the
 // rejecting gate + report.
 // -----------------------------------------------------------------
 // Serialized graph state is channel-wrapped: {"channels":{"<name>":
@@ -131,14 +119,11 @@ json channel_of(const json& serialized, const std::string& name) {
 
 struct Verdict { bool ok = false; std::string gate, report; json core; };
 
-Verdict forge(const json& dsl, const ng::NodeContext& ctx) {
-    json core;
-    try { core = ng::Elaborator::elaborate(dsl).core; }          // Gate 1
-    catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }
+Verdict forge(const json& core, const ng::NodeContext& ctx) {
     try {
-        auto cg = ng::GraphCompiler::compile(core, ctx);          // Gate 2
+        auto cg = ng::GraphCompiler::compile(core, ctx);          // Gate 1
         ng::GraphCompiler::verify_roundtrip(core, cg);
-        auto rep = ng::GraphValidator::validate(cg);              // Gate 3
+        auto rep = ng::GraphValidator::validate(cg);              // Gate 2
         if (rep.has_errors()) return {false, "validate", rep.summary(), {}};
         return {true, "accepted", {}, core};
     } catch (const std::exception& e) { return {false, "compile", e.what(), {}}; }
@@ -154,17 +139,17 @@ int main() {
 
     // ================= ACT I — GENERATE + GATE =================
     std::cout << "── ACT I · generate a harness, prove it coherent ──\n";
-    const json dsl = seed_harness();
-    const Verdict v = forge(dsl, ctx);
+    const json core = seed_harness();
+    const Verdict v = forge(core, ctx);
     if (!v.ok) {
         std::cout << "  REJECTED at gate '" << v.gate << "':\n" << v.report << "\n";
         return 1;
     }
     const json seed_core = v.core;
-    std::cout << "  ACCEPTED — 3 gates passed. Core lockfile nodes: ";
+    std::cout << "  ACCEPTED — strict compile and validation gates passed. Core nodes: ";
     for (auto it = seed_core["nodes"].begin(); it != seed_core["nodes"].end(); ++it)
         std::cout << it.key() << " ";
-    std::cout << "\n  (DSL surface expanded away: vars/templates/use gone.)\n\n";
+    std::cout << "\n  (strict Core JSON is the retained interchange representation.)\n\n";
 
     // ================= ACT II — EVOLVE =================
     // Real mutation operators + compile-gate selection + genealogy.
@@ -186,8 +171,8 @@ int main() {
               << " · survived compile gate: " << evo.compile_passed
               << " · rejected (invalid, never run): "
               << (evo.total_offspring - evo.compile_passed) << "\n";
-    // The mutation space is the DSL (M4), not raw JSON, so offspring are
-    // valid by construction — the gate is the safety net, and the reject
+    // The mutation space is the bounded strict Core topology, so offspring
+    // stay in the interchange representation — the gate is the safety net, and the reject
     // count is itself a health metric on the operators. Show real variety:
     std::cout << "  sample mutations that produced offspring:\n";
     int shown = 0;

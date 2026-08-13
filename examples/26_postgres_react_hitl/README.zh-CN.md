@@ -100,7 +100,7 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 ### 一次真实运行的参考数字
 
 在上面的 multimodal-RAG demo 上完成一次 run-resume-resume 循环
-（2 轮 supervisor × 每轮 2 个 researcher，claude-sonnet-4-5）
+（2 轮 supervisor × 每轮 2 个 researcher，经过 OpenRouter 的固定 DeepSeek 模型）
 产生了这些 PG 数字：
 
 | 指标                        | 值         | 说明 |
@@ -122,7 +122,7 @@ supervisor 之所以能做到，是因为 HITL gate 把反馈送回了
 1. 复制并填入凭据：
    ```
    cp .env.example .env
-   # edit ANTHROPIC_API_KEY
+   # 设置 OPENROUTER_API_KEY；将新生成的 `openssl rand -hex 32` 值填入 CRAWL4AI_API_TOKEN
    ```
 2. 启动支撑服务：
    ```
@@ -152,7 +152,9 @@ cmake --build build --target example_postgres_react_hitl -j
 ```
 
 主机侧 .env 中的 `POSTGRES_URL=postgresql://postgres:test@localhost:55432/neograph`
-指向 compose 发布的端口；`CRAWL4AI_URL` 也是如此。
+指向 compose 发布的端口；`CRAWL4AI_URL` 对 Crawl4AI 也是如此。
+`CRAWL4AI_API_TOKEN` 会作为 Bearer 凭据发送。compose 会拒绝空值，并且只将
+Crawl4AI 发布到 `127.0.0.1`。
 
 ## 针对此栈运行集成测试
 

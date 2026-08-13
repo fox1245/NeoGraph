@@ -1,14 +1,13 @@
-"""NeoGraph + openai-sdk hybrid — bring your own OpenAI client.
+"""NeoGraph + openai-sdk hybrid — bring your own OpenRouter client.
 
 Demonstrates that NeoGraph's `Provider` is Python-subclassable
 (v0.2.3+): wrap the official `openai` SDK and plug it into NeoGraph
-graph nodes. Keeps all your SDK-side configuration (retries, Azure,
-custom transport, observability hooks) while gaining NeoGraph's
-graph orchestration.
+graph nodes. The SDK still owns retries, transport, and observability;
+OpenRouter owns model routing and the ZDR provider preference.
 
 Run:
     pip install neograph-engine>=0.2.3 openai
-    echo 'OPENAI_API_KEY=sk-...' > .env
+    echo 'OPENROUTER_API_KEY=sk-or-...' > .env
     python hybrid.py
 """
 
@@ -42,7 +41,8 @@ class OpenAISdkProvider(ng.Provider):
     callbacks) attach to the `client` argument and are honored on
     every call NeoGraph makes through this provider.
     """
-    def __init__(self, client: OpenAI, model: str = "gpt-5.4-mini"):
+    def __init__(self, client: OpenAI,
+                 model: str = "deepseek/deepseek-v4-flash-0731"):
         super().__init__()
         self.client = client
         self.model  = model
@@ -60,6 +60,7 @@ class OpenAISdkProvider(ng.Provider):
             model=model,
             messages=messages,
             temperature=params.temperature,
+            extra_body={"provider": {"zdr": True}},
         )
 
         out = ng.ChatCompletion()
@@ -77,17 +78,20 @@ class OpenAISdkProvider(ng.Provider):
 
 def main() -> int:
     _load_env_if_present()
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("OPENAI_API_KEY not set", file=sys.stderr)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("OPENROUTER_API_KEY not set", file=sys.stderr)
         return 2
 
-    # User's existing openai SDK client — bring all your retry /
-    # observability / Azure config here. Nothing is special about
-    # this; it's whatever you already use elsewhere.
-    sdk_client = OpenAI()
-    print(f"[hybrid] using openai SDK inside NeoGraph {ng.__version__} graph")
+    # The official SDK remains the transport/client surface; the OpenRouter
+    # endpoint is selected explicitly with the pinned DeepSeek model.
+    sdk_client = OpenAI(
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        base_url="https://openrouter.ai/api/v1",
+    )
+    print(f"[hybrid] using OpenRouter inside NeoGraph {ng.__version__} graph")
 
-    provider = OpenAISdkProvider(sdk_client, model="gpt-5.4-mini")
+    provider = OpenAISdkProvider(
+        sdk_client, model="deepseek/deepseek-v4-flash-0731")
     ctx = ng.NodeContext(
         provider=provider,
         instructions=("You are a concise assistant. "

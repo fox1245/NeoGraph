@@ -61,6 +61,36 @@ enum class ReducerType {
 };
 
 /**
+ * @brief Retention policy applied after a channel reducer produces a value.
+ *
+ * Retention is independent from combination: a channel may append values
+ * while retaining only a bounded suffix, or overwrite a scalar without any
+ * retention work.
+ */
+enum class ChannelRetentionPolicy : std::uint8_t {
+    Unbounded,  ///< Keep the reducer result unchanged.
+    Latest,     ///< Keep the newest array element (as a one-element array).
+    Bounded,    ///< Keep at most `retention_limit` newest array elements.
+};
+
+/**
+ * @brief Whether a channel value is part of serialized checkpoints.
+ */
+enum class ChannelPersistencePolicy : std::uint8_t {
+    Checkpoint, ///< Include value and version in checkpoints.
+    Ephemeral,   ///< Keep in-memory only; restore leaves the initial value.
+};
+
+struct ChannelLifecyclePolicy {
+    ChannelRetentionPolicy    retention = ChannelRetentionPolicy::Unbounded;
+    std::uint64_t              retention_limit = 0;
+    ChannelPersistencePolicy  persistence = ChannelPersistencePolicy::Checkpoint;
+
+    bool operator==(const ChannelLifecyclePolicy&) const = default;
+};
+
+
+/**
  * @brief Custom reducer function signature.
  * @param current The current value in the channel.
  * @param incoming The new value being written.
@@ -69,18 +99,20 @@ enum class ReducerType {
 using ReducerFn = std::function<json(const json& current, const json& incoming)>;
 
 /**
- * @brief A state channel that holds a value with a reducer and version tracking.
+ * @brief A state channel that holds a reducer, lifecycle policy, and version.
  *
- * Channels are the primary state storage mechanism in the graph engine.
- * Each channel has a name, a reducer that controls how new values are
- * merged with existing ones, and a version counter.
+ * Combination (`reducer_type`/`reducer`) happens first. Retention then
+ * normalizes the combined value, and persistence controls checkpoint
+ * projection. Keeping those stages explicit avoids conflating "append" with
+ * "keep forever" or "persist".
  */
 struct Channel {
-    std::string name;                                ///< Channel name.
-    ReducerType reducer_type = ReducerType::OVERWRITE; ///< Merge strategy.
-    ReducerFn   reducer;                             ///< Custom reducer (when type == CUSTOM).
-    json        value;                               ///< Current channel value.
-    uint64_t    version = 0;                         ///< Version counter (incremented on each write).
+    std::string              name;  ///< Channel name.
+    ReducerType              reducer_type = ReducerType::OVERWRITE; ///< Merge strategy.
+    ReducerFn                reducer; ///< Custom reducer (when type == CUSTOM).
+    ChannelLifecyclePolicy   lifecycle; ///< Retention and persistence policy.
+    json                     value; ///< Current channel value.
+    uint64_t                 version = 0; ///< Version counter (incremented on each write).
 };
 
 /**
