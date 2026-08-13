@@ -382,8 +382,11 @@ jobs:
       - name: Run QuickJS boundary tests under MSVC AddressSanitizer
         shell: pwsh
         run: |
+          # These tests enforce their own wall-time ceilings. Running every
+          # ASan-instrumented process concurrently can exhaust the four-core
+          # hosted runner and turn scheduler delay into a false timeout.
           ctest --test-dir build-windows-asan -C Release `
-            --output-on-failure -j `
+            --output-on-failure -j 1 `
             -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
 
       - name: Upload sanitizer logs on failure
