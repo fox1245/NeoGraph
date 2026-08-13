@@ -35,6 +35,10 @@ function(_forbid text needle label)
 endfunction()
 
 _require("${_quickjs}" "#include \"quickjs-prefix.h\"" "the private symbol prefix")
+_require("${_quickjs}" "uint8_t closure_type : 3; /* see JSClosureTypeEnum */"
+         "the unsigned closure type bitfield")
+_forbid("${_quickjs}" "JSClosureTypeEnum closure_type : 3;"
+        "the MSVC-signed closure type bitfield")
 _require("${_quickjs}" "GetSystemTimeAsFileTime" "the Windows clock shim")
 _require("${_quickjs}" "defined(__EMSCRIPTEN__) || defined(_MSC_VER)" "the computed-goto guard")
 _require("${_quickjs}" "!defined(__EMSCRIPTEN__) && !defined(_MSC_VER)" "the POSIX atomics guard")

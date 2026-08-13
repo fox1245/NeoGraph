@@ -590,6 +590,10 @@ static inline JSCFunctionListEntry js_msvc_make_alias_base_entry(const char *nam
 
     file(READ "${quickjs_source_dir}/quickjs.c" _quickjs_c)
     _neograph_quickjs_replace_exact(_quickjs_c
+        "JSClosureTypeEnum closure_type : 3;"
+        "uint8_t closure_type : 3; /* see JSClosureTypeEnum */"
+        "unsigned closure type bitfield")
+    _neograph_quickjs_replace_exact(_quickjs_c
         "#include \"quickjs.h\""
         "#include \"quickjs-msvc-port.h\""
         "patched QuickJS header include")
