@@ -397,13 +397,6 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
 // run_one_async: single-node path
 // =========================================================================
 
-#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
-// MSVC 19.44 AddressSanitizer mis-sizes coroutine frames containing catch
-// funclets (the generated handler addresses locals beyond the allocated
-// frame). Keep this one control-flow boundary uninstrumented; every callee
-// and the remainder of Core stay under ASan.
-__declspec(no_sanitize_address)
-#endif
 asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     const std::string&                                 node_name,
     int                                                step,
