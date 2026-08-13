@@ -1912,6 +1912,10 @@ TEST(ProgramRuntimeTest, JavaScriptCommandFinalizersReleaseNativeMemoryCharges) 
     limits.memory_limit_bytes  = 2u * 1024u * 1024u;
     limits.max_stack_bytes     = 128u * 1024u;
     limits.max_interrupt_polls = 100'000'000u;
+    // This is a finalizer/accounting stress test, not a wall-time test. Keep
+    // the 32,000 temporary native commands and tight 2 MiB memory ceiling,
+    // while allowing for sanitizer allocator overhead on Windows runners.
+    limits.max_wall_time_ms    = 180'000u;
     auto generator =
         neograph::program::detail::JavaScriptGenerator::open(source, json::object(), limits);
     ASSERT_TRUE(generator.has_value());
