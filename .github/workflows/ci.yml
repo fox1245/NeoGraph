@@ -366,7 +366,7 @@ jobs:
             -DNEOGRAPH_BUILD_BENCHMARKS=OFF `
             -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
             -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
-            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO /DEBUG"
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
 
       - name: Build Program and QuickJS sanitizer targets
         shell: pwsh
@@ -374,60 +374,19 @@ jobs:
           cmake --build build-windows-asan --config Release -j `
             --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
 
-      - name: Install ProcDump for fast-fail capture
-        shell: pwsh
-        run: choco install procdump -y --no-progress
-
       - name: Run QuickJS boundary tests under MSVC AddressSanitizer
         shell: pwsh
         run: |
-          $dumpDir = Join-Path (Resolve-Path "build-windows-asan") "crash-dumps"
-          New-Item -ItemType Directory -Force $dumpDir | Out-Null
-          $smoke = Resolve-Path `
-            "build-windows-asan/tests/Release/neograph_quickjs_c_smoke.exe"
-          & procdump -accepteula -ma -e 1 -f "" -x $dumpDir $smoke
-          $smokeExit = $LASTEXITCODE
           ctest --test-dir build-windows-asan -C Release `
-            --output-on-failure -j `
-            -E "^QuickJS[.]CEmbeddingSmoke$" `
+            --output-on-failure -j 1 `
             -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
-          if ($smokeExit -ne 0) {
-            throw "QuickJS C embedding smoke exited with $smokeExit"
-          }
-
-      - name: Analyze MSVC AddressSanitizer dump
-        if: failure()
-        shell: pwsh
-        run: |
-          $dump = Get-ChildItem build-windows-asan/crash-dumps -Filter "*.dmp" |
-            Select-Object -First 1
-          if (-not $dump) {
-            Write-Output "MSVC AddressSanitizer did not produce a dump"
-            exit 0
-          }
-          $debugger = Get-ChildItem `
-            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" `
-            -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $debugger) {
-            Write-Output "cdb.exe is unavailable; preserving $($dump.FullName)"
-            exit 0
-          }
-          & $debugger.FullName -z $dump.FullName `
-            -c ".symfix; .reload; !analyze -v; kP; q" |
-            Tee-Object build-windows-asan/asan-analysis.txt
 
       - name: Upload sanitizer logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs-windows-asan
-          path: |
-            build-windows-asan/Testing/Temporary/LastTest.log
-            build-windows-asan/asan-analysis.txt
-            build-windows-asan/crash-dumps/*.dmp
-            build-windows-asan/tests/Release/neograph_quickjs_c_smoke.exe
-            build-windows-asan/tests/Release/neograph_quickjs_c_smoke.pdb
-            build-windows-asan/Release/neograph_quickjs.pdb
+          path: build-windows-asan/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
   # ──────────────────────────────────────────────────────────────────

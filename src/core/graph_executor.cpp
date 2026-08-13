@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -77,6 +78,16 @@ private:
     RunContext                      context_;
     detail::ScopedRunContextRuntime runtime_scope_;
 };
+
+[[noreturn]] void rethrow_node_interrupt(std::exception_ptr interrupt,
+                                         const std::string& node_name) {
+    try {
+        std::rethrow_exception(std::move(interrupt));
+    } catch (NodeInterrupt& value) {
+        value.set_node(node_name);
+        throw;
+    }
+}
 
 void apply_node_result(GraphState& state, const NodeResult& result, const RunContext& context) {
     state.apply_writes(result.writes);
@@ -411,11 +422,11 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     const RunContext&                                  ctx) {
     const std::string task_id = make_static_task_id(step, node_name);
 
-    // GCC-13-safe outcome capture: collect result or NodeInterrupt
-    // marker inside try, decide outside. Other exceptions propagate
-    // out of the coroutine untouched.
-    std::optional<NodeResult>    ok_result;
-    std::optional<NodeInterrupt> interrupt;
+    // Retain only an opaque exception handle in the coroutine frame. This
+    // avoids copying a non-trivial NodeInterrupt from a generated catch
+    // funclet while preserving all other exception propagation.
+    std::optional<NodeResult> ok_result;
+    std::exception_ptr        interrupt;
 
     try {
         auto replay_it = replay.find(task_id);
@@ -433,13 +444,10 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
             co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name,
                                                       *ok_result, step);
         }
-    } catch (const NodeInterrupt& ni) {
-        // Copy the whole interrupt, not just the fact that one happened.
-        // This used to record a bool and rethrow `NodeInterrupt(node_name)`,
-        // which silently replaced the node's reason (and, later, its payload)
-        // with the node's own name — so a caller asking "why did you stop?"
-        // got back "risky" (issue #94).
-        interrupt = ni;
+    } catch (const NodeInterrupt&) {
+        // Preserve the original reason and structured payload without
+        // materializing the exception inside the coroutine catch funclet.
+        interrupt = std::current_exception();
     }
 
     if (interrupt) {
@@ -456,9 +464,8 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
                                              CheckpointPhase::NodeInterrupt, step, parent_cp_id,
                                              barrier_state, detail::checkpoint_metadata_for(ctx));
         // The executor is the only layer that knows the graph's name for
-        // this node — the node body does not.
-        interrupt->set_node(node_name);
-        throw *interrupt;
+        // this node; stamp it outside the coroutine catch funclet.
+        rethrow_node_interrupt(std::move(interrupt), node_name);
     }
 
     auto& nr = *ok_result;
