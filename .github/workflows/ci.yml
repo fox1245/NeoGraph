@@ -329,13 +329,13 @@ jobs:
           if-no-files-found: ignore
 
   build-windows-asan:
-      # Focused native-MSVC sanitizer canary for the Program/QuickJS boundary.
-      # Release mode avoids /RTC incompatibility; /Zi retains actionable stacks.
-      # VS 2022's MSVC 19.44 miscomputes the frame address used by an ASan-
-      # instrumented coroutine catch funclet (run_one_async$_ResumeCoro$1::catch$0).
-      # Use the current production toolset, which also lets this job retain the
-      # complete ProgramRuntime coverage instead of suppressing the affected tests.
-      runs-on: windows-2025-vs2026
+    # Focused native-MSVC sanitizer canary for the Program/QuickJS boundary.
+    # Release mode avoids /RTC incompatibility; /Zi retains actionable stacks.
+    # VS 2022's MSVC 19.44 miscomputes the frame address used by an ASan-
+    # instrumented coroutine catch funclet (run_one_async$_ResumeCoro$1::catch$0).
+    # Use the current production toolset, which also lets this job retain the
+    # complete ProgramRuntime coverage instead of suppressing the affected tests.
+    runs-on: windows-2025-vs2026
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -344,12 +344,12 @@ jobs:
         with:
           arch: x64
 
-        - name: Configure (MSVC AddressSanitizer, Program + QuickJS only)
-          shell: pwsh
-          run: |
-            cmake -B build-windows-asan `
-              -G Ninja `
-              -DCMAKE_BUILD_TYPE=Release `
+      - name: Configure (MSVC AddressSanitizer, Program + QuickJS only)
+        shell: pwsh
+        run: |
+          cmake -B build-windows-asan `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
             -DNEOGRAPH_BUILD_LLM=OFF `
             -DNEOGRAPH_BUILD_MCP=OFF `
             -DNEOGRAPH_BUILD_UTIL=OFF `
@@ -379,12 +379,12 @@ jobs:
           cmake --build build-windows-asan --config Release -j `
             --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
 
-        - name: Run QuickJS boundary tests under MSVC AddressSanitizer
-          shell: pwsh
-          run: |
-            ctest --test-dir build-windows-asan -C Release `
-              --output-on-failure -j `
-              -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
+      - name: Run QuickJS boundary tests under MSVC AddressSanitizer
+        shell: pwsh
+        run: |
+          ctest --test-dir build-windows-asan -C Release `
+            --output-on-failure -j `
+            -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
 
       - name: Upload sanitizer logs on failure
         if: failure()
