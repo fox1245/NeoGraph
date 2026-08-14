@@ -4,7 +4,7 @@
 # Optional deps (Postgres, full SQLite suite) gated off to keep the
 # emulated build under ~5-10 minutes.
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
