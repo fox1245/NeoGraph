@@ -91,9 +91,9 @@ demonstrate, not by file number.
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | The ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. Calculator tool. |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | RAG with real OpenRouter-compatible embeddings + in-memory cosine search. |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | Direct one-request Responses SSE smoke test via `SchemaProvider::complete_stream()`, without Agent's non-streaming tool-detection pass. |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses-compatible transport toggle; the reproducible active path is HTTP/SSE. |
-| 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Wire-level tour of Responses-compatible built-in tool shapes. |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | Direct one-request OpenRouter Responses SSE smoke test via `SchemaProvider::complete_stream()`. |
+| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | Direct OpenAI `/v1/responses` WebSocket smoke test with `use_websocket=true`. |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | Raw HTTP/SSE tour of OpenRouter Responses built-in tool shapes. |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | Debug aid: dump the raw `/api/v1/responses` JSON envelope for one tool-call request. |
 | 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | Sweep the pinned DeepSeek reasoning-effort values on one prompt — see latency / reasoning-token tradeoffs. |
 
@@ -198,8 +198,8 @@ Each example is one of three setups:
    `Command` through `NodeOutput`. This is where Send fan-out and
    Command routing overrides live.
 3. **Schema-driven response shapes** (13, 15, 16, 17, 33):
-   one JSON schema describes the wire shape while every live example uses
-   the same OpenRouter provider and pinned DeepSeek model.
+   one JSON schema describes the wire shape while examples target either
+   OpenRouter-compatible SSE or OpenAI's native WebSocket transport.
 
 The graph definition is JSON-shaped (`std::map<std::string, json>`)
 either way — examples 14 and 15 in the [Python examples](../bindings/python/examples/)
@@ -209,7 +209,8 @@ show how the same definition round-trips through `json.dumps` and back.
 
 | Provider | Examples |
 |---|---|
-| `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 33, 34, 35, 40 |
+| `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
+| `OPENAI_API_KEY` | 33 |
 | local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 

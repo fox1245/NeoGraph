@@ -1,13 +1,11 @@
-// NeoGraph Example 34: OpenRouter Responses-compatible built-in tools tour
-// over WebSocket.
+// NeoGraph Example 34: OpenRouter Responses built-in tools over SSE.
 //
 // Walks every tool type the OpenRouter Responses API exposes — custom function,
 // web_search, image_generation, file_search, tool_search, skills,
-// shell — by sending one `response.create` per section over a fresh
-// `wss://openrouter.ai/api/v1/responses` connection and printing what
-// comes back.
+// shell — by sending one streaming POST per section to
+// `https://openrouter.ai/api/v1/responses` and printing what comes back.
 //
-// Talks to neograph::async::ws_connect directly (no SchemaProvider)
+// Talks to neograph::async::async_post_stream directly (no SchemaProvider)
 // because the SchemaProvider tool serialization is custom-function
 // only — it doesn't know about `{"type":"web_search"}` etc. Going
 // raw also keeps each request body verbatim in the source so you can
@@ -20,12 +18,12 @@
 //
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-//   ./example_openai_responses_ws_tools
+//   ./example_openrouter_responses_tools_sse
 //
 // Each section:
-//   - opens a fresh WS connection (clean event stream)
-//   - sends one response.create with the tool slot populated
-//   - drains events until response.completed (or error / close)
+//   - opens a fresh HTTP/SSE request (clean event stream)
+//   - sends one Responses request with the tool slot populated
+//   - drains events until response.done / response.completed or an error
 //   - prints a one-line summary + any tool-specific output
 
 #include <neograph/async/http_client.h>
@@ -47,7 +45,7 @@
 #include <utility>
 #include <vector>
 
-namespace ws = neograph::async;
+namespace net = neograph::async;
 using neograph::json;
 
 namespace tools_demo {
@@ -80,10 +78,6 @@ struct Summary {
     // server-side error event payload, if any.
     std::string    server_error;
 
-    // close-frame metadata if the server killed the socket early.
-    bool           closed_early      = false;
-    int            close_code        = 0;
-    std::string    close_reason;
 };
 
 void render(const std::string& section, const Summary& s) {
@@ -106,10 +100,6 @@ void render(const std::string& section, const Summary& s) {
     if (s.tool_search_calls) std::cout << "  tool_search_calls=" << s.tool_search_calls;
     if (s.file_search_calls) std::cout << "  file_search_calls=" << s.file_search_calls;
     if (s.shell_calls)       std::cout << "  shell_calls="       << s.shell_calls;
-    if (s.closed_early) {
-        std::cout << "  CLOSED close_code=" << s.close_code
-                  << " reason=\"" << s.close_reason << "\"";
-    }
     if (!s.server_error.empty()) {
         std::cout << "  ERROR=\"" << s.server_error << "\"";
     }
@@ -135,7 +125,8 @@ bool consume_event(std::string_view payload, Summary& out) {
     std::string type = j.value("type", std::string{});
     if (type.empty()) return false;
 
-    if (type == "response.output_text.delta") {
+    if (type == "response.output_text.delta" ||
+        type == "response.content_part.delta") {
         out.text_delta_count++;
         out.assembled_text += j.value("delta", std::string{});
         return false;
@@ -172,21 +163,12 @@ bool consume_event(std::string_view payload, Summary& out) {
         out.server_error = m;
         return true;
     }
-    return type == "response.completed";
+    return type == "response.completed" || type == "response.done";
 }
 
-// GCC 13 has two coroutine codegen bugs that have to be dodged here
-// (both trip an internal compiler error at cp/call.cc:11096,
-// build_special_member_call):
-//   (1) More than one non-trivially-destructible coroutine parameter
-//       (e.g. two std::string by value) triggers it. std::string_view
-//       is trivial, so passing refs via view sidesteps the bug.
-//   (2) Naming the result of a co_await inside a loop body (`auto
-//       msg = co_await wsc->recv(); ...`) triggers the destructor
-//       codegen for the temp. Feeding the await straight into a call
-//       expression avoids the named local.
-// Bisected against GCC 13.3.0; the same patterns compile fine on
-// clang 18 + libc++ but we follow the project's default toolchain.
+// Keep coroutine parameters trivially destructible. Passing multiple owned
+// strings here triggers a GCC 13 coroutine codegen ICE; string_view keeps the
+// request storage owned by the blocking caller below.
 asio::awaitable<void> run_section(
     asio::any_io_executor ex,
     std::string_view api_key,
@@ -223,9 +205,9 @@ asio::awaitable<void> run_section(
         {"Authorization", "Bearer " + std::string{api_key}},
         {"Content-Type", "application/json"},
     };
-    ws::RequestOptions opts;
+    net::RequestOptions opts;
     opts.timeout = std::chrono::seconds(120);
-    auto response = co_await ws::async_post_stream(
+    auto response = co_await net::async_post_stream(
         ex, "openrouter.ai", "443", "/api/v1/responses",
         request.dump(), std::move(headers), /*tls=*/true,
         [&](std::string_view chunk) {
@@ -486,10 +468,6 @@ int main() {
             Summary summary;
             std::string key_str = api_key;
             std::string body_str = s.build().dump();
-            if (body_str.size() >= 2 && body_str.back() == '}') {
-                body_str.pop_back();
-                body_str += R"(,"type":"response.create"})";
-            }
             // Pass string views into the coroutine; the backing
             // std::string locals (key_str, body_str) outlive run_sync
             // since it blocks.
@@ -506,7 +484,7 @@ int main() {
                 std::chrono::steady_clock::now() - t0).count();
             std::cout << "  (" << ms << " ms)";
             render(s.name, summary);
-            if (summary.closed_early || !summary.server_error.empty())
+            if (!summary.server_error.empty())
                 failed++;
         } catch (const std::exception& e) {
             std::cout << "  EXCEPTION: " << e.what() << "\n";

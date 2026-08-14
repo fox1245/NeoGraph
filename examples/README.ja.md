@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=200f242a080f49d1219526fb96b7be802ad86988481dae28092aaa80968e0d02 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -91,9 +91,9 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct ループ: `llm_call` ↔ `tool_dispatch` (`has_tool_calls` 条件付き)。計算ツール。 |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | OpenRouter 互換 embedding + メモリ内コサイン検索を備えた RAG。 |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | Agent の非ストリーミング tool-detection を介さず、`SchemaProvider::complete_stream()` を直接呼び出す単一リクエストの Responses SSE スモークテスト。 |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses 互換 transport の切り替え例。再現可能な実行経路は HTTP/SSE です。 |
-| 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Responses 互換の組み込みツール wire shape を紹介します。 |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | `SchemaProvider::complete_stream()` を直接呼び出す単一リクエストの OpenRouter Responses SSE スモークテスト。 |
+| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | `use_websocket=true` を使用する OpenAI `/v1/responses` WebSocket の直接スモークテスト。 |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | OpenRouter Responses の組み込みツール wire shape を紹介する raw HTTP/SSE サンプル。 |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | デバッグ支援: 1 つのツール呼び出しリクエストの生の `/api/v1/responses` JSON envelope をダンプします。 |
 | 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | 固定 DeepSeek モデルで reasoning effort のレイテンシー / reasoning token のトレードオフを確認します。 |
 
@@ -198,8 +198,8 @@ OPENROUTER_API_KEY=sk-or-...
    `Command` から `NodeOutput`。ここでファンアウトを送信し、
    コマンド ルーティングはライブでオーバーライドされます。
 3. **Schema-driven response shapes** (13、15、16、17、33):
-   1 つの JSON スキーマがワイヤー形状を記述し、ライブ例はすべて
-   同じ OpenRouter provider と固定 DeepSeek モデルを使用します。
+   1 つの JSON スキーマがワイヤー形状を記述し、サンプルは
+   OpenRouter 互換 SSE または OpenAI のネイティブ WebSocket transport を使用します。
 
 グラフ定義はJSON形式(`std::map<std::string, json>`)
 どちらの方法でも — [Python examples](../bindings/python/examples/) の例 14 と 15
@@ -209,7 +209,8 @@ OPENROUTER_API_KEY=sk-or-...
 
 |プロバイダー |例 |
 |---|---|
-| `OPENROUTER_API_KEY` | 01、03、12、13、15、16、17、18、19、20、22、23、24、25、28、29、30、33、34、35、40 |
+| `OPENROUTER_API_KEY` | 01、03、12、13、15、16、17、18、19、20、22、23、24、25、28、29、30、34、35、40 |
+| `OPENAI_API_KEY` | 33 |
 | ローカルサーバー (キーなし) | 31 |
 | **なし** | 02、04、05、06、07、08、09、10、14、21、27、36、37、38、39、41、42、43、44、46、47、48、49、50、51、52、53、54、55、 56、57 |
 

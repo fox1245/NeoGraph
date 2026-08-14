@@ -67,7 +67,7 @@ nightly CI job (not yet wired).
 ## What's NOT covered
 
 - Network-bearing examples (`example_react_agent`, `example_mcp_*`,
-  `example_openai_responses_*`) — TLS/socket interactions produce
+  `example_*_responses_*`) — TLS/socket interactions produce
   noise from libssl / libcurl that valgrind suppressions would have
   to mask. Use leak-check on the engine path with mock providers
   instead.

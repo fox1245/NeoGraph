@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/VALGRIND.md locale=ko source_sha256=1d224555d10eb0266f4e4084f35f7fd9fe139ed9c014d00fc7733ca566188965 -->
+<!-- neograph-i18n: source=docs/VALGRIND.md locale=ko source_sha256=38c9d7fc8073d2557d9b5533dfb33ec2de6867a55ba394bc26d6a5cf6b2e6215 -->
 # 메모리 & 새니타이저 검사 (Valgrind / ASan / UBSan / 장시간 부하)
 
 **Languages:** [English](VALGRIND.md) | [한국어](VALGRIND.ko.md) | [日本語](VALGRIND.ja.md) | [简体中文](VALGRIND.zh-CN.md)
@@ -67,7 +67,7 @@ Valgrind 3.22.0, GCC 13.3 Debug 빌드.
 ## 다루지 않는 것
 
 - 네트워크를 사용하는 예제 (, , `example_react_agent` `example_mcp_*`
- `example_openai_responses_*` ) — TLS/소켓 상호작용이 libssl /
+ `example_*_responses_*` ) — TLS/소켓 상호작용이 libssl /
   libcurl에서 valgrind 제외(suppression)로 가려야 하는 잡음을 발생.
   대신 모의 제공자(mock provider)로 엔진 경로 누수 검사 사용.
 - Crawl4AI / Postgres 예제 — 외부 프로세스나 라이브러리 상태가
@@ -111,7 +111,7 @@ cmake --build build-asan -j$(nproc)
 -- Found PostgreSQL: /usr/lib/x86_64-linux-gnu/libpq.so (found version "16.14")
 -- Found Python3: /usr/bin/python3.12 (found version "3.12.3") found components: Interpreter
 -- Found CURL: /usr/lib/x86_64-linux-gnu/libcurl.so (found version "8.5.0")
--- Skipping example_openai_responses_ws_tools: needs GCC >= 14 or Clang (current: GNU 13.3.0)
+-- Skipping example_openrouter_responses_tools_sse: needs GCC >= 14 (current: GNU 13.3.0)
 -- Configuring done (20.6s)
 -- Generating done (0.6s)
 -- Build files have been written to: /root/Coding/NeoGraph/.claude/worktrees/i18n-ko-a/build-asan

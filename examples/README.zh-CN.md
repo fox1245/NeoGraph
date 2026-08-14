@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=200f242a080f49d1219526fb96b7be802ad86988481dae28092aaa80968e0d02 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -86,9 +86,9 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct 循环：`llm_call` ↔ `tool_dispatch`，带 `has_tool_calls` 条件判断。Calculator 工具。 |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | 使用 OpenRouter 兼容 embedding + 内存余弦搜索的 RAG。 |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | 单请求 Responses SSE 冒烟测试，直接调用 `SchemaProvider::complete_stream()`，不经过 Agent 的非流式工具检测阶段。 |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses 兼容 transport 切换示例；可复现的活动路径是 HTTP/SSE。 |
-| 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Responses 兼容内置工具 wire shape 演示。 |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | 直接调用 `SchemaProvider::complete_stream()` 的单请求 OpenRouter Responses SSE 冒烟测试。 |
+| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | 使用 `use_websocket=true` 的 OpenAI `/v1/responses` WebSocket 直接冒烟测试。 |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | 展示 OpenRouter Responses 内置工具 wire shape 的 raw HTTP/SSE 示例。 |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | 调试辅助：为一次工具调用请求转储原始 `/api/v1/responses` JSON envelope。 |
 | 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | 扫描固定 DeepSeek 模型的 reasoning effort，观察延迟 / reasoning token 取舍。 |
 
@@ -191,8 +191,8 @@ OPENROUTER_API_KEY=sk-or-...
    `run(NodeInput)` body — 通过 `NodeOutput` 发出 `ChannelWrite`、`Send` 或 `Command`。
    Send 扇出与 Command 路由覆盖就在这里。
 3. **Schema-driven response shapes**（13, 15, 16, 17, 33）：
-   一个 JSON schema 描述 wire shape；所有 live 示例都使用同一个
-   OpenRouter provider 和固定 DeepSeek 模型。
+   一个 JSON schema 描述 wire shape；示例可使用 OpenRouter 兼容 SSE
+   或 OpenAI 原生 WebSocket transport。
 无论哪种方式，图定义都是 JSON 形状（`std::map<std::string, json>`）
 — [Python examples](../bindings/python/examples/) 中的示例 14 和 15 展示了同一个定义
 如何通过 `json.dumps` 往返后再回来。
@@ -201,7 +201,8 @@ OPENROUTER_API_KEY=sk-or-...
 
 | Provider | 示例 |
 |---|---|
-| `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 33, 34, 35, 40 |
+| `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
+| `OPENAI_API_KEY` | 33 |
 | local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 

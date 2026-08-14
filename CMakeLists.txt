@@ -1278,26 +1278,25 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_rag_agent examples/12_rag_agent.cpp)
         target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
 
-        add_executable(example_openai_responses examples/13_openai_responses.cpp)
-        target_link_libraries(example_openai_responses PRIVATE neograph::core neograph::llm cppdotenv)
+        add_executable(example_openrouter_responses_sse examples/13_openrouter_responses_sse.cpp)
+        target_link_libraries(example_openrouter_responses_sse PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_openai_responses_ws examples/33_openai_responses_ws.cpp)
         target_link_libraries(example_openai_responses_ws PRIVATE neograph::core neograph::llm cppdotenv)
 
         # Tools-tour demo exercises a C++20 coroutine pattern that
         # trips a GCC 13 internal compiler error (build_special_member_call
-        # at cp/call.cc:11096). GCC 14 and Clang 18+ codegen the same
-        # source without source-level workarounds. Gate the target so
+        # at cp/call.cc:11096). GCC 14 and the other supported toolchains
+        # codegen the same source. Gate the target so
         # Ubuntu 24.04 default toolchain users (GCC 13.3) still build
         # the rest of the project cleanly.
-        if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-            AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14")
-           OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            add_executable(example_openai_responses_ws_tools examples/34_openai_responses_ws_tools.cpp)
-            target_link_libraries(example_openai_responses_ws_tools PRIVATE neograph::core neograph::async cppdotenv)
+        if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+           OR CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14")
+            add_executable(example_openrouter_responses_tools_sse examples/34_openrouter_responses_tools_sse.cpp)
+            target_link_libraries(example_openrouter_responses_tools_sse PRIVATE neograph::core neograph::async cppdotenv)
         else()
             message(STATUS
-                "Skipping example_openai_responses_ws_tools: needs GCC >= 14 or Clang "
+                "Skipping example_openrouter_responses_tools_sse: needs GCC >= 14 "
                 "(current: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
         endif()
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/VALGRIND.md locale=ja source_sha256=1d224555d10eb0266f4e4084f35f7fd9fe139ed9c014d00fc7733ca566188965 -->
+<!-- neograph-i18n: source=docs/VALGRIND.md locale=ja source_sha256=38c9d7fc8073d2557d9b5533dfb33ec2de6867a55ba394bc26d6a5cf6b2e6215 -->
 # メモリ & サニタイザースイープ (Valgrind / ASan / UBSan / soak)
 
 **Languages:** [English](VALGRIND.md) | [한국어](VALGRIND.ko.md) | [日本語](VALGRIND.ja.md) | [简体中文](VALGRIND.zh-CN.md)
@@ -68,7 +68,7 @@ valgrind 下での完全な `neograph_tests` スイートは ~30 分かかりま
 ## カバーされていないもの
 
 - ネットワークを含むサンプル (`example_react_agent`、`example_mcp_*`、
-  `example_openai_responses_*`) — TLS/ソケットの相互作用が libssl / libcurl
+  `example_*_responses_*`) — TLS/ソケットの相互作用が libssl / libcurl
   からのノイズを生成し、valgrind 抑制でマスクする必要がある。
   代わりにモックプロバイダを使用してエンジンパスでリークチェックを使用。
 - Crawl4AI / Postgres サンプル — 外部プロセスまたはライブラリの状態がリーク

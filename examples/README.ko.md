@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=200f242a080f49d1219526fb96b7be802ad86988481dae28092aaa80968e0d02 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # C++ API 예제
@@ -92,9 +92,9 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 |[`01_react_agent.cpp`](01_react_agent.cpp)|OpenRouter|ReAct 루프: `llm_call` ⇔ `tool_dispatch`(`has_tool_calls` 조건부 포함) 계산기 도구.|
 | 12 |[`12_rag_agent.cpp`](12_rag_agent.cpp)|OpenRouter|OpenRouter 호환 embedding + 메모리 내 코사인 검색을 사용하는 RAG.|
-| 13 |[`13_openai_responses.cpp`](13_openai_responses.cpp)|OpenRouter|Agent의 비스트리밍 도구 감지 단계를 거치지 않고 `SchemaProvider::complete_stream()`으로 직접 수행하는 단일 요청 Responses SSE 스모크 테스트.|
-| 33 |[`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp)|OpenRouter|Responses 호환 transport 전환 예제. 재현 가능한 활성 경로는 HTTP/SSE입니다.|
-| 34 |[`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp)|OpenRouter|Responses 호환 내장 도구 wire shape 투어.|
+| 13 |[`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp)|OpenRouter|`SchemaProvider::complete_stream()`을 직접 호출하는 단일 요청 OpenRouter Responses SSE 스모크 테스트.|
+| 33 |[`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp)|OpenAI|`use_websocket=true`를 사용하는 OpenAI `/v1/responses` WebSocket 직접 스모크 테스트.|
+| 34 |[`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp)|OpenRouter|OpenRouter Responses 내장 도구 wire shape를 보여 주는 raw HTTP/SSE 예제.|
 | 29 |[`29_responses_envelope.cpp`](29_responses_envelope.cpp)|OpenRouter|한 번의 tool-call 요청에 대한 원시 `/api/v1/responses` JSON envelope 덤프.|
 | 30 |[`30_reasoning_effort.cpp`](30_reasoning_effort.cpp)|OpenRouter|고정 DeepSeek 모델의 reasoning effort를 한 prompt에서 sweep합니다.|
 
@@ -199,8 +199,8 @@ OPENROUTER_API_KEY=sk-or-...
 `Command`부터 `NodeOutput`까지. 여기에서 팬아웃을 보내고
 명령 라우팅이 실시간보다 우선합니다.
 3. **Schema-driven response shape** (13, 15, 16, 17, 33):
-하나의 JSON 스키마로 wire shape를 기술하며 모든 라이브 예제는
-동일한 OpenRouter provider와 고정 DeepSeek 모델을 사용합니다.
+하나의 JSON 스키마로 wire shape를 기술하며 예제는 OpenRouter 호환
+SSE 또는 OpenAI의 네이티브 WebSocket transport를 사용합니다.
 
 그래프 정의는 JSON 모양(`std::map<std::string, json>`)입니다.
 어느 쪽이든 — [Python examples](../bindings/python/examples/)의 예제 14 및 15
@@ -210,7 +210,8 @@ OPENROUTER_API_KEY=sk-or-...
 
 |공급자|예|
 |---|---|
-|`OPENROUTER_API_KEY`| 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 33, 34, 35, 40 |
+|`OPENROUTER_API_KEY`| 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
+|`OPENAI_API_KEY`| 33 |
 |로컬 서버(키 없음)| 31 |
 |**없음**| 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 

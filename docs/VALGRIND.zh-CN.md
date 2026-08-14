@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/VALGRIND.md locale=zh-CN source_sha256=1d224555d10eb0266f4e4084f35f7fd9fe139ed9c014d00fc7733ca566188965 -->
+<!-- neograph-i18n: source=docs/VALGRIND.md locale=zh-CN source_sha256=38c9d7fc8073d2557d9b5533dfb33ec2de6867a55ba394bc26d6a5cf6b2e6215 -->
 # 内存与消毒器扫描（Valgrind / ASan / UBSan / 浸泡）
 
 **Languages:** [English](VALGRIND.md) | [한국어](VALGRIND.ko.md) | [日本語](VALGRIND.ja.md) | [简体中文](VALGRIND.zh-CN.md)
@@ -65,7 +65,7 @@ Valgrind 3.22.0，GCC 13.3 Debug 构建。
 ## 未覆盖的部分
 
 - 涉及网络的示例（`example_react_agent`、`example_mcp_*`、
-  `example_openai_responses_*`）——TLS/套接字交互会产生来自 libssl /
+  `example_*_responses_*`）——TLS/套接字交互会产生来自 libssl /
   libcurl 的噪音，需要 valgrind 压制规则来屏蔽。建议改用 mock Provider
   在引擎路径上进行泄漏检查。
 - Crawl4AI / Postgres 示例——外部进程或库状态会干扰泄漏检查；这些路径

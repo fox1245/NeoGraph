@@ -1,4 +1,4 @@
-// NeoGraph Example 13: OpenRouter Responses API via SchemaProvider
+// NeoGraph Example 13: OpenRouter Responses API over SSE
 //
 // Minimal one-request SSE smoke test for OpenRouter's `/api/v1/responses`
 // endpoint through the schema-driven SchemaProvider. This intentionally calls
@@ -8,7 +8,7 @@
 //
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-//   ./example_openai_responses
+//   ./example_openrouter_responses_sse
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>

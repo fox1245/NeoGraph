@@ -9,9 +9,9 @@ Pieces wired together:
 
   - **OpenAI Responses API over WebSocket** —
     `SchemaProvider(schema="openai-responses", use_websocket=True)`.
-    Same /v1/responses path as the C++ example
-    34_openai_responses_ws_tools.cpp, just driven through the
-    binding's high-level Provider surface instead of raw ws_client.
+    Same /v1/responses WebSocket path as the C++ example
+    33_openai_responses_ws.cpp, driven through the binding's
+    high-level Provider surface.
 
   - **Multi-turn context** — Gradio's ChatInterface keeps the
     user-visible history. Each turn we hand the engine the FULL prior
