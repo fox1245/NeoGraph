@@ -8,7 +8,18 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
+    groups:
+      python-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -17,28 +28,15 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: "docker"
-    directories:
-      - "/"
-      - "/benchmarks/concurrent"
-      - "/examples/26_postgres_react_hitl"
-      - "/examples/cookbook/jarvis/bench"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: "docker-compose"
-    directories:
-      - "/examples/26_postgres_react_hitl"
-      - "/tests/fixtures/q7-postgres"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
