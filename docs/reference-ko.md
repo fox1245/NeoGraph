@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8c9b9a18538183a30c122066a3466eb05b81a6c21d6ac906f7bf3f68a0dd09a2 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -14,34 +14,31 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
 `RateLimitedProvider`, `NodeCache`, `AsyncTool`, `create_deep_research_graph`)
 이 투어에서 다루지 않는 **헤더 공개 API를 포함한다**.
 
-> **위의 모든 모듈을 포함해 타입별 전체 API 표면을 보려면,
-> [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/)의
-> Doxygen 출력을 사용하라. 헤더에서 직접 생성되며 master에 push할 때마다
-> 갱신된다. 이 내러티브 투어는 권장 진입점이고, Doxygen이 정식 참조 문서다.**
+> **위의 모든 모듈을 포함해 타입별 전체 API 표면을 보려면, 아래에 연결된
+> `include/neograph/`의 공개 헤더를 사용하라. 이 내러티브 투어는 권장
+> 진입점이고, 헤더가 정식 참조 문서다.**
 
 이렇게 나누면 내러티브는 끝까지 읽을 수 있을 만큼 작게 유지되고,
-자동 생성 Doxygen은 다음을 보장한다.
-공개 API와 문서 표면이 어긋나지 않으며, `include/neograph/`와 1:1로
-대응하는 모양을 유지한다.
+상세 참조는 `include/neograph/`의 구현과 함께 유지된다.
 
 **모듈 한눈에 보기:**
 
-| 모듈 | 네임스페이스 | 설명 | 투어 | Doxygen |
+| 모듈 | 네임스페이스 | 설명 | 투어 | 헤더 |
 |--------|-----------|-------------|------|---------|
-| 핵심 | `neograph` | 기초 타입, Provider와 Tool 인터페이스 | [§1–§3](#1-foundation-types) | [Provider](https://fox1245.github.io/NeoGraph/classneograph_1_1Provider.html) |
-| 그래프 | `neograph::graph` | 그래프 엔진, 노드, 상태, 체크포인트, 저장소 | [§4–§11](#4-graph-types) | [GraphEngine](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1GraphEngine.html) |
-| LLM | `neograph::llm` | LLM 제공자 구현과 Agent | [§12](#12-llm-module) | [Agent](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1Agent.html) |
-| MCP | `neograph::mcp` | Model Context Protocol 클라이언트 | [§13](#13-mcp-module) | [MCPClient](https://fox1245.github.io/NeoGraph/classneograph_1_1mcp_1_1MCPClient.html) |
-| 유틸리티 | `neograph::util` | 동시성 유틸리티 | [§14](#14-util-module) | [RequestQueue](https://fox1245.github.io/NeoGraph/classneograph_1_1util_1_1RequestQueue.html) |
-| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | _Doxygen 전용_ | [A2AClient](https://fox1245.github.io/NeoGraph/classneograph_1_1a2a_1_1A2AClient.html) |
-| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _Doxygen 전용_ | [ACPServer](https://fox1245.github.io/NeoGraph/classneograph_1_1acp_1_1ACPServer.html) |
-| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _Doxygen 전용_ | [WsClient](https://fox1245.github.io/NeoGraph/classneograph_1_1async_1_1WsClient.html) |
+| 핵심 | `neograph` | 기초 타입, Provider와 Tool 인터페이스 | [§1–§3](#1-foundation-types) | [Provider](../include/neograph/provider.h) |
+| 그래프 | `neograph::graph` | 그래프 엔진, 노드, 상태, 체크포인트, 저장소 | [§4–§11](#4-graph-types) | [GraphEngine](../include/neograph/graph/engine.h) |
+| LLM | `neograph::llm` | LLM 제공자 구현과 Agent | [§12](#12-llm-module) | [Agent](../include/neograph/llm/agent.h) |
+| MCP | `neograph::mcp` | Model Context Protocol 클라이언트 | [§13](#13-mcp-module) | [MCPClient](../include/neograph/mcp/client.h) |
+| 유틸리티 | `neograph::util` | 동시성 유틸리티 | [§14](#14-util-module) | [RequestQueue](../include/neograph/util/request_queue.h) |
+| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | _헤더 전용_ | [A2AClient](../include/neograph/a2a/client.h) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _헤더 전용_ | [ACPServer](../include/neograph/acp/server.h) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _헤더 전용_ | [WsClient](../include/neograph/async/ws_client.h) |
 
-The three "_Doxygen 전용_" rows are net-new modules added across
+The three "_헤더 전용_" rows are net-new modules added across
 recent audit and protocol-bridge work. They have full headers under
 `include/neograph/{a2a,acp,async}/` and are exercised by ctest
 suites, but writing dedicated narrative sections has been deferred
-in favour of pointing to Doxygen — both because they're large
+in favour of pointing to those headers — both because they're large
 (A2A alone is ~5 classes + types module + caller node) and because
 new modules tend to keep evolving for one or two more releases
 before a hand-written tour is worth the maintenance.
@@ -3387,8 +3384,7 @@ int main() {
 
 The headers under `include/neograph/` carry public surface that
 isn't walked through above. Each block below is a one-paragraph
-pointer — the canonical doc lives in Doxygen, generated 1:1 from
-the headers and refreshed on every push to master.
+pointer to that canonical source-level reference.
 
 ### `neograph::a2a` — Agent-to-Agent protocol
 
@@ -3402,7 +3398,7 @@ see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
 and httplib chunked (server). Caller node embeds an A2A call as
 a graph node.
 
-**전체 참조:** [Doxygen 클래스 목록](https://fox1245.github.io/NeoGraph/annotated.html)에서 네임스페이스별로 볼 수 있습니다.
+**공개 헤더:** [`include/neograph/a2a/`](../include/neograph/a2a/).
 
 ### `neograph::acp` — Agent Client Protocol
 
@@ -3415,7 +3411,7 @@ late-bound `ACPClient`. `ACPServer::handle_message` async-dispatches
 prompts on a worker thread, capped at `max_inflight_prompts=32`
 with per-session single-flight + `-32000` backpressure.
 
-**전체 참조:** [Doxygen 클래스 목록](https://fox1245.github.io/NeoGraph/annotated.html)에서 네임스페이스별로 볼 수 있습니다.
+**공개 헤더:** [`include/neograph/acp/`](../include/neograph/acp/).
 
 ### `neograph::async` — HTTP/SSE/WS helpers
 
@@ -3428,7 +3424,7 @@ streaming; `WsClient` for OpenAI Responses WebSocket; libcurl
 endpoints; `run_sync` for awaitable→sync bridges in the engine
 defaults.
 
-**전체 참조:** [Doxygen 클래스 목록](https://fox1245.github.io/NeoGraph/annotated.html)에서 네임스페이스별로 볼 수 있습니다.
+**공개 헤더:** [`include/neograph/async/`](../include/neograph/async/).
 
 ### Persistent checkpoint backends
 
@@ -3444,16 +3440,16 @@ values are not available before initial connection setup and use that default.
 Synchronous libpq connection timeout behavior is unchanged.
 `SqliteCheckpointStore` — same shape, single-file backend, fits the
 edge / single-host deployments.
-**Full reference:**
-[`PostgresCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1PostgresCheckpointStore.html) ·
-[`SqliteCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1SqliteCheckpointStore.html).
+**공개 헤더:**
+[`PostgresCheckpointStore`](../include/neograph/graph/postgres_checkpoint.h) ·
+[`SqliteCheckpointStore`](../include/neograph/graph/sqlite_checkpoint.h).
 
 ### Other public surface not in this tour
 
 - **`neograph::llm::RateLimitedProvider`** — wraps any `Provider`
   with retry on 429 + Retry-After honour + capped exponential
   backoff + max-total-wait gate (Round 5).
-  [Doxygen](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1RateLimitedProvider.html).
+  [헤더](../include/neograph/llm/rate_limited_provider.h).
 - **`neograph::AsyncTool`** — `Tool` peer that exposes
   `execute_async(json)` for tools whose work is naturally
   coroutine-shaped (HTTP fetch, MCP call). Sync `execute()` is
@@ -3467,7 +3463,5 @@ edge / single-host deployments.
   `BriefNode` LLM rewrite, `FinalReportNode` token-limit retry,
   `ClarifyNode` HITL gate.
 
-If the type you need isn't in this tour and you can't find it in
-Doxygen either, check `include/neograph/` directly — every public
-header carries the same Doxygen-style comments that drive the
-generated reference.
+If the type you need isn't in this tour, check `include/neograph/`
+directly. Every public header carries its reference documentation.

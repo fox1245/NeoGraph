@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8c9b9a18538183a30c122066a3466eb05b81a6c21d6ac906f7bf3f68a0dd09a2 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -12,30 +12,29 @@
 `RateLimitedProvider`、`NodeCache`、`AsyncTool`、
 `create_deep_research_graph`）具有**本导览未涵盖的头文件中的公开 API**。
 
-> **关于完整、逐类型的 API 表面 — 包括以上每个模块 — 请使用 Doxygen 输出，
-> 位于 [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/)，
-> 直接从头文件生成并在每次推送到 master 时刷新。本叙述式导览是推荐的
-> 入口点；Doxygen 是权威参考。**
+> **关于完整、逐类型的 API 表面 — 包括以上每个模块 — 请使用下方链接的
+> `include/neograph/` 公共头文件。本叙述式导览是推荐的入口点；
+> 头文件是权威参考。**
 
-此拆分换取的好处：叙述保持小到可从头到尾读完，而自动生成的 Doxygen 保证
-公开 API 与文档表面之间没有漂移 — 与 `include/neograph/` 的 1:1 形态映射。
+此拆分换取的好处：叙述保持小到可从头到尾读完，而详细参考与
+`include/neograph/` 中的实现保持在一起。
 
 **模块一览：**
 
-| 模块 | 命名空间 | 描述 | 导览 | Doxygen |
+| 模块 | 命名空间 | 描述 | 导览 | 头文件 |
 |--------|-----------|-------------|------|---------|
-| Core | `neograph` | 基础类型、Provider 和 Tool 接口 | [§1–§3](#1-foundation-types) | [Provider](https://fox1245.github.io/NeoGraph/classneograph_1_1Provider.html) |
-| Graph | `neograph::graph` | 图引擎、节点、状态、检查点、存储 | [§4–§11](#4-graph-types) | [GraphEngine](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1GraphEngine.html) |
-| LLM | `neograph::llm` | LLM Provider 实现和 Agent | [§12](#12-llm-module) | [Agent](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1Agent.html) |
-| MCP | `neograph::mcp` | 模型上下文协议客户端 | [§13](#13-mcp-module) | [MCPClient](https://fox1245.github.io/NeoGraph/classneograph_1_1mcp_1_1MCPClient.html) |
-| Util | `neograph::util` | 并发工具 | [§14](#14-util-module) | [RequestQueue](https://fox1245.github.io/NeoGraph/classneograph_1_1util_1_1RequestQueue.html) |
-| **A2A** | `neograph::a2a` | Agent 到 Agent JSON-RPC 桥接（客户端 + 服务器 + 流式） | _仅 Doxygen_ | [A2AClient](https://fox1245.github.io/NeoGraph/classneograph_1_1a2a_1_1A2AClient.html) |
-| **ACP** | `neograph::acp` | Agent 客户端协议 — 编辑器↔agent 通过 stdio 的双向 RPC | _仅 Doxygen_ | [ACPServer](https://fox1245.github.io/NeoGraph/classneograph_1_1acp_1_1ACPServer.html) |
-| **Async** | `neograph::async` | Asio HTTP/SSE/WS 辅助类、ConnPool、run_sync | _仅 Doxygen_ | [WsClient](https://fox1245.github.io/NeoGraph/classneograph_1_1async_1_1WsClient.html) |
+| Core | `neograph` | 基础类型、Provider 和 Tool 接口 | [§1–§3](#1-foundation-types) | [Provider](../include/neograph/provider.h) |
+| Graph | `neograph::graph` | 图引擎、节点、状态、检查点、存储 | [§4–§11](#4-graph-types) | [GraphEngine](../include/neograph/graph/engine.h) |
+| LLM | `neograph::llm` | LLM Provider 实现和 Agent | [§12](#12-llm-module) | [Agent](../include/neograph/llm/agent.h) |
+| MCP | `neograph::mcp` | 模型上下文协议客户端 | [§13](#13-mcp-module) | [MCPClient](../include/neograph/mcp/client.h) |
+| Util | `neograph::util` | 并发工具 | [§14](#14-util-module) | [RequestQueue](../include/neograph/util/request_queue.h) |
+| **A2A** | `neograph::a2a` | Agent 到 Agent JSON-RPC 桥接（客户端 + 服务器 + 流式） | _仅头文件_ | [A2AClient](../include/neograph/a2a/client.h) |
+| **ACP** | `neograph::acp` | Agent 客户端协议 — 编辑器↔agent 通过 stdio 的双向 RPC | _仅头文件_ | [ACPServer](../include/neograph/acp/server.h) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS 辅助类、ConnPool、run_sync | _仅头文件_ | [WsClient](../include/neograph/async/ws_client.h) |
 
-三行"_仅 Doxygen_"是在最近的审计和协议桥接工作中添加的全新模块。它们在
+三行"_仅头文件_"是在最近的审计和协议桥接工作中添加的全新模块。它们在
 `include/neograph/{a2a,acp,async}/` 下有完整头文件，并由 ctest 套件实践，
-但编写专门的叙述部分已被推迟，转而指向 Doxygen — 既因为它们很大（仅 A2A
+但编写专门的叙述部分已被推迟，转而指向这些头文件 — 既因为它们很大（仅 A2A
 就有约 5 个类 + 类型模块 + 调用者节点），也因为新模块在被手写导览值得维护
 之前往往会继续演化一到两个版本。
 
@@ -3320,9 +3319,7 @@ int main() {
 ## 超越本导览
 
 `include/neograph/` 下的头文件包含本导览未展开的公共接口。
-下面每个区块都是一段指引；标准文档
-位于 Doxygen 中，由头文件逐一生成，
-每次推送到 master 时刷新。
+下面每个区块都是对该权威源码级参考的简短指引。
 
 ### `neograph::a2a` — Agent 到 Agent 协议
 
@@ -3335,7 +3332,7 @@ agent（`message/send`、`tasks/get`、`tasks/cancel`、AgentCard
 `SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
 将 A2A 调用嵌入为图节点。
 
-**完整参考：** [Doxygen 类列表](https://fox1245.github.io/NeoGraph/annotated.html)可按命名空间浏览。
+**公共头文件：** [`include/neograph/a2a/`](../include/neograph/a2a/)。
 
 ### `neograph::acp` — Agent 客户端协议
 
@@ -3347,7 +3344,7 @@ Gemini CLI、Neovim CodeCompanion）。双向通信包括：client→agent
 `ACPServer::handle_message` 在工作线程上异步分发提示，`max_inflight_prompts=32`
 为上限，并按会话执行单飞控制 + `-32000` 背压。
 
-**完整参考：** [Doxygen 类列表](https://fox1245.github.io/NeoGraph/annotated.html)可按命名空间浏览。
+**公共头文件：** [`include/neograph/acp/`](../include/neograph/acp/)。
 
 ### `neograph::async` — HTTP/SSE/WS 辅助工具
 
@@ -3358,7 +3355,7 @@ Gemini CLI、Neovim CodeCompanion）。双向通信包括：client→agent
 WebSocket；libcurl `CurlH2Pool` 用于 HTTP/2 + 多路复用及 Cloudflare 前端
 端点；`run_sync` 用于引擎默认设置中的 awaitable→sync 桥接。
 
-**完整参考：** [Doxygen 类列表](https://fox1245.github.io/NeoGraph/annotated.html)可按命名空间浏览。
+**公共头文件：** [`include/neograph/async/`](../include/neograph/async/)。
 
 ### 持久化检查点后端
 
@@ -3371,15 +3368,15 @@ WebSocket；libcurl `CurlH2Pool` 用于 HTTP/2 + 多路复用及 Cloudflare 前�
 初始连接建立前无法取得环境变量和 service 文件中的超时值，因此使用该默认值。
 同步 libpq 连接的超时行为不变。
 `SqliteCheckpointStore` — 形态相同的单文件后端，适合边缘设备/单主机部署。
-**完整参考：**
-[`PostgresCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1PostgresCheckpointStore.html) ·
-[`SqliteCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1SqliteCheckpointStore.html).
+**公共头文件：**
+[`PostgresCheckpointStore`](../include/neograph/graph/postgres_checkpoint.h) ·
+[`SqliteCheckpointStore`](../include/neograph/graph/sqlite_checkpoint.h)。
 
 ### 本导览未涵盖的其他公共接口
 
 - **`neograph::llm::RateLimitedProvider`** — 包装任意 `Provider`，在 429 时重试、遵守 Retry-After、
   使用有上限的指数退避，并通过最大总等待时间闸门（Round 5）限制等待。
-  [Doxygen](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1RateLimitedProvider.html).
+  [头文件](../include/neograph/llm/rate_limited_provider.h)。
 - **`neograph::AsyncTool`** — `Tool` 的对应类型，为天然适合协程的工具（HTTP 获取、MCP 调用）
   提供 `execute_async(json)`。同步 `execute()` 通过 `run_sync` 以 `final` 方式路由。
 - **`neograph::graph::NodeCache`** — 每节点记忆化缓存，通过构造时的 `EngineConfig::cached_nodes`
@@ -3390,7 +3387,5 @@ WebSocket；libcurl `CurlH2Pool` 用于 HTTP/2 + 多路复用及 Cloudflare 前�
   `BriefNode` LLM 重写、`FinalReportNode` token 限制重试以及
   `ClarifyNode` HITL 闸门。
 
-如果本导览和 Doxygen 中都找不到所需类型，请直接检查
-`include/neograph/`；每个公共头文件都带有相同风格的 Doxygen 注释，
-这些注释会驱动
-参考文档的生成。
+如果本导览中没有所需类型，请直接检查 `include/neograph/`；
+每个公共头文件都包含其参考文档。
