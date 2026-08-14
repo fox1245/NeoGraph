@@ -202,7 +202,7 @@ public:
     HostResourceLease& operator=(const HostResourceLease&) = delete;
     HostResourceLease(HostResourceLease&& other) noexcept;
     HostResourceLease& operator=(HostResourceLease&& other) noexcept;
-    ~HostResourceLease();
+    ~HostResourceLease() noexcept;
 
     [[nodiscard]] bool held() const noexcept;
     [[nodiscard]] const HostResourceVector& resources() const noexcept;
