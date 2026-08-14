@@ -37,7 +37,7 @@ jobs:
           --health-retries 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -159,7 +159,7 @@ jobs:
   build-and-test-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -206,7 +206,7 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -268,7 +268,7 @@ jobs:
     # including native MSVC compilation of the sealed control runtime.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Chocolatey's openssl package is a prebuilt binary (no source
       # compile) — installs in ~20 s and lands at a predictable path
@@ -338,7 +338,7 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -417,7 +417,7 @@ jobs:
   bench-regression:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -481,7 +481,7 @@ jobs:
   quickjs-performance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -538,7 +538,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -677,7 +677,7 @@ jobs:
   tsan-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -743,7 +743,7 @@ jobs:
   fuzz-canary:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Clang + build dependencies
         run: |
@@ -827,7 +827,7 @@ jobs:
             args: --program --shared
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
