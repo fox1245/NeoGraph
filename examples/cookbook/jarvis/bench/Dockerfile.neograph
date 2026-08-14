@@ -1,7 +1,7 @@
 # NeoGraph 자비스 벤치 이미지 — mock 빌드 (오디오 의존성 없음 → STT 패스스루/TTS 콘솔)
 # 빌드 컨텍스트: NeoGraph 레포 루트 (.dockerignore 가 jarvis third_party/assets 제외
 # → CMake 가 whisper/onnx/miniaudio 를 못 찾아 자동으로 mock 게이트)
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ cmake make libssl-dev libcurl4-openssl-dev ca-certificates python3 \
