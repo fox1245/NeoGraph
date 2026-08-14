@@ -1,8 +1,6 @@
 <!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=b668003b55bbf84e6463dc6dbc7c708f77d62a9face15528b6fc7e32caac0182 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-P8 disposition: [`spec/neograph-example-disposition-v1.json`](../../spec/neograph-example-disposition-v1.json).
-
 # 네오그래프 요리책
 
 

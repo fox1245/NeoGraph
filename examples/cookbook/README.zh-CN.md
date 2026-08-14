@@ -3,8 +3,6 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-P8 切换处置：[`spec/neograph-example-disposition-v1.json`](../../spec/neograph-example-disposition-v1.json)。
-
 这些端到端示例会把多个 NeoGraph 功能组合成一个真实可运行的场景。
 每一个都是自包含的：复制该文件夹，按它的 README 操作，然后运行。
 

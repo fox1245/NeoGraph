@@ -6,11 +6,10 @@ remaining gate has passed.
 **Date:** 2026-08-11
 
 **Authority:** [QuickJS Control Architecture](QUICKJS_CONTROL_ARCHITECTURE.md),
-[QuickJS Control Runtime Migration Plan](QUICKJS_CONTROL_MIGRATION.md), and
-[`spec/quickjs-control-runtime.sdd.yaml`](../spec/quickjs-control-runtime.sdd.yaml).
+[QuickJS Control Runtime Migration Plan](QUICKJS_CONTROL_MIGRATION.md), and the
+owner-local executable runtime contract.
 
-**Executable companion:**
-[`spec/quickjs-control-migration-completion.sdd.yaml`](../spec/quickjs-control-migration-completion.sdd.yaml).
+**Executable companion:** owner-local migration-completion contract.
 
 ---
 

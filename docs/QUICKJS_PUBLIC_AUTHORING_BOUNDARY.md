@@ -7,7 +7,7 @@ Date: 2026-08-10
 Parent architecture: [QuickJS Control Architecture](QUICKJS_CONTROL_ARCHITECTURE.md)  
 Migration plan: [QuickJS Control Runtime Migration Plan](QUICKJS_CONTROL_MIGRATION.md)  
 Execution profiles: [QuickJS Execution Profiles and Extension Boundary](QUICKJS_EXECUTION_PROFILES.md)
-Executable contract: [`../spec/quickjs-control-runtime.sdd.yaml`](../spec/quickjs-control-runtime.sdd.yaml)  
+Executable contract: owner-local runtime contract
 Tracking: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23), [#27](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27), [#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35), [authoring-boundary decision](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27#issuecomment-5230015368)
 
 ## Decision

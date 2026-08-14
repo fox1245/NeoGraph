@@ -3,8 +3,6 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-P8 処理一覧: [`spec/neograph-example-disposition-v1.json`](../../spec/neograph-example-disposition-v1.json)。
-
 複数の NeoGraph 機能を 1 つにまとめたエンドツーエンドのレシピ
 実際の作業シナリオ。それぞれが自己完結型です。フォルダーをコピーし、
 READMEに従って実行してください。

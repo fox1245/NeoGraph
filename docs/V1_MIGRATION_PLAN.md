@@ -394,7 +394,7 @@ Historical bundles and sidecar records are classified as exact-import,
 converted, drain-only, or blocked. They are never silently treated as
 current `ProgramVersion` values. Issue #7 records this cross-repository gate;
 Issue #6 remains the remote collaboration behavior contract. The focused,
-machine-readable gate is `spec/cross-repository-compatibility-v1.json` with
+machine-readable gate uses owner-local metadata with
 `scripts/check_cross_repository_compatibility.py`; it compares the current
 ProgramVersion, RunInvocation, and A2A collaboration surfaces and rejects a
 historical consumer that lacks explicit rebase revisions and verified evidence.
@@ -750,8 +750,8 @@ translated documentation remain open.
 Deliverables:
 
 - one Core C++ quickstart and one Program C++ quickstart;
-- the machine-readable `spec/neograph-example-disposition-v1.json` manifest
-  classifying every existing example and cookbook entry as Core-kept,
+- an owner-local machine-readable manifest classifying every existing example
+  and cookbook entry as Core-kept,
   Program-ported, protocol-adapter-ported, historical-only, or removed with
   rationale;
 - build/run smoke proof for every retained example, including minimum runnable
@@ -915,13 +915,13 @@ Do not translate unstable internals phase by phase. Documentation tiers are:
 4. **Migration guide and translations**: after P8 cutover names and behavior are
    fixed.
 
-The P8 example/cookbook manifest is a cutover gate, not an informal inventory.
-`spec/neograph-example-disposition-v1.json` is the source of truth: every
-tracked entry names its target layer, required optional components, build/run
-command, expected observable result, documentation links, and removal rationale
-when deleted. The two focused quickstarts are the first `verified` entries;
-component-matrix compilation and representative runnable proof for the remaining
-retained entries are explicit follow-up work rather than implicit claims.
+The owner-local P8 example/cookbook manifest is a cutover gate, not an informal
+inventory. Every tracked entry names its target layer, required optional
+components, build/run command, expected observable result, documentation links,
+and removal rationale when deleted. The two focused quickstarts are the first
+`verified` entries; component-matrix compilation and representative runnable
+proof for the remaining retained entries are explicit follow-up work rather than
+implicit claims.
 
 Historical documents keep a visible superseded banner and link to the current
 decision. They are removed only when no issue, migration fixture, or retained

@@ -258,15 +258,14 @@ The rebase sequence is deliberately one-way:
 Old pinned bundles and sidecar records receive an explicit exact-import,
 converted, drain-only, or rejected classification. They must never be
 silently accepted as current Program versions. Issue #7 tracks this
-cross-repository rebase gate. The machine-readable declaration in
-`spec/cross-repository-compatibility-v1.json` records the comparison between
-the current `ProgramVersion`, `RunInvocation`, and A2A collaboration surfaces
-and those historical references. Its metadata/source check is intentionally
-fail-closed: NeoCode and NeoProtocol remain `historical_only` until a consumer
-declares every current contract revision and verified conformance evidence;
-changing a label alone cannot make a consumer current. Run the focused check
-with `python3 scripts/check_cross_repository_compatibility.py` (also wired as
-`CrossRepositoryCompatibility.Metadata` when tests are enabled).
+cross-repository rebase gate. An owner-local machine-readable declaration
+records the comparison between the current `ProgramVersion`, `RunInvocation`,
+and A2A collaboration surfaces and those historical references. Its
+metadata/source check is intentionally fail-closed: NeoCode and NeoProtocol
+remain `historical_only` until a consumer declares every current contract
+revision and verified conformance evidence; changing a label alone cannot make
+a consumer current. `scripts/check_cross_repository_compatibility.py` runs the
+focused check when that local metadata is available.
 
 ### Execution strategy: embedded JavaScript with a sealed command boundary
 
@@ -1152,8 +1151,8 @@ The architecture is implemented only when all are true:
 10. Public headers, CMake components, schemas, changelog, and translated user
     documentation agree; every existing example and cookbook entry has an
     explicit Core, Program, protocol-adapter, historical, or removal
-    disposition. The machine-readable disposition and proof inventory is
-    `spec/neograph-example-disposition-v1.json`; entries marked
+    disposition. An owner-local machine-readable disposition and proof
+    inventory backs this classification; entries marked
     `pending-component-smoke` are explicit remaining P8 work, not current
     compatibility claims.
 11. MCP, HTTP, CLI, selected Python bindings, A2A, ACP, and gRPC have explicit

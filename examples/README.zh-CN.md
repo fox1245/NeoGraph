@@ -3,8 +3,6 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-P8 切换清单：[`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json)。
-
 五十六个可运行的 C++ 程序，覆盖 NeoGraph 引擎表面。
 每个示例都是此目录中的单个文件（有一个 Docker-Compose 例外，
 [`26_postgres_react_hitl/`](26_postgres_react_hitl/)）— 把其中一个复制到你的项目里，

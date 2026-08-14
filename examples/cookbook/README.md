@@ -6,10 +6,6 @@ End-to-end recipes that compose multiple NeoGraph features into a
 real working scenario. Each one is self-contained: copy the folder,
 follow its README, and run.
 
-The P8 disposition for every cookbook directory (including its variants and
-supporting assets) is tracked in
-[`spec/neograph-example-disposition-v1.json`](../../spec/neograph-example-disposition-v1.json).
-
 | Cookbook | What it shows |
 |---|---|
 | [`the-beast/`](the-beast/) | **A self-evolving agent: generate · evolve · roll back.** The Beast authors strict Core JSON, validates it before execution, evolves its bounded Core topology with `evolve()`, and rolls back through checkpoints. The live, apex, forge, script, and arithmetic-evolution variants retain the same compiler/validation boundary; JavaScript or trusted C++ owns source authoring, while strict Core JSON remains interchange data. |

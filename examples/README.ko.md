@@ -1,8 +1,6 @@
 <!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=bdd60f74da6b396e20b442bafa8e8479ebeeced9e8bef17caf8366a89ae4bf7e -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-P8 cutover inventory: [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json).
-
 # C++ API 예제
 
 

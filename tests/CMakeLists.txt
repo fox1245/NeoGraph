@@ -354,16 +354,21 @@ endif()
 
 include(GoogleTest)
 
-# Cross-repository compatibility is a metadata gate, not an integration
-# build.  Keep it runnable in the minimal test configuration so a historical
-# NeoCode/NeoProtocol reference cannot silently become current conformance.
-add_test(NAME CrossRepositoryCompatibility.Metadata
-    COMMAND Python3::Interpreter
-        ${PROJECT_SOURCE_DIR}/scripts/check_cross_repository_compatibility.py
-        --metadata ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.json
-        --schema ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.schema.json)
-set_tests_properties(CrossRepositoryCompatibility.Metadata
-    PROPERTIES LABELS "compatibility;metadata")
+# Cross-repository compatibility metadata is owner-local. Keep its fail-closed
+# check available without making a clean public checkout depend on private files.
+set(NEOGRAPH_COMPATIBILITY_METADATA
+    ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.json)
+set(NEOGRAPH_COMPATIBILITY_SCHEMA
+    ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.schema.json)
+if(EXISTS "${NEOGRAPH_COMPATIBILITY_METADATA}" AND EXISTS "${NEOGRAPH_COMPATIBILITY_SCHEMA}")
+    add_test(NAME CrossRepositoryCompatibility.Metadata
+        COMMAND Python3::Interpreter
+            ${PROJECT_SOURCE_DIR}/scripts/check_cross_repository_compatibility.py
+            --metadata ${NEOGRAPH_COMPATIBILITY_METADATA}
+            --schema ${NEOGRAPH_COMPATIBILITY_SCHEMA})
+    set_tests_properties(CrossRepositoryCompatibility.Metadata
+        PROPERTIES LABELS "compatibility;metadata")
+endif()
 
 # Q7 uses a frozen-storage audit rather than a claim inferred from source
 # availability. Keep its Python contract runnable in minimal configurations.

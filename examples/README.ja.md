@@ -3,8 +3,6 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-P8 カットオーバー一覧: [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json)。
-
 NeoGraph エンジンの表面をカバーする 56 個の実行可能な C++ プログラム。
 それぞれがこのディレクトリ内の 1 つのファイルです (Docker-Compose が 1 つあります)
 例外、[`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — コピー

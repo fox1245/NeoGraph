@@ -3,8 +3,7 @@
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 The numbered examples cover the NeoGraph engine surface, with one focused Core
-quickstart and one focused Program quickstart. The complete cutover inventory is
-the machine-readable [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json).
+quickstart and one focused Program quickstart.
 Each is a single file in this directory (with one Docker-Compose
 exception, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — copy
 one into your own project, link against `neograph::core` +

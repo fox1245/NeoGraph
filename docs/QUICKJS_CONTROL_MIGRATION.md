@@ -6,9 +6,9 @@ Date: 2026-08-10
 Architecture: `QUICKJS_CONTROL_ARCHITECTURE.md`
 Public authoring boundary: [`QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
-Executable gates: `../spec/quickjs-control-runtime.sdd.yaml`
+Executable gates: owner-local runtime contract
 Completion runbook: [`QUICKJS_MIGRATION_COMPLETION.md`](QUICKJS_MIGRATION_COMPLETION.md)
-Completion execution spec: [`../spec/quickjs-control-migration-completion.sdd.yaml`](../spec/quickjs-control-migration-completion.sdd.yaml)
+Completion execution contract: owner-local
 Post-cutover controller extension:
 [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
 Tracking epic: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23)
@@ -558,14 +558,13 @@ recreate the design fragmentation this decision rejects:
 
 - `AGENT_SYNTHESIS_PROGRAM_DSL.md`;
 - `DSL_COMPOSITION_LIMITS.md`;
-- `PROGRAMMABLE_HARNESS_DSL_DESIGN.md`; and
-- `../spec/programmable-harness-vm-integration.sdd.yaml`.
+- `PROGRAMMABLE_HARNESS_DSL_DESIGN.md`.
 
 Current implementation details remain discoverable from code, schemas, tests,
 and repository history until the legacy runtime is removed. Base cutover work is
 tracked only by this plan, the QuickJS architecture, the
 [public authoring boundary](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md), the
-executable SDD, and their registered GitHub issues.
+owner-local executable contract, and their registered GitHub issues.
 
 ## 9. Post-cutover controller extension
 

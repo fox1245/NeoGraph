@@ -7,7 +7,7 @@ Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Supersedes: user authoring through the bounded Core DSL and Program JSON operation DSL
 Runtime selection: QuickJS with JavaScript
 Canonical migration plan: `QUICKJS_CONTROL_MIGRATION.md`
-Executable plan: `../spec/quickjs-control-runtime.sdd.yaml`
+Executable plan: owner-local runtime contract
 Public authoring boundary: `QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`
 Execution profiles and extension boundary: [`QUICKJS_EXECUTION_PROFILES.md`](QUICKJS_EXECUTION_PROFILES.md)
 Controller extension: [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)

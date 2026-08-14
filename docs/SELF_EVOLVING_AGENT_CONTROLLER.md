@@ -4,9 +4,7 @@ Status: Accepted product hypothesis and architecture extension; implementation i
 Date: 2026-08-08
 Base architecture: [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md)
 Migration plan: [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)
-Executable base contract: [`../spec/quickjs-control-runtime.sdd.yaml`](../spec/quickjs-control-runtime.sdd.yaml)
-Executable extension contract:
-[`../spec/self-evolving-agent-controller.sdd.yaml`](../spec/self-evolving-agent-controller.sdd.yaml)
+Executable contracts: owner-local runtime and controller contracts
 Tracking epic: [#29](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/29)
 Workstreams: [#30](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/30),
 [#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35),

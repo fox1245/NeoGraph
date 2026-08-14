@@ -6,7 +6,7 @@ Date: 2026-08-10
 Parent architecture: [QuickJS Control Architecture](QUICKJS_CONTROL_ARCHITECTURE.md)  
 Public boundary: [QuickJS Public Authoring Boundary](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)  
 Authority and guarantee model: [Self-Evolving Agent Controller](SELF_EVOLVING_AGENT_CONTROLLER.md)  
-Executable contracts: [`../spec/quickjs-control-runtime.sdd.yaml`](../spec/quickjs-control-runtime.sdd.yaml) and [`../spec/self-evolving-agent-controller.sdd.yaml`](../spec/self-evolving-agent-controller.sdd.yaml)  
+Executable contracts: owner-local runtime and controller contracts
 Tracking: [#35](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/35)
 
 ## Decision
