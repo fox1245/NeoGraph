@@ -35,7 +35,7 @@
 
 ## What is NeoGraph?
 
-NeoGraph is a **C++17/20 graph-based agent orchestration engine** that brings
+NeoGraph is a **C++20 graph-based agent orchestration engine** that brings
 LangGraph-level capabilities to C++. Define agent workflows as JSON, execute
 them with parallel fan-out, checkpoint state for time-travel debugging and
 human-in-the-loop, and plug in any LLM provider — all without Python.

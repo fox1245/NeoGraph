@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=1ea76dcf312e4041ee0762b42945377e996661562c6ea90a4ccb9b35b586bdab -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=6c67c286aae76e1f4dcc6a25b9e04af02b9d362083721bce943f3fddb381b168 -->
 <p align="center">
   <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -36,7 +36,7 @@
 
 ## NeoGraph とは？
 
-NeoGraph は **C++17/20 グラフベースエージェントオーケストレーションエンジン**です。
+NeoGraph は **C++20 グラフベースエージェントオーケストレーションエンジン**です。
 LangGraph 級の機能を C++ にもたらします。エージェントワークフローを JSON で定義し、
 並列ファンアウトで実行し、タイムトラベルデバッグや Human-in-the-Loop のために
 状態をチェックポイントし、任意の LLM プロバイダを接続 — すべて Python 不要で。

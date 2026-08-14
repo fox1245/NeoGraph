@@ -215,11 +215,11 @@ engine_config.checkpoint_store = store;
 auto engine = GraphEngine::build(def, std::move(engine_config));
 ```
 
-스키마는 LangGraph의 `PostgresSaver`(접두사가 붙은 3개의 테이블)를 미러링합니다.
-동일한 데이터베이스에서 LangGraph 상태와 공존하는 `neograph_*`) 및
-`(thread_id, channel, version)`로 채널 값을 중복 제거합니다. 에이
-슈퍼 스텝당 하나의 채널을 터치하는 1000단계 세션의 비용은 대략적입니다.
-`O(steps × channels)` 대신 `O(steps + channels)` Blob 행.
+스키마는 LangGraph의 `PostgresSaver`를 따르며, 같은 데이터베이스에서 LangGraph
+상태와 함께 사용할 수 있도록 `neograph_*` 접두사를 붙인 세 개의 테이블을 만듭니다.
+채널 값은 `(thread_id, channel, version)`을 기준으로 중복을 제거합니다. 슈퍼스텝마다
+채널 하나를 갱신하는 1,000단계 세션은 대략 `O(steps × channels)`가 아니라
+`O(steps + channels)`개의 blob 행을 사용합니다.
 
 **빌드 플래그**: `-DNEOGRAPH_BUILD_POSTGRES=ON`(기본값). 필요하다
 `libpq-dev`(적당) / `libpq-devel`(rpm). 건너뛰도록 플래그 `OFF`를 설정합니다.
@@ -237,8 +237,8 @@ NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_
     ctest --test-dir build -R PostgresCheckpoint --output-on-failure
 ```
 
-env var가 없으면 PG 테스트는 `GTEST_SKIP`이므로 나머지는
-이 제품군은 Postgres가 없어도 컴퓨터에서 녹색으로 유지됩니다.
+환경 변수가 없으면 PG 테스트는 `GTEST_SKIP`되므로 Postgres가 없는 환경에서도
+나머지 테스트는 계속 통과합니다.
 
 적용 범위: `tests/test_graph_engine.cpp` 포함
 `ConcurrentRunDifferentThreadIds`(16개 스레드 × 25개 실행 = 400개 병렬)

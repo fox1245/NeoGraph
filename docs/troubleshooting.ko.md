@@ -1,21 +1,21 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=6d6541f3291390674910938c7a45100ea84f62b1b7f7dd4e864afee8507ca154 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=699f30d5019b9acf078e0c623c4fbe4093a8b53bcd84479a100d46ac9c1b8658 -->
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
 
 # 문제 해결
 
 
-먼저 증상을 해결하고 근본 원인을 해결한 후 해결하세요. 뭔가에 부딪히면
-여기에는 없습니다. 증상이 있는 문제를 열어주세요.
-나중에 이 목록에 들어가세요.
+먼저 증상을 확인하고, 이어서 원인과 해결 방법을 살펴보세요. 여기에 없는 문제가
+발생하면 증상과 재현 방법을 담아 이슈를 열어 주세요. 확인된 해결책은 이 목록에
+추가합니다.
 
 > **5초 동안의 상태 점검.** 무엇보다 먼저 확인하세요.
 > 당신은 최신 패치를 사용하고 있습니다:
 > ```bash
-> pip install --neograph-엔진 업그레이드
-> python -c "neograph_engine 가져오기; print(neograph_engine.__version__)"
+> pip install --upgrade neograph-engine
+> python -c "import neograph_engine; print(neograph_engine.__version__)"
 > ```
-> 아래의 대부분의 문제는 특정 릴리스에서 해결되었습니다. 먼저 업그레이드하고,
-> 두 번째 디버그.
+> 아래 문제 중 상당수는 특정 릴리스에서 수정되었습니다. 먼저 업그레이드한 뒤
+> 원인을 확인하세요.
 
 ---
 
@@ -107,8 +107,9 @@ commit은 지원되는 모델의 WS 핸드셰이크에서 이를 제거합니다
 
 ### WASM를 통해 브라우저에서 실행할 때 CORS 오류
 
-WASM 빌드는 아직 browser-CORS에 대한 바이패스 헤더를 구현하지 않습니다.
-상태를 확인하려면 [Issue #wasm-cors](../../issues)를 추적하세요.
+현재 WASM 빌드에는 브라우저 CORS 우회 헤더나 브라우저 로더가 없습니다.
+진행 상황은 [WASM/CORS 이슈 목록](https://github.com/fox1245/NeoGraph/issues)에서
+확인하세요.
 
 ---
 

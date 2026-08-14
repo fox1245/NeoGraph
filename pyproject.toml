@@ -9,7 +9,7 @@
 #     pip install --no-build-isolation .    # reuse system pybind11
 #     python -m build --wheel               # produce dist/*.whl
 #
-# Wheel contents (Linux x86_64):
+# Typical wheel contents (platform-specific library suffixes apply):
 #     neograph/__init__.py
 #     neograph/llm.py
 #     neograph/_neograph.cpython-*-linux-gnu.so       (binding)
@@ -20,9 +20,9 @@
 # RPATH on _neograph.so is `$ORIGIN` so the binding finds its sibling
 # engine .so files inside the wheel without LD_LIBRARY_PATH.
 #
-# Cibuildwheel/manylinux + macOS/Windows multi-platform packaging is
-# scoped for commit 4+. Today's wheel is Linux-only and not yet
-# manylinux-compliant (it links against the Ubuntu OpenSSL ABI).
+# Cibuildwheel builds Linux x86_64/aarch64, macOS arm64, and Windows x64
+# wheels. Linux uses manylinux_2_34; platforms outside this matrix use the
+# source distribution.
 
 [build-system]
 requires = [
@@ -59,9 +59,11 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: C++",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Topic :: Software Development :: Libraries",
 ]
 # certifi ships the Mozilla CA bundle. The wheel's __init__.py uses it
@@ -198,17 +200,11 @@ cmake.args = [
 #     CIBW_BUILD=cp312-manylinux_x86_64 cibuildwheel --platform linux
 #
 # Coverage:
-#   - Linux x86_64 + aarch64 (manylinux_2_28 — glibc >= 2.28; covers
-#     RHEL 8, Ubuntu 20.04+, Debian 11+, Amazon Linux 2023).
-#   - macOS arm64 (Apple Silicon native; the macOS runner already runs
-#     arm64 so no cross-compile).
-#   - Windows: deferred. The engine's public headers don't carry
-#     __declspec(dllexport) annotations yet (NEOGRAPH_API macro pass);
-#     BUILD_SHARED_LIBS=ON on Windows would link-fail with undefined
-#     symbols. Re-enable in pyproject.toml + the workflow once that
-#     macro pass lands.
+#   - Linux x86_64 + aarch64 (manylinux_2_34 / glibc >= 2.34).
+#   - macOS arm64 (Apple Silicon native).
+#   - Windows x64 (MSVC + vcpkg OpenSSL/libpq, repaired with delvewheel).
 #
-# Python: cp39-cp313 (5 versions × 3 platforms = 15 wheels per release).
+# Python: cp39-cp313 (5 versions × 4 platform targets = 20 wheels per release).
 # musllinux skipped — different glibc lineage; covers Alpine which is
 # not our target audience yet. PyPy skipped — pybind11 type-caster
 # overhead largely cancels out PyPy's interpreter wins for I/O-bound

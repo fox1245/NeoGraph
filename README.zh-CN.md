@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=1ea76dcf312e4041ee0762b42945377e996661562c6ea90a4ccb9b35b586bdab -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=6c67c286aae76e1f4dcc6a25b9e04af02b9d362083721bce943f3fddb381b168 -->
 <p align="center">
   <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -36,7 +36,7 @@
 
 ## 什么是 NeoGraph？
 
-NeoGraph 是一个 **C++17/20 基于图的 agent 编排引擎**，将
+NeoGraph 是一个 **C++20 基于图的 agent 编排引擎**，将
 LangGraph 级能力带入 C++。以 JSON 定义 agent 工作流，通过并行扇出执行，
 为时间旅行调试和人类参与设置检查点，并接入任何 LLM provider——全部无需
 Python。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=6d6541f3291390674910938c7a45100ea84f62b1b7f7dd4e864afee8507ca154 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=699f30d5019b9acf078e0c623c4fbe4093a8b53bcd84479a100d46ac9c1b8658 -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -90,7 +90,8 @@ commit 将其从受支持模型上的 WS 握手中删除。
 
 ### CORS从浏览器运行时出现错误WASM
 
-这WASMbuild 尚未实现浏览器的旁路标头 -CORS。跟踪 [问题 #wasm-cors](../../issues)为了状态。
+当前 WASM 构建还没有浏览器 CORS 绕过标头或浏览器加载器。请在
+[WASM/CORS 问题列表](https://github.com/fox1245/NeoGraph/issues)中查看进展。
 
 ---
 

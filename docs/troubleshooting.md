@@ -106,7 +106,7 @@ Three common causes, in order of frequency:
 ### CORS errors when running from a browser via WASM
 
 The WASM build doesn't yet implement bypass headers for browser-CORS.
-Track [Issue #wasm-cors](../../issues) for status.
+Track the [WASM/CORS issues](https://github.com/fox1245/NeoGraph/issues) for status.
 
 ---
 

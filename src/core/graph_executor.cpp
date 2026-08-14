@@ -611,8 +611,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // refcount) never crosses the ``co_await save_super_step_async``
     // suspend boundary — that's where TSan was flagging a benign
     // libstdc++ ``__exception_ptr::_M_release`` race against the
-    // worker thread's eptr destructor (see
-    // ``feedback_parallel_group_eptr_race.md``). Non-interrupt
+    // worker thread's eptr destructor. Non-interrupt
     // exceptions still rethrow the original eptr on the same thread
     // they were classified, no co_await between, so no race window.
     std::exception_ptr first_exception;

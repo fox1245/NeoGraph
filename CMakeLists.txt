@@ -111,6 +111,9 @@ endif()
 # find_package() calls are skipped entirely (see line ~258).
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
+option(NEOGRAPH_BUILD_WASM
+       "Build the Emscripten WASM smoke executable (Emscripten only)"
+       OFF)
 # Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
 # while it is being qualified.  It is deliberately separate from the existing
 # Program operation-tree component so Core-only and legacy Program consumers do
@@ -423,8 +426,8 @@ endif()
 # build (ASYNC/LLM/MCP/A2A all OFF) doesn't need libssl-dev on the host.
 # Previously unconditional — that broke
 # `benchmarks/concurrent/Dockerfile.neograph` twice when option defaults
-# drifted OFF → ON. See [feedback_libcurl_unconditional_dep.md] for the
-# sister sin one release earlier; same shape, same fix.
+# drifted OFF → ON. Keep this dependency guard next to the option defaults so
+# a minimal-core build cannot acquire OpenSSL accidentally.
 #
 # Guard: if any component that *needs* OpenSSL is ON but ASYNC is OFF,
 # fail loud — neograph_async is their link target and skipping it would
@@ -513,7 +516,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # ===========================================================================
 # neograph::core — Graph engine + foundation types
 # ===========================================================================
-add_library(neograph_core
+set(NEOGRAPH_CORE_SOURCES
     src/core/json.cpp
     src/core/cancel.cpp
     src/core/graph_invocation.cpp
@@ -547,6 +550,7 @@ add_library(neograph_core
     src/core/harness_bench.cpp
     src/observability/openinference.cpp
 )
+add_library(neograph_core ${NEOGRAPH_CORE_SOURCES})
 # postgres_checkpoint.cpp is built into a separate target below
 # (neograph_postgres) so projects without libpq can still link
 # neograph::core.
@@ -577,6 +581,27 @@ target_link_libraries(neograph_core
 # Coroutines are exposed through public headers (provider.h ships
 # asio::awaitable<ChatCompletion>); propagate C++20 to consumers.
 target_compile_features(neograph_core PUBLIC cxx_std_20)
+
+# Link the smoke program to the same core target as native builds so its
+# source list cannot drift when the engine gains a new core implementation.
+if(NEOGRAPH_BUILD_WASM)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR
+            "NEOGRAPH_BUILD_WASM=ON requires the Emscripten toolchain")
+    endif()
+    add_executable(neograph_wasm_smoke wasm/smoke.cpp)
+    target_link_libraries(neograph_wasm_smoke PRIVATE neograph_core)
+    target_compile_options(neograph_core PRIVATE -O3 -flto -fexceptions -pthread)
+    target_compile_options(neograph_wasm_smoke PRIVATE -O3 -flto -fexceptions -pthread)
+    target_link_options(neograph_wasm_smoke PRIVATE
+        -O3 -flto -fexceptions -pthread
+        -sALLOW_MEMORY_GROWTH=1
+        -sPTHREAD_POOL_SIZE=4
+        -sEXIT_RUNTIME=1)
+    set_target_properties(neograph_wasm_smoke PROPERTIES
+        OUTPUT_NAME smoke
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
+endif()
 
 add_library(neograph::core ALIAS neograph_core)
 
@@ -2239,10 +2264,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
         endif()
     endforeach()
 
-    if(TARGET neograph_mcp_types)
-        list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
-    endif()
-    foreach(_comp program program_sqlite program_postgres async llm mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
+    foreach(_comp program program_sqlite program_postgres async llm mcp_types mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp grpc util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})
@@ -2267,6 +2289,13 @@ if(NEOGRAPH_INSTALL_EXPORT)
         NAMESPACE   neograph::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NeoGraph)
 
+    if(TARGET neograph_grpc)
+        install(FILES
+            "${_ng_grpc_gen}/neograph.pb.h"
+            "${_ng_grpc_gen}/neograph.grpc.pb.h"
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    endif()
+
     # Re-find, in the consumer's configure, whatever the engine build actually
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
@@ -2283,6 +2312,10 @@ if(NEOGRAPH_INSTALL_EXPORT)
     endif()
     if(NEOGRAPH_USE_LIBCURL AND CURL_FOUND)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(CURL)")
+    endif()
+    if(TARGET neograph_grpc)
+        string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES
+            "\nfind_dependency(Protobuf)\nfind_dependency(gRPC)")
     endif()
 
     include(CMakePackageConfigHelpers)

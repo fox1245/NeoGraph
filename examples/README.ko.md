@@ -4,13 +4,12 @@
 # C++ API 예제
 
 
-NeoGraph 엔진 표면을 다루는 56개의 실행 가능한 C++ 프로그램.
-각각은 이 디렉터리에 있는 단일 파일입니다(하나의 Docker-Compose 포함).
-예외, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — 복사
-하나를 자신의 프로젝트에 추가하고 `neograph::core`에 연결 +
-`neograph::llm`, 그리고 출발점이 있습니다.
+NeoGraph 엔진 API를 보여 주는 56개의 실행 가능한 C++ 프로그램입니다.
+대부분은 이 디렉터리의 단일 소스 파일이며, Docker Compose가 필요한 예제도 하나
+포함되어 있습니다. 예제를 프로젝트에 복사한 뒤 `neograph::core`와 필요한
+`neograph::llm`을 링크하면 바로 출발점으로 사용할 수 있습니다.
 
-## 짓다
+## 빌드
 
 기본 CMake 구성은 활성화된 구성요소가 지원하는 예제를 빌드합니다.
 Program quickstart와 Program 기반 예제에는
@@ -39,15 +38,15 @@ cmake --build build -j$(nproc)
 
 ## 설정
 
-실제 LLM에 도달하는 예는 cwd에서 `.env`를 자동 로드합니다.
-상위) cppdotenv를 통해. 모든 라이브 예제는 하나의 키를 사용합니다.
+실제 LLM에 연결하는 예제는 cppdotenv를 통해 현재 디렉터리의 `.env`를 자동으로
+불러옵니다. 모든 라이브 예제는 다음 키 형식을 사용합니다.
 
 ```
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-아래의 "설정" 항목이 없는 예에는 API 키가 필요하지 않습니다.
-진행 중인 `MockProvider` 또는 순수 모의 노드.
+아래 표의 설정 열에 별도 표시가 없는 예제는 API 키가 필요하지 않습니다.
+`MockProvider` 또는 순수한 모의 노드만 사용합니다.
 
 ## 여기서 시작하세요
 
@@ -64,8 +63,8 @@ OPENROUTER_API_KEY=sk-or-...
 |[`01_react_agent.cpp`](01_react_agent.cpp)|실제 LLM + 계산기 도구를 사용한 ReAct 루프. **`OPENROUTER_API_KEY`가 필요합니다.**|
 |[`14_plan_executor.cpp`](14_plan_executor.cpp)|계획 → 병렬 하위 작업 → 해결사, 체크포인트 저장소를 통한 충돌 복구. API 키가 없습니다.|
 
-이러한 내용이 이해되면 아래의 나머지 내용은 해당 내용에 따라 그룹화됩니다.
-파일 번호가 아닌 시연합니다.
+기본 예제를 확인한 뒤에는 아래 색인을 기능별로 살펴보세요. 파일 번호순이 아니라
+기능과 사용 목적에 따라 그룹화되어 있습니다.
 
 ## 색인
 

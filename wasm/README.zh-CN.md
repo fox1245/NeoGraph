@@ -1,17 +1,17 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=5d8c8917e27b2b522ff655a631f05e29701f0759b8f5bb9595f2db1d02089b92 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=19a1e742b349014d3c9115255a5966a692c37f11c52cdfc3f65a9e747a507a89 -->
 # NeoGraph WASM — 可行性验证
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 图引擎已编译到 WebAssembly。本目录是 **phase-1 spike** — 证明 engine layer（compile、run、executor、scheduler、coordinator、state、channels、NodeCache）能在 Emscripten 下不修改源码地构建并执行。
 
-## 结果
+## 历史运行结果
 
 | 指标 | 值 |
 |---|---|
 | WASM 二进制文件（-O3 + LTO） | **712 KB** |
 | Emscripten JS runtime    | 92 KB |
-| 发布总大小          | **~800 KB** |
+| JavaScript + WASM 总计 | **~800 KB** |
 | 引擎源码差异       | 0 行 |
 | 首次运行输出         | `doubled = 42, trace = d` ✓ |
 
@@ -35,32 +35,45 @@
 | `neograph_mcp` | 基于子进程，与浏览器无关 | — |
 | Embind JS bindings | 让 JS 以 callbacks 定义 node implementations | 2-A |
 
-## 构建
+## 构建并运行
 
 ```bash
 source /opt/emsdk/emsdk_env.sh
 
-em++ -std=c++20 -O3 -flto -fexceptions -pthread \
-  -sALLOW_MEMORY_GROWTH=1 -sPTHREAD_POOL_SIZE=4 \
-  -DASIO_STANDALONE -DASIO_NO_DEPRECATED \
-  -I include -I deps/asio/include -I deps/yyjson \
-  wasm/smoke.cpp \
-  src/core/json.cpp deps/yyjson/yyjson.c \
-  src/core/graph_engine.cpp src/core/graph_compiler.cpp \
-  src/core/graph_validator.cpp src/core/tool_dispatch.cpp \
-  src/core/graph_coordinator.cpp src/core/graph_executor.cpp \
-  src/core/scheduler.cpp src/core/graph_state.cpp \
-  src/core/graph_node.cpp src/core/graph_loader.cpp \
-  src/core/graph_checkpoint.cpp src/core/store.cpp \
-  src/core/provider.cpp src/core/tool.cpp \
-  src/core/react_graph.cpp src/core/plan_execute_graph.cpp \
-  src/core/deep_research_graph.cpp src/core/node_cache.cpp \
-  -o wasm/smoke.js
+emcmake cmake -S . -B build-wasm \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_WASM=ON \
+  -DNEOGRAPH_BUILD_ASYNC=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_MCP_CLIENT=OFF \
+  -DNEOGRAPH_BUILD_MCP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF \
+  -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_GRPC=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF \
+  -DNEOGRAPH_BUILD_UTIL=OFF \
+  -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+  -DNEOGRAPH_USE_LIBCURL=OFF
+cmake --build build-wasm --target neograph_wasm_smoke -j
+node build-wasm/wasm/smoke.js
 ```
 
-用 `node wasm/smoke.js` 运行。不需要浏览器参数。
+该目标直接链接 `neograph_core`，因此源文件列表由主 CMake 构建维护，而不是复制到
+本文档中。成功运行时会输出 `doubled = 42` 和节点执行轨迹。
 
 `compile()` 默认使用 `worker_count=1`，因此不会创建引擎自有线程池。该冒烟命令仍启用四个 Emscripten 线程，以便调用方可通过 `set_worker_count(N >= 2)` 选择并行扇出；冒烟测试本身使用单工作线程默认值。单线程构建只需传入 `-sPTHREAD_POOL_SIZE=0`，无需调用 `set_worker_count(1)`。
+
+## 浏览器支持状态
+
+当前仓库还没有浏览器加载器、npm 包或 Embind API，因此该目标仅支持 Node.js。使用
+Emscripten pthreads 的浏览器构建还需要提供跨源隔离标头的 Web 服务器
+(`Cross-Origin-Opener-Policy: same-origin` 和
+`Cross-Origin-Embedder-Policy: require-corp`)，以及生成的 worker 资源。
 
 ## Phase 2 计划
 

@@ -7,7 +7,7 @@ PROJECT_NAME           = "NeoGraph"
 # PROJECT_NUMBER is sed-replaced from pyproject.toml at workflow build time
 # (see .github/workflows/docs.yml). Default 0.0.0-dev for local doxygen runs.
 PROJECT_NUMBER         = "0.0.0-dev"
-PROJECT_BRIEF          = "A C++17 Graph Agent Engine Library — LangGraph for C++"
+PROJECT_BRIEF          = "A C++20 Graph Agent Engine Library — LangGraph for C++"
 PROJECT_LOGO           =
 OUTPUT_DIRECTORY       = docs/api
 

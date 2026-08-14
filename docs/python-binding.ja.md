@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=75569d457cedc380413c9de3526d7a4db73790213b5ac9613182126fe9f4933c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=aa37c77f9c0d5edbcefc44cab95fa0bbd0eaf928751367baa9e4091c7cbbf592 -->
 # Python バインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -85,10 +85,16 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `interrupted` | `bool` |実行が `interrupt_before` / `interrupt_after` / `NodeInterrupt` で一時停止された場合は、`True`。 |
 | `interrupt_node` | `str` |割り込みをトリガーしたノードの名前 (`interrupted` の場合)。 |
 | `interrupt_value` | `dict` |動的割り込みの場合は `{"reason": str, "type": "NodeInterrupt", "value": ...}` (ノードがペイロードをアタッチした場合にのみ `"value"` が存在します)、静的 `interrupt_before` / `interrupt_after` の場合は `{"message": ...}`。 |
-| `checkpoint_id` | `str` |実行中に保存された最新のチェックポイントの ID。続行するには、`engine.resume_async(checkpoint_id=...)` に渡します。 |
+| `checkpoint_id` | `str` |実行中に保存された最新チェックポイントの ID。参考情報であり、`resume_async()` はチェックポイント ID ではなく `thread_id` で再開します。 |
 | `execution_trace` | `list[str]` |実行された順序でのノード名 - ルーティングのデバッグに役立ちます。 |
 
-`RunConfig` は、LangGraph `RunnableConfig` のアイデアを反映しています。
+`RunConfig` は LangGraph の `RunnableConfig` の考え方に対応します。
+
+中断した実行を非同期で再開するには、スレッド ID と、必要に応じて人間の回答を渡します。
+
+```python
+result = await engine.resume_async(thread_id="t1", resume_value=answer)
+```
 
 |フィールド |デフォルト |意味 |
 |---|---|---|
@@ -430,7 +436,7 @@ ng.ReducerRegistry.register_reducer("sum",
 - **カスタム Python ノード** — サブクラス `neograph_engine.GraphNode`、`NodeFactory.register_type` または `@neograph_engine.node` デコレーター経由で登録します。エンジンは、ファンアウト ワーカー スレッドからなど、適切な GIL 処理の下でディスパッチされます。
 - **カスタム Python ツール** — サブクラス `neograph_engine.Tool`、`NodeContext(tools=[...])` に渡します。エンジンはコンパイル時に所有権を取得します。
 - **非同期** — すべての `*_async` バインディングは、呼び出しスレッドの実行ループにバインドされた `asyncio.Future` を返します。ストリーム コールバックは `loop.call_soon_threadsafe` 経由でループ スレッドにホップされるため、コールバックは asyncio が期待する場所で実行されます。
-- **チェックポイント** — Python バックエンドのサブクラス `CheckpointStore`、`InMemoryCheckpointStore` を直接使用するか、バインディングが `-DNEOGRAPH_BUILD_POSTGRES=ON` を使用してソースから構築される場合 (PyPI ホイールの libpq バンドルが保留中) に `PostgresCheckpointStore` を使用します。
+- **チェックポイント** — Python バックエンドでは `CheckpointStore` をサブクラス化するか、`InMemoryCheckpointStore` を直接使用できます。`-DNEOGRAPH_BUILD_POSTGRES=ON` でバインディングをビルドすれば `PostgresCheckpointStore` も利用でき、対応するホイールには libpq が同梱されます。
 - **WebSocket を介した OpenAI 応答** — `SchemaProvider(schema="openai_responses", use_websocket=True)`。
 
 ホイール: Linux x86_64 (manylinux_2_34)、Linux aarch64 (manylinux_2_34)、

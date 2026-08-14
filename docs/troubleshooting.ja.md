@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=6d6541f3291390674910938c7a45100ea84f62b1b7f7dd4e864afee8507ca154 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=699f30d5019b9acf078e0c623c4fbe4093a8b53bcd84479a100d46ac9c1b8658 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -107,7 +107,7 @@ v0.1.7 以上にアップグレードするか、`SSL_CERT_FILE` を設定して
 ### WASM 経由でブラウザから実行すると CORS エラーが発生する
 
 WASM ビルドは、ブラウザー CORS のバイパス ヘッダーをまだ実装していません。
-ステータスについては [Issue #wasm-cors](../../issues) を追跡します。
+進行状況は [WASM/CORS の課題一覧](https://github.com/fox1245/NeoGraph/issues)で確認できます。
 
 ---
 

@@ -1,10 +1,10 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=8b62b237339d4244bee698f93443c1598e9ae55b631399b33d036606bab39d52 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=0db34ca3ab8056fa7c8562fd8e774815e8c6b76787b74570c41b80974be4fd88 -->
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
 
 # NeoGraph C++ API 참조 {#mainpage}
 
 
-C++17 그래프 에이전트 엔진 라이브러리 - C++용 LangGraph(옵션 포함)
+C++20 그래프 에이전트 엔진 라이브러리 - C++용 LangGraph(옵션 포함)
 파이썬 바인딩. 이 사이트는 다음에 대한 **생성된 참조**입니다.
 `include/neograph/`의 공개 C++ 헤더.
 

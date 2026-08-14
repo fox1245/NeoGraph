@@ -84,10 +84,17 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `interrupted` | `bool` | `True` if the run paused at an `interrupt_before` / `interrupt_after` / `NodeInterrupt`. |
 | `interrupt_node` | `str` | Name of the node that triggered the interrupt (when `interrupted`). |
 | `interrupt_value` | `dict` | `{"reason": str, "type": "NodeInterrupt", "value": ...}` for a dynamic interrupt (`"value"` present only when the node attached a payload), or `{"message": ...}` for a static `interrupt_before` / `interrupt_after`. |
-| `checkpoint_id` | `str` | ID of the latest checkpoint saved during the run. Pass to `engine.resume_async(checkpoint_id=...)` to continue. |
+| `checkpoint_id` | `str` | ID of the latest checkpoint saved during the run. Informational only; `resume_async()` resumes by `thread_id`, not by checkpoint ID. |
 | `execution_trace` | `list[str]` | Node names in the order they executed — useful for debugging routing. |
 
 `RunConfig` mirrors the LangGraph `RunnableConfig` idea:
+
+To resume an interrupted run asynchronously, use the thread ID and optionally
+provide the human's answer:
+
+```python
+result = await engine.resume_async(thread_id="t1", resume_value=answer)
+```
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -429,7 +436,7 @@ where `fn(state) -> str` returns one of the route keys.
 - **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
 - **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
 - **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
-- **Checkpoints** — subclass `CheckpointStore` for a Python backend, use `InMemoryCheckpointStore` directly, or use `PostgresCheckpointStore` when the binding is built from source with `-DNEOGRAPH_BUILD_POSTGRES=ON` (libpq bundling for the PyPI wheel is pending).
+- **Checkpoints** — subclass `CheckpointStore` for a Python backend, use `InMemoryCheckpointStore` directly, or use `PostgresCheckpointStore` when the binding is built with `-DNEOGRAPH_BUILD_POSTGRES=ON`. Supported wheels bundle libpq with the extension.
 - **OpenAI Responses over WebSocket** — `SchemaProvider(schema="openai_responses", use_websocket=True)`.
 
 Wheels: Linux x86_64 (manylinux_2_34), Linux aarch64 (manylinux_2_34),

@@ -146,8 +146,9 @@ from ._neograph import (
 )
 
 # PostgresCheckpointStore is only present when the binding was built
-# with -DNEOGRAPH_BUILD_POSTGRES=ON. The PyPI wheel ships with it OFF
-# (libpq bundling is a separate cibw step). Re-export when available
+# with -DNEOGRAPH_BUILD_POSTGRES=ON. The PyPI wheel builds it on supported
+# platforms after bundling libpq; source builds can enable it explicitly.
+# Re-export when available
 # so source-build users / advanced installs get the durable store
 # under the same `neograph_engine.PostgresCheckpointStore` name.
 try:

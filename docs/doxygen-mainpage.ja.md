@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ja source_sha256=8b62b237339d4244bee698f93443c1598e9ae55b631399b33d036606bab39d52 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ja source_sha256=0db34ca3ab8056fa7c8562fd8e774815e8c6b76787b74570c41b80974be4fd88 -->
 # NeoGraph C++ API リファレンス {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
 
-C++17 グラフ エージェント エンジン ライブラリ — LangGraph for C++ (オプションあり)
+C++20 グラフ エージェント エンジン ライブラリ — LangGraph for C++ (オプションあり)
 Python バインディング。このサイトは、**生成されたリファレンス**です。
 `include/neograph/` のパブリック C++ ヘッダー。
 

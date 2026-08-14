@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=b09a63e8a367d734aa3e9a1be015fcef1bc3d3b9fe472e138e040ed6ce0f53f9 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=d649c0a0a5d99d39d6a84ec5a4b48707f6b5f49a7a5143ff3ce3aa13c8b9436b -->
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
 
 # 네오그래프 하네스 MCP
@@ -145,6 +145,7 @@ OpenAI 호환 공급자 어댑터를 사용하여 로컬 stdio 서버를 구축�
 
 ```bash
 cmake -S . -B build-harness \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_MCP_SERVER=ON
@@ -154,13 +155,12 @@ export NEOGRAPH_HARNESS_MODEL=gpt-4o-mini
 ```
 
 `NEOGRAPH_HARNESS_API_KEY`는 `OPENAI_API_KEY`보다 우선합니다.
-`NEOGRAPH_HARNESS_BASE_URL`는 OpenAI 호환 엔드포인트를 선택합니다. 서버
-accepts both an unversioned base such as `https://openrouter.ai/api` and the
-provider's documented versioned form such as `https://openrouter.ai/api/v1`;
-누락된 경우에만 `/v1`를 추가합니다. 서버는 다음에만 프로토콜 메시지를 씁니다.
-stdout 및 진단은 stderr에만 적용됩니다. 참조
-현재의 [OpenRouter quickstart](https://openrouter.ai/docs/quickstart)
-끝점 형식.
+`NEOGRAPH_HARNESS_BASE_URL`는 OpenAI 호환 엔드포인트를 선택합니다. 서버는
+`https://openrouter.ai/api`처럼 버전이 없는 기본 주소와
+`https://openrouter.ai/api/v1`처럼 제공자가 문서화한 버전 주소를 모두 받습니다.
+주소에 `/v1`이 없을 때만 이를 추가합니다. 서버는 프로토콜 메시지를 stdout에만,
+진단 메시지를 stderr에만 기록합니다. 현재 엔드포인트 형식은
+[OpenRouter quickstart](https://openrouter.ai/docs/quickstart)를 참고하세요.
 
 호스트 상호 운용성 연기 테스트에 대해서만 `NEOGRAPH_HARNESS_SMOKE=1`를 설정합니다.
 해당 명시적 모드는 유효한 값을 반환하는 결정적 프로세스 내 공급자를 사용합니다.
@@ -180,11 +180,11 @@ export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
 컴파일된 개정 다이제스트, MCP 프로토콜 버전 및 하네스 프로필. 노동자
 시도에는 기간, validation/retry 결과 및 상관 관계 ID가 포함됩니다.
 발급 시도에 공급자, 기능 및 호스트 중개 호출을 참여시킵니다.
-두 SQLite 저장소 모두 WAL 모드와 제한된 사용 중을 사용합니다.
-시간 초과. 기존 버전 1 레코드 데이터베이스는 트랜잭션 방식으로 버전으로 마이그레이션됩니다.
-3개 열었을 때. 디렉터리는 서버를 다시 시작해도 유지됩니다. 에이
-`host_brokered` 카탈로그 항목은 두 저장소 중 하나가 있는 경우 컴파일 시 거부됩니다.
-누락되어 워크플로에 없는 재개 가능성을 광고할 수 없습니다.
+두 SQLite 저장소 모두 WAL 모드와 제한된 busy timeout을 사용합니다. 기존 버전 1
+레코드 데이터베이스는 열 때 트랜잭션으로 버전 3으로 마이그레이션됩니다. 디렉터리는
+서버를 다시 시작해도 유지됩니다. 두 저장소 중 하나라도 없으면
+`host_brokered` 카탈로그 항목을 컴파일 시 거부하므로, 워크플로가 지원하지 않는
+재개 기능을 광고할 수 없습니다.
 
 커스텀 임베딩은 다음을 통해 동일한 백엔드를 구성할 수 있습니다.
 선택적 `neograph::mcp_sqlite` 대상의 `SqliteHarnessRecordStore`.
@@ -318,6 +318,7 @@ HTTP/OpenSSL 종속성을 자동으로 얻지 않습니다.
 
 ```bash
 cmake -S . -B build-harness-http \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=OFF \
   -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_MCP_SERVER=ON \

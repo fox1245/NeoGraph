@@ -178,6 +178,7 @@ Build the local stdio server with the OpenAI-compatible provider adapter:
 
 ```bash
 cmake -S . -B build-harness \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_MCP_SERVER=ON
@@ -351,6 +352,7 @@ does not silently gain an HTTP/OpenSSL dependency:
 
 ```bash
 cmake -S . -B build-harness-http \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=OFF \
   -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_MCP_SERVER=ON \

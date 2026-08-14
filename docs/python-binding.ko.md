@@ -1,12 +1,12 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=75569d457cedc380413c9de3526d7a4db73790213b5ac9613182126fe9f4933c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=aa37c77f9c0d5edbcefc44cab95fa0bbd0eaf928751367baa9e4091c7cbbf592 -->
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 # 파이썬 바인딩
 
 
-NeoGraph는 `pip` 설치 가능한 Python 패키지로 제공되므로 동일합니다.
-C++ 엔진은 Jupyter에서 LangGraph 스타일 워크플로를 구동할 수 있습니다.
-노트북, Gradio 앱 또는 FastAPI 서비스:
+NeoGraph는 `pip`로 설치하는 Python 패키지로도 제공됩니다. 동일한 C++ 엔진을
+Jupyter 노트북, Gradio 앱, FastAPI 서비스에서 LangGraph와 비슷한 워크플로로
+구동할 수 있습니다.
 
 ```bash
 pip install neograph-engine
@@ -14,8 +14,8 @@ pip install neograph-engine
 
 ## 5초 데모(API 키 없음)
 
-설치가 작동했음을 증명하는 가장 짧은 것 — 하나의 데코레이터 정의
-노드를 실행하고 출력을 읽습니다.
+설치가 제대로 되었는지 확인하는 가장 짧은 예제입니다. 데코레이터로 노드를
+정의하고 실행한 뒤 결과를 읽습니다.
 
 ```python
 import neograph_engine as ng
@@ -86,19 +86,26 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 |`interrupted`|`bool`|실행이 `interrupt_before` / `interrupt_after` / `NodeInterrupt`에서 일시 중지된 경우 `True`입니다.|
 |`interrupt_node`|`str`|인터럽트를 트리거한 노드의 이름입니다(`interrupted`인 경우).|
 |`interrupt_value`|`dict`|동적 인터럽트의 경우 `{"reason": str, "type": "NodeInterrupt", "value": ...}`(노드가 페이로드를 연결할 때만 존재하는 `"value"`) 또는 정적 `interrupt_before`/`interrupt_after`의 경우 `{"message": ...}`입니다.|
-|`checkpoint_id`|`str`|실행 중에 저장된 최신 체크포인트의 ID입니다. 계속하려면 `engine.resume_async(checkpoint_id=...)`를 전달하세요.|
+|`checkpoint_id`|`str`|실행 중 저장된 최신 체크포인트의 ID입니다. 참고용 값이며, `resume_async()`는 체크포인트 ID가 아니라 `thread_id`로 재개합니다.|
 |`execution_trace`|`list[str]`|실행된 순서대로의 노드 이름 — 라우팅 디버깅에 유용합니다.|
 
-`RunConfig`는 LangGraph `RunnableConfig` 아이디어를 반영합니다.
+`RunConfig`는 LangGraph `RunnableConfig`의 개념을 따릅니다.
+
+중단된 실행을 비동기로 재개하려면 스레드 ID를 전달하고, 필요하면 사람의 응답도
+함께 전달하세요.
+
+```python
+result = await engine.resume_async(thread_id="t1", resume_value=answer)
+```
 
 |필드|기본|의미|
 |---|---|---|
-|`thread_id`|필수의|대화/세션 식별자 — 체크포인트 스트림을 별도로 유지합니다.|
-|`input`| `{}` |초기 채널 값 — 키는 그래프의 `channels` 정의와 일치해야 합니다.|
-|`max_steps`| 50 |슈퍼 계단 천장; ReAct 루프에는 일반적으로 10개 이상이 필요합니다.|
-| `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
-|`resume_if_exists`|`False`|`True` 및 체크포인트 저장소가 구성되면 실행은 `thread_id`(있는 경우)에 대한 최신 체크포인트를 로드하고 채널 감소기를 통해 맨 위에 `input`를 적용합니다. 즉, `input`를 통해 이전 상태를 수동으로 스레딩하지 않고도 다중 턴 채팅이 가능합니다. 기본값은 이전 버전과의 호환성을 위해 새로 시작 의미 체계를 유지합니다. 중단된 실행에서 HITL를 재개하려면 대신 `engine.resume_async()`를 사용하세요.|
-|`cancel_token`|`None`|협력 취소를 위한 선택적 `CancelToken`입니다. `engine.run()` 앞에 하나를 할당한 다음 다른 Python 스레드에서 `token.cancel()`를 호출합니다. 엔진은 다음 슈퍼스텝 경계에서 멈춥니다. 긴 작업을 수행하는 노드는 `input.ctx.cancel_token`를 폴링해야 합니다.|
+|`thread_id`|필수|대화 또는 세션 식별자입니다. 체크포인트 스트림을 분리합니다.|
+|`input`|`{}`|초기 채널 값입니다. 키는 그래프의 `channels` 정의와 일치해야 합니다.|
+|`max_steps`|50|슈퍼스텝 실행 한도입니다. ReAct 루프에는 보통 10 이상이 필요합니다.|
+|`stream_mode`|`StreamMode.OFF`|`EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL` 비트마스크입니다. `run_stream`과 `run_stream_async`에서만 사용합니다.|
+|`resume_if_exists`|`False`|`True`이고 체크포인트 저장소가 설정되어 있으면 `thread_id`의 최신 체크포인트를 불러온 뒤 `input`을 채널 리듀서로 적용합니다. 따라서 이전 상태를 `input`에 직접 넣지 않고도 다중 턴 대화를 이어갈 수 있습니다. 기본값은 새로 시작하는 동작을 유지합니다. HITL 중단을 재개할 때는 `engine.resume_async()`를 사용하세요.|
+|`cancel_token`|`None`|협력적 취소를 위한 선택적 `CancelToken`입니다. `engine.run()` 전에 할당하고 다른 Python 스레드에서 `token.cancel()`을 호출하세요. 엔진은 다음 슈퍼스텝 경계에서 멈추며, 오래 실행되는 노드는 `input.ctx.cancel_token`을 확인해야 합니다.|
 
 ```python
 token = ng.CancelToken()
@@ -110,18 +117,17 @@ config.cancel_token = token
 token.cancel()
 ```
 
-## Python 노드에서 사람을 위해 일시 ​​중지
+## Python 노드에서 사람의 확인을 기다리기
 
-그래프 정의의 `interrupt_before`는 다음을 수행할 때 선택한 노드에서 일시 중지됩니다.
-그래프를 썼습니다. 인간이 실제로 존재하는 경우를 표현할 수는 없습니다.
-왜냐하면 계단이 위험한지 여부는 모델이 방금 요청한 내용에 따라 달라지기 때문입니다.
-을 위한:
+그래프 정의의 `interrupt_before`는 그래프를 작성할 때 지정한 노드 앞에서 실행을
+멈춥니다. 하지만 실제 HITL에서는 어떤 작업이 위험한지 모델의 요청을 확인한 뒤에야
+알 수 있으므로, 이 설정만으로는 충분하지 않습니다. 예를 들면 다음과 같습니다.
 
 > *"에이전트가 `rm -rf build/`를 실행하려고 합니다. 허용하시겠습니까?"*
 
-이를 위해 노드 자체가 결정합니다. `NodeInterrupt`를 발생시켜 무엇을 첨부할지 결정합니다.
-승인이 필요합니다. 엔진 체크포인트를 확인하고 일반 `RunResult`를 돌려줍니다.
-(아무것도 제기되지 않습니다) 답변은 다음을 요청한 노드로 돌아갑니다.
+이 경우에는 노드가 직접 `NodeInterrupt`를 발생시키고 승인에 필요한 정보를 함께
+전달합니다. 엔진은 체크포인트를 저장한 뒤 일반 `RunResult`를 반환하며, 사람의
+응답은 요청을 생성한 노드로 돌아갑니다.
 
 ```python
 import neograph_engine as ng
@@ -431,7 +437,7 @@ ng.ReducerRegistry.register_reducer("sum",
 - **사용자 정의 Python 노드** — `neograph_engine.GraphNode` 서브클래스, `NodeFactory.register_type` 또는 `@neograph_engine.node` 데코레이터를 통해 등록합니다. 팬아웃 작업자 스레드를 포함하여 적절한 GIL 처리에 따라 엔진이 디스패치됩니다.
 - **사용자 정의 Python 도구** — 하위 클래스 `neograph_engine.Tool`, `NodeContext(tools=[...])`에 전달합니다. 엔진은 컴파일 타임에 소유권을 갖습니다.
 - **비동기** — 모든 `*_async` 바인딩은 호출 스레드의 실행 루프에 바인딩된 `asyncio.Future`를 반환합니다. 스트림 콜백은 `loop.call_soon_threadsafe`를 통해 루프 스레드로 호핑되므로 asyncio가 예상하는 곳에서 콜백이 실행됩니다.
-- **체크포인트** — Python 백엔드용 하위 클래스 `CheckpointStore`, `InMemoryCheckpointStore`를 직접 사용하거나, 바인딩이 `-DNEOGRAPH_BUILD_POSTGRES=ON`를 사용하여 소스에서 빌드된 경우 `PostgresCheckpointStore`를 사용합니다(PyPI 휠에 대한 libpq 번들링은 보류 중입니다).
+- **체크포인트** — Python 백엔드는 `CheckpointStore`를 서브클래싱하거나 `InMemoryCheckpointStore`를 직접 사용할 수 있습니다. 바인딩을 `-DNEOGRAPH_BUILD_POSTGRES=ON`으로 빌드하면 `PostgresCheckpointStore`도 사용할 수 있으며, 지원되는 휠에는 libpq가 함께 포함됩니다.
 - **WebSocket을 통한 OpenAI 응답** — `SchemaProvider(schema="openai_responses", use_websocket=True)`.
 
 휠: Linux x86_64(manylinux_2_34), Linux aarch64(manylinux_2_34),

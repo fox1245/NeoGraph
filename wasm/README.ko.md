@@ -1,103 +1,112 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=5d8c8917e27b2b522ff655a631f05e29701f0759b8f5bb9595f2db1d02089b92 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=19a1e742b349014d3c9115255a5966a692c37f11c52cdfc3f65a9e747a507a89 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-# NeoGraph WASM — 타당성 스파이크
+# NeoGraph WASM - 1단계 스모크 빌드
 
+이 디렉터리에는 1단계 WebAssembly 스모크 프로그램이 들어 있습니다. Emscripten에서
+WASM 전용 코드 분기 없이 코어 엔진으로 그래프를 컴파일하고 실행할 수 있는지 확인합니다.
+현재 경로는 Node.js 스모크 테스트용이며, 브라우저 SDK는 아닙니다.
 
-WebAssembly로 컴파일된 그래프 엔진입니다. 이 디렉토리는
-**1단계 스파이크** — 엔진 계층(컴파일, 실행, 실행기,
-스케줄러, 코디네이터, 상태, 채널, NodeCache) 빌드 및 실행
-Emscripten에서 수정되지 않았습니다.
+## 과거 실행 결과
 
-## 결과
+아래 수치는 이전에 로컬에서 실행한 스모크 테스트의 결과입니다. 참고용으로만 유지하며,
+생성된 `.wasm`이나 `.js` 파일은 저장소에 포함하지 않습니다. 현재 CI도 WASM 크기
+아티팩트를 게시하지 않습니다.
 
-|미터법|값|
+| 측정 항목 | 값 |
 |---|---|
-|WASM 바이너리(-O3 + LTO)|**712KB**|
-|Emscripten JS 런타임|92KB|
-|총 선박 크기|**~800KB**|
-|엔진 소스 차이|0줄|
-|첫 번째 실행 출력|`doubled = 42, trace = d` ✓|
+| WASM 바이너리 (-O3 + LTO) | **712 KB** |
+| Emscripten JS 런타임 | 92 KB |
+| JavaScript + WASM 합계 | **약 800 KB** |
+| 엔진 소스 변경 | 0줄 |
+| 첫 실행 출력 | `doubled = 42, trace = d` ✓ |
 
-비교를 위해 기본 NG의 총 크기는 5.5MB입니다. LangGraph 스택
-(langgraph + langchain + openai + httpx + pydantic + langsmith)는 31MB입니다.
-브라우저에 전달하려고 시도조차 하지 않는 순수 Python입니다. NG
-L3 캐시 내부에 두 배 이상 들어가며 일반적인 SaaS보다 작습니다.
-랜딩 페이지는 이미 이 엔진이 사용하는 것보다 더 많은 JS를 로드하고 있습니다.
+비교 기준인 네이티브 NG 빌드는 5.5 MB이며, LangGraph 스택
+(langgraph + langchain + openai + httpx + pydantic + langsmith)은 31 MB의
+순수 Python 코드입니다. 이 스택은 브라우저 배포를 지원하지 않지만, NeoGraph 코어는
+브라우저에 전달하기에 충분히 작습니다.
 
-## 오늘 실행되는 작업(1단계)
+## 현재 실행되는 항목 (1단계)
 
-- `GraphEngine::compile(json)` — JSON 정의 → 실행 가능한 엔진.
-- `engine->run(cfg)` — InMemoryCheckpointStore를 사용한 동기 실행.
-- `NodeFactory::register_type` — 리프를 통해 등록된 사용자 정의 노드
-의미 체계는 C++/Python 경로에서 이어집니다.
-- 모든 v0.1.6 기능은 깔끔하게 컴파일됩니다: `set_worker_count`,
-`set_node_cache_enabled`, 리듀서가 있는 채널, 조건부 에지,
-팬아웃, 명령 라우팅, 인터럽트를 보냅니다.
-- C++20 코루틴(asio의 헤더 전용 `awaitable` 조각)은 다음에서 작동합니다.
-엠스크립트 5.0.
+- `GraphEngine::compile(json)` - JSON 정의를 실행 가능한 엔진으로 컴파일합니다.
+- `engine->run(cfg)` - `InMemoryCheckpointStore`를 사용해 동기 실행합니다.
+- `NodeFactory::register_type`로 등록한 사용자 정의 노드를 실행합니다. 노드의 기본
+  동작은 C++ 및 Python 경로와 같습니다.
+- 1단계 스모크 테스트는 `set_worker_count`, `set_node_cache_enabled`, 리듀서가 있는
+  채널, 조건부 엣지, Send 팬아웃, Command 라우팅, 인터럽트를 포함합니다.
+- C++20 코루틴(asio의 헤더 전용 `awaitable` 구성 요소)은 Emscripten 5.0에서
+  동작합니다.
 
-## 일부러 아직 배송하지 않은 것
+## 아직 제공하지 않는 항목
 
-|서브시스템|연기된 이유|단계|
+| 서브시스템 | 보류 이유 | 단계 |
 |---|---|---|
-|`neograph_async`(asio를 통한 HTTP/WebSocket)|브라우저는 원시 소켓이 아닌 `fetch` / 기본 WebSocket을 사용합니다.| 2 |
-|`neograph_llm`(SchemaProvider, OpenAIProvider)|위의 비동기 전송에 따라 다름| 2 |
-|`neograph_postgres`|관련 없는 브라우저| — |
-|`neograph_mcp`|하위 프로세스 기반, 브라우저와 관련 없음| — |
-|JS 바인딩 포함|JS가 노드 구현을 콜백으로 정의하도록 합니다.|2-A|
+| `neograph_async` (asio 기반 HTTP/WebSocket) | 브라우저에서는 원시 소켓 대신 `fetch`와 네이티브 WebSocket을 사용합니다. | 2 |
+| `neograph_llm` (SchemaProvider, OpenAIProvider) | 위 비동기 전송 계층이 필요합니다. | 2 |
+| `neograph_postgres` | 브라우저 환경에는 적합하지 않습니다. | - |
+| `neograph_mcp` | 서브프로세스 기반이라 브라우저에서 사용할 수 없습니다. | - |
+| Embind JS 바인딩 | JavaScript에서 노드 구현을 콜백으로 정의할 수 있게 합니다. | 2-A |
 
-## 짓다
+## 빌드 및 실행
 
 ```bash
 source /opt/emsdk/emsdk_env.sh
 
-em++ -std=c++20 -O3 -flto -fexceptions -pthread \
-  -sALLOW_MEMORY_GROWTH=1 -sPTHREAD_POOL_SIZE=4 \
-  -DASIO_STANDALONE -DASIO_NO_DEPRECATED \
-  -I include -I deps/asio/include -I deps/yyjson \
-  wasm/smoke.cpp \
-  src/core/json.cpp deps/yyjson/yyjson.c \
-  src/core/graph_engine.cpp src/core/graph_compiler.cpp \
-  src/core/graph_validator.cpp src/core/tool_dispatch.cpp \
-  src/core/graph_coordinator.cpp src/core/graph_executor.cpp \
-  src/core/scheduler.cpp src/core/graph_state.cpp \
-  src/core/graph_node.cpp src/core/graph_loader.cpp \
-  src/core/graph_checkpoint.cpp src/core/store.cpp \
-  src/core/provider.cpp src/core/tool.cpp \
-  src/core/react_graph.cpp src/core/plan_execute_graph.cpp \
-  src/core/deep_research_graph.cpp src/core/node_cache.cpp \
-  -o wasm/smoke.js
+emcmake cmake -S . -B build-wasm \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_WASM=ON \
+  -DNEOGRAPH_BUILD_ASYNC=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_MCP_CLIENT=OFF \
+  -DNEOGRAPH_BUILD_MCP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF \
+  -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_GRPC=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF \
+  -DNEOGRAPH_BUILD_UTIL=OFF \
+  -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+  -DNEOGRAPH_USE_LIBCURL=OFF
+cmake --build build-wasm --target neograph_wasm_smoke -j
+node build-wasm/wasm/smoke.js
 ```
 
-`node wasm/smoke.js`로 실행합니다. 브라우저 플래그가 필요하지 않습니다.
+이 타깃은 `neograph_core`를 직접 링크하므로 소스 목록은 이 문서에 복사해 두지 않고
+주 CMake 빌드에서 관리합니다. 정상 실행 시 `doubled = 42`와 노드 실행 추적이
+출력됩니다.
 
-`compile()`의 기본값은 `worker_count=1`이므로 엔진 소유 스레드 풀을 만들지
-않습니다. 이 스모크 명령은 호출자가 `set_worker_count(N >= 2)`로 병렬 팬아웃을
-선택할 수 있도록 Emscripten 스레드 네 개를 계속 활성화하지만, 스모크 자체는
-단일 작업자 기본값을 사용합니다. 단일 스레드 빌드는
-`-sPTHREAD_POOL_SIZE=0`을 전달하면 되며 `set_worker_count(1)` 호출은 필요하지
-않습니다.
+`compile()`의 기본값은 `worker_count=1`이므로 엔진이 소유한 스레드 풀을 만들지
+않습니다. 이 스모크 빌드는 `set_worker_count(N >= 2)`로 병렬 팬아웃을 선택할 수
+있도록 Emscripten 스레드 풀 네 개를 활성화하지만, 스모크 자체는 단일 작업자 기본값을
+사용합니다. 단일 스레드 빌드가 필요하면 `-sPTHREAD_POOL_SIZE=0`을 사용하면 됩니다.
 
-## 2단계 스케치
+## 브라우저 지원 현황
 
-1. **2-A — JS 바인딩을 포함합니다.** `GraphEngine`, `RunConfig`,
-`ChannelWrite`, `Send`, `Command`를 JS로 변환합니다. JS 함수는 등록할 수 있습니다.
-노드 구현으로서의 자체; 엔진은 JS를 다시 호출하여
-각 노드 실행. 1~2일 예상됩니다.
+현재 저장소에는 브라우저 로더, npm 패키지, Embind API가 없습니다. 따라서 현재 타깃은
+Node.js 전용입니다. Emscripten pthreads를 사용하는 브라우저 빌드는 교차 출처 격리
+헤더(`Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Embedder-Policy: require-corp`)를 제공하는 웹 서버와 생성된 워커
+아티팩트가 추가로 필요합니다.
 
-2. **2-B — 가져오기 기반 HTTP 전송.** 전송 제공
-`SchemaProvider`가 사용하는 인터페이스; WASM 빌드가 연결됩니다.
-`fetch()`로. 동일한 공급자 코드는 두 백엔드 중 하나를 대상으로 합니다. 추정된
-3~5일.
+## 2단계 계획
 
-3. **2-C — npm 패키지.** 앱이 다음을 수행할 수 있도록 `@neograph/wasm`로 게시합니다.
-자체 빌드가 없는 엔진 + JS 바인딩 `npm install`.
-1~2일 예상됩니다.
+1. **2-A - Embind JS 바인딩.** `GraphEngine`, `RunConfig`, `ChannelWrite`, `Send`,
+   `Command`를 JavaScript에 노출합니다. JavaScript 함수로 노드 구현을 등록하면
+   엔진이 각 노드 실행 시 해당 함수를 호출합니다. 예상 기간은 1~2일입니다.
 
-2단계 이후 엔진은 Originator에서 발행한 그래프를 완전히 실행할 수 있습니다.
-브라우저 탭 — BYOK 호출을 종료합니다. Anthropic / OpenAI / Bedrock 키를 통해
-`fetch()`, Transformers.js / 로컬 추론을 위한 AI 내장 및
-결과는 채널을 통해 결과 봉투로 다시 흐릅니다. 그게 다야
-런타임 측면
-[NeoProtocol](https://github.com/fox1245/NeoProtocol) 실행자 역할.
+2. **2-B - fetch 기반 HTTP 전송.** `SchemaProvider`가 사용하는 전송 인터페이스를
+   제공하고 WASM 빌드에서는 이를 `fetch()`에 연결합니다. 하나의 Provider 코드가
+   두 전송 백엔드를 모두 사용할 수 있습니다. 예상 기간은 3~5일입니다.
+
+3. **2-C - npm 패키지.** 자체 빌드 없이 엔진과 JS 바인딩을 설치할 수 있도록
+   `@neograph/wasm`으로 배포합니다. 예상 기간은 1~2일입니다.
+
+2단계가 끝나면 브라우저 탭에서 Originator가 발행한 그래프를 실행할 수 있습니다.
+각 노드는 `fetch()`를 통해 BYOK 방식으로 Anthropic, OpenAI, Bedrock 키를 호출하고,
+transformers.js 또는 내장 AI로 로컬 추론을 수행하며, 결과는 채널을 거쳐 Result
+Envelope로 돌아옵니다. 이는 [NeoProtocol](https://github.com/fox1245/NeoProtocol)
+Executor 역할의 런타임 부분입니다.

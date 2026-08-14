@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=1ea76dcf312e4041ee0762b42945377e996661562c6ea90a4ccb9b35b586bdab -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=6c67c286aae76e1f4dcc6a25b9e04af02b9d362083721bce943f3fddb381b168 -->
 <p align="center">
   <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -36,7 +36,7 @@
 
 ## NeoGraph란?
 
-NeoGraph는 LangGraph 수준의 기능을 C++로 가져오는 **C++17/20 그래프 기반 에이전트 조율(orchestration) 엔진**이다. 에이전트 워크플로를 JSON으로 정의하고, 병렬 팬아웃으로 실행하며, 시간 여행 디버깅과 인간 개입(HITL)을 위한 상태를 체크포인트하고, 어떤 LLM 제공자든 연결할 수 있다 — 모두 Python 없이.
+NeoGraph는 LangGraph 수준의 기능을 C++로 제공하는 **C++20 그래프 기반 에이전트 오케스트레이션 엔진**입니다. 에이전트 워크플로를 JSON으로 정의하고, 병렬 팬아웃으로 실행하며, 시간 여행 디버깅과 인간 개입(HITL)을 위한 상태를 체크포인트할 수 있습니다. LLM 제공자도 자유롭게 연결할 수 있으며 Python 없이 사용할 수 있습니다.
 
 ```cpp
 #include <neograph/neograph.h>
@@ -79,7 +79,7 @@ auto result = engine->run(config);
 
 ## 네 축
 
-각 행은 명령어 하나면 된다 — 설정 없이, 라이브 LLM 변종만 API 키 필요.
+각 항목은 명령 한 번으로 확인할 수 있습니다. 라이브 LLM 예제만 API 키가 필요합니다.
 
 |   | 축 | 측정값 | 상세 |
 |---|---|---|---|---|
@@ -107,7 +107,7 @@ N=10,000 동시 (1 CPU / 512 MB 샌드박스): NeoGraph 52 ms / 7 µs p99 / 5.5 
 <a id="quick-start"></a>
 ## 빠른 시작
 
-**요구사항** — C++20 컴파일러 (GCC 13.3 코어 통과; GCC 14.2+ / Clang 18+ / MSVC 2022 전체), CMake 3.16+, Python 3 (빌드 시 코드 생성). 기본 옵션으로 구성 시 OpenSSL, SQLite3, libpq, libcurl **개발** 패키지도 필요(런타임 `.so`만으로는 `find_package`를 만족시키지 못함):
+**요구사항** — C++20 컴파일러(GCC 13.3은 코어만 지원하며, 전체 기능에는 GCC 14.2+ / Clang 18+ / MSVC 2022 권장), CMake 3.16+, Python 3(빌드 시 코드 생성). 기본 옵션으로 구성하려면 OpenSSL, SQLite3, libpq, libcurl **개발** 패키지도 필요합니다. 런타임 `.so`만으로는 `find_package`를 충족할 수 없습니다.
 
 ```bash
 # Ubuntu / Debian
@@ -116,7 +116,7 @@ sudo apt install libssl-dev libsqlite3-dev libpq-dev libcurl4-openssl-dev
 brew install openssl libpq curl
 ```
 
-Postgres / SQLite 체크포인트나 HTTP/2 백엔드가 필요 없다면? 패키지를 건너뛰고 `-DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF`로 구성.
+Postgres / SQLite 체크포인트나 HTTP/2 백엔드가 필요 없다면 해당 패키지를 설치하지 않고 `-DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF`로 구성하세요.
 
 **플랫폼** — Linux x86_64 **GA** (기준, 429/429 ctest, 새니타이저 깨끗); macOS arm64, Linux ARM64, Windows MSVC 2022 **beta**. 플랫폼별 근거는 [`CHANGELOG.md`](CHANGELOG.md).
 

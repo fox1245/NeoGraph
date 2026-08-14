@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=b09a63e8a367d734aa3e9a1be015fcef1bc3d3b9fe472e138e040ed6ce0f53f9 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=d649c0a0a5d99d39d6a84ec5a4b48707f6b5f49a7a5143ff3ce3aa13c8b9436b -->
 # NeoGraph ハーネス MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -143,6 +143,7 @@ OpenAI 互換プロバイダー アダプターを使用してローカル stdio
 
 ```bash
 cmake -S . -B build-harness \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_MCP_SERVER=ON
@@ -316,6 +317,7 @@ neograph://runs/run_123/attempts?after_sequence=17&limit=50
 
 ```bash
 cmake -S . -B build-harness-http \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=OFF \
   -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_MCP_SERVER=ON \

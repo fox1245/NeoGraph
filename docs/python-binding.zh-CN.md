@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=75569d457cedc380413c9de3526d7a4db73790213b5ac9613182126fe9f4933c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=aa37c77f9c0d5edbcefc44cab95fa0bbd0eaf928751367baa9e4091c7cbbf592 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -80,10 +80,16 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `interrupted` | `bool` | `True`如果运行暂停在`interrupt_before` / `interrupt_after` / `NodeInterrupt`。|
 | `interrupt_node` | `str` |触发中断的节点名称（当`interrupted`）。|
 | `interrupt_value` | `dict` | `{"reason": str, "type": "NodeInterrupt", "value": ...}`对于动态中断（`"value"`仅当节点附加有效负载时才存在），或`{"message": ...}`对于静态的`interrupt_before` / `interrupt_after`。|
-| `checkpoint_id` | `str` |运行期间保存的最新检查点的 ID。传递至`engine.resume_async(checkpoint_id=...)`继续。|
+| `checkpoint_id` | `str` |运行期间保存的最新检查点 ID，仅供参考；`resume_async()`按`thread_id`恢复，而不是按检查点 ID 恢复。|
 | `execution_trace` | `list[str]` |节点名称按执行顺序排列——对于调试路由很有用。|
 
-`RunConfig` 对应 LangGraph 的 `RunnableConfig` 概念：
+`RunConfig` 对应 LangGraph 的 `RunnableConfig` 概念。
+
+要异步恢复中断的运行，请传入线程 ID，并可选地传入人工回复：
+
+```python
+result = await engine.resume_async(thread_id="t1", resume_value=answer)
+```
 
 |场地|默认|意义|
 |---|---|---|
@@ -347,7 +353,7 @@ ng.ReducerRegistry.register_reducer("sum",
 - **自定义 Python 节点** — 子类 `neograph_engine.GraphNode`，通过 `NodeFactory.register_type` 或 `@neograph_engine.node` 装饰器注册。引擎在 GIL 下正确调度，包括来自扇出工作线程的调度。
 - **自定义 Python 工具** — 子类`neograph_engine.Tool`, 传入`NodeContext(tools=[...])`。引擎在编译时取得所有权。
 - **异步** — 每个`*_async`绑定返回一个`asyncio.Future`绑定到调用线程的运行循环。流回调通过以下方式跳转到循环线程`loop.call_soon_threadsafe`因此回调会在 asyncio 期望的地方运行。
-- **检查点** — 子类`CheckpointStore`对于 Python 后端，请使用`InMemoryCheckpointStore`直接使用，或者使用`PostgresCheckpointStore`当从源代码构建绑定时`-DNEOGRAPH_BUILD_POSTGRES=ON`（PyPI 轮的 libpq 捆绑正在等待中）。
+- **检查点** — Python 后端可以继承 `CheckpointStore`，也可以直接使用 `InMemoryCheckpointStore`。使用 `-DNEOGRAPH_BUILD_POSTGRES=ON` 构建绑定后，还可以使用 `PostgresCheckpointStore`；受支持的 wheel 会随扩展一起打包 libpq。
 - **OpenAI 回应结束WebSocket** — `SchemaProvider(schema="openai_responses", use_websocket=True)`。
 
 轮子：Linux x86_64 (manylinux_2_34)、Linux aarch64 (manylinux_2_34)、macOS arm64 (14+)、Windows x64 (MSVC），对于 Python 3.9 → 3.13。 **20个轮子

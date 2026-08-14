@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=8b62b237339d4244bee698f93443c1598e9ae55b631399b33d036606bab39d52 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=0db34ca3ab8056fa7c8562fd8e774815e8c6b76787b74570c41b80974be4fd88 -->
 # NeoGraph C++ API 参考 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
 
 
 
-一个 C++17 图 agent 引擎库，面向 C++ 的 LangGraph，带有可选的 Python 绑定。此站点是公共 C++ 标头的 **生成参考**`include/neograph/`。
+一个 C++20 图 agent 引擎库，面向 C++ 的 LangGraph，带有可选的 Python 绑定。此站点是公共 C++ 标头 `include/neograph/` 的**生成参考**。
 
 ## 从哪里开始
 

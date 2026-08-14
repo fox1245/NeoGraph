@@ -159,6 +159,7 @@ def _load_env():
             return
 
 
+def main() -> int:
     _load_env()
     if not os.environ.get("OPENROUTER_API_KEY"):
         print("OPENROUTER_API_KEY not set", file=sys.stderr)

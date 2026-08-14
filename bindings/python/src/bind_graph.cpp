@@ -625,11 +625,9 @@ void init_graph(py::module_& m) {
     // ensure_schema(); raises RuntimeError on bad credentials or DDL
     // failure rather than waiting until first save().
     //
-    // Available only when the binding wheel was built with
-    // NEOGRAPH_BUILD_POSTGRES=ON (default OFF in cibw config — the
-    // shipped PyPI wheel doesn't include this; install from source
-    // with -DNEOGRAPH_BUILD_POSTGRES=ON to use). Wheel inclusion
-    // pending a libpq-bundling cibw setup.
+    // Available when the binding was built with NEOGRAPH_BUILD_POSTGRES=ON.
+    // Supported wheels bundle libpq; source builds can enable the target
+    // explicitly with -DNEOGRAPH_BUILD_POSTGRES=ON.
     py::class_<PostgresCheckpointStore, CheckpointStore,
                std::shared_ptr<PostgresCheckpointStore>>(m,
         "PostgresCheckpointStore",

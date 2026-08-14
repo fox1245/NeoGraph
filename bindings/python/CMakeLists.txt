@@ -25,7 +25,7 @@
 # RPATH on `_neograph.so` is `$ORIGIN/..` so it finds the libneograph_*.so
 # siblings without LD_LIBRARY_PATH. Wheel-packaging downstream relocates
 # both the package dir and the .so files into a single relocatable layout
-# (see future bindings/python/README).
+# (see pyproject.toml and the wheel workflow).
 #
 # pybind11 is fetched via FetchContent rather than vendored as a submodule
 # — the engine itself doesn't need it (NEOGRAPH_BUILD_PYBIND is OFF by
@@ -181,9 +181,9 @@ endif()
 # day-to-day iteration use -DNEOGRAPH_BUILD_PYBIND=ON ; cmake --build then
 # re-run cmake -B build to refresh.
 #
-# (For the wheel build path: scikit-build-core copies these via the
-# `wheel.packages = ["bindings/python/neograph"]` directive in
-# pyproject.toml — no install rule needed here for them.)
+# The wheel build uses these same install rules; scikit-build-core stages the
+# CMake install tree directly, so no separate wheel.packages directive is
+# required.
 configure_file(neograph_engine/__init__.py      "${_NEOGRAPH_PY_PKG_DIR}/__init__.py"      COPYONLY)
 configure_file(neograph_engine/llm.py           "${_NEOGRAPH_PY_PKG_DIR}/llm.py"           COPYONLY)
 configure_file(neograph_engine/streaming.py     "${_NEOGRAPH_PY_PKG_DIR}/streaming.py"     COPYONLY)

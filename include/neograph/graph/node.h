@@ -127,9 +127,8 @@ public:
      * references inside still point to objects on the engine's
      * suspended-frame stack (which outlive the run by construction),
      * but the struct itself is no longer a reference parameter.
-     * Coroutine-reference-parameter UAF (per
-     * ``feedback_async_bridge_required.md`` / the v0.2.0 RunConfig
-     * crash) does not apply.
+     * The coroutine-reference-parameter UAF fixed in the v0.2.0 RunConfig
+     * path does not apply here.
      */
     virtual asio::awaitable<NodeOutput> run(NodeInput in) = 0;
 

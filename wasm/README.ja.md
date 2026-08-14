@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=5d8c8917e27b2b522ff655a631f05e29701f0759b8f5bb9595f2db1d02089b92 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=19a1e742b349014d3c9115255a5966a692c37f11c52cdfc3f65a9e747a507a89 -->
 # NeoGraph WASM — 実現可能性の急上昇
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,13 +8,13 @@ WebAssembly にコンパイルされたグラフ エンジン。このディレ�
 スケジューラ、コーディネーター、状態、チャネル、NodeCache) を構築して実行します
 Emscripten では未修正。
 
-## 結果
+## 過去の実行結果
 
 |メトリック |値 |
 |---|---|
 | WASM バイナリ (-O3 + LTO) | **712 KB** |
 | Emscripten JS ランタイム | 92KB |
-|船の合計サイズ | **~800 KB** |
+| JavaScript + WASM の合計 | **~800 KB** |
 |エンジンソースの差分 | 0 行 |
 |最初の実行出力 | `doubled = 42, trace = d` ✓ |
 
@@ -46,30 +46,37 @@ L3 キャッシュ内に 2 倍以上収まり、一般的な SaaS に十分な�
 | `neograph_mcp` |サブプロセスベース、ブラウザは無関係 | — |
 | JS バインディングを埋め込む | JS でノード実装をコールバックとして定義しましょう | 2-A |
 
-## 建てる
+## ビルドと実行
 
 ```bash
 source /opt/emsdk/emsdk_env.sh
 
-em++ -std=c++20 -O3 -flto -fexceptions -pthread \
-  -sALLOW_MEMORY_GROWTH=1 -sPTHREAD_POOL_SIZE=4 \
-  -DASIO_STANDALONE -DASIO_NO_DEPRECATED \
-  -I include -I deps/asio/include -I deps/yyjson \
-  wasm/smoke.cpp \
-  src/core/json.cpp deps/yyjson/yyjson.c \
-  src/core/graph_engine.cpp src/core/graph_compiler.cpp \
-  src/core/graph_validator.cpp src/core/tool_dispatch.cpp \
-  src/core/graph_coordinator.cpp src/core/graph_executor.cpp \
-  src/core/scheduler.cpp src/core/graph_state.cpp \
-  src/core/graph_node.cpp src/core/graph_loader.cpp \
-  src/core/graph_checkpoint.cpp src/core/store.cpp \
-  src/core/provider.cpp src/core/tool.cpp \
-  src/core/react_graph.cpp src/core/plan_execute_graph.cpp \
-  src/core/deep_research_graph.cpp src/core/node_cache.cpp \
-  -o wasm/smoke.js
+emcmake cmake -S . -B build-wasm \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_WASM=ON \
+  -DNEOGRAPH_BUILD_ASYNC=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_MCP_CLIENT=OFF \
+  -DNEOGRAPH_BUILD_MCP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF \
+  -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_GRPC=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF \
+  -DNEOGRAPH_BUILD_UTIL=OFF \
+  -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+  -DNEOGRAPH_USE_LIBCURL=OFF
+cmake --build build-wasm --target neograph_wasm_smoke -j
+node build-wasm/wasm/smoke.js
 ```
 
-`node wasm/smoke.js` で実行します。ブラウザーのフラグは必要ありません。
+このターゲットは `neograph_core` を直接リンクするため、ソース一覧はこの文書に
+複製せず、メインの CMake ビルドで管理します。成功すると `doubled = 42` と
+ノードの実行トレースが出力されます。
 
 `compile()` のデフォルトは `worker_count=1` なので、エンジン所有の
 スレッドプールは作成されません。このスモークコマンドは、呼び出し側が
@@ -77,6 +84,14 @@ em++ -std=c++20 -O3 -flto -fexceptions -pthread \
 4 スレッドを有効にしますが、スモーク自体は 1 ワーカーのデフォルトを使います。
 シングルスレッドビルドでは `-sPTHREAD_POOL_SIZE=0` を渡せばよく、
 `set_worker_count(1)` の呼び出しは不要です。
+
+## ブラウザー対応状況
+
+現在、このリポジトリにはブラウザーローダー、npm パッケージ、Embind API はありません。
+そのため、現在のターゲットは Node.js 専用です。Emscripten pthreads を使うブラウザー
+ビルドには、クロスオリジン分離ヘッダー
+(`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Embedder-Policy: require-corp`)
+と生成されたワーカーアセットを配信する Web サーバーも必要です。
 
 ## フェーズ 2 スケッチ
 

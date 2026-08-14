@@ -34,14 +34,12 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
 | **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _헤더 전용_ | [ACPServer](../include/neograph/acp/server.h) |
 | **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _헤더 전용_ | [WsClient](../include/neograph/async/ws_client.h) |
 
-The three "_헤더 전용_" rows are net-new modules added across
-recent audit and protocol-bridge work. They have full headers under
-`include/neograph/{a2a,acp,async}/` and are exercised by ctest
-suites, but writing dedicated narrative sections has been deferred
-in favour of pointing to those headers — both because they're large
-(A2A alone is ~5 classes + types module + caller node) and because
-new modules tend to keep evolving for one or two more releases
-before a hand-written tour is worth the maintenance.
+세 개의 "_헤더 전용_" 모듈은 최근 감사와 프로토콜 브리지 작업에서 추가되었습니다.
+`include/neograph/{a2a,acp,async}/` 아래에 전체 헤더가 있고 ctest 제품군으로
+검증하지만, 전용 설명을 작성하는 일은 공개 헤더 링크로 대신하고 있습니다. 모듈의
+규모가 크고(A2A만 해도 클래스 약 5개, types 모듈, caller 노드로 구성됩니다), 새
+모듈은 한두 번의 릴리스 동안 계속 바뀌는 경우가 많아 직접 작성한 개요를 유지하기
+어렵기 때문입니다.
 
 **편의 헤더:** `#include <neograph/neograph.h>`에는 전체 핵심 API와 그래프 엔진 API가 포함된다.
 
@@ -153,7 +151,7 @@ struct ToolCall {
 };
 ```
 
-| Field | Type | Description |
+| 필드 | 유형 | 설명 |
 |-------|------|-------------|
 | `id` | `std::string` | Unique identifier for this tool call (assigned by the LLM) |
 | `name` | `std::string` | Name of the tool function to invoke |
@@ -1301,12 +1299,12 @@ struct RunResult {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `output` | `json` | Serialized final state of all channels |
-| `interrupted` | `bool` | `true` if execution was paused by an interrupt (HITL) |
-| `interrupt_node` | `std::string` | Name of the node that triggered the interrupt |
-| `interrupt_value` | `json` | Reason or payload from the interrupt |
-| `checkpoint_id` | `std::string` | UUID of the last saved checkpoint |
-| `execution_trace` | `std::vector<std::string>` | Ordered list of node names in execution order |
+| `output` | `json` | 모든 채널의 직렬화된 최종 상태 |
+| `interrupted` | `bool` | 인터럽트(HITL)로 실행이 일시 중지되었으면 `true` |
+| `interrupt_node` | `std::string` | 인터럽트를 발생시킨 노드 이름 |
+| `interrupt_value` | `json` | 인터럽트의 이유 또는 페이로드 |
+| `checkpoint_id` | `std::string` | 마지막으로 저장된 체크포인트의 UUID |
+| `execution_trace` | `std::vector<std::string>` | 실행 순서대로 기록된 노드 이름 목록 |
 
 `max_steps_exhausted()` returns `true` only when the step ceiling stopped the
 run while runnable work remained. A graph that reaches `__end__` exactly on its
