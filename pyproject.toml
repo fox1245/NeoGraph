@@ -89,12 +89,12 @@ a2a = [
     "uvicorn>=0.35; python_version >= '3.10'",
 ]
 acp = [
-    "agent-client-protocol==0.11.0; python_version >= '3.10'",
+    "agent-client-protocol==0.12.0; python_version >= '3.10'",
 ]
 protocols = [
     "a2a-sdk[http-server]>=1.1,<2; python_version >= '3.10'",
     "uvicorn>=0.35; python_version >= '3.10'",
-    "agent-client-protocol==0.11.0; python_version >= '3.10'",
+    "agent-client-protocol==0.12.0; python_version >= '3.10'",
 ]
 
 [project.urls]
