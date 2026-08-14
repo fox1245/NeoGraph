@@ -97,7 +97,7 @@ jobs:
         # such file or directory`. v2.23 onwards skips python versions
         # that aren't on the build selector, which fixes this without
         # downgrading the manylinux image.
-        uses: pypa/cibuildwheel@v2.23
+        uses: pypa/cibuildwheel@v4.2
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
 
