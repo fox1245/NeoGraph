@@ -4,8 +4,7 @@ updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 1
@@ -24,8 +23,7 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 1
@@ -40,3 +38,17 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
+
+  - package-ecosystem: "npm"
+    directory: "/docs/promo"
+    schedule:
+      interval: "monthly"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    # Security updates remain enabled, but routine npm version PRs are disabled.
+    open-pull-requests-limit: 0
+    groups:
+      npm-security-updates:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
