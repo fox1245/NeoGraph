@@ -50,3 +50,8 @@ wasm/*.data
 
 # Local UI automation/MCP execution logs; generated data can contain host paths.
 /results/
+
+# Local-only verification and OpenRouter artifacts; may contain private data.
+/test.bat
+/turns_openrouter.txt
+/nginx-openrouter.conf
