@@ -1,10 +1,10 @@
 // NeoGraph Example 13: OpenRouter Responses API via SchemaProvider
 //
-// Same ReAct loop as example 01, but wired to OpenRouter's `/api/v1/responses`
-// endpoint through the schema-driven SchemaProvider. Demonstrates that a
-// completely different Responses API (input[] instead of messages[], flat
-// function_call items, output[] response, SSE event streaming) is supported
-// by swapping one built-in schema name — no provider subclass required.
+// Minimal one-request SSE smoke test for OpenRouter's `/api/v1/responses`
+// endpoint through the schema-driven SchemaProvider. This intentionally calls
+// SchemaProvider::complete_stream() directly instead of Agent::run_stream(),
+// whose first request is a non-streaming tool-detection pass. Every token
+// printed here therefore comes from the Responses SSE path.
 //
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
@@ -13,77 +13,53 @@
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
-#include <neograph/llm/agent.h>
 
 #include <cppdotenv/dotenv.hpp>
 
 #include <iostream>
-
-class CalculatorTool : public neograph::Tool {
-public:
-    neograph::ChatTool get_definition() const override {
-        return {
-            "calculator",
-            "Evaluate a mathematical expression. Input: {\"expression\": \"2 + 3 * 4\"}",
-            neograph::json{
-                {"type", "object"},
-                {"properties", {
-                    {"expression", {{"type", "string"}, {"description", "Math expression to evaluate"}}}
-                }},
-                {"required", neograph::json::array({"expression"})}
-            }
-        };
-    }
-
-    std::string execute(const neograph::json& args) override {
-        auto expr = args.value("expression", "");
-        return R"({"result": 42, "expression": ")" + expr + "\"}";
-    }
-
-    std::string get_name() const override { return "calculator"; }
-};
+#include <string>
 
 int main() {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const char* api_key = std::getenv("OPENROUTER_API_KEY");
-    if (!api_key) {
-        std::cerr << "Set OPENROUTER_API_KEY environment variable "
-                     "(or put it in .env beside the binary)\n";
-        return 1;
-    }
+        const char* api_key = std::getenv("OPENROUTER_API_KEY");
+        if (!api_key) {
+            std::cerr << "Set OPENROUTER_API_KEY environment variable "
+                         "(or put it in .env beside the binary)\n";
+            return 1;
+        }
 
-    // SchemaProvider with the OpenRouter-compatible Responses schema.
-    neograph::llm::SchemaProvider::Config config;
-    config.schema_path = "openai_responses";
-    config.api_key = api_key;
-    config.base_url_override = "https://openrouter.ai/api";
-    config.default_model = "~deepseek/deepseek-v4-flash-latest";
-    config.provider_routing = {{"zdr", true}};
-    auto provider = neograph::llm::SchemaProvider::create(config);
+        const std::string model = "~deepseek/deepseek-v4-flash-latest";
+        const std::string prompt =
+            "In two short sentences, explain why streaming LLM responses "
+            "improves perceived latency.";
 
-    std::vector<std::unique_ptr<neograph::Tool>> tools;
-    tools.push_back(std::make_unique<CalculatorTool>());
+        neograph::llm::SchemaProvider::Config config;
+        config.schema_path = "openai_responses";
+        config.api_key = api_key;
+        config.base_url_override = "https://openrouter.ai/api";
+        config.default_model = model;
+        config.timeout_seconds = 180;
+        config.provider_routing = {{"zdr", true}};
+        auto provider = neograph::llm::SchemaProvider::create(config);
 
-    neograph::llm::Agent agent(
-        std::move(provider),
-        std::move(tools),
-        "You are a helpful assistant with a calculator tool."
-    );
-    agent.set_tool_detection_timeout_seconds(180);
+        neograph::CompletionParams params;
+        params.model = model;
+        params.messages.push_back({"user", prompt});
+        params.temperature = 0.0f;
+        params.max_tokens = 512;
+        params.timeout_seconds = 180;
 
-    std::vector<neograph::ChatMessage> messages;
-    messages.push_back({"user", "What is 15 * 28 + 7?"});
+        std::cout << "User: " << prompt << "\n";
+        std::cout << "Assistant: " << std::flush;
 
-    std::cout << "User: What is 15 * 28 + 7?\n";
-    std::cout << "Assistant: " << std::flush;
+        provider->complete_stream(
+            params,
+            [](const std::string& token) { std::cout << token << std::flush; });
 
-    auto response = agent.run_stream(messages,
-        [](const std::string& token) { std::cout << token << std::flush; });
-
-    std::cout << "\n";
-    return 0;
+        std::cout << "\n";
+        return 0;
     } catch (const std::exception& e) {
         std::cerr << "\nError: " << e.what() << "\n";
         return 1;

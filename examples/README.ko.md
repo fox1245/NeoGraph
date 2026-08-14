@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=51dc1c8896901496c2ff95cb71a3788f11a095a53c10d72292ad1cf29dfd1511 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=200f242a080f49d1219526fb96b7be802ad86988481dae28092aaa80968e0d02 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # C++ API 예제
@@ -92,7 +92,7 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 |[`01_react_agent.cpp`](01_react_agent.cpp)|OpenRouter|ReAct 루프: `llm_call` ⇔ `tool_dispatch`(`has_tool_calls` 조건부 포함) 계산기 도구.|
 | 12 |[`12_rag_agent.cpp`](12_rag_agent.cpp)|OpenRouter|OpenRouter 호환 embedding + 메모리 내 코사인 검색을 사용하는 RAG.|
-| 13 |[`13_openai_responses.cpp`](13_openai_responses.cpp)|OpenRouter|OpenRouter `/api/v1/responses`에 `SchemaProvider("openai_responses")`로 연결한 ReAct 루프.|
+| 13 |[`13_openai_responses.cpp`](13_openai_responses.cpp)|OpenRouter|Agent의 비스트리밍 도구 감지 단계를 거치지 않고 `SchemaProvider::complete_stream()`으로 직접 수행하는 단일 요청 Responses SSE 스모크 테스트.|
 | 33 |[`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp)|OpenRouter|Responses 호환 transport 전환 예제. 재현 가능한 활성 경로는 HTTP/SSE입니다.|
 | 34 |[`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp)|OpenRouter|Responses 호환 내장 도구 wire shape 투어.|
 | 29 |[`29_responses_envelope.cpp`](29_responses_envelope.cpp)|OpenRouter|한 번의 tool-call 요청에 대한 원시 `/api/v1/responses` JSON envelope 덤프.|

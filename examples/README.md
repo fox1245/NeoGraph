@@ -91,7 +91,7 @@ demonstrate, not by file number.
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | The ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. Calculator tool. |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | RAG with real OpenRouter-compatible embeddings + in-memory cosine search. |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | Same ReAct loop, wired to OpenRouter's `/api/v1/responses` via `SchemaProvider("openai_responses")`. |
+| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | Direct one-request Responses SSE smoke test via `SchemaProvider::complete_stream()`, without Agent's non-streaming tool-detection pass. |
 | 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses-compatible transport toggle; the reproducible active path is HTTP/SSE. |
 | 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Wire-level tour of Responses-compatible built-in tool shapes. |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | Debug aid: dump the raw `/api/v1/responses` JSON envelope for one tool-call request. |

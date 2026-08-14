@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=bdd60f74da6b396e20b442bafa8e8479ebeeced9e8bef17caf8366a89ae4bf7e -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=200f242a080f49d1219526fb96b7be802ad86988481dae28092aaa80968e0d02 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -58,6 +58,7 @@ OPENROUTER_API_KEY=sk-or-...
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | 使用 `make_parallel_group` 的异步扇出。不需要 API key。 |
 | [`10_send_command.cpp`](10_send_command.cpp) | `Send`（动态扇出）+ `Command`（路由覆盖）。不需要 API key。 |
 | [`01_react_agent.cpp`](01_react_agent.cpp) | 使用真实 LLM + calculator tool 的 ReAct 循环。**需要 `OPENROUTER_API_KEY`。** |
+| [`14_plan_executor.cpp`](14_plan_executor.cpp) | 计划 → 并行子任务 → 求解器，并通过 checkpoint store 实现崩溃恢复。不需要 API key。 |
 
 理解这些之后，下面其余示例按它们展示的内容分组，而不是按文件编号分组。
 
@@ -85,7 +86,7 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct 循环：`llm_call` ↔ `tool_dispatch`，带 `has_tool_calls` 条件判断。Calculator 工具。 |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | 使用 OpenRouter 兼容 embedding + 内存余弦搜索的 RAG。 |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | 同一个 ReAct 循环，通过 `SchemaProvider("openai_responses")` 接到 OpenRouter 的 `/api/v1/responses`。 |
+| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | 单请求 Responses SSE 冒烟测试，直接调用 `SchemaProvider::complete_stream()`，不经过 Agent 的非流式工具检测阶段。 |
 | 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses 兼容 transport 切换示例；可复现的活动路径是 HTTP/SSE。 |
 | 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Responses 兼容内置工具 wire shape 演示。 |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | 调试辅助：为一次工具调用请求转储原始 `/api/v1/responses` JSON envelope。 |

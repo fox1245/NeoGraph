@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=bdd60f74da6b396e20b442bafa8e8479ebeeced9e8bef17caf8366a89ae4bf7e -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=200f242a080f49d1219526fb96b7be802ad86988481dae28092aaa80968e0d02 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -91,7 +91,7 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct ループ: `llm_call` ↔ `tool_dispatch` (`has_tool_calls` 条件付き)。計算ツール。 |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | OpenRouter 互換 embedding + メモリ内コサイン検索を備えた RAG。 |
-| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | 同じ ReAct ループですが、OpenRouter の `/api/v1/responses` に `SchemaProvider("openai_responses")` 経由で接続します。 |
+| 13 | [`13_openai_responses.cpp`](13_openai_responses.cpp) | OpenRouter | Agent の非ストリーミング tool-detection を介さず、`SchemaProvider::complete_stream()` を直接呼び出す単一リクエストの Responses SSE スモークテスト。 |
 | 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenRouter | Responses 互換 transport の切り替え例。再現可能な実行経路は HTTP/SSE です。 |
 | 34 | [`34_openai_responses_ws_tools.cpp`](34_openai_responses_ws_tools.cpp) | OpenRouter | Responses 互換の組み込みツール wire shape を紹介します。 |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | デバッグ支援: 1 つのツール呼び出しリクエストの生の `/api/v1/responses` JSON envelope をダンプします。 |
@@ -183,7 +183,7 @@ OPENROUTER_API_KEY=sk-or-...
 | # |ファイル |セットアップ |それが示すもの |
 |---|------|-------|---------------|
 | 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) |クレイ+レイリブ (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Clay/Raylib UI を使用したマルチターン チャット。 Pure-C++ デスクトップ アプリ、NeoGraph バックエンド。モックまたは`--live`。 |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + ギドラ + ギドラ-mcp | リバースエンジニアリング エージェント — Ghidra を介して、ストリップされたバイナリから関数名と概要を復元します。エンドツーエンドで検証済み (matched_score 0.92、6-fn crackme)。 |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + ギドラ + ギドラ-mcp | リバースエンジニアリング エージェント — Ghidra を介して、ストリップされたバイナリから関数名と概要を復元します。エンドツーエンドで検証済み (matched_score 0.92、6-fn crackme)。完全なパイプラインは [`fox1245/re-agent`](https://github.com/fox1245/re-agent) にあります。 |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) |オフライン | 5 つの小さな「分類子」 (感情 / 毒性 / 言語 / トピック / 意図) が Send を介して展開され、並行して実行されます。経過時間 ≈ 合計ではなく最大 (分類子ごと) — 小規模モデルのエッジ ストーリー。 DistilBERT/MiniLM パスの 5 ms レイテンシの代用を模擬します。インライン `[ONNX SWAP-IN]` ブロックは、`Ort::Session` を使用した 30 行の置換を示します。推論ランタイムの依存関係はありません。 |
 
 ## メンタル モデル — 3 層、真ん中に JSON
