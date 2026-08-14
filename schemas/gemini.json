@@ -4,10 +4,10 @@
     "base_url": "https://generativelanguage.googleapis.com",
     "endpoint": "/v1beta/models/$MODEL:generateContent",
     "stream_endpoint": "/v1beta/models/$MODEL:streamGenerateContent?alt=sse",
-    "auth_header": "",
+    "auth_header": "x-goog-api-key",
     "auth_prefix": "",
     "api_key_env": "GEMINI_API_KEY",
-    "auth_query_param": "key",
+    "auth_query_param": "",
     "extra_headers": {}
   },
   "request": {

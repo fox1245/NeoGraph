@@ -59,7 +59,7 @@ int main() {
     config.schema_path = "openai_responses";
     config.api_key = api_key;
     config.base_url_override = "https://openrouter.ai/api";
-    config.default_model = "deepseek/deepseek-v4-flash-0731";
+    config.default_model = "~deepseek/deepseek-v4-flash-latest";
     config.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::SchemaProvider::create(config);
 

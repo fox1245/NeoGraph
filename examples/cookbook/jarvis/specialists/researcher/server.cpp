@@ -139,7 +139,7 @@ public:
 
         CompletionParams p;
         p.model       = provider_->get_name() == "mock"
-                            ? "mock" : "deepseek/deepseek-v4-flash-0731";
+                            ? "mock" : "~deepseek/deepseek-v4-flash-latest";
         p.temperature = 0.3f; // 연구 응답은 정확성 위주 — 온도 낮게
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user",   user_text});
@@ -184,7 +184,7 @@ public:
         // 없으면 LLM 에게 25 단어 이하 요약 한 줄 추가 요청
         CompletionParams p;
         p.model       = provider_->get_name() == "mock"
-                            ? "mock" : "deepseek/deepseek-v4-flash-0731";
+                            ? "mock" : "~deepseek/deepseek-v4-flash-latest";
         p.temperature = 0.2f;
         p.messages.push_back({
             "system",
@@ -317,11 +317,11 @@ int main(int argc, char** argv) {
         llm::OpenAIProvider::Config cfg;
         cfg.api_key       = api_key;
         cfg.base_url      = "https://openrouter.ai/api";
-        cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+        cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
         cfg.provider_routing = {{"zdr", true}};
         provider = llm::OpenAIProvider::create_shared(cfg);
         std::cout << "[researcher-specialist] OpenRouter provider "
-                     "(deepseek/deepseek-v4-flash-0731)\n";
+                     "(~deepseek/deepseek-v4-flash-latest)\n";
     } else {
         provider = std::make_shared<MockProvider>();
         std::cout << "[researcher-specialist] OPENROUTER_API_KEY 없음 — mock provider 사용\n";

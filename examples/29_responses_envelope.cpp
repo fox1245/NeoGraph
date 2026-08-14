@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
                          "(or put it in .env beside the binary)\n";
             return 1;
         }
-        const std::string model = "deepseek/deepseek-v4-flash-0731";
+        const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
         std::string question = (argc >= 2)
             ? argv[1]

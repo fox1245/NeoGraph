@@ -49,7 +49,7 @@ using json = neograph::json;
 // =========================================================================
 // Embedding Client — calls OpenRouter's OpenAI-compatible embeddings API
 // (embeddings necessarily use an embedding model; chat calls below use
-// deepseek/deepseek-v4-flash-0731).
+// ~deepseek/deepseek-v4-flash-latest).
 // =========================================================================
 
 class EmbeddingClient {
@@ -359,7 +359,7 @@ int main() {
     neograph::llm::OpenAIProvider::Config llm_config;
     llm_config.api_key = api_key;
     llm_config.base_url = "https://openrouter.ai/api";
-    llm_config.default_model = "deepseek/deepseek-v4-flash-0731";
+    llm_config.default_model = "~deepseek/deepseek-v4-flash-latest";
     llm_config.provider_routing = {{"zdr", true}};
     auto provider = std::shared_ptr<neograph::Provider>(
         neograph::llm::OpenAIProvider::create(llm_config)

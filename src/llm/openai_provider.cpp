@@ -18,8 +18,17 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 
 namespace neograph::llm {
+
+namespace {
+
+bool model_omits_temperature(std::string_view model) {
+    return model.rfind("gpt-5", 0) == 0;
+}
+
+}  // namespace
 
 // --- OpenAIProvider ---
 
@@ -51,7 +60,8 @@ std::shared_ptr<Provider> OpenAIProvider::create_shared(const Config& config) {
 
 json OpenAIProvider::build_body(const CompletionParams& params) const {
     json body;
-    body["model"]    = params.model.empty() ? config_.default_model : params.model;
+    const std::string model = params.model.empty() ? config_.default_model : params.model;
+    body["model"]    = model;
     body["messages"] = messages_to_json(params.messages);
 
     if (!params.tools.empty()) {
@@ -59,7 +69,7 @@ json OpenAIProvider::build_body(const CompletionParams& params) const {
         body["tool_choice"] = "auto";
     }
 
-    if (params.temperature >= 0.0f) {
+    if (params.temperature >= 0.0f && !model_omits_temperature(model)) {
         body["temperature"] = params.temperature;
     }
 

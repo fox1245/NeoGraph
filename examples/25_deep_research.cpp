@@ -277,7 +277,7 @@ int main(int argc, char** argv) {
     const std::string crawl4ai_token =
         crawl4ai_token_env ? crawl4ai_token_env : "";
 
-    const std::string model = "deepseek/deepseek-v4-flash-0731";
+    const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
     auto raw_openrouter = llm::SchemaProvider::create({
         .schema_path      = "openai_responses",

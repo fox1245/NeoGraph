@@ -66,7 +66,7 @@ import _common  # side-effect: loads .env  # noqa: F401
 from neograph_engine.llm import SchemaProvider
 
 API_KEY = os.getenv("OPENAI_API_KEY", "")
-MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+MODEL   = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 PROMPT  = "Reply with a single short factual sentence about apples."
 PARALLEL = 5
 ITERS    = 3

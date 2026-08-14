@@ -1,6 +1,6 @@
 """06 — ReAct agent (LLM ↔ tools loop).
 
-Real OpenAI call + a Python `Tool` subclass. The LLM decides whether
+Real OpenAI Responses API call + a Python `Tool` subclass. The LLM decides whether
 to call the tool, the engine dispatches, the result is fed back, the
 LLM reads the result and produces the final answer.
 
@@ -16,7 +16,7 @@ Run:
 
 import json
 
-from _common import ng, openai_provider
+from _common import ng, schema_provider
 
 
 class CalculatorTool(ng.Tool):
@@ -68,7 +68,9 @@ def has_tool_calls(messages):
     return False
 
 
-provider = openai_provider()
+# GPT-5 tool calls use the OpenAI Responses API rather than the legacy
+# Chat Completions endpoint.
+provider = schema_provider(schema="openai_responses")
 
 # Built-in `llm_call` and `tool_dispatch` nodes plus the
 # `has_tool_calls` conditional condition (registered in the C++ side

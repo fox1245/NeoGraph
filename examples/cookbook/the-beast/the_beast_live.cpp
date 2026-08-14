@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
     }
     register_beast_node();
 
-    const std::string model            = "deepseek/deepseek-v4-flash-0731";
+    const std::string model            = "~deepseek/deepseek-v4-flash-latest";
     const json        provider_routing = {
         {"zdr", true},
         {"only", json::array({"morph"})},

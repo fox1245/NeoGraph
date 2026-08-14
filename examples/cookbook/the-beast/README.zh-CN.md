@@ -118,7 +118,7 @@ $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
-`the_beast_live.cpp` 将 `deepseek/deepseek-v4-flash-0731` 固定为
+`the_beast_live.cpp` 将 `~deepseek/deepseek-v4-flash-latest` 固定为
 `provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`。
 验证时，OpenRouter 将 Morph 的数据中心列为 US，并将该模型/提供商端点
 列为支持 ZDR。这是严格的提供商选择，而不是 OpenRouter 的区域内数据

@@ -217,7 +217,7 @@ int main(int argc, char** argv) {
     const auto harness = materialize_local_harness(source_server);
     register_local_copy_ninja_node(harness);
 
-    const std::string model            = "deepseek/deepseek-v4-flash-0731";
+    const std::string model            = "~deepseek/deepseek-v4-flash-latest";
     const json        provider_routing = {
         {"zdr", true},
         {"only", json::array({"morph"})},

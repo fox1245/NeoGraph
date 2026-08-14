@@ -26,7 +26,7 @@ import neograph_engine as ng
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "deepseek/deepseek-v4-flash-0731"
+MODEL = "~deepseek/deepseek-v4-flash-latest"
 
 
 def _load_env_if_present() -> None:

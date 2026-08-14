@@ -49,7 +49,7 @@ static std::string speak(Provider& p,
                          const std::string& transcript,
                          float temperature) {
     CompletionParams params;
-    params.model = "deepseek/deepseek-v4-flash-0731";
+    params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = temperature;
     params.messages.push_back({"system", role_system});
     params.messages.push_back({"user", transcript});
@@ -71,7 +71,7 @@ int main() {
     cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
     cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::SchemaProvider::create(cfg);
 

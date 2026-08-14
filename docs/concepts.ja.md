@@ -10,8 +10,7 @@
 
 コードサンプルは簡潔であるため、Python 側です。すべての地図
 C++ API に対して 1:1 (クラスについては [`reference-en.md`](reference-en.md) を参照)
-署名または [Doxygen](https://fox1245.github.io/NeoGraph/)
-生成された参照)。
+署名と `include/neograph/` 下の公開ヘッダーを使用します。
 
 > **以前に LangGraph を使用したことがある場合:** プリミティブは意図的に
 > 同じ — リデューサーを備えたチャネル、書き込みを発行するノード、条件付き
@@ -706,7 +705,5 @@ C++ の `ReducerRegistry::register_reducer` (Python フックはまだありま�
   上記のすべての概念をカバーするスクリプト。
 - [C++ examples](../examples/) — 同じ構造を持つ 36 個のプログラム。
 - [`reference-en.md`](reference-en.md) — 網羅的なクラスごとの API。
-- [Doxygen](https://fox1245.github.io/NeoGraph/) — 生成された参照
-  C++ ヘッダーの場合。
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 非同期 / コルーチンの詳細
   層。

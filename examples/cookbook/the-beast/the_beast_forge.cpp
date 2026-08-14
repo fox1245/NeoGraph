@@ -31,7 +31,12 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
 #include <unistd.h>    // getpid
+#endif
 #include <iostream>
 #include <memory>
 #include <string>
@@ -60,7 +65,7 @@ Verdict forge_gate(const json& core, const ng::NodeContext& ctx) {
 static std::string ask(std::shared_ptr<neograph::Provider> prov,
                        std::vector<neograph::ChatMessage>& convo, int max_tokens = 4000) {
     neograph::CompletionParams p;
-    p.model = "deepseek/deepseek-v4-flash-0731";
+    p.model = "~deepseek/deepseek-v4-flash-latest";
     p.messages = convo;
     p.temperature = 0.2f;
     p.max_tokens = max_tokens;
@@ -96,7 +101,7 @@ int main(int argc, char** argv) {
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
     auto provider = neograph::llm::OpenAIProvider::create_shared(
         {.api_key = key, .base_url = "https://openrouter.ai/api",
-         .default_model = "deepseek/deepseek-v4-flash-0731",
+         .default_model = "~deepseek/deepseek-v4-flash-latest",
          .provider_routing = {{"zdr", true}}});
 
     // Task deliberately needs a capability the stock server lacks (string

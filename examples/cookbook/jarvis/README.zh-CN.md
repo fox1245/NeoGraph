@@ -120,7 +120,7 @@ A2A bot、另一个 NeoGraph 实例等 — 只要把 URL 加到这个 JSON，
 
 ## Router（意图分类）— JARVIS 的大脑
 
-对固定的 DeepSeek 模型（`deepseek/deepseek-v4-flash-0731`）进行一次调用会返回：
+对固定的 DeepSeek 模型（`~deepseek/deepseek-v4-flash-latest`）进行一次调用会返回：
 
 ```json
 {

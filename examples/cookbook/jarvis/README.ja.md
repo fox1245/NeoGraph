@@ -120,7 +120,7 @@ A2A エンドポイントとして。
 
 ## ルーター (意図分類) — JARVIS の頭脳
 
-固定された DeepSeek モデル (`deepseek/deepseek-v4-flash-0731`) への 1 回の呼び出しで、次が返されます。
+固定された DeepSeek モデル (`~deepseek/deepseek-v4-flash-latest`) への 1 回の呼び出しで、次が返されます。
 
 ```json
 {

@@ -84,7 +84,7 @@ static ChatCompletion ask(Provider& p,
                           const std::string& user,
                           float temperature = 0.7f) {
     CompletionParams params;
-    params.model = "deepseek/deepseek-v4-flash-0731";
+    params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = temperature;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user",   user});
@@ -106,7 +106,7 @@ int main() {
     cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
     cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::SchemaProvider::create(cfg);
 

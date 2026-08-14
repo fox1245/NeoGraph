@@ -100,7 +100,7 @@ MOCK_ROUTER_JSON = ('{"mode":"direct","tool_calls":[],"delegate_to":null,'
 if BENCH_MODE == "api":
     from langchain_openai import ChatOpenAI
 
-    OPENROUTER_MODEL = "deepseek/deepseek-v4-flash-0731"
+    OPENROUTER_MODEL = "~deepseek/deepseek-v4-flash-latest"
 
     def _mk(temp: float, max_tok: int):
         api_key = os.environ.get("OPENROUTER_API_KEY")

@@ -110,7 +110,7 @@ int main() {
 
     auto out = neograph::async::run_sync(
         neograph::history::compact_history(
-            hist, mock, "deepseek/deepseek-v4-flash-0731",
+            hist, mock, "~deepseek/deepseek-v4-flash-latest",
             /*max_tokens=*/200, /*recent_keep=*/4));
 
     std::printf("  compacted: %s\n", out.compacted ? "yes" : "no");

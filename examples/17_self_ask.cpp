@@ -64,7 +64,7 @@ static ChatCompletion ask(Provider& p,
                           const std::vector<ChatMessage>& messages,
                           float temperature) {
     CompletionParams params;
-    params.model = "deepseek/deepseek-v4-flash-0731";
+    params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = temperature;
     params.messages = messages;
     return p.complete(params);
@@ -74,7 +74,7 @@ static ChatCompletion ask(Provider& p,
 // system prompt. In production this would be a search tool or RAG lookup.
 static std::string lookup(Provider& p, const std::string& sub_question) {
     CompletionParams params;
-    params.model = "deepseek/deepseek-v4-flash-0731";
+    params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = 0.0f;
     params.messages.push_back({"system",
         "You are a reference database. Given a factual question, answer with "
@@ -100,7 +100,7 @@ int main() {
     cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
     cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::SchemaProvider::create(cfg);
 

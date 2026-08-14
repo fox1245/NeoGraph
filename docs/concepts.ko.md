@@ -11,8 +11,7 @@
 
 코드 샘플은 더 간결하기 때문에 Python 측입니다. 모든 것이 지도에 나온다
 C++ API에 1:1(클래스는 [`reference-en.md`](reference-en.md) 참조)
-서명 또는 [Doxygen](https://fox1245.github.io/NeoGraph/)
-생성된 참조).
+서명과 `include/neograph/` 아래의 공개 헤더를 사용합니다.
 
 > **이전에 LangGraph를 사용한 적이 있는 경우:** 기본 요소는 의도적으로
 > 동일 — 리듀서가 있는 채널, 쓰기를 내보내는 노드, 조건부
@@ -706,7 +705,5 @@ C++의 `ReducerRegistry::register_reducer`(아직 Python 후크 없음).
 위의 모든 개념을 다루는 스크립트.
 - [C++ examples](../examples/) — 동일한 구조를 가진 36개의 프로그램.
 - [`reference-en.md`](reference-en.md) — 철저한 클래스별 API.
-- [Doxygen](https://fox1245.github.io/NeoGraph/) — 생성된 참조
-C++ 헤더의 경우.
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 비동기/코루틴에 대한 심층 분석
 층.

@@ -42,7 +42,7 @@ class OpenAISdkProvider(ng.Provider):
     every call NeoGraph makes through this provider.
     """
     def __init__(self, client: OpenAI,
-                 model: str = "deepseek/deepseek-v4-flash-0731"):
+                 model: str = "~deepseek/deepseek-v4-flash-latest"):
         super().__init__()
         self.client = client
         self.model  = model
@@ -91,7 +91,7 @@ def main() -> int:
     print(f"[hybrid] using OpenRouter inside NeoGraph {ng.__version__} graph")
 
     provider = OpenAISdkProvider(
-        sdk_client, model="deepseek/deepseek-v4-flash-0731")
+        sdk_client, model="~deepseek/deepseek-v4-flash-latest")
     ctx = ng.NodeContext(
         provider=provider,
         instructions=("You are a concise assistant. "

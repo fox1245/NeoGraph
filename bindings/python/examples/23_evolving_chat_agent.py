@@ -75,7 +75,7 @@ class PromptedChatNode(ng.GraphNode):
     def run(self, input):
         msgs = input.state.get("messages") or []
         params = ng.CompletionParams()
-        params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
         params.temperature = 0.4
         params.max_tokens = self._max_tokens
         params.messages = [ng.ChatMessage(role="system", content=self._system_prompt)]
@@ -217,7 +217,7 @@ Current graph:
 Return the revised graph JSON."""
 
     params = ng.CompletionParams()
-    params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     params.temperature = 0.2
     params.max_tokens = 1500
     params.messages = [

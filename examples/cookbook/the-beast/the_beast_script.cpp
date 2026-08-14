@@ -42,7 +42,14 @@
 #include <set>
 #include <sstream>
 #include <string>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#define popen _popen
+#define pclose _pclose
+#else
 #include <unistd.h>
+#endif
 
 using neograph::json;
 namespace ng = neograph::graph;
@@ -146,6 +153,9 @@ static std::string run_python(const std::string& code_path, const std::string& i
                               const std::set<std::string>& caps) {
 #ifdef BEAST_SANDBOX2
     return run_python_sandboxed(code_path, in_path, caps);
+#elif defined(_WIN32)
+    (void)caps;
+    return run_cmd("python \"" + code_path + "\" \"" + in_path + "\"");
 #else
     (void)caps;
     return run_cmd("timeout 10 python3 '" + code_path + "' '" + in_path + "'");
@@ -343,7 +353,7 @@ int main(int argc, char** argv) {
         if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set (or use --selftest)\n"; return 2; }
         provider = neograph::llm::OpenAIProvider::create_shared(
             {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "deepseek/deepseek-v4-flash-0731",
+             .default_model = "~deepseek/deepseek-v4-flash-latest",
              .provider_routing = {{"zdr", true}}});
         ctx.provider = provider;
     }
@@ -369,7 +379,7 @@ int main(int argc, char** argv) {
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         std::cout << "── Attempt #" << attempt << ": model writes node logic ──\n";
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-flash-0731"; p.messages = convo;
+        p.model = "~deepseek/deepseek-v4-flash-latest"; p.messages = convo;
         p.temperature = 0.2f; p.max_tokens = 4000;
         neograph::ChatCompletion resp;
         try { resp = provider->complete(p); }

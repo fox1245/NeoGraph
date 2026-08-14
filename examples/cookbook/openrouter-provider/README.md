@@ -3,7 +3,7 @@
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 Run NeoGraph graphs against OpenRouter's pinned
-`deepseek/deepseek-v4-flash-0731` model. This cookbook shows two equivalent
+`~deepseek/deepseek-v4-flash-latest` model. This cookbook shows two equivalent
 provider surfaces, both using the same API key, model, and explicit
 zero-data-retention (ZDR) provider preference:
 
@@ -27,7 +27,7 @@ from neograph_engine.llm import OpenAIProvider
 provider = OpenAIProvider(
     api_key=os.environ["OPENROUTER_API_KEY"],
     base_url="https://openrouter.ai/api",
-    default_model="deepseek/deepseek-v4-flash-0731",
+    default_model="~deepseek/deepseek-v4-flash-latest",
     provider_routing={"zdr": True},
 ```
 
@@ -57,7 +57,7 @@ silently changes the live-provider path.
 ## Output shape
 
 ```text
-[openrouter] using deepseek/deepseek-v4-flash-0731 via OpenAI-compatible path
+[openrouter] using ~deepseek/deepseek-v4-flash-latest via OpenAI-compatible path
 [user] What's the capital of France?
   assistant: Paris is the capital of France.
 ```

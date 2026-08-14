@@ -58,7 +58,7 @@ RESEARCH_TRIGGER_PATTERN = re.compile(
 # routes streaming completions over wss://api.openai.com/v1/responses.
 PROVIDER = schema_provider(
     schema="openai_responses",   # underscore — built-in schema name
-    default_model="gpt-4o-mini",
+    default_model="gpt-5.6-luna",
     use_websocket=True,
 )
 

@@ -22,7 +22,6 @@
   <a href="examples/README.md">Examples</a> &middot;
   <a href="docs/troubleshooting.md">Troubleshooting</a> &middot;
   <a href="docs/reference-en.md">API Reference</a> &middot;
-  <a href="https://fox1245.github.io/NeoGraph/">Doxygen</a> &middot;
   <a href="#vs-langgraph">vs LangGraph</a>
 </p>
 

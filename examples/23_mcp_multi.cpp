@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
     cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
         neograph::llm::OpenAIProvider::create(cfg);

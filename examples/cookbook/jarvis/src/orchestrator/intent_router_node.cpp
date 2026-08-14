@@ -48,7 +48,7 @@ IntentRouterNode::IntentRouterNode(std::string             name,
     // The live Jarvis profile is intentionally pinned to one OpenRouter model.
     // This prevents graph JSON or process environment overrides from routing
     // a supposedly equivalent example through a different provider/model.
-    model_ = "deepseek/deepseek-v4-flash-0731";
+    model_ = "~deepseek/deepseek-v4-flash-latest";
     output_channel_ = cfg.value("output_channel", "route_decision");
     prompt_file_    = cfg.value("prompt_file",    "config/persona.txt");
     prompt_section_ = cfg.value("prompt_section", "router");

@@ -12,7 +12,7 @@
 //   member_server 8101 의원_김진보 진보당 prompts/jinbo.txt
 //
 // .env (or env vars) must set OPENROUTER_API_KEY. The model is hard-coded to
-// deepseek/deepseek-v4-flash-0731.
+// ~deepseek/deepseek-v4-flash-latest.
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
@@ -76,7 +76,7 @@ class PersonaNode : public GraphNode {
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
         CompletionParams p;
-        p.model = "deepseek/deepseek-v4-flash-0731";
+        p.model = "~deepseek/deepseek-v4-flash-latest";
         p.temperature = 0.7f;
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user", user_text});
@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     llm::OpenAIProvider::Config cfg;
     cfg.api_key       = api_key;
     cfg.base_url      = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = llm::OpenAIProvider::create_shared(cfg);
 

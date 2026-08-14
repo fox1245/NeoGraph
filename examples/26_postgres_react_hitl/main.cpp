@@ -219,7 +219,7 @@ static AppCtx build_app(bool with_human_review) {
     const char* crawl_token_env = std::getenv("CRAWL4AI_API_TOKEN");
     const std::string crawl_token = crawl_token_env ? crawl_token_env : "";
 
-    const std::string model = "deepseek/deepseek-v4-flash-0731";
+    const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
     auto raw_openrouter = llm::SchemaProvider::create({
         .schema_path       = "openai_responses",

@@ -56,7 +56,7 @@ static std::unique_ptr<Provider> make_provider(const std::string& api_key) {
     cfg.schema_path = "openai_responses";
     cfg.api_key = api_key;
     cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     return llm::SchemaProvider::create(cfg);
 }
@@ -66,7 +66,7 @@ static std::string complete_one(Provider& p,
                                 const std::string& user,
                                 float temperature) {
     CompletionParams params;
-    params.model = "deepseek/deepseek-v4-flash-0731";
+    params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = temperature;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user", user});

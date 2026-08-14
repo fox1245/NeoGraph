@@ -186,7 +186,8 @@ public:
                   << "  (sum of per-classifier latencies)\n";
         std::cout << "  parallel speedup:    "
                   << std::setprecision(2)
-                  << (double(total_inference_us) / std::max(1L, wall_us))
+                  << (double(total_inference_us)
+                      / std::max(wall_us, decltype(wall_us){1}))
                   << "×\n";
 
         co_return NodeOutput{};

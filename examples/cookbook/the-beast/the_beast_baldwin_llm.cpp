@@ -180,7 +180,7 @@ struct LLMLearner : Learner {
         if (plastic.empty()) return g;
         ++invocations;
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-flash-0731"; p.temperature = 0.2f; p.max_tokens = 800;
+        p.model = "~deepseek/deepseek-v4-flash-latest"; p.temperature = 0.2f; p.max_tokens = 800;
         std::string committed;
         for (int i = 0; i < N; ++i)
             committed += "  stage " + std::to_string(i) + ": " +
@@ -272,14 +272,14 @@ int main(int argc, char** argv) {
                  "Toggle: Baldwinian scores the learner's fill but keeps the gene '?'; Lamarckian\n"
                  "writes the fill into the genome (heritable).\n"
                  "Learner = "
-              << (live ? "the model (deepseek/deepseek-v4-flash-0731).\n\n"
+              << (live ? "the model (~deepseek/deepseek-v4-flash-latest).\n\n"
                        : "deterministic oracle (default; pass --llm with a key for the model).\n\n");
 
     std::shared_ptr<neograph::Provider> provider;
     if (live)
         provider = neograph::llm::OpenAIProvider::create_shared(
             {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "deepseek/deepseek-v4-flash-0731",
+             .default_model = "~deepseek/deepseek-v4-flash-latest",
              .provider_routing = {{"zdr", true}}});
 
     // A fresh learner per mode so the invocation counters are independent.

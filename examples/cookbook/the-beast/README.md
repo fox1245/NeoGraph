@@ -118,7 +118,7 @@ $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
-`the_beast_live.cpp` pins `deepseek/deepseek-v4-flash-0731` to
+`the_beast_live.cpp` pins `~deepseek/deepseek-v4-flash-latest` to
 `provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`.
 At the time of verification, OpenRouter listed Morph's datacenters as US and
 listed that model/provider endpoint as ZDR-capable. This is a strict provider

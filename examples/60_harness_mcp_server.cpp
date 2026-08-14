@@ -85,7 +85,7 @@ int main() {
     neograph::llm::OpenAIProvider::Config provider_config;
     provider_config.api_key         = api_key;
     provider_config.base_url        = "https://openrouter.ai/api";
-    provider_config.default_model   = "deepseek/deepseek-v4-flash-0731";
+    provider_config.default_model   = "~deepseek/deepseek-v4-flash-latest";
     provider_config.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider;
     if (smoke_mode) {

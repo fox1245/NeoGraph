@@ -20,7 +20,7 @@ import neograph_engine as ng
 from _common import schema_provider
 
 
-PROVIDER = schema_provider(schema="openai", default_model="gpt-5.4-mini")
+PROVIDER = schema_provider(schema="openai", default_model="gpt-5.6-luna")
 
 
 class ExpensiveNode(ng.GraphNode):

@@ -119,7 +119,7 @@ subordinate by just adding its URL to this JSON.
 
 ## Router (Intent Classification) — JARVIS's Brain
 
-A single call to the pinned DeepSeek model (`deepseek/deepseek-v4-flash-0731`)
+A single call to the pinned DeepSeek model (`~deepseek/deepseek-v4-flash-latest`)
 returns:
 
 ```json

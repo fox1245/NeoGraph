@@ -193,7 +193,7 @@ int main() {
         provider_cfg.schema_path     = "openai_responses";
         provider_cfg.api_key         = api_key;
         provider_cfg.base_url_override = "https://openrouter.ai/api";
-        provider_cfg.default_model   = "deepseek/deepseek-v4-flash-0731";
+        provider_cfg.default_model   = "~deepseek/deepseek-v4-flash-latest";
         provider_cfg.timeout_seconds = 30;
         provider_cfg.provider_routing = {{"zdr", true}};
         std::shared_ptr<neograph::Provider> provider =

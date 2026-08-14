@@ -125,7 +125,7 @@ static json extract_json(const std::string& t) {
 // Lamarckian: the LLM does the arithmetic and wires a chain hitting TARGET.
 static std::optional<json> llm_refine(std::shared_ptr<neograph::Provider> prov, const Ind& elite) {
     neograph::CompletionParams p;
-    p.model = "deepseek/deepseek-v4-flash-0731";
+    p.model = "~deepseek/deepseek-v4-flash-latest";
     p.temperature = 0.2f; p.max_tokens = 1500;
     p.messages = {
         {"system",
@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
     if (lamarck)
         provider = neograph::llm::OpenAIProvider::create_shared(
             {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "deepseek/deepseek-v4-flash-0731",
+             .default_model = "~deepseek/deepseek-v4-flash-latest",
              .provider_routing = {{"zdr", true}}});
 
     ng::NodeContext ctx;

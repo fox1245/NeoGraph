@@ -652,7 +652,7 @@ void register_custom_node_types(
                     // All live Jarvis calls use the pinned OpenRouter model;
                     // mock mode is selected before this node is invoked.
                     neograph::CompletionParams p;
-                    p.model       = "deepseek/deepseek-v4-flash-0731";
+                    p.model       = "~deepseek/deepseek-v4-flash-latest";
                     p.temperature = 0.4f;
                     p.max_tokens  = 220;
                     p.messages.push_back({"system", sys});
@@ -835,7 +835,7 @@ int main(int argc, char** argv) {
             pcfg.api_key = api_key_env;
             pcfg.base_url = (base_url_env && *base_url_env)
                 ? base_url_env : "https://openrouter.ai/api";
-            pcfg.default_model = "deepseek/deepseek-v4-flash-0731";
+            pcfg.default_model = "~deepseek/deepseek-v4-flash-latest";
             pcfg.provider_routing = {{"zdr", true}};
             router_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
             synth_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);

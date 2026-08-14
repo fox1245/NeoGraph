@@ -94,11 +94,15 @@ def test_generated_factories_and_shipped_json_use_current_schema_version():
         (ROOT / "examples/cookbook/jarvis").rglob("jarvis_graph.json")
     )
     assert graph_files
-    for path in graph_files:
+    for source_path in graph_files:
+        path = source_path
+        document = path.read_text(encoding="utf-8").strip()
+        if not document.startswith("{"):
+            path = (path.parent / document).resolve()
         definition = json.loads(path.read_text(encoding="utf-8"))
         assert definition["schema_version"] == getattr(
             ng, "TOPOLOGY_SCHEMA_VERSION"
-        ), path
+        ), source_path
 
 
 def test_unversioned_compatibility_boundary_is_documented():

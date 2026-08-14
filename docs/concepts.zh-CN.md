@@ -7,7 +7,7 @@
 
 在深入示例之前先阅读一遍本文。它按照你自己构建思维模型的顺序构建思维模型：图→通道→节点→边→扇出→路由覆盖→检查点→流。
 
-代码示例是 Python 端的，因为它们更简洁；一切都 1:1 映射到 C++ API（类签名见 [`reference-en.md`](reference-en.md)，生成参考见 [Doxygen](https://fox1245.github.io/NeoGraph/)）。
+代码示例是 Python 端的，因为它们更简洁；一切都 1:1 映射到 C++ API（类签名见 [`reference-en.md`](reference-en.md)，公开头文件位于 `include/neograph/`）。
 
 > **如果你用过 LangGraph：** 这里的基本原语有意保持相同：
 > 带归约器的通道、发出写入的节点、条件边、`Send`、`Command`、
@@ -590,7 +590,5 @@ Python 绑定不会公开这些属性。使用`result.output`, `result.interrupt
 涵盖上述每个概念的脚本。
 - [C++ 示例](../examples/)— 36 个具有相同结构的程序。
 - [`reference-en.md`](reference-en.md)— 逐类详尽 API。
-- [Doxygen](https://fox1245.github.io/NeoGraph/)— 生成参考
-用于 C++ 头文件。
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)— 深入探讨异步/协程
 层。

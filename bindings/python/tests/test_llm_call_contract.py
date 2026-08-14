@@ -24,7 +24,7 @@ class _ResolveGraphConstants(ast.NodeTransformer):
 
 
 def _cookbook_graph(path):
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
@@ -36,7 +36,7 @@ def _cookbook_graph(path):
 
 
 def _cookbook_instructions(path):
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)

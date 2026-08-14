@@ -121,7 +121,7 @@ A2A 엔드포인트로.
 
 ## 라우터(의도 분류) — JARVIS의 두뇌
 
-고정된 DeepSeek 모델(`deepseek/deepseek-v4-flash-0731`)에 대한 단일 호출은 다음을 반환합니다.
+고정된 DeepSeek 모델(`~deepseek/deepseek-v4-flash-latest`)에 대한 단일 호출은 다음을 반환합니다.
 
 ```json
 {

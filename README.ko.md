@@ -23,7 +23,6 @@
   <a href="examples/README.md">예제</a> &middot;
   <a href="docs/troubleshooting.md">문제 해결</a> &middot;
   <a href="docs/reference-en.md">API 참조</a> &middot;
-  <a href="https://fox1245.github.io/NeoGraph/">Doxygen</a> &middot;
   <a href="#vs-langgraph">vs LangGraph</a>
 </p>
 

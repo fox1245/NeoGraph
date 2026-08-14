@@ -19,7 +19,7 @@ from neograph_engine.llm import OpenAIProvider
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"
-MODEL = "deepseek/deepseek-v4-flash-0731"
+MODEL = "~deepseek/deepseek-v4-flash-latest"
 
 
 def _load_env_if_present() -> None:

@@ -431,7 +431,7 @@ int main() {
         }
 
         // SchemaProvider with the OpenRouter-compatible Responses schema.
-        const std::string model = "deepseek/deepseek-v4-flash-0731";
+        const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
         llm::SchemaProvider::Config cfg;
         cfg.schema_path     = "openai_responses";

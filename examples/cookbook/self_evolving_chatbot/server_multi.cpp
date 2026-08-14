@@ -166,7 +166,7 @@ static std::string llm_judge_topology(
     }
 
     neograph::CompletionParams p;
-    p.model = "deepseek/deepseek-v4-flash-0731";
+    p.model = "~deepseek/deepseek-v4-flash-latest";
     p.messages.push_back({
         "system",
         "You are a chatbot harness optimizer. Given a conversation history "
@@ -309,7 +309,7 @@ int main() {
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
     cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 
@@ -353,7 +353,7 @@ int main() {
 
             NodeContext ctx;
             ctx.provider = provider;
-            ctx.model = "deepseek/deepseek-v4-flash-0731";
+            ctx.model = "~deepseek/deepseek-v4-flash-latest";
             ctx.instructions = cust.system_prompt;
             auto engine = cache.get_or_compile(cust.topology_def, ctx);
 

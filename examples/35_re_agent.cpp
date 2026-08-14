@@ -22,7 +22,7 @@
 //   ./example_re_agent
 //   ./example_re_agent --max-steps 80
 //
-// The model is fixed to deepseek/deepseek-v4-flash-0731 and the provider is
+// The model is fixed to ~deepseek/deepseek-v4-flash-latest and the provider is
 // fixed to OpenRouter's Responses-compatible endpoint.
 //
 // The agent's final tool-free message is a JSON summary on stdout; trace
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     int max_steps = 80;
-    const std::string model = "deepseek/deepseek-v4-flash-0731";
+    const std::string model = "~deepseek/deepseek-v4-flash-latest";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--max-steps" && i + 1 < argc) max_steps = std::atoi(argv[++i]);

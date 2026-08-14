@@ -229,7 +229,7 @@ int main() {
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
     cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 
@@ -276,7 +276,7 @@ int main() {
                 const auto& rec = customers[cust];
                 NodeContext ctx;
                 ctx.provider = provider;
-                ctx.model = "deepseek/deepseek-v4-flash-0731";
+                ctx.model = "~deepseek/deepseek-v4-flash-latest";
                 ctx.instructions = rec.system_prompt;
                 auto engine = cache.get_or_compile(cust, rec.topology_def, ctx);
 
@@ -329,7 +329,7 @@ int main() {
 
     std::cout << "\n=== Multi-tenant chatbot LIVE LLM demo ===\n";
     std::cout << "Provider:         OpenRouter "
-                 "deepseek/deepseek-v4-flash-0731 (ZDR)\n";
+                 "~deepseek/deepseek-v4-flash-latest (ZDR)\n";
     std::cout << "Requests:         " << N_REQUESTS << " across "
               << customer_ids.size() << " customers / "
               << N_SESSIONS << " sessions\n";

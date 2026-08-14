@@ -124,7 +124,7 @@ public:
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
         CompletionParams p;
-        p.model       = "deepseek/deepseek-v4-flash-0731";
+        p.model       = "~deepseek/deepseek-v4-flash-latest";
         p.temperature = 0.7f;
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user",   user_text});
@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
         llm::OpenAIProvider::Config cfg;
         cfg.api_key       = api_key;
         cfg.base_url      = "https://openrouter.ai/api";
-        cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+        cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
         cfg.provider_routing = {{"zdr", true}};
         provider = llm::OpenAIProvider::create_shared(cfg);
     } else {

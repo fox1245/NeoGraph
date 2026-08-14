@@ -44,6 +44,15 @@ def _load_env() -> None:
     load_dotenv()
 
 
+def _configure_console() -> None:
+    """Keep model responses printable on Windows' legacy console codecs."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_console()
 _load_env()
 
 
@@ -57,7 +66,7 @@ def _require_key() -> str:
     return key
 
 
-def openai_provider(default_model: str = "gpt-4o-mini") -> OpenAIProvider:
+def openai_provider(default_model: str = "gpt-5.6-luna") -> OpenAIProvider:
     """OpenAI-compatible HTTP provider configured from the env.
 
     Honours:
@@ -74,7 +83,7 @@ def openai_provider(default_model: str = "gpt-4o-mini") -> OpenAIProvider:
 
 def schema_provider(
     schema: str = "openai_responses",
-    default_model: str = "gpt-4o-mini",
+    default_model: str = "gpt-5.6-luna",
     *,
     use_websocket: bool = False,
 ) -> SchemaProvider:

@@ -70,7 +70,7 @@ class AgenticOpenAIProvider(ng.Provider):
     sees exactly one provider call per graph step.
     """
     def __init__(self, client, tools=PYTHON_TOOLS,
-                 model="deepseek/deepseek-v4-flash-0731",
+                 model="~deepseek/deepseek-v4-flash-latest",
                  max_iterations=8):
         super().__init__()
         self.client    = client
@@ -131,7 +131,7 @@ class AgenticOpenAIProvider(ng.Provider):
                     result = fn(**args)
                 except Exception as e:
                     result = f"error: {e}"
-                print(f"→ {result}", file=sys.stderr)
+                print(f"-> {result}", file=sys.stderr)
                 messages.append({"role": "tool",
                                  "tool_call_id": tc.id,
                                  "content": str(result)})
@@ -187,7 +187,7 @@ def _load_env():
 
     user_q = ("Reverse the string 'NeoGraph', then count the words in "
               "'the quick brown fox', then compute 17*23+5. "
-              "Use the tools — don't compute manually.")
+              "Use the tools - don't compute manually.")
     print(f"[user] {user_q}\n")
 
     result = engine.run(ng.RunConfig(

@@ -60,7 +60,7 @@ RESEARCH_TRIGGER_PATTERN = re.compile(
 
 PROVIDER = schema_provider(
     schema="openai_responses",
-    default_model=os.environ.get("DR_MODEL", "gpt-5.4-mini"),
+    default_model=os.environ.get("DR_MODEL", "gpt-5.6-luna"),
     use_websocket=True,
 )
 

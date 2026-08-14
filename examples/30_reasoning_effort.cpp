@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
             std::cerr << "Set OPENROUTER_API_KEY (env or .env)\n";
             return 1;
         }
-        const std::string model = "deepseek/deepseek-v4-flash-0731";
+        const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
         // Default problem: the snail-in-a-well puzzle. Single correct
         // answer (28), classic last-day-doesn't-slip trick. At "none"

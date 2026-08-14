@@ -55,3 +55,4 @@ wasm/*.data
 /test.bat
 /turns_openrouter.txt
 /nginx-openrouter.conf
+/spec/

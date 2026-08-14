@@ -107,7 +107,7 @@ class PromptedLLMNode(ng.GraphNode):
     def run(self, input):
         seed = input.state.get("seed") or ""
         params = ng.CompletionParams()
-        params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
         params.temperature = 0.4
         params.max_tokens = 250
 
@@ -209,7 +209,7 @@ Current graph:
 Return the revised graph JSON now."""
 
     params = ng.CompletionParams()
-    params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     params.temperature = 0.2
     params.max_tokens = 1200
     params.messages = [

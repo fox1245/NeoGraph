@@ -9,8 +9,7 @@ checkpoints → streaming.
 
 Code samples are Python-side because they're terser; everything maps
 1:1 to the C++ API (see [`reference-en.md`](reference-en.md) for class
-signatures or [Doxygen](https://fox1245.github.io/NeoGraph/) for the
-generated reference).
+signatures and the public headers under `include/neograph/`).
 
 > **If you've used LangGraph before:** the primitives are intentionally
 > the same — channels with reducers, nodes that emit writes, conditional
@@ -696,7 +695,5 @@ closed condition always throws if it returns outside its declared labels.
   scripts covering every concept above.
 - [C++ examples](../examples/) — 36 programs with the same structure.
 - [`reference-en.md`](reference-en.md) — exhaustive class-by-class API.
-- [Doxygen](https://fox1245.github.io/NeoGraph/) — generated reference
-  for the C++ headers.
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — deep dive on the async / coroutine
   layer.

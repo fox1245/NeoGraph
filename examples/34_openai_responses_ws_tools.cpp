@@ -193,7 +193,7 @@ asio::awaitable<void> run_section(
     std::string_view body_json,
     Summary* out) {
     json request = json::parse(std::string{body_json});
-    request["model"] = "deepseek/deepseek-v4-flash-0731";
+    request["model"] = "~deepseek/deepseek-v4-flash-latest";
     request["stream"] = true;
     request["provider"] = {{"zdr", true}};
 
@@ -276,7 +276,7 @@ int main() {
 
     std::vector<Section> sections;
 
-    const std::string MODEL = "deepseek/deepseek-v4-flash-0731";
+    const std::string MODEL = "~deepseek/deepseek-v4-flash-latest";
 
     sections.push_back({
         "function (custom calculator)",

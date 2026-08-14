@@ -36,6 +36,14 @@
 
 namespace neograph::llm {
 
+namespace {
+
+bool model_omits_temperature(const std::string& model) {
+    return model.rfind("gpt-5", 0) == 0;
+}
+
+}  // namespace
+
 struct SchemaProvider::StreamCancelControl {
     void attach(httplib::Client& target) {
         bool stop_now = false;
@@ -1068,11 +1076,11 @@ json SchemaProvider::build_body(const CompletionParams& params) const {
     // HTTP body. Now applied unconditionally.
     //
     // Tool-specific keys (`tool_choice`) ARE harmless to send without
-    // tools — most providers ignore them when there's nothing to
-    // choose from. Schema authors who want a key gated on tool
-    // presence can move it to a per-call binding once that surface
-    // exists (issue #33).
+    // tools on most providers, but OpenAI rejects that request shape.
+    // Keep this one field gated on tool presence while applying all
+    // other schema-declared fields unconditionally.
     for (const auto& [k, v] : req_.extra_fields.items()) {
+        if (k == "tool_choice" && params.tools.empty()) continue;
         body[k] = v;
     }
 
@@ -1125,7 +1133,8 @@ json SchemaProvider::build_body(const CompletionParams& params) const {
     // Either disables the write. Reasoning-model schemas typically use
     // the per-schema path so node code doesn't have to negate
     // `params.temperature` at every call site.
-    if (params.temperature >= 0.0f && !req_.temperature_path.empty()) {
+    if (params.temperature >= 0.0f && !req_.temperature_path.empty()
+        && !model_omits_temperature(model)) {
         json_path::set_path(body, req_.temperature_path, params.temperature);
     }
 

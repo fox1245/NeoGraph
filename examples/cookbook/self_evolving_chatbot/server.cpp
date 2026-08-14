@@ -151,7 +151,7 @@ public:
 
 // ── (3) LLM judge — history + 현재 topology → 다음 topology ─────────
 //
-// 진짜 self-evolution 의 핵심. deepseek/deepseek-v4-flash-0731 이 사용자
+// 진짜 self-evolution 의 핵심. ~deepseek/deepseek-v4-flash-latest 이 사용자
 // 대화 스타일을 보고 'simple / reflexive / fanout' 중 best fit 을 한 단어로
 // 응답.
 // Production 이면 judgment prompt + few-shot + 더 풍부한 metric (응답
@@ -170,7 +170,7 @@ static std::string llm_judge_topology(
     }
 
     neograph::CompletionParams p;
-    p.model = "deepseek/deepseek-v4-flash-0731";
+    p.model = "~deepseek/deepseek-v4-flash-latest";
     p.messages.push_back({
         "system",
         "You are a chatbot harness optimizer. Given a conversation history "
@@ -244,7 +244,7 @@ int main() {
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
     cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "deepseek/deepseek-v4-flash-0731";
+    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 
@@ -289,7 +289,7 @@ int main() {
         // (a) 현재 topology 로 응답.
         NodeContext ctx;
         ctx.provider = provider;
-        ctx.model = "deepseek/deepseek-v4-flash-0731";
+        ctx.model = "~deepseek/deepseek-v4-flash-latest";
         ctx.instructions = alice.system_prompt;
         auto engine = cache.get_or_compile(alice.topology_def, ctx);
 

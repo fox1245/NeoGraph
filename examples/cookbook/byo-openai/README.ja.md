@@ -35,7 +35,7 @@ from openai import OpenAI
 
 class OpenAISdkProvider(ng.Provider):
     """NeoGraph Provider backed by the official `openai` SDK."""
-    def __init__(self, client: OpenAI, model: str = "deepseek/deepseek-v4-flash-0731"):
+    def __init__(self, client: OpenAI, model: str = "~deepseek/deepseek-v4-flash-latest"):
         super().__init__()
         self.client = client
         self.model  = model
@@ -76,7 +76,7 @@ python hybrid.py
 ```
 [hybrid] using openai SDK inside NeoGraph 0.2.3 graph
 [hybrid] running one llm_call through the OpenAI SDK provider
-[provider] complete() call #1 (2 msgs) — model=deepseek/deepseek-v4-flash-0731
+[provider] complete() call #1 (2 msgs) — model=~deepseek/deepseek-v4-flash-latest
 [... user and assistant messages ...]
 [hybrid] provider.complete() called 1× via openai SDK
 ```
@@ -129,7 +129,7 @@ class AgenticOpenAIProvider(ng.Provider):
                      for n, fn in self.tools.items()]
         for _ in range(10):  # cap loops
             r = self.client.chat.completions.create(
-                model=params.model or "deepseek/deepseek-v4-flash-0731",
+                model=params.model or "~deepseek/deepseek-v4-flash-latest",
                 messages=messages, tools=sdk_tools)
             choice = r.choices[0]
             if not choice.message.tool_calls:

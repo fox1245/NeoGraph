@@ -23,7 +23,6 @@
   <a href="examples/README.md">示例</a> &middot;
   <a href="docs/troubleshooting.md">故障排查</a> &middot;
   <a href="docs/reference-en.md">API 参考</a> &middot;
-  <a href="https://fox1245.github.io/NeoGraph/">Doxygen</a> &middot;
   <a href="#vs-langgraph">对比 LangGraph</a>
 </p>
 
