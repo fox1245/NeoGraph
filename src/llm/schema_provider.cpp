@@ -1397,8 +1397,11 @@ SchemaProvider::complete_async(const CompletionParams& params)
     }
 
     async::RequestOptions opts;
-    if (user_config_.timeout_seconds > 0) {
-        opts.timeout = std::chrono::seconds(user_config_.timeout_seconds);
+    const int timeout_seconds = params.timeout_seconds > 0
+        ? params.timeout_seconds
+        : user_config_.timeout_seconds;
+    if (timeout_seconds > 0) {
+        opts.timeout = std::chrono::seconds(timeout_seconds);
     }
 
     // Two transports — pick at construction time via Config:
@@ -1561,7 +1564,10 @@ ChatCompletion SchemaProvider::complete_stream_http(
         (params.cancel_token && params.cancel_token->is_cancelled())) {
         throw neograph::graph::CancelledException("SchemaProvider stream entry");
     }
-    cli.set_read_timeout(user_config_.timeout_seconds, 0);
+    const int timeout_seconds = params.timeout_seconds > 0
+        ? params.timeout_seconds
+        : user_config_.timeout_seconds;
+    cli.set_read_timeout(timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
     ChatCompletion completion;
@@ -1588,10 +1594,26 @@ ChatCompletion SchemaProvider::complete_stream_http(
 
     // Event type tracking for SSE_EVENTS
     std::string current_event_type;
+    bool terminal_event_seen = false;
 
-    auto res = cli.Post(
-        endpoint, headers, body_str, "application/json",
-        [&](const char* data, size_t len) -> bool {
+    int response_status = 0;
+    std::string error_body;
+    httplib::Request request;
+    request.method = "POST";
+    request.path = endpoint;
+    request.headers = headers;
+    request.body = body_str;
+    request.set_header("Content-Type", "application/json");
+    request.response_handler = [&](const httplib::Response& response) {
+        response_status = response.status;
+        return true;
+    };
+    request.content_receiver =
+        [&](const char* data, size_t len, size_t, size_t) -> bool {
+            if (response_status != 200) {
+                error_body.append(data, len);
+                return true;
+            }
             if ((cancel_control && cancel_control->is_cancelled()) ||
                 (params.cancel_token && params.cancel_token->is_cancelled())) {
                 return false;
@@ -1614,7 +1636,10 @@ ChatCompletion SchemaProvider::complete_stream_http(
                     if (line.rfind(stream_.prefix, 0) != 0) continue;
                     std::string payload = line.substr(stream_.prefix.size());
 
-                    if (!stream_.done_signal.empty() && payload == stream_.done_signal) continue;
+                    if (!stream_.done_signal.empty() && payload == stream_.done_signal) {
+                        terminal_event_seen = true;
+                        return false;
+                    }
                     if (payload.empty()) continue;
 
                     try {
@@ -1703,6 +1728,11 @@ ChatCompletion SchemaProvider::complete_stream_http(
 
                 // --- SSE_EVENTS format (Claude) ---
                 else if (stream_.format == StreamFormat::SSE_EVENTS) {
+                    if (line.empty()) {
+                        current_event_type.clear();
+                        continue;
+                    }
+
                     // Parse "event: <type>" lines
                     if (line.rfind("event: ", 0) == 0) {
                         current_event_type = line.substr(7);
@@ -1713,6 +1743,10 @@ ChatCompletion SchemaProvider::complete_stream_http(
                     if (line.rfind("data: ", 0) != 0) continue;
                     std::string payload = line.substr(6);
                     if (payload.empty()) continue;
+                    if (!stream_.done_signal.empty() && payload == stream_.done_signal) {
+                        terminal_event_seen = true;
+                        return false;
+                    }
 
                     try {
                         auto j = json::parse(payload);
@@ -1720,8 +1754,17 @@ ChatCompletion SchemaProvider::complete_stream_http(
                             observed_stop_reason = reason;
                         }
 
-                        if (!stream_.events_config.contains(current_event_type)) continue;
-                        auto event_cfg = stream_.events_config[current_event_type];
+                        // Prefer the explicit SSE event field. OpenRouter's
+                        // Responses API sends data-only records, so fall back to
+                        // the JSON type only when no event field was supplied.
+                        std::string event_type = current_event_type;
+                        current_event_type.clear();
+                        if (event_type.empty() && j.contains("type") &&
+                            j["type"].is_string()) {
+                            event_type = j["type"].get<std::string>();
+                        }
+                        if (!stream_.events_config.contains(event_type)) continue;
+                        auto event_cfg = stream_.events_config[event_type];
                         std::string action = event_cfg.value("action", "ignore");
 
                         if (action == "ignore") {
@@ -1847,25 +1890,38 @@ ChatCompletion SchemaProvider::complete_stream_http(
                                 completion.usage =
                                     parse_usage(j["response"]);
                             }
+                            terminal_event_seen = true;
                         }
                     } catch (...) {
                         // Skip malformed
                     }
+                    if (terminal_event_seen) return false;
                 }
             }
             return true; // continue receiving
-        }
-    );
+        };
+
+    auto res = cli.send(request);
 
     if ((cancel_control && cancel_control->is_cancelled()) ||
         (params.cancel_token && params.cancel_token->is_cancelled())) {
         throw neograph::graph::CancelledException("SchemaProvider stream aborted");
     }
-    if (!res) {
+    if (response_status != 0 && response_status != 200) {
+        if (response_status == 429) {
+            throw RateLimitError(
+                "API error (HTTP 429): " + error_body,
+                res ? retry_after_seconds(res) : -1);
+        }
+        throw std::runtime_error(
+            "API error (HTTP " + std::to_string(response_status) + "): " + error_body);
+    }
+    if (!res && !(terminal_event_seen && response_status == 200 &&
+                  res.error() == httplib::Error::Canceled)) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
     }
 
-    if (res->status != 200) {
+    if (res && res->status != 200) {
         if (res->status == 429) {
             throw RateLimitError(
                 "API error (HTTP 429): " + res->body,

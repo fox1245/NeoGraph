@@ -261,25 +261,29 @@ void init_provider(py::module_& m) {
         .def(py::init([](const std::string& model,
                          std::vector<neograph::ChatMessage> messages,
                          std::vector<neograph::ChatTool> tools,
-                         float temperature, int max_tokens) {
+                         float temperature, int max_tokens,
+                         int timeout_seconds) {
             neograph::CompletionParams p;
             p.model = model;
             p.messages = std::move(messages);
             p.tools = std::move(tools);
             p.temperature = temperature;
             p.max_tokens = max_tokens;
+            p.timeout_seconds = timeout_seconds;
             return p;
         }),
             py::arg("model") = "",
             py::arg("messages") = std::vector<neograph::ChatMessage>{},
             py::arg("tools") = std::vector<neograph::ChatTool>{},
             py::arg("temperature") = 0.7f,
-            py::arg("max_tokens") = -1)
+            py::arg("max_tokens") = -1,
+            py::arg("timeout_seconds") = -1)
         .def_readwrite("model",       &neograph::CompletionParams::model)
         .def_readwrite("messages",    &neograph::CompletionParams::messages)
         .def_readwrite("tools",       &neograph::CompletionParams::tools)
         .def_readwrite("temperature", &neograph::CompletionParams::temperature)
-        .def_readwrite("max_tokens",  &neograph::CompletionParams::max_tokens);
+        .def_readwrite("max_tokens",  &neograph::CompletionParams::max_tokens)
+        .def_readwrite("timeout_seconds", &neograph::CompletionParams::timeout_seconds);
 
     // ── ChatCompletion + Usage ───────────────────────────────────────────
     py::class_<neograph::ChatCompletion> chat_completion(m, "ChatCompletion",

@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/llm/schema_provider.h>
 
@@ -214,5 +215,28 @@ TEST(SchemaProviderAsync, CancelTokenAbortsHttpSseSocket) {
 #if defined(NEOGRAPH_TESTS_HAVE_LIBCURL)
 TEST(SchemaProviderAsync, CancelTokenAbortsCurlH2PoolSocket) {
     expect_socket_cancel(true);
+}
+
+TEST(SchemaProviderAsync, LibcurlPerCallTimeoutRemainsTyped) {
+    HoldingServer server;
+    ASSERT_GT(server.port, 0);
+
+    llm::SchemaProvider::Config config;
+    config.schema_path = "openai";
+    config.api_key = "test-key";
+    config.default_model = "gpt-4o-mini";
+    config.base_url_override = server.base_url();
+    config.timeout_seconds = 5;
+    config.prefer_libcurl = true;
+    auto provider = llm::SchemaProvider::create(config);
+
+    auto params = make_params();
+    params.timeout_seconds = 1;
+    try {
+        (void)async::run_sync(provider->complete_async(params));
+        FAIL() << "expected per-call timeout";
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::timed_out);
+    }
 }
 #endif

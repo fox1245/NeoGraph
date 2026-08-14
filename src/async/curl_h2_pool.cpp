@@ -366,15 +366,20 @@ struct CurlH2Pool::Impl {
                     r.location = v;
                 }
             }
-        } else if (!cancelled) {
+        } else if (!cancelled && code != CURLE_OPERATION_TIMEDOUT) {
             err = std::make_exception_ptr(std::runtime_error(
                 std::string("libcurl: ") + curl_easy_strerror(code)));
         }
 
         curl_slist_free_all(p->curl_hdrs);
         curl_easy_cleanup(easy);
+        const asio::error_code ec = cancelled
+            ? asio::error::operation_aborted
+            : code == CURLE_OPERATION_TIMEDOUT
+                ? asio::error::timed_out
+                : asio::error_code{};
         complete(std::move(p),
-                 cancelled ? asio::error::operation_aborted : asio::error_code{},
+                 ec,
                  std::move(r), std::move(err));
     }
 };

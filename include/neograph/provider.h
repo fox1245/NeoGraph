@@ -60,7 +60,6 @@ struct CompletionParams {
     std::vector<ChatTool> tools;        ///< Available tools the LLM may call.
     float temperature = 0.7f;           ///< Sampling temperature (0.0 = deterministic, 1.0 = creative).
     int max_tokens = -1;                ///< Maximum output tokens. -1 means provider default.
-
     /**
      * @brief Optional cancel handle (v0.3+).
      *
@@ -113,6 +112,12 @@ struct CompletionParams {
      * schema-static `request.extra_fields` block.
      */
     json extra_fields;
+
+    /// Per-call transport timeout. Positive values override the provider
+    /// default; -1 keeps the provider configuration. Exact deadline versus
+    /// read-idle semantics are transport-specific.
+    /// Appended to preserve existing positional aggregate initialization.
+    int timeout_seconds = -1;
 };
 
 /**

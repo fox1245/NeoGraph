@@ -131,6 +131,12 @@ class NEOGRAPH_API Agent {
         tool_execution_controller_ = std::move(controller);
     }
 
+    /// Override only the initial non-stream request used to detect tool calls.
+    /// Positive values are seconds; -1 keeps the provider's default deadline.
+    void set_tool_detection_timeout_seconds(int timeout_seconds) {
+        tool_detection_timeout_seconds_ = timeout_seconds;
+    }
+
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
@@ -151,6 +157,8 @@ class NEOGRAPH_API Agent {
     /// Optional host-shared resource admission controller. The dispatcher uses
     /// the process default when this is empty.
     std::shared_ptr<ToolExecutionController> tool_execution_controller_;
+
+    int tool_detection_timeout_seconds_ = -1;
 
     void ensure_system_message(std::vector<ChatMessage>& messages);
     std::vector<ChatTool> get_tool_definitions() const;

@@ -1,6 +1,8 @@
 #include <neograph/llm/agent.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/tool_dispatch.h>
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -147,8 +149,18 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
             // Rare: another tool call after streaming — fall through to execute
         } else {
             // Non-streaming: reliable tool call detection
-            auto completion = neograph::async::run_sync(
-                provider_->invoke(params, nullptr));
+            params.timeout_seconds = tool_detection_timeout_seconds_;
+            ChatCompletion completion;
+            try {
+                completion = neograph::async::run_sync(
+                    provider_->invoke(params, nullptr));
+            } catch (const asio::system_error& error) {
+                if (error.code() != asio::error::timed_out) throw;
+                throw asio::system_error(
+                    error.code(),
+                    "Agent::run_stream tool-detection phase timed out: " +
+                    std::string(error.what()));
+            }
             usage_->add(completion.usage);   // #88
             messages.push_back(completion.message);
 
@@ -156,6 +168,7 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
                 // No tools needed at all — stream the response
                 // Remove the non-streamed message, re-do with streaming
                 messages.pop_back();
+                params.timeout_seconds = -1;
                 auto streamed = neograph::async::run_sync(
                     provider_->invoke(params, on_chunk));
                 usage_->add(streamed.usage);   // #88

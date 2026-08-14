@@ -122,6 +122,10 @@
       "response.content_part.added": {
         "action": "ignore"
       },
+      "response.content_part.delta": {
+        "action": "text_delta",
+        "delta_field": "delta"
+      },
       "response.output_text.delta": {
         "action": "text_delta",
         "delta_field": "delta"
@@ -144,6 +148,9 @@
         "tool_call_type": "function_call"
       },
       "response.completed": {
+        "action": "done"
+      },
+      "response.done": {
         "action": "done"
       },
       "response.incomplete": {

@@ -71,6 +71,7 @@ int main() {
         std::move(tools),
         "You are a helpful assistant with a calculator tool."
     );
+    agent.set_tool_detection_timeout_seconds(180);
 
     std::vector<neograph::ChatMessage> messages;
     messages.push_back({"user", "What is 15 * 28 + 7?"});

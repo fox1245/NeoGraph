@@ -265,6 +265,66 @@ TEST(ToolDispatchParity, AgentOverlapsAsyncTools) {
         << "Agent ran the tool calls serially; ToolNode overlaps them (#87)";
 }
 
+TEST(ToolDispatchParity, AgentRunStreamStartsWithConfiguredToolDetectionCall) {
+    class PhaseProbeProvider : public Provider {
+    public:
+        std::vector<bool> streaming;
+        std::vector<int> timeouts;
+
+        asio::awaitable<ChatCompletion>
+        invoke(const CompletionParams& params, StreamCallback on_chunk) override {
+            streaming.push_back(static_cast<bool>(on_chunk));
+            timeouts.push_back(params.timeout_seconds);
+            ChatCompletion completion;
+            completion.message = ChatMessage{
+                "assistant", on_chunk ? "streamed" : "buffered"};
+            if (on_chunk) on_chunk("streamed");
+            co_return completion;
+        }
+
+        std::string get_name() const override { return "phase-probe"; }
+    };
+
+    auto provider = std::make_shared<PhaseProbeProvider>();
+    neograph::llm::Agent agent(provider, std::vector<std::unique_ptr<Tool>>{});
+    agent.set_tool_detection_timeout_seconds(7);
+
+    std::vector<ChatMessage> messages{{"user", "hello"}};
+    std::string streamed;
+    EXPECT_EQ("streamed", agent.run_stream(
+        messages, [&](const std::string& chunk) { streamed += chunk; }));
+    EXPECT_EQ("streamed", streamed);
+    EXPECT_EQ((std::vector<bool>{false, true}), provider->streaming);
+    EXPECT_EQ((std::vector<int>{7, -1}), provider->timeouts);
+}
+
+TEST(ToolDispatchParity, AgentRunStreamLabelsToolDetectionTimeout) {
+    class TimeoutProvider : public Provider {
+    public:
+        asio::awaitable<ChatCompletion>
+        invoke(const CompletionParams&, StreamCallback) override {
+            throw asio::system_error(
+                asio::error::timed_out, "ConnPool::async_post: timeout");
+            co_return ChatCompletion{};
+        }
+
+        std::string get_name() const override { return "timeout"; }
+    };
+
+    neograph::llm::Agent agent(
+        std::make_shared<TimeoutProvider>(), std::vector<std::unique_ptr<Tool>>{});
+    std::vector<ChatMessage> messages{{"user", "hello"}};
+
+    try {
+        (void)agent.run_stream(messages, [](const std::string&) {});
+        FAIL() << "expected tool-detection timeout";
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::timed_out);
+        EXPECT_NE(std::string(error.what()).find("tool-detection phase"),
+                  std::string::npos);
+    }
+}
+
 // How far does the win actually scale? Twenty distinct legacy tools should
 // stay near one tool's latency, while repeated calls to one tool stay
 // keyed-exclusive. Both reference regimes are measured on the same binary.

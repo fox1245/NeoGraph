@@ -172,8 +172,11 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     };
 
     async::RequestOptions opts;
-    if (config_.timeout_seconds > 0) {
-        opts.timeout = std::chrono::seconds(config_.timeout_seconds);
+    const int timeout_seconds = params.timeout_seconds > 0
+        ? params.timeout_seconds
+        : config_.timeout_seconds;
+    if (timeout_seconds > 0) {
+        opts.timeout = std::chrono::seconds(timeout_seconds);
     }
 
     auto request =
@@ -239,7 +242,10 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     auto [host, prefix] = parse_url(config_.base_url);
 
     httplib::Client cli(host);
-    cli.set_read_timeout(config_.timeout_seconds, 0);
+    const int timeout_seconds = params.timeout_seconds > 0
+        ? params.timeout_seconds
+        : config_.timeout_seconds;
+    cli.set_read_timeout(timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
     httplib::Headers headers = {{"Authorization", "Bearer " + config_.api_key}};
@@ -256,6 +262,7 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     std::string        line_buffer;
     std::exception_ptr stream_error;
     std::string        observed_stop_reason;
+    bool               terminal_event_seen = false;
 
     int              response_status = 0;
     std::string      error_body;
@@ -291,7 +298,12 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                 if (!payload.empty() && payload.front() == ' ') {
                     payload.erase(0, 1);
                 }
-                if (payload.empty() || payload == "[DONE]") continue;
+                if (payload.empty()) continue;
+                if (payload == "[DONE]") {
+                    terminal_event_seen = true;
+                    line_buffer.clear();
+                    return false;
+                }
 
                 json j;
                 try {
@@ -368,7 +380,8 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     // Preserve the actual parser, API, or user callback exception instead.
     if (stream_error) std::rethrow_exception(stream_error);
 
-    if (!res) {
+    if (!res && !(terminal_event_seen && response_status == 200 &&
+                  res.error() == httplib::Error::Canceled)) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
     }
 
@@ -376,7 +389,7 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
         throw std::runtime_error("Malformed SSE stream: unterminated line: " + line_buffer);
     }
 
-    if (res->status != 200) {
+    if (res && res->status != 200) {
         throw std::runtime_error("API error (HTTP " + std::to_string(res->status) +
                                  "): " + res->body);
     }

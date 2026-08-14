@@ -106,7 +106,9 @@ def test_completion_params_construction():
         model="gpt-4o-mini",
         messages=[neograph.ChatMessage(role="user", content="hi")],
         temperature=0.5,
+        timeout_seconds=7,
     )
     assert params.model == "gpt-4o-mini"
     assert len(params.messages) == 1
     assert params.temperature == 0.5
+    assert params.timeout_seconds == 7

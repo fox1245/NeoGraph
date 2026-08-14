@@ -21,6 +21,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -35,10 +36,11 @@ struct ResponsesMock {
     std::thread     t;
     int             port = 0;
 
-    explicit ResponsesMock(std::string sse_body) {
+    explicit ResponsesMock(std::string sse_body, int status = 200) {
         svr.Post("/v1/responses",
-            [body = std::move(sse_body)]
+            [body = std::move(sse_body), status]
             (const httplib::Request&, httplib::Response& res) {
+                res.status = status;
                 res.set_header("Content-Type", "text/event-stream");
                 res.set_content(body, "text/event-stream");
             });
@@ -124,40 +126,119 @@ TEST(SchemaProviderResponsesStream, TextDeltasAccumulateAndUsageCaptured) {
 }
 
 TEST(SchemaProviderResponsesStream,
+     OpenRouterDataOnlyEventsDispatchAndTerminateAtResponseDone) {
+    ResponsesMock mock{
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,"
+              "\"item\":{\"type\":\"message\",\"id\":\"msg_1\","
+              "\"role\":\"assistant\"}}\n\n"
+        "data: {\"type\":\"response.content_part.delta\","
+              "\"delta\":\"Open\"}\n\n"
+        "data: {\"type\":\"response.content_part.delta\","
+              "\"delta\":\"Router\"}\n\n"
+        "data: {\"type\":\"response.done\","
+              "\"response\":{\"status\":\"completed\","
+              "\"usage\":{\"input_tokens\":4,\"output_tokens\":2,"
+              "\"total_tokens\":6}}}\n\n"
+        // A terminal event must prevent unrelated trailing data from being read.
+        "data: {\"type\":\"response.content_part.delta\","
+              "\"delta\":\" ignored\"}\n\n"
+        "data: [DONE]\n\n"};
+    ASSERT_GT(mock.port, 0);
+
+    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
+    auto p = params_with("hi");
+
+    std::string streamed;
+    auto r = provider->complete_stream(
+        p, [&](const std::string& token) { streamed += token; });
+
+    EXPECT_EQ("OpenRouter", streamed);
+    EXPECT_EQ("OpenRouter", r.message.content);
+    EXPECT_EQ(4, r.usage.prompt_tokens);
+    EXPECT_EQ(2, r.usage.completion_tokens);
+    EXPECT_EQ(6, r.usage.total_tokens);
+}
+
+TEST(SchemaProviderResponsesStream, DoneSentinelTerminatesDataOnlyStream) {
+    ResponsesMock mock{
+        "data: {\"type\":\"response.output_item.added\","
+              "\"item\":{\"type\":\"message\"}}\n\n"
+        "data: {\"type\":\"response.content_part.delta\","
+              "\"delta\":\"done\"}\n\n"
+        "data: [DONE]\n\n"
+        "data: {\"type\":\"response.content_part.delta\","
+              "\"delta\":\" ignored\"}\n\n"};
+    ASSERT_GT(mock.port, 0);
+
+    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
+    auto r = provider->complete_stream(params_with("hi"), nullptr);
+
+    EXPECT_EQ("done", r.message.content);
+}
+
+TEST(SchemaProviderResponsesStream, ExplicitEventTakesPriorityOverPayloadType) {
+    ResponsesMock mock{
+        "event: response.output_item.added\n"
+        "data: {\"type\":\"response.output_item.added\","
+              "\"item\":{\"type\":\"message\"}}\n\n"
+        "event: response.output_text.delta\n"
+        "data: {\"type\":\"unrelated.payload.type\","
+              "\"delta\":\"explicit\"}\n\n"
+        "data: {\"type\":\"response.content_part.delta\","
+              "\"delta\":\" fallback\"}\n\n"
+        "data: [DONE]\n\n"};
+    ASSERT_GT(mock.port, 0);
+
+    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
+    auto r = provider->complete_stream(params_with("hi"), nullptr);
+
+    EXPECT_EQ("explicit fallback", r.message.content);
+}
+
+TEST(SchemaProviderResponsesStream, ErrorStatusCannotBeMaskedByTerminalPayload) {
+    ResponsesMock mock{
+        "data: {\"type\":\"response.done\","
+        "\"response\":{\"status\":\"completed\"}}\n\n",
+        503};
+    ASSERT_GT(mock.port, 0);
+
+    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
+    try {
+        (void)provider->complete_stream(params_with("hi"), nullptr);
+        FAIL() << "expected HTTP status failure";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("HTTP 503"), std::string::npos);
+    }
+}
+
+TEST(SchemaProviderResponsesStream,
      FunctionCallArgumentsConcatenateVerbatim) {
     // get_weather({"city":"Tokyo","unit":"C"}) — args split across
     // 4 deltas to exercise the slice-concat path.
     ResponsesMock mock{
-        "event: response.output_item.added\n"
         "data: {\"type\":\"response.output_item.added\",\"output_index\":0,"
               "\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\","
               "\"call_id\":\"call_abc\",\"name\":\"get_weather\","
               "\"arguments\":\"\"}}\n"
         "\n"
-        "event: response.function_call_arguments.delta\n"
         "data: {\"type\":\"response.function_call_arguments.delta\","
               "\"item_id\":\"fc_1\",\"delta\":\"{\\\"city\\\":\"}\n"
         "\n"
-        "event: response.function_call_arguments.delta\n"
         "data: {\"type\":\"response.function_call_arguments.delta\","
               "\"item_id\":\"fc_1\",\"delta\":\"\\\"Tokyo\\\"\"}\n"
         "\n"
-        "event: response.function_call_arguments.delta\n"
         "data: {\"type\":\"response.function_call_arguments.delta\","
               "\"item_id\":\"fc_1\",\"delta\":\",\\\"unit\\\":\"}\n"
         "\n"
-        "event: response.function_call_arguments.delta\n"
         "data: {\"type\":\"response.function_call_arguments.delta\","
               "\"item_id\":\"fc_1\",\"delta\":\"\\\"C\\\"}\"}\n"
         "\n"
-        "event: response.output_item.done\n"
         "data: {\"type\":\"response.output_item.done\",\"output_index\":0,"
               "\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\","
               "\"call_id\":\"call_abc\",\"name\":\"get_weather\","
               "\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\","
                               "\\\"unit\\\":\\\"C\\\"}\"}}\n"
         "\n"
-        "event: response.completed\n"
         "data: {\"type\":\"response.completed\","
               "\"response\":{\"id\":\"resp_1\","
               "\"usage\":{\"input_tokens\":12,\"output_tokens\":24,"
@@ -189,4 +270,44 @@ TEST(SchemaProviderResponsesStream,
     EXPECT_EQ(12, r.usage.prompt_tokens);
     EXPECT_EQ(24, r.usage.completion_tokens);
     EXPECT_EQ(36, r.usage.total_tokens);
+}
+
+TEST(SchemaProviderResponsesStream, FunctionCallOutputIsFlatOnTheFollowupTurn) {
+    auto provider = llm::SchemaProvider::create(cfg_for(1));
+
+    CompletionParams p;
+    p.model = "gpt-test";
+    p.messages.push_back(ChatMessage{"user", "weather?"});
+
+    ChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back(
+        ToolCall{"call_abc", "get_weather", R"({"city":"Tokyo"})"});
+    p.messages.push_back(std::move(assistant));
+
+    ChatMessage tool;
+    tool.role = "tool";
+    tool.content = R"({"temperature":24})";
+    tool.tool_call_id = "call_abc";
+    p.messages.push_back(std::move(tool));
+
+    const auto body = llm::test_access::SchemaProviderTestAccess::build_body(
+        *provider, p);
+    ASSERT_TRUE(body.contains("input"));
+    ASSERT_TRUE(body["input"].is_array());
+
+    const auto function_call = std::find_if(
+        body["input"].begin(), body["input"].end(), [](const json& item) {
+            return item.value("type", "") == "function_call";
+        });
+    const auto function_output = std::find_if(
+        body["input"].begin(), body["input"].end(), [](const json& item) {
+            return item.value("type", "") == "function_call_output";
+    });
+    ASSERT_NE(function_call, body["input"].end());
+    ASSERT_NE(function_output, body["input"].end());
+    EXPECT_EQ("call_abc", (*function_call).at("call_id").get<std::string>());
+    EXPECT_EQ("call_abc", (*function_output).at("call_id").get<std::string>());
+    EXPECT_EQ(R"({"temperature":24})",
+              (*function_output).at("output").get<std::string>());
 }

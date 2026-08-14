@@ -186,6 +186,7 @@ int main() {
             std::move(tools),
             react_system
         );
+        agent.set_tool_detection_timeout_seconds(180);
 
         // 4. Run
         std::vector<neograph::ChatMessage> messages;
