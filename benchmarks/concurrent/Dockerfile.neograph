@@ -3,7 +3,7 @@
 # Build from repo root:
 #   docker build -t ng-concurrent -f benchmarks/concurrent/Dockerfile.neograph .
 
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -51,7 +51,7 @@ RUN g++ -std=c++20 -O2 -DNDEBUG \
         build/libneograph_core.a build/libyyjson.a \
         -pthread -o /usr/local/bin/bench_ng
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
