@@ -459,15 +459,21 @@ void init_provider(py::module_& m) {
         "Together, vLLM, Ollama — anything serving the /v1/chat/completions "
         "shape.")
         .def(py::init([](const std::string& api_key,
-                         const std::string& base_url,
-                         const std::string& default_model,
-                         int timeout_seconds,
-                         py::object provider_routing) {
+                          const std::string& base_url,
+                          const std::string& default_model,
+                          int timeout_seconds,
+                          py::object provider_routing,
+                          bool allow_insecure_loopback,
+                          std::size_t max_stream_line_bytes,
+                          std::size_t max_stream_response_bytes) {
             neograph::llm::OpenAIProvider::Config cfg;
             cfg.api_key = api_key;
             cfg.base_url = base_url;
             cfg.default_model = default_model;
             cfg.timeout_seconds = timeout_seconds;
+            cfg.allow_insecure_loopback = allow_insecure_loopback;
+            cfg.max_stream_line_bytes = max_stream_line_bytes;
+            cfg.max_stream_response_bytes = max_stream_response_bytes;
             if (!provider_routing.is_none()) {
                 cfg.provider_routing = py_to_json(provider_routing);
             }
@@ -480,7 +486,10 @@ void init_provider(py::module_& m) {
             py::arg("base_url") = "https://api.openai.com",
             py::arg("default_model") = "gpt-4o-mini",
             py::arg("timeout_seconds") = 60,
-            py::arg("provider_routing") = py::none());
+            py::arg("provider_routing") = py::none(),
+            py::arg("allow_insecure_loopback") = false,
+            py::arg("max_stream_line_bytes") = 64u * 1024u,
+            py::arg("max_stream_response_bytes") = 16u * 1024u * 1024u);
 
     // ── SchemaProvider ───────────────────────────────────────────────────
     py::class_<neograph::llm::SchemaProvider, neograph::Provider,
@@ -495,9 +504,15 @@ void init_provider(py::module_& m) {
                          const std::string& base_url_override,
                          bool use_websocket,
                          bool prefer_libcurl,
-                         py::object provider_routing,
-                         const std::string& auth_header_override,
-                         const std::string& auth_prefix_override) {
+                          py::object provider_routing,
+                          const std::string& auth_header_override,
+                          const std::string& auth_prefix_override,
+                          bool allow_insecure_loopback,
+                          std::size_t max_stream_line_bytes,
+                          std::size_t max_stream_response_bytes,
+                          std::size_t ws_max_handshake_bytes,
+                          std::size_t ws_max_frame_payload_bytes,
+                          std::size_t ws_max_message_payload_bytes) {
             neograph::llm::SchemaProvider::Config cfg;
             cfg.schema_path = schema_path;
             cfg.api_key = api_key;
@@ -508,6 +523,14 @@ void init_provider(py::module_& m) {
             cfg.prefer_libcurl = prefer_libcurl;
             cfg.auth_header_override = auth_header_override;
             cfg.auth_prefix_override = auth_prefix_override;
+            cfg.allow_insecure_loopback = allow_insecure_loopback;
+            cfg.max_stream_line_bytes = max_stream_line_bytes;
+            cfg.max_stream_response_bytes = max_stream_response_bytes;
+            cfg.websocket_options.max_handshake_bytes = ws_max_handshake_bytes;
+            cfg.websocket_options.max_frame_payload_bytes =
+                ws_max_frame_payload_bytes;
+            cfg.websocket_options.max_message_payload_bytes =
+                ws_max_message_payload_bytes;
             if (!provider_routing.is_none()) {
                 cfg.provider_routing = py_to_json(provider_routing);
             }
@@ -523,7 +546,13 @@ void init_provider(py::module_& m) {
             py::arg("prefer_libcurl") = false,
             py::arg("provider_routing") = py::none(),
             py::arg("auth_header_override") = "",
-            py::arg("auth_prefix_override") = "");
+            py::arg("auth_prefix_override") = "",
+            py::arg("allow_insecure_loopback") = false,
+            py::arg("max_stream_line_bytes") = 64u * 1024u,
+            py::arg("max_stream_response_bytes") = 16u * 1024u * 1024u,
+            py::arg("ws_max_handshake_bytes") = 64u * 1024u,
+            py::arg("ws_max_frame_payload_bytes") = 16u * 1024u * 1024u,
+            py::arg("ws_max_message_payload_bytes") = 16u * 1024u * 1024u);
 #endif // NEOGRAPH_PYBIND_HAS_LLM
 }
 

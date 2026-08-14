@@ -141,7 +141,8 @@ struct ConnPool::Impl {
     // outside the TU or to be duplicated. Definition follows the
     // anonymous-namespace helpers so `open`/`try_exchange`/
     // `exchange_fresh` are in scope at the point of use.
-    asio::awaitable<HttpResponse> dispatch(Key key, const std::string& req);
+    asio::awaitable<HttpResponse> dispatch(
+        Key key, const std::string& req, RequestOptions request_opts);
 };
 
 namespace {
@@ -210,14 +211,21 @@ bool is_safe_method(const std::string& req) {
 // surface it (rather than silently double-applying a non-idempotent
 // side effect on the retry path).
 asio::awaitable<std::optional<detail::ExchangeResult>> try_exchange(
-    Connection& conn, const std::string& req) {
+    Connection& conn, const std::string& req, const RequestOptions& opts) {
     try {
         if (conn.plain) {
-            auto r = co_await detail::run_exchange(*conn.plain, req);
+            auto r = co_await detail::run_exchange(*conn.plain, req, opts);
             co_return r;
         }
-        auto r = co_await detail::run_exchange(*conn.tls, req);
+        auto r = co_await detail::run_exchange(*conn.tls, req, opts);
         co_return r;
+    } catch (const asio::system_error& error) {
+        // A framing limit is deterministic, not evidence of a stale idle
+        // socket. Replaying even a safe request would only repeat the same
+        // oversized response. Propagation also drops `conn` at dispatch scope.
+        if (error.code() == asio::error::message_size) throw;
+        if (is_safe_method(req)) co_return std::nullopt;
+        throw;
     } catch (const std::exception&) {
         if (is_safe_method(req)) co_return std::nullopt;
         throw;
@@ -227,22 +235,22 @@ asio::awaitable<std::optional<detail::ExchangeResult>> try_exchange(
 // Exchange on a fresh connection. No internal catch: a failure on
 // a brand-new conn is a real network error worth surfacing.
 asio::awaitable<detail::ExchangeResult> exchange_fresh(
-    Connection& conn, const std::string& req) {
+    Connection& conn, const std::string& req, const RequestOptions& opts) {
     if (conn.plain) {
-        auto r = co_await detail::run_exchange(*conn.plain, req);
+        auto r = co_await detail::run_exchange(*conn.plain, req, opts);
         co_return r;
     }
-    auto r = co_await detail::run_exchange(*conn.tls, req);
+    auto r = co_await detail::run_exchange(*conn.tls, req, opts);
     co_return r;
 }
 
 }  // namespace
 
 asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
-    Key key, const std::string& req) {
+    Key key, const std::string& req, RequestOptions request_opts) {
     auto reused = checkout(key);
     if (reused) {
-        auto maybe = co_await try_exchange(*reused, req);
+        auto maybe = co_await try_exchange(*reused, req, request_opts);
         if (maybe) {
             if (maybe->server_directive == detail::ConnDirective::keep_alive) {
                 checkin(key, std::move(reused));
@@ -253,7 +261,7 @@ asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
     }
 
     auto fresh = co_await open(ex, ssl_ctx, key);
-    auto r = co_await exchange_fresh(*fresh, req);
+    auto r = co_await exchange_fresh(*fresh, req, request_opts);
     if (r.server_directive == detail::ConnDirective::keep_alive) {
         checkin(key, std::move(fresh));
     }
@@ -297,7 +305,7 @@ asio::awaitable<HttpResponse> ConnPool::async_post_owned(
     Key key{ std::move(host), std::move(port), tls };
 
     if (opts.timeout.count() <= 0) {
-        co_return co_await impl_->dispatch(std::move(key), req);
+        co_return co_await impl_->dispatch(std::move(key), req, opts);
     }
 
     // Bound the entire call (reuse attempt + fresh fallback) by a
@@ -309,7 +317,7 @@ asio::awaitable<HttpResponse> ConnPool::async_post_owned(
     timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
-            impl_->dispatch(std::move(key), req)
+            impl_->dispatch(std::move(key), req, opts)
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,

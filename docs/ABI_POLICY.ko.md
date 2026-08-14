@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=4094661c9776532f38c3ad525754adea0810191a9739de2f72b224c5ba23c38a -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=d2a0d445bf112968279a8efd4c21953f01b3dae5bb9a5b026a821b04e12a99e9 -->
 # 바이너리 호환성 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -49,7 +49,7 @@ NeoGraph는 `pyproject.toml`에서 프로젝트 버전을 읽습니다. CMake는
 | 업그레이드 | 해야 할 일 | 이유 |
 |---|---|---|
 | `0.9.0` 이전 버전에서 `0.9.0+`로 | 모든 C++ 프로그램과 사용자 정의 노드를 다시 빌드 | `GraphNode`에서 예전 가상 함수 8개를 없애 vtable이 바뀌었습니다. |
-| `0.11.1` 이하에서 bounded `NodeCache`가 들어간 다음 릴리스로 | 모든 C++ 프로그램을 다시 빌드 | `NodeCache`와 `EngineConfig`의 공개 객체 배치가 바뀌었습니다. `SyncGraphNode` 추가 자체는 기존 `GraphNode` vtable을 바꾸지 않습니다. |
+| `0.11.1` 이하에서 다음 릴리스로 | 모든 C++ 프로그램을 다시 빌드 | bounded runtime/transport 상태를 위해 `NodeCache`, `EngineConfig`, `CompletionParams`, `Agent`, `RequestOptions`, `SseEventParser`, provider config의 공개 객체 배치가 바뀌었습니다. `SyncGraphNode` 추가 자체는 기존 `GraphNode` vtable을 바꾸지 않습니다. |
 | 아무 `0.x` 버전에서 `1.0.0`으로 | 모든 C++ 프로그램을 다시 빌드 | v1 객체 배치를 확정하고 로더 ABI 세대가 0에서 1로 바뀝니다. |
 
 v1 이전 공유 라이브러리를 새 파일로 덮어쓰기 전에 대상 릴리스의 변경 기록을

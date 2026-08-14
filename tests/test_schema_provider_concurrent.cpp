@@ -126,6 +126,7 @@ TEST(SchemaProviderConcurrent, ParallelCompletesNeverSendEmptyOrMalformedBody) {
     cfg.timeout_seconds = 5;
     cfg.base_url_override =
         "http://127.0.0.1:" + std::to_string(mock.port);
+    cfg.allow_insecure_loopback = true;
 
     auto provider = llm::SchemaProvider::create(cfg);
     ASSERT_TRUE(provider);
@@ -243,6 +244,7 @@ TEST(SchemaProviderConcurrent, Throws429AsRateLimitErrorWithRetryAfter) {
     cfg.timeout_seconds = 30;
     cfg.base_url_override =
         "http://127.0.0.1:" + std::to_string(mock.port);
+    cfg.allow_insecure_loopback = true;
 
     auto provider = llm::SchemaProvider::create(cfg);
 
@@ -277,6 +279,7 @@ TEST(SchemaProviderConcurrent, Throws429WithoutRetryAfterHeader) {
     cfg.timeout_seconds = 5;
     cfg.base_url_override =
         "http://127.0.0.1:" + std::to_string(mock.port);
+    cfg.allow_insecure_loopback = true;
 
     auto provider = llm::SchemaProvider::create(cfg);
 

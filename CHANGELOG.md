@@ -157,8 +157,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SOVERSION`; installed shared libraries resolve sibling dependencies from
   their own directory. Pre-v1 releases use ABI generation 0 but may declare
   mandatory rebuild boundaries. All C++ consumers built against `0.11.1` or
-  earlier must rebuild for the release containing bounded `NodeCache`, because
-  `NodeCache` and `EngineConfig` public layouts changed. The release containing
+  earlier must rebuild for the next release, because `NodeCache`, `EngineConfig`,
+  `CompletionParams`, `Agent`, `RequestOptions`, `SseEventParser`, and provider
+  configuration public layouts changed. The release containing
   bounded `UsageAccumulator` reservations is another mandatory rebuild boundary:
   its public object layout now carries reservation accounting state. Version 1.0
   changes the ABI generation to 1 and freezes the supported v1 layouts. CI now
@@ -190,6 +191,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Bounded remote transports and credential origins.** HTTP/1.1, HTTP/2,
+  SSE, and WebSocket receive paths now enforce conservative response, header,
+  chunk, line, frame, handshake, and message limits before untrusted sizes are
+  allocated. Redirected POST requests are followed only within the normalized
+  same origin, provider credentials require TLS unless an explicit numeric
+  loopback development exception is enabled, and WebSocket debug output no
+  longer contains request headers or payloads.
 - **QuickJS `all` join startup race.** Completion handlers now wait for initial
   member-launch registration before closing a JavaScript join. An immediately
   completing child can no longer resume the generator before its sibling initial

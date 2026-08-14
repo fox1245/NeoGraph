@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
 #include <string>
 
 namespace async = neograph::async;
@@ -140,4 +141,117 @@ TEST(SseEventParser, ResetClearsPartial) {
     auto events = p.drain();
     ASSERT_EQ(events.size(), 1u);
     EXPECT_EQ(events[0].data, "fresh");
+}
+
+TEST(SseEventParser, ConsecutiveEmptyDataFieldsPreserveSeparator) {
+    async::SseEventParser p;
+    p.feed("data:\ndata:\n\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "\n");
+}
+
+TEST(SseEventParser, LimitsAreInclusive) {
+    async::SseParserOptions options;
+    options.max_partial_line_bytes = 7;  // "data: x"
+    options.max_event_bytes = 1;
+    options.max_pending_events = 1;
+    options.max_pending_bytes = 1;
+    async::SseEventParser p(options);
+
+    EXPECT_NO_THROW(p.feed("data: x\n\n"));
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "x");
+}
+
+TEST(SseEventParser, SplitPartialLineOverflowFails) {
+    async::SseParserOptions options;
+    options.max_partial_line_bytes = 7;
+    async::SseEventParser p(options);
+
+    EXPECT_NO_THROW(p.feed("data:"));
+    EXPECT_NO_THROW(p.feed(" x"));
+    EXPECT_THROW(p.feed("x"), std::length_error);
+}
+
+TEST(SseEventParser, CurrentEventAggregateIsBounded) {
+    async::SseParserOptions options;
+    options.max_event_bytes = 3;
+    async::SseEventParser p(options);
+
+    p.feed("event: a\nid: b\n");
+    EXPECT_NO_THROW(p.feed("data: c\n"));
+    // The newline inserted before a second data field is part of the event.
+    EXPECT_THROW(p.feed("data:\n"), std::length_error);
+}
+
+TEST(SseEventParser, PendingEventCountIsBounded) {
+    async::SseParserOptions options;
+    options.max_pending_events = 1;
+    async::SseEventParser p(options);
+
+    p.feed("data: a\n\n");
+    EXPECT_THROW(p.feed("data: b\n\n"), std::length_error);
+}
+
+TEST(SseEventParser, PendingEventBytesAreBounded) {
+    async::SseParserOptions options;
+    options.max_pending_bytes = 2;
+    async::SseEventParser p(options);
+
+    EXPECT_NO_THROW(p.feed("data: a\n\ndata: b\n\n"));
+    EXPECT_THROW(p.feed("data: c\n\n"), std::length_error);
+}
+
+TEST(SseEventParser, LimitFailureRequiresReset) {
+    async::SseParserOptions options;
+    options.max_event_bytes = 1;
+    options.max_pending_events = 1;
+    options.max_pending_bytes = 1;
+    async::SseEventParser p(options);
+
+    p.feed("data: a\n\n");
+    p.feed("data: x\n");
+    EXPECT_THROW(p.feed("data: y\n"), std::length_error);
+    EXPECT_THROW(p.feed("\n\n"), std::length_error);
+    EXPECT_THROW(p.drain(), std::length_error);
+
+    p.reset();
+    EXPECT_NO_THROW(p.feed("data: z\n\n"));
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "z");
+}
+
+TEST(SseEventParser, DrainReleasesPendingBudgets) {
+    async::SseParserOptions options;
+    options.max_pending_events = 1;
+    options.max_pending_bytes = 1;
+    async::SseEventParser p(options);
+
+    p.feed("data: a\n\n");
+    ASSERT_EQ(p.drain().size(), 1u);
+    EXPECT_NO_THROW(p.feed("data: b\n\n"));
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "b");
+}
+
+TEST(SseEventParser, ZeroLimitsAreInvalid) {
+    async::SseParserOptions options;
+    options.max_partial_line_bytes = 0;
+    EXPECT_THROW((void)async::SseEventParser{options}, std::invalid_argument);
+
+    options = {};
+    options.max_event_bytes = 0;
+    EXPECT_THROW((void)async::SseEventParser{options}, std::invalid_argument);
+
+    options = {};
+    options.max_pending_events = 0;
+    EXPECT_THROW((void)async::SseEventParser{options}, std::invalid_argument);
+
+    options = {};
+    options.max_pending_bytes = 0;
+    EXPECT_THROW((void)async::SseEventParser{options}, std::invalid_argument);
 }

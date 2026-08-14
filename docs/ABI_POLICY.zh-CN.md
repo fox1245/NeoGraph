@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=4094661c9776532f38c3ad525754adea0810191a9739de2f72b224c5ba23c38a -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=d2a0d445bf112968279a8efd4c21953f01b3dae5bb9a5b026a821b04e12a99e9 -->
 # 二进制兼容性策略
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -39,7 +39,7 @@ NeoGraph 从 `pyproject.toml` 读取项目版本。CMake 把该值设为所有�
 | 升级 | 要求 | 原因 |
 |---|---|---|
 | `0.9.0` 之前版本到 `0.9.0+` | 重新构建所有 C++ 使用者和自定义节点 | `GraphNode` 删除了八个旧虚函数，vtable 已改变。 |
-| `0.11.1` 或更早版本到包含 bounded `NodeCache` 的下一版本 | 重新构建所有 C++ 使用者 | `NodeCache` 和 `EngineConfig` 的公开对象布局已改变；`SyncGraphNode` 本身只是新增 API。 |
+| `0.11.1` 或更早版本到下一版本 | 重新构建所有 C++ 使用者 | bounded runtime/transport 状态改变了 `NodeCache`、`EngineConfig`、`CompletionParams`、`Agent`、`RequestOptions`、`SseEventParser` 和 provider config 的公开对象布局；`SyncGraphNode` 本身只是新增 API。 |
 | 任意 `0.x` 到 `1.0.0` | 重新构建所有 C++ 使用者 | v1 布局正式冻结，ABI 代次从 0 改为 1。 |
 
 ## 公开虚接口

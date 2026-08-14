@@ -13,7 +13,12 @@
  */
 #pragma once
 
+#include <algorithm>
+#include <charconv>
+#include <cctype>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace neograph::async {
 
@@ -39,28 +44,132 @@ inline AsyncEndpoint split_async_endpoint(const std::string& base_url) {
     auto scheme_end = rest.find("://");
     if (scheme_end != std::string::npos) {
         std::string scheme = rest.substr(0, scheme_end);
-        out.tls = (scheme == "https");
+        std::transform(scheme.begin(), scheme.end(), scheme.begin(),
+                       [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        if (scheme != "http" && scheme != "https") {
+            throw std::invalid_argument("unsupported HTTP endpoint scheme");
+        }
+        out.tls = scheme == "https";
         rest = rest.substr(scheme_end + 3);
     }
 
-    auto path_start = rest.find('/');
+    auto path_start = rest.find_first_of("/?#");
     std::string authority;
     if (path_start != std::string::npos) {
         authority = rest.substr(0, path_start);
+        if (rest[path_start] != '/') {
+            throw std::invalid_argument(
+                "HTTP endpoint base URL must not contain a query or fragment");
+        }
         out.prefix = rest.substr(path_start);
+        if (out.prefix.find('#') != std::string::npos) {
+            throw std::invalid_argument(
+                "HTTP endpoint base URL must not contain a fragment");
+        }
     } else {
         authority = rest;
     }
 
-    auto colon = authority.find(':');
-    if (colon != std::string::npos) {
-        out.host = authority.substr(0, colon);
-        out.port = authority.substr(colon + 1);
-    } else {
-        out.host = authority;
-        out.port = out.tls ? "443" : "80";
+    if (authority.empty() || authority.find('@') != std::string::npos) {
+        throw std::invalid_argument("invalid HTTP endpoint authority");
     }
+    if (authority.front() == '[') {
+        const auto close = authority.find(']');
+        if (close == std::string::npos) {
+            throw std::invalid_argument("invalid bracketed HTTP endpoint host");
+        }
+        out.host = authority.substr(1, close - 1);
+        if (close + 1 < authority.size()) {
+            if (authority[close + 1] != ':' || close + 2 == authority.size()) {
+                throw std::invalid_argument("invalid HTTP endpoint port");
+            }
+            out.port = authority.substr(close + 2);
+        }
+    } else {
+        const auto colon = authority.find(':');
+        if (colon != std::string::npos) {
+            if (authority.find(':', colon + 1) != std::string::npos) {
+                throw std::invalid_argument(
+                    "IPv6 HTTP endpoint hosts must use brackets");
+            }
+            out.host = authority.substr(0, colon);
+            out.port = authority.substr(colon + 1);
+        } else {
+            out.host = authority;
+        }
+    }
+    if (out.host.empty()) {
+        throw std::invalid_argument("HTTP endpoint host is empty");
+    }
+    if (out.port.empty()) out.port = out.tls ? "443" : "80";
+    unsigned int numeric_port = 0;
+    const auto [port_end, port_error] = std::from_chars(
+        out.port.data(), out.port.data() + out.port.size(), numeric_port);
+    if (port_error != std::errc{} ||
+        port_end != out.port.data() + out.port.size() ||
+        numeric_port == 0 || numeric_port > 65535) {
+        throw std::invalid_argument("invalid HTTP endpoint port");
+    }
+    out.port = std::to_string(numeric_port);
     return out;
+}
+
+inline bool has_explicit_http_scheme(std::string_view url) {
+    const auto separator = url.find("://");
+    if (separator == std::string_view::npos) return false;
+    std::string scheme(url.substr(0, separator));
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    return scheme == "http" || scheme == "https";
+}
+
+inline bool is_loopback_host(std::string_view host) {
+    std::string lower(host);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    if (!lower.empty() && lower.back() == '.') lower.pop_back();
+    if (lower == "::1") return true;
+
+    unsigned int octets[4]{};
+    std::size_t start = 0;
+    for (int i = 0; i < 4; ++i) {
+        const auto end = lower.find('.', start);
+        const auto token_end = end == std::string::npos ? lower.size() : end;
+        if (token_end == start) return false;
+        const auto [parsed, error] = std::from_chars(
+            lower.data() + start, lower.data() + token_end, octets[i]);
+        if (error != std::errc{} || parsed != lower.data() + token_end ||
+            octets[i] > 255) {
+            return false;
+        }
+        if (i < 3 && end == std::string::npos) return false;
+        if (i == 3 && end != std::string::npos) return false;
+        start = token_end + 1;
+    }
+    return octets[0] == 127;
+}
+
+inline AsyncEndpoint validate_credential_endpoint(
+    const std::string& base_url,
+    bool credentialed,
+    bool allow_insecure_loopback) {
+    if (credentialed && !has_explicit_http_scheme(base_url)) {
+        throw std::invalid_argument(
+            "credentialed provider endpoint requires an explicit http:// or https:// scheme");
+    }
+    auto endpoint = split_async_endpoint(base_url);
+    if (credentialed && !endpoint.tls &&
+        !(allow_insecure_loopback && is_loopback_host(endpoint.host))) {
+        throw std::invalid_argument(
+            "credentialed provider endpoint requires TLS; plaintext is allowed only for explicit loopback development");
+    }
+    return endpoint;
 }
 
 } // namespace neograph::async

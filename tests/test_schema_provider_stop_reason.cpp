@@ -71,6 +71,7 @@ llm::SchemaProvider::Config config_for(const std::string& schema, int port,
     cfg.default_model = model;
     cfg.timeout_seconds = 10;
     cfg.base_url_override = "http://127.0.0.1:" + std::to_string(port);
+    cfg.allow_insecure_loopback = true;
     return cfg;
 }
 

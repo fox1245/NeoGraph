@@ -113,6 +113,7 @@ std::unique_ptr<SchemaProvider> make_provider_from(
     cfg.default_model = "gpt-test";
     cfg.strategy_registry = std::move(strategy_registry);
     cfg.provider_routing = std::move(provider_routing);
+    cfg.allow_insecure_loopback = true;
 
     auto sp = SchemaProvider::create(cfg);
     std::remove(path.c_str());

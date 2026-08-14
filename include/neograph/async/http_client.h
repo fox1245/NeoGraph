@@ -19,6 +19,7 @@
 #include <asio/any_io_executor.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -61,8 +62,8 @@ struct NEOGRAPH_API HttpResponse {
     std::string_view get_header(std::string_view name) const noexcept;
 };
 
-/// Per-call knobs. Default-constructed instance preserves the
-/// library's historical behavior (no timeout, no redirect-following).
+/// Per-call knobs. Default construction keeps timeout and redirect-following
+/// disabled while applying conservative inbound response limits.
 struct RequestOptions {
     /// Per-hop deadline covering connect + handshake + write + read
     /// of one HTTP exchange. Zero = no timeout (the default).
@@ -76,6 +77,19 @@ struct RequestOptions {
     /// and body for all 3xx codes (pragmatic for the LLM/MCP hosts
     /// we target — no 303 → GET downgrade).
     int max_redirects = 0;
+
+    /// Maximum bytes accepted for a response status/header block, trailer
+    /// block, or individual chunk-size line. Zero disables this limit.
+    std::size_t max_response_header_bytes = 64 * 1024;
+
+    /// Maximum decoded response body bytes accepted per hop. Checked
+    /// before allocating or appending body storage. Zero disables this
+    /// limit.
+    std::size_t max_response_body_bytes = 16 * 1024 * 1024;
+
+    /// Maximum bytes accepted in one HTTP transfer chunk (or one Curl
+    /// body callback). Zero disables this limit.
+    std::size_t max_response_chunk_bytes = 1024 * 1024;
 };
 
 /// Async HTTP(S) POST. Returns the response body and status on the

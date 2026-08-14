@@ -108,6 +108,7 @@ llm::OpenAIProvider::Config make_config(const MockServer& mock) {
     llm::OpenAIProvider::Config cfg;
     cfg.api_key         = "test-key";
     cfg.base_url        = mock.base_url();
+    cfg.allow_insecure_loopback = true;
     cfg.default_model   = "gpt-4o-mini";
     cfg.timeout_seconds = 5;
     return cfg;
@@ -319,6 +320,39 @@ TEST(OpenAIProviderStream, UnterminatedDataIsNotAnEmptySuccess) {
 
     auto provider = llm::OpenAIProvider::create(make_config(mock));
     EXPECT_THROW(provider->complete_stream(make_params(), {}), std::runtime_error);
+}
+
+TEST(OpenAIProviderStream, RejectsOversizedSseLine) {
+    MockServer mock;
+    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"too-long\"}}]}\n\n";
+
+    auto config = make_config(mock);
+    config.max_stream_line_bytes = 24;
+    config.max_stream_response_bytes = 1024;
+    auto provider = llm::OpenAIProvider::create(config);
+    EXPECT_THROW(provider->complete_stream(make_params(), {}),
+                 std::length_error);
+}
+
+TEST(OpenAIProviderStream, RejectsOversizedAggregateStream) {
+    MockServer mock;
+    mock.body =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"three\"}}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto config = make_config(mock);
+    config.max_stream_line_bytes = 100;
+    config.max_stream_response_bytes = 100;
+    auto provider = llm::OpenAIProvider::create(config);
+    try {
+        (void)provider->complete_stream(make_params(), {});
+        FAIL() << "expected aggregate stream limit";
+    } catch (const std::length_error& error) {
+        EXPECT_NE(std::string(error.what()).find("response limit"),
+                  std::string::npos);
+    }
 }
 
 TEST(OpenAIProviderStream, SuccessfulContentAndUsageRemainIntact) {

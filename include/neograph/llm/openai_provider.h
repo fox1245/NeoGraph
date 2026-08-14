@@ -13,6 +13,7 @@
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -69,6 +70,11 @@ public:
         /// Example: `{"zdr": true}` restricts routing to Zero Data
         /// Retention endpoints.
         json provider_routing;
+        /// Permit credentials over explicit http:// only for a literal
+        /// loopback endpoint. Intended solely for local tests/development.
+        bool allow_insecure_loopback = false;
+        std::size_t max_stream_line_bytes = 64u * 1024u;
+        std::size_t max_stream_response_bytes = 16u * 1024u * 1024u;
     };
 
     /**

@@ -21,6 +21,7 @@
 #include <neograph/async/sse_parser.h>
 
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -47,20 +48,48 @@ split_field(std::string_view line) {
 
 }  // namespace
 
-void SseEventParser::feed(std::string_view bytes) {
-    raw_.append(bytes.data(), bytes.size());
+SseEventParser::SseEventParser(SseParserOptions options)
+    : options_(options) {
+    if (options_.max_partial_line_bytes == 0 ||
+        options_.max_event_bytes == 0 ||
+        options_.max_pending_events == 0 ||
+        options_.max_pending_bytes == 0) {
+        throw std::invalid_argument("SSE parser limits must be nonzero");
+    }
+}
 
-    // Scan for complete lines. We keep the unterminated tail in raw_.
-    std::size_t start = 0;
-    while (start < raw_.size()) {
-        auto nl = raw_.find('\n', start);
-        if (nl == std::string::npos) break;
-        std::string_view line(raw_.data() + start, nl - start);
+void SseEventParser::feed(std::string_view bytes) {
+    if (failed_) {
+        throw std::length_error(
+            "SSE parser is in a failed state; call reset() before reuse");
+    }
+
+    // Scan the input before copying it so a chunk containing many bounded
+    // lines does not require an equally large temporary raw_ allocation.
+    while (!bytes.empty()) {
+        const auto nl = bytes.find('\n');
+        const auto fragment = bytes.substr(0, nl);
+        ensure_can_add(raw_.size(), fragment.size(),
+                       options_.max_partial_line_bytes,
+                       "SSE partial line exceeds configured byte limit");
+
+        if (nl == std::string_view::npos) {
+            raw_.append(fragment.data(), fragment.size());
+            return;
+        }
+
+        std::string_view line;
+        if (raw_.empty()) {
+            line = fragment;
+        } else {
+            raw_.append(fragment.data(), fragment.size());
+            line = raw_;
+        }
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         consume_line(line);
-        start = nl + 1;
+        raw_.clear();
+        bytes.remove_prefix(nl + 1);
     }
-    if (start > 0) raw_.erase(0, start);
 }
 
 void SseEventParser::consume_line(std::string_view line) {
@@ -74,14 +103,39 @@ void SseEventParser::consume_line(std::string_view line) {
     }
     auto [name, value] = split_field(line);
     if (name == "data") {
-        if (!cur_data_.empty()) cur_data_.push_back('\n');
+        const std::size_t separator_bytes = cur_has_data_ ? 1u : 0u;
+        ensure_can_add(cur_event_bytes_, separator_bytes,
+                       options_.max_event_bytes,
+                       "SSE event exceeds configured byte limit");
+        const std::size_t bytes_with_separator =
+            cur_event_bytes_ + separator_bytes;
+        ensure_can_add(bytes_with_separator, value.size(),
+                       options_.max_event_bytes,
+                       "SSE event exceeds configured byte limit");
+
+        if (cur_has_data_) cur_data_.push_back('\n');
         cur_data_.append(value);
+        cur_event_bytes_ = bytes_with_separator + value.size();
         cur_in_progress_ = true;
+        cur_has_data_ = true;
     } else if (name == "event") {
-        cur_event_.assign(value);
+        const std::size_t retained_bytes =
+            cur_event_bytes_ - cur_event_.size();
+        ensure_can_add(retained_bytes, value.size(),
+                       options_.max_event_bytes,
+                       "SSE event exceeds configured byte limit");
+        std::string replacement(value);
+        cur_event_.swap(replacement);
+        cur_event_bytes_ = retained_bytes + value.size();
         cur_in_progress_ = true;
     } else if (name == "id") {
-        cur_id_.assign(value);
+        const std::size_t retained_bytes = cur_event_bytes_ - cur_id_.size();
+        ensure_can_add(retained_bytes, value.size(),
+                       options_.max_event_bytes,
+                       "SSE event exceeds configured byte limit");
+        std::string replacement(value);
+        cur_id_.swap(replacement);
+        cur_event_bytes_ = retained_bytes + value.size();
         cur_in_progress_ = true;
     }
     // Other fields (retry etc.) intentionally ignored.
@@ -89,20 +143,36 @@ void SseEventParser::consume_line(std::string_view line) {
 
 void SseEventParser::finish_event() {
     if (!cur_in_progress_) return;
-    SseEvent e;
-    e.event = std::move(cur_event_);
-    e.data  = std::move(cur_data_);
-    e.id    = std::move(cur_id_);
-    pending_.push_back(std::move(e));
+    ensure_can_add(pending_.size(), 1u, options_.max_pending_events,
+                   "SSE pending event count exceeds configured limit");
+    ensure_can_add(pending_bytes_, cur_event_bytes_,
+                   options_.max_pending_bytes,
+                   "SSE pending event bytes exceed configured limit");
+
+    // Grow pending_ only after both budgets have been checked. Constructing
+    // the slot first also keeps the current event intact if allocation fails.
+    pending_.emplace_back();
+    auto& event = pending_.back();
+    event.event = std::move(cur_event_);
+    event.data  = std::move(cur_data_);
+    event.id    = std::move(cur_id_);
+    pending_bytes_ += cur_event_bytes_;
     cur_event_.clear();
     cur_data_.clear();
     cur_id_.clear();
+    cur_event_bytes_ = 0;
     cur_in_progress_ = false;
+    cur_has_data_ = false;
 }
 
 std::vector<SseEvent> SseEventParser::drain() {
+    if (failed_) {
+        throw std::length_error(
+            "SSE parser is in a failed state; call reset() before reuse");
+    }
     std::vector<SseEvent> out;
     out.swap(pending_);
+    pending_bytes_ = 0;
     return out;
 }
 
@@ -111,8 +181,35 @@ void SseEventParser::reset() noexcept {
     cur_data_.clear();
     cur_event_.clear();
     cur_id_.clear();
+    cur_event_bytes_ = 0;
     cur_in_progress_ = false;
+    cur_has_data_ = false;
     pending_.clear();
+    pending_bytes_ = 0;
+    failed_ = false;
+}
+
+void SseEventParser::ensure_can_add(std::size_t current,
+                                    std::size_t addition,
+                                    std::size_t limit,
+                                    const char* message) {
+    if (current > limit || addition > limit - current) {
+        fail_limit(message);
+    }
+}
+
+[[noreturn]] void SseEventParser::fail_limit(const char* message) {
+    failed_ = true;
+    std::string{}.swap(raw_);
+    std::string{}.swap(cur_data_);
+    std::string{}.swap(cur_event_);
+    std::string{}.swap(cur_id_);
+    std::vector<SseEvent>{}.swap(pending_);
+    cur_event_bytes_ = 0;
+    pending_bytes_ = 0;
+    cur_in_progress_ = false;
+    cur_has_data_ = false;
+    throw std::length_error(message);
 }
 
 }  // namespace neograph::async

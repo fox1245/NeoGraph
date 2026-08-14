@@ -127,6 +127,20 @@ SchemaProvider::SchemaProvider(Config config, json schema)
 {
     parse_schema();
 
+    if (user_config_.max_stream_line_bytes == 0 ||
+        user_config_.max_stream_response_bytes == 0 ||
+        user_config_.max_stream_line_bytes >
+            user_config_.max_stream_response_bytes) {
+        throw std::invalid_argument(
+            "SchemaProvider stream limits must be nonzero and line <= response");
+    }
+    const bool credentialed = !conn_.auth_header.empty() ||
+                              !conn_.auth_query_param.empty() ||
+                              !conn_.extra_headers.empty();
+    (void)async::validate_credential_endpoint(
+        conn_.base_url, credentialed,
+        user_config_.allow_insecure_loopback);
+
     // Stand up the long-lived HTTP loop + ConnPool. The pool is bound
     // to http_io_'s executor, so it survives the run_sync io_context
     // that drives any individual Provider::complete() call. Sync and
@@ -589,18 +603,18 @@ static int retry_after_seconds(const httplib::Result& res) {
 }
 
 // Parse base_url into host + path prefix
-static std::pair<std::string, std::string> split_host_prefix(const std::string& base_url) {
-    std::string host = base_url;
-    std::string prefix;
-    auto scheme_end = host.find("://");
-    if (scheme_end != std::string::npos) {
-        auto path_start = host.find('/', scheme_end + 3);
-        if (path_start != std::string::npos) {
-            prefix = host.substr(path_start);
-            host = host.substr(0, path_start);
-        }
+static std::pair<std::string, std::string> split_host_prefix(
+    const std::string& base_url) {
+    const auto endpoint = async::split_async_endpoint(base_url);
+    std::string host = endpoint.tls ? "https://" : "http://";
+    if (endpoint.host.find(':') != std::string::npos) {
+        host += "[" + endpoint.host + "]";
+    } else {
+        host += endpoint.host;
     }
-    return {host, prefix};
+    const std::string default_port = endpoint.tls ? "443" : "80";
+    if (endpoint.port != default_port) host += ":" + endpoint.port;
+    return {std::move(host), endpoint.prefix};
 }
 
 // Parse Retry-After (seconds-integer shape only, matching the
@@ -617,7 +631,9 @@ static int parse_retry_after_string(std::string_view raw) {
     return seconds;
 }
 
-std::string SchemaProvider::build_endpoint(const std::string& model, bool streaming) const {
+std::string SchemaProvider::build_endpoint(const std::string& model,
+                                           bool streaming,
+                                           std::string_view api_key) const {
     std::string ep = streaming ? conn_.stream_endpoint : conn_.endpoint;
 
     // Substitute $MODEL in endpoint
@@ -628,20 +644,20 @@ std::string SchemaProvider::build_endpoint(const std::string& model, bool stream
 
     // Append auth query param if configured
     if (!conn_.auth_query_param.empty()) {
-        std::string key = get_api_key();
         char sep = (ep.find('?') != std::string::npos) ? '&' : '?';
-        ep += sep + conn_.auth_query_param + "=" + key;
+        ep += sep + conn_.auth_query_param + "=" + std::string(api_key);
     }
 
     return ep;
 }
 
-std::map<std::string, std::string> SchemaProvider::build_headers() const {
+std::map<std::string, std::string> SchemaProvider::build_headers(
+    std::string_view api_key) const {
     std::map<std::string, std::string> headers;
 
     // Auth header (skip if empty, e.g., Gemini uses query param)
     if (!conn_.auth_header.empty()) {
-        headers[conn_.auth_header] = conn_.auth_prefix + get_api_key();
+        headers[conn_.auth_header] = conn_.auth_prefix + std::string(api_key);
     }
 
     // Extra headers (e.g., anthropic-version)
@@ -1379,12 +1395,17 @@ SchemaProvider::complete_async(const CompletionParams& params)
     async::AsyncEndpoint endpoint;
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
+        const std::string api_key = get_api_key();
+        endpoint = async::validate_credential_endpoint(
+            conn_.base_url,
+            !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
+                !conn_.extra_headers.empty() || !api_key.empty(),
+            user_config_.allow_insecure_loopback);
         auto body = build_body(params);
         body_str = body.dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
-        endpoint = async::split_async_endpoint(conn_.base_url);
-        endpoint_path = endpoint.prefix + build_endpoint(model, false);
-        for (const auto& [k, v] : build_headers()) {
+        endpoint_path = endpoint.prefix + build_endpoint(model, false, api_key);
+        for (const auto& [k, v] : build_headers(api_key)) {
             headers.emplace_back(k, v);
         }
         // async_post computes Content-Length from body but does not
@@ -1412,8 +1433,12 @@ SchemaProvider::complete_async(const CompletionParams& params)
     //     wide-fan-out workloads against WAF-protected endpoints.
     std::optional<asio::awaitable<async::HttpResponse>> request;
     if (curl_pool_) {
-        std::string url = (endpoint.tls ? "https://" : "http://") + endpoint.host
-                        + (endpoint.port == "443" || endpoint.port == "80"
+        const std::string default_port = endpoint.tls ? "443" : "80";
+        const std::string url_host = endpoint.host.find(':') != std::string::npos
+            ? "[" + endpoint.host + "]"
+            : endpoint.host;
+        std::string url = (endpoint.tls ? "https://" : "http://") + url_host
+                        + (endpoint.port == default_port
                             ? "" : ":" + endpoint.port)
                         + endpoint_path;
         request.emplace(curl_pool_->async_post(
@@ -1528,6 +1553,12 @@ ChatCompletion SchemaProvider::complete_stream_http(
     std::string host, prefix;
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
+        const std::string api_key = get_api_key();
+        (void)async::validate_credential_endpoint(
+            conn_.base_url,
+            !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
+                !conn_.extra_headers.empty() || !api_key.empty(),
+            user_config_.allow_insecure_loopback);
         auto body = build_body(params);
         if (!req_.stream_field.empty()) {
             body[req_.stream_field] = true;
@@ -1544,8 +1575,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
         body_str = body.dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
         std::tie(host, prefix) = split_host_prefix(conn_.base_url);
-        endpoint = prefix + build_endpoint(model, true);
-        for (const auto& [k, v] : build_headers()) {
+        endpoint = prefix + build_endpoint(model, true, api_key);
+        for (const auto& [k, v] : build_headers(api_key)) {
             headers.emplace(k, v);
         }
     }
@@ -1598,6 +1629,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
 
     int response_status = 0;
     std::string error_body;
+    std::size_t response_bytes = 0;
+    std::exception_ptr stream_error;
     httplib::Request request;
     request.method = "POST";
     request.path = endpoint;
@@ -1610,7 +1643,22 @@ ChatCompletion SchemaProvider::complete_stream_http(
     };
     request.content_receiver =
         [&](const char* data, size_t len, size_t, size_t) -> bool {
+            if (len > user_config_.max_stream_response_bytes -
+                    std::min(response_bytes,
+                             user_config_.max_stream_response_bytes)) {
+                stream_error = std::make_exception_ptr(std::length_error(
+                    "SchemaProvider stream exceeds configured response limit"));
+                return false;
+            }
+            response_bytes += len;
             if (response_status != 200) {
+                constexpr std::size_t kMaxErrorBodyBytes = 64u * 1024u;
+                if (len > kMaxErrorBodyBytes -
+                        std::min(error_body.size(), kMaxErrorBodyBytes)) {
+                    stream_error = std::make_exception_ptr(std::length_error(
+                        "SchemaProvider error response exceeds configured limit"));
+                    return false;
+                }
                 error_body.append(data, len);
                 return true;
             }
@@ -1624,6 +1672,11 @@ ChatCompletion SchemaProvider::complete_stream_http(
             while ((pos = line_buffer.find('\n')) != std::string::npos) {
                 if ((cancel_control && cancel_control->is_cancelled()) ||
                     (params.cancel_token && params.cancel_token->is_cancelled())) {
+                    return false;
+                }
+                if (pos > user_config_.max_stream_line_bytes) {
+                    stream_error = std::make_exception_ptr(std::length_error(
+                        "SchemaProvider SSE line exceeds configured limit"));
                     return false;
                 }
                 std::string line = line_buffer.substr(0, pos);
@@ -1898,6 +1951,11 @@ ChatCompletion SchemaProvider::complete_stream_http(
                     if (terminal_event_seen) return false;
                 }
             }
+            if (line_buffer.size() > user_config_.max_stream_line_bytes) {
+                stream_error = std::make_exception_ptr(std::length_error(
+                    "SchemaProvider SSE line exceeds configured limit"));
+                return false;
+            }
             return true; // continue receiving
         };
 
@@ -1907,6 +1965,7 @@ ChatCompletion SchemaProvider::complete_stream_http(
         (params.cancel_token && params.cancel_token->is_cancelled())) {
         throw neograph::graph::CancelledException("SchemaProvider stream aborted");
     }
+    if (stream_error) std::rethrow_exception(stream_error);
     if (response_status != 0 && response_status != 200) {
         if (response_status == 429) {
             throw RateLimitError(
@@ -2129,6 +2188,7 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     // HTTP path. The lock is released before any I/O.
     json request_body;
     async::AsyncEndpoint endpoint;
+    std::string api_key;
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
         // OpenAI's Responses WS endpoint has a known quirk: when the
@@ -2146,7 +2206,10 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
         CompletionParams ws_params = params;
         ws_params.temperature = -1.0f;  // suppresses temperature in build_body
         request_body = build_body(ws_params);
-        endpoint = async::split_async_endpoint(conn_.base_url);
+        api_key = get_api_key();
+        endpoint = async::validate_credential_endpoint(
+            conn_.base_url, true,
+            user_config_.allow_insecure_loopback);
     }
 
     // OpenAI WS framing: a single JSON object with `"type":"response.create"`
@@ -2158,7 +2221,7 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     request_body["type"] = "response.create";
 
     std::vector<std::pair<std::string, std::string>> ws_headers = {
-        {"Authorization", "Bearer " + get_api_key()},
+        {"Authorization", "Bearer " + api_key},
     };
     // Schema-declared extra headers (rarely set for OpenAI but the
     // contract is that build_headers() reflects them; we apply the
@@ -2178,11 +2241,13 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
         endpoint.prefix.empty() ? std::string("/v1/responses")
                                 : (endpoint.prefix + "/v1/responses"),
         std::move(ws_headers),
-        endpoint.tls);
+        endpoint.tls,
+        user_config_.websocket_options);
 
     auto dumped = request_body.dump();
     if (std::getenv("NEOGRAPH_WS_DEBUG")) {
-        std::cerr << "[WS DEBUG] sending: " << dumped << "\n";
+        std::cerr << "[WS DEBUG] sending response.create bytes="
+                  << dumped.size() << "\n";
     }
     co_await ws->send_text(dumped);
 
@@ -2239,12 +2304,20 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     };
 
     bool ws_debug = std::getenv("NEOGRAPH_WS_DEBUG") != nullptr;
+    std::size_t ws_response_bytes = 0;
     while (!got_done) {
         auto msg = co_await ws->recv();
+        if (msg.payload.size() >
+            user_config_.max_stream_response_bytes -
+                std::min(ws_response_bytes,
+                         user_config_.max_stream_response_bytes)) {
+            throw std::length_error(
+                "SchemaProvider WebSocket response exceeds configured limit");
+        }
+        ws_response_bytes += msg.payload.size();
         if (ws_debug) {
             std::cerr << "[WS DEBUG] recv op=" << static_cast<int>(msg.op)
-                      << " bytes=" << msg.payload.size()
-                      << " payload=" << msg.payload << "\n";
+                      << " bytes=" << msg.payload.size() << "\n";
         }
         if (msg.op == async::WsOpcode::Close) {
             // Server closed before sending response.completed — surface

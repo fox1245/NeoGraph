@@ -26,11 +26,13 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/async/ws_client.h>
 #include <neograph/provider.h>
 #include <neograph/llm/json_path.h>
 #include <neograph/llm/schema_strategy_registry.h>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
+#include <cstddef>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -91,6 +93,16 @@ public:
         std::shared_ptr<const SchemaStrategyRegistry> strategy_registry;
         /// Prefer the libcurl HTTP/2 pool over the httplib transport.
         bool prefer_libcurl = false;
+        /// Permit credentials over explicit http:// only for a literal
+        /// loopback endpoint. Intended solely for local tests/development.
+        bool allow_insecure_loopback = false;
+        /// Maximum retained bytes for one unterminated HTTP/SSE line.
+        std::size_t max_stream_line_bytes = 64u * 1024u;
+        /// Maximum aggregate bytes accepted from one HTTP/SSE or WebSocket
+        /// streaming response.
+        std::size_t max_stream_response_bytes = 16u * 1024u * 1024u;
+        /// WebSocket handshake, frame, and assembled-message limits.
+        async::WsClientOptions websocket_options;
     };
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
@@ -402,8 +414,10 @@ public:
     std::string parse_stop_reason(const json& resp_json) const;
     std::string parse_stream_stop_reason(const json& event_json) const;
 
-    std::string build_endpoint(const std::string& model, bool streaming) const;
-    std::map<std::string, std::string> build_headers() const;
+    std::string build_endpoint(const std::string& model, bool streaming,
+                               std::string_view api_key) const;
+    std::map<std::string, std::string> build_headers(
+        std::string_view api_key) const;
     std::string get_api_key() const;
 
     static std::pair<std::string, std::string> parse_data_url(const std::string& url);

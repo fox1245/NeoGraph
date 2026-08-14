@@ -60,6 +60,7 @@ llm::SchemaProvider::Config cfg_for(int port) {
     cfg.default_model     = "gpt-test";
     cfg.timeout_seconds   = 10;
     cfg.base_url_override = "http://127.0.0.1:" + std::to_string(port);
+    cfg.allow_insecure_loopback = true;
     return cfg;
 }
 
@@ -208,6 +209,41 @@ TEST(SchemaProviderResponsesStream, ErrorStatusCannotBeMaskedByTerminalPayload) 
         FAIL() << "expected HTTP status failure";
     } catch (const std::runtime_error& error) {
         EXPECT_NE(std::string(error.what()).find("HTTP 503"), std::string::npos);
+    }
+}
+
+TEST(SchemaProviderResponsesStream, RejectsOversizedSseLine) {
+    ResponsesMock mock{
+        "data: {\"type\":\"response.content_part.delta\","
+        "\"delta\":\"too-long\"}\n\n"};
+    ASSERT_GT(mock.port, 0);
+
+    auto config = cfg_for(mock.port);
+    config.max_stream_line_bytes = 24;
+    config.max_stream_response_bytes = 1024;
+    auto provider = llm::SchemaProvider::create(config);
+    EXPECT_THROW(provider->complete_stream(params_with("hi"), nullptr),
+                 std::length_error);
+}
+
+TEST(SchemaProviderResponsesStream, RejectsOversizedAggregateStream) {
+    ResponsesMock mock{
+        "data: {\"type\":\"response.output_item.added\","
+        "\"item\":{\"type\":\"message\"}}\n\n"
+        "data: {\"type\":\"response.content_part.delta\","
+        "\"delta\":\"bounded\"}\n\n"};
+    ASSERT_GT(mock.port, 0);
+
+    auto config = cfg_for(mock.port);
+    config.max_stream_line_bytes = 120;
+    config.max_stream_response_bytes = 120;
+    auto provider = llm::SchemaProvider::create(config);
+    try {
+        (void)provider->complete_stream(params_with("hi"), nullptr);
+        FAIL() << "expected aggregate stream limit";
+    } catch (const std::length_error& error) {
+        EXPECT_NE(std::string(error.what()).find("response limit"),
+                  std::string::npos);
     }
 }
 

@@ -16,6 +16,8 @@
 //     coroutines unblock.
 
 #include <neograph/async/curl_h2_pool.h>
+#include <neograph/async/endpoint.h>
+#include "http_exchange_detail.h"
 
 #include <stdexcept>
 
@@ -55,11 +57,14 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <limits>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -100,7 +105,9 @@ struct Pending {
     std::string url;
     std::string body;
     std::vector<std::pair<std::string, std::string>> headers;
-    long timeout_seconds = 0;
+    RequestOptions opts;
+    std::optional<detail::HttpTarget> current_target;
+    int redirects_followed = 0;
 
     asio::any_io_executor caller_ex;
     std::function<void(asio::error_code, HttpResponse, std::exception_ptr)> on_done;
@@ -111,35 +118,113 @@ struct Pending {
     std::vector<std::pair<std::string, std::string>> resp_headers;
     long status = 0;
     std::string error;
+    std::size_t resp_header_bytes = 0;
+    std::optional<std::size_t> content_length;
+    bool limit_error = false;
+    bool callback_error = false;
 
     CURL*              easy        = nullptr;
     struct curl_slist* curl_hdrs   = nullptr;
 };
 
+bool header_name_equals(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) return false;
+    return std::equal(left.begin(), left.end(), right.begin(),
+        [](unsigned char a, unsigned char b) {
+            return std::tolower(a) == std::tolower(b);
+        });
+}
+
 std::size_t write_body_cb(char* p, std::size_t s, std::size_t n, void* up) {
     auto* st = static_cast<Pending*>(up);
-    st->resp_body.append(p, s * n);
-    return s * n;
+    if (s != 0 && n > std::numeric_limits<std::size_t>::max() / s) {
+        st->limit_error = true;
+        return 0;
+    }
+    const std::size_t bytes = s * n;
+    if (detail::exceeds_limit(bytes, st->opts.max_response_chunk_bytes) ||
+        bytes > std::numeric_limits<std::size_t>::max() - st->resp_body.size() ||
+        bytes > st->resp_body.max_size() -
+            std::min(st->resp_body.size(), st->resp_body.max_size()) ||
+        (st->opts.max_response_body_bytes != 0 &&
+         bytes > st->opts.max_response_body_bytes -
+             std::min(st->resp_body.size(), st->opts.max_response_body_bytes))) {
+        st->limit_error = true;
+        return 0;
+    }
+    try {
+        st->resp_body.append(p, bytes);
+    } catch (...) {
+        st->callback_error = true;
+        return 0;
+    }
+    return bytes;
 }
 
 // libcurl emits each HTTP header as one line including CRLF. Skip
 // the status line ("HTTP/...") and any trailing blank line.
 std::size_t header_line_cb(char* p, std::size_t s, std::size_t n, void* up) {
     auto* st = static_cast<Pending*>(up);
-    std::string_view line(p, s * n);
+    if (s != 0 && n > std::numeric_limits<std::size_t>::max() / s) {
+        st->limit_error = true;
+        return 0;
+    }
+    const std::size_t bytes = s * n;
+    if (bytes > std::numeric_limits<std::size_t>::max() - st->resp_header_bytes ||
+        (st->opts.max_response_header_bytes != 0 &&
+         bytes > st->opts.max_response_header_bytes -
+             std::min(st->resp_header_bytes, st->opts.max_response_header_bytes))) {
+        st->limit_error = true;
+        return 0;
+    }
+    st->resp_header_bytes += bytes;
+
+    std::string_view line(p, bytes);
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
         line.remove_suffix(1);
     }
-    if (line.empty() || line.substr(0, 5) == "HTTP/") return s * n;
+    if (line.empty()) return bytes;
+    if (line.substr(0, 5) == "HTTP/") {
+        st->content_length.reset();
+        return bytes;
+    }
     auto colon = line.find(':');
-    if (colon == std::string_view::npos) return s * n;
-    std::string name(line.substr(0, colon));
-    std::string value(line.substr(colon + 1));
-    auto first = value.find_first_not_of(" \t");
-    if (first != std::string::npos) value = value.substr(first);
-    else value.clear();
-    st->resp_headers.emplace_back(std::move(name), std::move(value));
-    return s * n;
+    if (colon == std::string_view::npos) return bytes;
+    const std::string_view name_view = line.substr(0, colon);
+    std::string_view raw_value = line.substr(colon + 1);
+    while (!raw_value.empty() &&
+           (raw_value.front() == ' ' || raw_value.front() == '\t')) {
+        raw_value.remove_prefix(1);
+    }
+    while (!raw_value.empty() &&
+           (raw_value.back() == ' ' || raw_value.back() == '\t')) {
+        raw_value.remove_suffix(1);
+    }
+    if (header_name_equals(name_view, "content-length")) {
+        std::size_t parsed = 0;
+        const auto [end, ec] = std::from_chars(
+            raw_value.data(), raw_value.data() + raw_value.size(), parsed, 10);
+        if (ec == std::errc::result_out_of_range ||
+            detail::exceeds_limit(parsed, st->opts.max_response_body_bytes) ||
+            parsed > st->resp_body.max_size()) {
+            st->limit_error = true;
+            return 0;
+        }
+        if (raw_value.empty() || ec != std::errc{} ||
+            end != raw_value.data() + raw_value.size() ||
+            (st->content_length && *st->content_length != parsed)) {
+            st->callback_error = true;
+            return 0;
+        }
+        st->content_length = parsed;
+    }
+    try {
+        st->resp_headers.emplace_back(name_view, raw_value);
+    } catch (...) {
+        st->callback_error = true;
+        return 0;
+    }
+    return bytes;
 }
 
 int xferinfo_cb(void* up,
@@ -149,6 +234,31 @@ int xferinfo_cb(void* up,
                 curl_off_t) {
     auto* st = static_cast<Pending*>(up);
     return st->control->cancelled.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+constexpr bool is_redirect_status(int status) noexcept {
+    return status == 301 || status == 302 || status == 303 ||
+           status == 307 || status == 308;
+}
+
+std::string_view first_header(
+    const std::vector<std::pair<std::string, std::string>>& headers,
+    std::string_view wanted) {
+    for (const auto& [name, value] : headers) {
+        if (header_name_equals(name, wanted)) return value;
+    }
+    return {};
+}
+
+void reset_response(Pending& pending) {
+    pending.resp_body.clear();
+    pending.resp_headers.clear();
+    pending.status = 0;
+    pending.error.clear();
+    pending.resp_header_bytes = 0;
+    pending.content_length.reset();
+    pending.limit_error = false;
+    pending.callback_error = false;
 }
 
 } // namespace
@@ -282,6 +392,11 @@ struct CurlH2Pool::Impl {
             complete(std::move(p), asio::error::operation_aborted);
             return;
         }
+        if (!p->current_target) {
+            complete(std::move(p), {}, {}, std::make_exception_ptr(
+                std::runtime_error("CurlH2Pool: invalid HTTP URL")));
+            return;
+        }
         p->easy = curl_easy_init();
         if (!p->easy) {
             complete(std::move(p), {}, {},
@@ -299,7 +414,8 @@ struct CurlH2Pool::Impl {
         curl_easy_setopt(p->easy, CURLOPT_HTTPHEADER,     p->curl_hdrs);
         curl_easy_setopt(p->easy, CURLOPT_POST,           1L);
         curl_easy_setopt(p->easy, CURLOPT_POSTFIELDS,     p->body.c_str());
-        curl_easy_setopt(p->easy, CURLOPT_POSTFIELDSIZE,  static_cast<long>(p->body.size()));
+        curl_easy_setopt(p->easy, CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(p->body.size()));
         curl_easy_setopt(p->easy, CURLOPT_WRITEFUNCTION,  write_body_cb);
         curl_easy_setopt(p->easy, CURLOPT_WRITEDATA,      p.get());
         curl_easy_setopt(p->easy, CURLOPT_HEADERFUNCTION, header_line_cb);
@@ -308,6 +424,14 @@ struct CurlH2Pool::Impl {
         curl_easy_setopt(p->easy, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
         curl_easy_setopt(p->easy, CURLOPT_XFERINFODATA,    p.get());
         curl_easy_setopt(p->easy, CURLOPT_HTTP_VERSION,   CURL_HTTP_VERSION_2TLS);
+        if (!p->current_target->tls &&
+            is_loopback_host(p->current_target->host)) {
+            // The explicit plaintext exception is direct-loopback only. Do not
+            // let HTTP_PROXY turn it into a credentialed remote cleartext hop.
+            curl_easy_setopt(p->easy, CURLOPT_NOPROXY, "*");
+        }
+        // Redirects are replayed manually only after same-origin validation.
+        curl_easy_setopt(p->easy, CURLOPT_FOLLOWLOCATION, 0L);
         // DIAG: PIPEWAIT=1 makes a request wait for an in-flight TLS handshake
         // to complete so it can multiplex onto the same conn. PIPEWAIT=0 lets
         // libcurl open a fresh conn instead of waiting. Tunable via env.
@@ -319,8 +443,11 @@ struct CurlH2Pool::Impl {
             if (v == 0 || v == 1) pipewait = v;
         }
         curl_easy_setopt(p->easy, CURLOPT_PIPEWAIT,       pipewait);
-        if (p->timeout_seconds > 0) {
-            curl_easy_setopt(p->easy, CURLOPT_TIMEOUT, p->timeout_seconds);
+        if (p->opts.timeout.count() > 0) {
+            const auto timeout = std::min<std::int64_t>(
+                p->opts.timeout.count(), std::numeric_limits<long>::max());
+            curl_easy_setopt(p->easy, CURLOPT_TIMEOUT_MS,
+                             static_cast<long>(timeout));
         }
         curl_easy_setopt(p->easy, CURLOPT_PRIVATE, p.get());
 
@@ -339,6 +466,11 @@ struct CurlH2Pool::Impl {
         std::unique_ptr<Pending> p = std::move(*it);
         active.erase(it);
 
+        if (p->limit_error) {
+            // The callback abort leaves response framing incomplete. Tell
+            // libcurl not to return this connection to the multi cache.
+            curl_easy_setopt(easy, CURLOPT_FORBID_REUSE, 1L);
+        }
         curl_multi_remove_handle(multi, easy);
 
         const bool cancelled =
@@ -347,26 +479,65 @@ struct CurlH2Pool::Impl {
 
         HttpResponse r;
         std::exception_ptr err;
-        if (!cancelled && code == CURLE_OK) {
+        if (!cancelled && !p->limit_error && !p->callback_error &&
+            code == CURLE_OK) {
             curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &p->status);
-            r.status  = static_cast<int>(p->status);
-            r.headers = std::move(p->resp_headers);
-            r.body    = std::move(p->resp_body);
-            // RateLimitedProvider + the SchemaProvider 429 path read
-            // `retry_after` and `location` directly off HttpResponse
-            // (not via get_header) — populate those here so behaviour
-            // matches the HTTP/1.1 free-function path.
-            for (const auto& [k, v] : r.headers) {
-                std::string lk; lk.reserve(k.size());
-                for (char c : k) lk.push_back(static_cast<char>(std::tolower(
-                    static_cast<unsigned char>(c))));
-                if (lk == "retry-after" && r.retry_after.empty()) {
-                    r.retry_after = v;
-                } else if (lk == "location" && r.location.empty()) {
-                    r.location = v;
+
+            const std::string_view location = first_header(
+                p->resp_headers, "location");
+            if (is_redirect_status(static_cast<int>(p->status)) &&
+                p->opts.max_redirects > 0 &&
+                p->redirects_followed < p->opts.max_redirects &&
+                !location.empty()) {
+                const auto next = detail::resolve_redirect_target(
+                    *p->current_target, location);
+                if (!next || (p->current_target->tls && !next->tls) ||
+                    !detail::same_origin(*p->current_target, *next)) {
+                    err = std::make_exception_ptr(std::runtime_error(
+                        "CurlH2Pool: redirect rejected by same-origin policy"));
+                } else {
+                    p->current_target = *next;
+                    p->url = detail::format_http_url(*next);
+                    ++p->redirects_followed;
+                    reset_response(*p);
+                    curl_easy_setopt(easy, CURLOPT_URL, p->url.c_str());
+
+                    Pending* raw = p.get();
+                    active.push_back(std::move(p));
+                    if (curl_multi_add_handle(multi, raw->easy) == CURLM_OK) {
+                        return;
+                    }
+                    p = std::move(active.back());
+                    active.pop_back();
+                    err = std::make_exception_ptr(std::runtime_error(
+                        "CurlH2Pool: redirect dispatch failed"));
                 }
             }
-        } else if (!cancelled && code != CURLE_OPERATION_TIMEDOUT) {
+
+            if (!err) {
+                r.status  = static_cast<int>(p->status);
+                r.headers = std::move(p->resp_headers);
+                r.body    = std::move(p->resp_body);
+                // RateLimitedProvider + the SchemaProvider 429 path read
+                // `retry_after` and `location` directly off HttpResponse
+                // (not via get_header) — populate those here so behaviour
+                // matches the HTTP/1.1 free-function path.
+                for (const auto& [k, v] : r.headers) {
+                    std::string lk; lk.reserve(k.size());
+                    for (char c : k) lk.push_back(static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(c))));
+                    if (lk == "retry-after" && r.retry_after.empty()) {
+                        r.retry_after = v;
+                    } else if (lk == "location" && r.location.empty()) {
+                        r.location = v;
+                    }
+                }
+            }
+        } else if (!cancelled && !p->limit_error && p->callback_error) {
+            err = std::make_exception_ptr(std::runtime_error(
+                "CurlH2Pool: malformed response framing"));
+        } else if (!cancelled && !p->limit_error &&
+                   code != CURLE_OPERATION_TIMEDOUT) {
             err = std::make_exception_ptr(std::runtime_error(
                 std::string("libcurl: ") + curl_easy_strerror(code)));
         }
@@ -375,6 +546,8 @@ struct CurlH2Pool::Impl {
         curl_easy_cleanup(easy);
         const asio::error_code ec = cancelled
             ? asio::error::operation_aborted
+            : p->limit_error
+                ? asio::error::message_size
             : code == CURLE_OPERATION_TIMEDOUT
                 ? asio::error::timed_out
                 : asio::error_code{};
@@ -423,17 +596,15 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
          opts](auto handler) mutable {
             // Wrap the asio handler so the worker can call it without
             // touching asio types at the C/lock-protected layer.
-             // Non-cancellation failures become the pool's historical
-             // status-0 response; cancellation preserves Asio's
-             // operation_aborted error for graph-level propagation.
+            // Non-cancellation failures become the pool's historical
+            // status-0 response; cancellation preserves Asio's
+            // operation_aborted error for graph-level propagation.
             auto p = std::make_unique<Pending>();
             p->url     = std::move(url);
             p->body    = std::move(body);
             p->headers = std::move(headers);
-            p->timeout_seconds = (opts.timeout.count() > 0)
-                ? std::chrono::duration_cast<std::chrono::seconds>(
-                      opts.timeout).count()
-                : 0;
+            p->opts = opts;
+            p->current_target = detail::parse_absolute_http_url(p->url);
             p->caller_ex = ex;
             auto slot = asio::get_associated_cancellation_slot(handler);
             // asio completion handlers are move-only; wrap into a

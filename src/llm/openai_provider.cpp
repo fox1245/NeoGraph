@@ -13,6 +13,7 @@
 #include <asio/this_coro.hpp>
 #include <httplib.h>
 
+#include <algorithm>
 #include <charconv>
 #include <exception>
 #include <iostream>
@@ -33,6 +34,15 @@ bool model_omits_temperature(std::string_view model) {
 // --- OpenAIProvider ---
 
 OpenAIProvider::OpenAIProvider(Config config) : config_(std::move(config)) {
+    if (config_.max_stream_line_bytes == 0 ||
+        config_.max_stream_response_bytes == 0 ||
+        config_.max_stream_line_bytes > config_.max_stream_response_bytes) {
+        throw std::invalid_argument(
+            "OpenAIProvider stream limits must be nonzero and line <= response");
+    }
+    (void)async::validate_credential_endpoint(
+        config_.base_url, !config_.api_key.empty(),
+        config_.allow_insecure_loopback);
     // Long-lived HTTP loop + ConnPool. Same pattern as SchemaProvider
     // (commit 6da4810): Provider::complete()'s run_sync builds a
     // throw-away io_context per call, so the pool can't live there.
@@ -164,12 +174,16 @@ std::string normalize_finish_reason(const json& choice) {
 asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionParams& params) {
     auto body_json = build_body(params);
     auto body_str  = body_json.dump();
-    auto endpoint  = async::split_async_endpoint(config_.base_url);
+    auto endpoint  = async::validate_credential_endpoint(
+        config_.base_url, !config_.api_key.empty(),
+        config_.allow_insecure_loopback);
 
     std::vector<std::pair<std::string, std::string>> headers = {
-        {"Authorization", "Bearer " + config_.api_key},
         {"Content-Type", "application/json"},
     };
+    if (!config_.api_key.empty()) {
+        headers.emplace_back("Authorization", "Bearer " + config_.api_key);
+    }
 
     async::RequestOptions opts;
     const int timeout_seconds = params.timeout_seconds > 0
@@ -230,6 +244,9 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
 
 ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                                                const StreamCallback&   on_chunk) {
+    (void)async::validate_credential_endpoint(
+        config_.base_url, !config_.api_key.empty(),
+        config_.allow_insecure_loopback);
     auto body      = build_body(params);
     body["stream"] = true;
     // OpenAI omits usage from streamed responses unless this flag is set
@@ -248,7 +265,10 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     cli.set_read_timeout(timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
-    httplib::Headers headers = {{"Authorization", "Bearer " + config_.api_key}};
+    httplib::Headers headers;
+    if (!config_.api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + config_.api_key);
+    }
 
     // Accumulate the full response from streamed chunks
     ChatCompletion completion;
@@ -263,6 +283,7 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     std::exception_ptr stream_error;
     std::string        observed_stop_reason;
     bool               terminal_event_seen = false;
+    std::size_t        response_bytes = 0;
 
     int              response_status = 0;
     std::string      error_body;
@@ -277,7 +298,22 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
         return true;
     };
     request.content_receiver = [&](const char* data, size_t len, size_t, size_t) -> bool {
+        if (len > config_.max_stream_response_bytes -
+                std::min(response_bytes,
+                         config_.max_stream_response_bytes)) {
+            stream_error = std::make_exception_ptr(std::length_error(
+                "OpenAIProvider stream exceeds configured response limit"));
+            return false;
+        }
+        response_bytes += len;
         if (response_status != 200) {
+            constexpr std::size_t kMaxErrorBodyBytes = 64u * 1024u;
+            if (len > kMaxErrorBodyBytes -
+                    std::min(error_body.size(), kMaxErrorBodyBytes)) {
+                stream_error = std::make_exception_ptr(std::length_error(
+                    "OpenAIProvider error response exceeds configured limit"));
+                return false;
+            }
             error_body.append(data, len);
             return true;
         }
@@ -287,6 +323,10 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
             // Process complete lines only
             size_t pos;
             while ((pos = line_buffer.find('\n')) != std::string::npos) {
+                if (pos > config_.max_stream_line_bytes) {
+                    throw std::length_error(
+                        "OpenAIProvider SSE line exceeds configured limit");
+                }
                 std::string line = line_buffer.substr(0, pos);
                 line_buffer.erase(0, pos + 1);
 
@@ -362,6 +402,10 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                     }
                 }
             }
+            if (line_buffer.size() > config_.max_stream_line_bytes) {
+                throw std::length_error(
+                    "OpenAIProvider SSE line exceeds configured limit");
+            }
         } catch (...) {
             stream_error = std::current_exception();
             return false;
@@ -371,14 +415,14 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
 
     auto res = cli.send(request);
 
+    // Returning false from httplib's receiver becomes Error::Canceled.
+    // Preserve parser, limit, API, or user callback failures instead.
+    if (stream_error) std::rethrow_exception(stream_error);
+
     if (response_status != 0 && response_status != 200) {
         throw std::runtime_error("API error (HTTP " + std::to_string(response_status) +
                                  "): " + error_body);
     }
-
-    // Returning false from httplib's receiver becomes Error::Canceled.
-    // Preserve the actual parser, API, or user callback exception instead.
-    if (stream_error) std::rethrow_exception(stream_error);
 
     if (!res && !(terminal_event_seen && response_status == 200 &&
                   res.error() == httplib::Error::Canceled)) {

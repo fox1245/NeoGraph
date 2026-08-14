@@ -58,61 +58,20 @@ std::string_view HttpResponse::get_header(std::string_view name) const noexcept 
 
 namespace {
 
-// Decomposed Location. When `absolute` is false, host/port/tls carry
-// whatever the caller started with; only `path` changed.
-struct Target {
-    std::string host;
-    std::string port;
-    std::string path;
-    bool        tls = false;
-};
+using Target = detail::HttpTarget;
 
-// Parse an HTTP Location header against the current request target.
-// Accepts three shapes:
-//   - absolute "http://host[:port]/path"   → fully resolved
-//   - absolute "https://host[:port]/path"  → scheme sets tls + default port
-//   - relative "/path"                     → reuse current host/port/tls
-//   - bare    "path"                       → same, with '/' prepended
-// Returns nullopt if the input is empty or obviously malformed
-// (scheme-less but not starting with '/', which we conservatively
-// reject rather than guess).
-Target parse_location(const Target& cur, std::string_view loc) {
-    Target out = cur;
-    auto starts_with = [](std::string_view s, std::string_view p) {
-        return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
-    };
-
-    if (starts_with(loc, "http://") || starts_with(loc, "https://")) {
-        const bool https = starts_with(loc, "https://");
-        std::string_view rest = loc.substr(https ? 8 : 7);
-        out.tls = https;
-
-        auto slash = rest.find('/');
-        std::string_view authority =
-            slash == std::string_view::npos ? rest : rest.substr(0, slash);
-        out.path = slash == std::string_view::npos
-                       ? "/"
-                       : std::string(rest.substr(slash));
-
-        auto colon = authority.find(':');
-        if (colon == std::string_view::npos) {
-            out.host = std::string(authority);
-            out.port = https ? "443" : "80";
-        } else {
-            out.host = std::string(authority.substr(0, colon));
-            out.port = std::string(authority.substr(colon + 1));
-        }
-        return out;
+Target checked_redirect_target(const Target& current,
+                               std::string_view location) {
+    const auto next = detail::resolve_redirect_target(current, location);
+    // Validate before the next loop iteration reaches resolver.async_resolve.
+    // Do not include Location in the exception: query strings and userinfo can
+    // contain bearer credentials.
+    if (!next || (current.tls && !next->tls) ||
+        !detail::same_origin(current, *next)) {
+        throw std::runtime_error(
+            "async HTTP: redirect rejected by same-origin policy");
     }
-
-    if (!loc.empty() && loc.front() == '/') {
-        out.path = std::string(loc);
-        return out;
-    }
-
-    // Bare path — prepend '/'. Rare, but happens.
-    out.path = "/" + std::string(loc);
-    return out;
+    return *next;
 }
 
 constexpr bool is_redirect_status(int status) noexcept {
@@ -129,7 +88,8 @@ asio::awaitable<HttpResponse> async_post_once(
     std::string host, std::string port, std::string path,
     std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
-    bool tls) {
+    bool tls,
+    RequestOptions opts) {
 
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
@@ -142,7 +102,7 @@ asio::awaitable<HttpResponse> async_post_once(
         host, path, body, headers, detail::ConnDirective::close);
 
     if (!tls) {
-        auto r = co_await detail::run_exchange(sock, req);
+        auto r = co_await detail::run_exchange(sock, req, opts);
         asio::error_code ec;
         sock.set_option(asio::socket_base::linger(true, 0), ec);
         sock.close(ec);
@@ -164,7 +124,7 @@ asio::awaitable<HttpResponse> async_post_once(
     co_await tls_stream.async_handshake(
         asio::ssl::stream_base::client, asio::use_awaitable);
 
-    auto r = co_await detail::run_exchange(tls_stream, req);
+    auto r = co_await detail::run_exchange(tls_stream, req, opts);
 
     try {
         co_await tls_stream.async_shutdown(asio::use_awaitable);
@@ -176,13 +136,14 @@ asio::awaitable<HttpResponse> async_post_once(
     co_return r.response;
 }
 
-asio::awaitable<HttpStreamResponse> async_post_stream_once(
+asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     asio::any_io_executor ex,
     std::string host, std::string port, std::string path,
     std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
-    std::function<void(std::string_view chunk)> on_chunk) {
+    std::function<void(std::string_view chunk)> on_chunk,
+    RequestOptions opts) {
 
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
@@ -194,15 +155,12 @@ asio::awaitable<HttpStreamResponse> async_post_stream_once(
     std::string req = detail::build_request(
         host, path, body, headers, detail::ConnDirective::close);
 
-    HttpStreamResponse out;
-
     if (!tls) {
-        auto r = co_await detail::run_exchange_stream(sock, req, on_chunk);
-        out.status = r.status;
+        auto r = co_await detail::run_exchange_stream(sock, req, on_chunk, opts);
         asio::error_code ec;
         sock.set_option(asio::socket_base::linger(true, 0), ec);
         sock.close(ec);
-        co_return out;
+        co_return r;
     }
 
     asio::ssl::context ctx{asio::ssl::context::tls_client};
@@ -220,8 +178,7 @@ asio::awaitable<HttpStreamResponse> async_post_stream_once(
     co_await tls_stream.async_handshake(
         asio::ssl::stream_base::client, asio::use_awaitable);
 
-    auto r = co_await detail::run_exchange_stream(tls_stream, req, on_chunk);
-    out.status = r.status;
+    auto r = co_await detail::run_exchange_stream(tls_stream, req, on_chunk, opts);
 
     try {
         co_await tls_stream.async_shutdown(asio::use_awaitable);
@@ -230,7 +187,7 @@ asio::awaitable<HttpStreamResponse> async_post_stream_once(
     }
     asio::error_code ec;
     sock.close(ec);
-    co_return out;
+    co_return r;
 }
 
 // ── Timeout wrapping ──────────────────────────────────────────────
@@ -240,27 +197,27 @@ asio::awaitable<HttpStreamResponse> async_post_stream_once(
 // cancelled. We use it to race the HTTP exchange against a
 // steady_timer; expiry path throws asio::error::timed_out.
 //
-// Zero timeout = pass-through. Keeps the default RequestOptions{}
-// behavior bit-identical to the pre-1.5 free functions.
+// Zero timeout = pass-through; response limits are still enforced by the
+// exchange itself.
 
 asio::awaitable<HttpResponse> async_post_once_timed(
     asio::any_io_executor ex,
     std::string host, std::string port, std::string path,
     std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
-    bool tls, std::chrono::milliseconds timeout) {
-    if (timeout.count() <= 0) {
+    bool tls, RequestOptions opts) {
+    if (opts.timeout.count() <= 0) {
         co_return co_await async_post_once(
             ex, std::move(host), std::move(port), std::move(path),
-            std::move(body), std::move(headers), tls);
+            std::move(body), std::move(headers), tls, opts);
     }
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
-    timer.expires_after(timeout);
+    timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
             async_post_once(ex, std::move(host), std::move(port), std::move(path),
-                            std::move(body), std::move(headers), tls)
+                            std::move(body), std::move(headers), tls, opts)
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
@@ -272,27 +229,27 @@ asio::awaitable<HttpResponse> async_post_once_timed(
     }
 }
 
-asio::awaitable<HttpStreamResponse> async_post_stream_once_timed(
+asio::awaitable<detail::StreamExchangeResult> async_post_stream_once_timed(
     asio::any_io_executor ex,
     std::string host, std::string port, std::string path,
     std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
     std::function<void(std::string_view chunk)> on_chunk,
-    std::chrono::milliseconds timeout) {
-    if (timeout.count() <= 0) {
+    RequestOptions opts) {
+    if (opts.timeout.count() <= 0) {
         co_return co_await async_post_stream_once(
             ex, std::move(host), std::move(port), std::move(path),
-            std::move(body), std::move(headers), tls, std::move(on_chunk));
+            std::move(body), std::move(headers), tls, std::move(on_chunk), opts);
     }
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
-    timer.expires_after(timeout);
+    timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
             async_post_stream_once(ex, std::move(host), std::move(port),
                                    std::move(path), std::move(body),
-                                   std::move(headers), tls, std::move(on_chunk))
+                                   std::move(headers), tls, std::move(on_chunk), opts)
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
@@ -326,7 +283,7 @@ static asio::awaitable<HttpResponse> async_post_owned(
     for (;;) {
         auto resp = co_await async_post_once_timed(
             ex, cur.host, cur.port, cur.path,
-            req_body, headers, cur.tls, opts.timeout);
+            req_body, headers, cur.tls, opts);
 
         if (!is_redirect_status(resp.status) || opts.max_redirects <= 0) {
             co_return resp;
@@ -339,7 +296,7 @@ static asio::awaitable<HttpResponse> async_post_owned(
         if (resp.location.empty()) {
             co_return resp;
         }
-        cur = parse_location(cur, resp.location);
+        cur = checked_redirect_target(cur, resp.location);
         // Loop: next hop uses the new cur.
     }
 }
@@ -360,16 +317,15 @@ asio::awaitable<HttpResponse> async_post(
 
 // ── Async GET ─────────────────────────────────────────────────────
 //
-// Bare-bones GET path used today only by the A2A client for
-// `/.well-known/agent-card.json` discovery. No timeout / redirect
-// loop — discovery URLs are stable, and the caller's timeout (set via
-// RequestOptions) is enforced through the same pattern as POST.
+// GET path used by A2A discovery. It shares the POST timeout, response-limit,
+// and same-origin redirect policy.
 
 asio::awaitable<HttpResponse> async_get_once(
     asio::any_io_executor ex,
     std::string host, std::string port, std::string path,
     std::vector<std::pair<std::string, std::string>> headers,
-    bool tls) {
+    bool tls,
+    RequestOptions opts) {
 
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
@@ -382,7 +338,7 @@ asio::awaitable<HttpResponse> async_get_once(
         host, path, /*body=*/"", headers, detail::ConnDirective::close, "GET");
 
     if (!tls) {
-        auto r = co_await detail::run_exchange(sock, req);
+        auto r = co_await detail::run_exchange(sock, req, opts);
         asio::error_code ec;
         sock.set_option(asio::socket_base::linger(true, 0), ec);
         sock.close(ec);
@@ -404,7 +360,7 @@ asio::awaitable<HttpResponse> async_get_once(
     co_await tls_stream.async_handshake(
         asio::ssl::stream_base::client, asio::use_awaitable);
 
-    auto r = co_await detail::run_exchange(tls_stream, req);
+    auto r = co_await detail::run_exchange(tls_stream, req, opts);
     try {
         co_await tls_stream.async_shutdown(asio::use_awaitable);
     } catch (const std::exception&) {
@@ -419,19 +375,19 @@ asio::awaitable<HttpResponse> async_get_once_timed(
     asio::any_io_executor ex,
     std::string host, std::string port, std::string path,
     std::vector<std::pair<std::string, std::string>> headers,
-    bool tls, std::chrono::milliseconds timeout) {
-    if (timeout.count() <= 0) {
+    bool tls, RequestOptions opts) {
+    if (opts.timeout.count() <= 0) {
         co_return co_await async_get_once(
             ex, std::move(host), std::move(port), std::move(path),
-            std::move(headers), tls);
+            std::move(headers), tls, opts);
     }
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
-    timer.expires_after(timeout);
+    timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
             async_get_once(ex, std::move(host), std::move(port), std::move(path),
-                           std::move(headers), tls)
+                           std::move(headers), tls, opts)
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
@@ -452,9 +408,19 @@ static asio::awaitable<HttpResponse> async_get_owned(
     bool tls,
     RequestOptions opts) {
 
-    co_return co_await async_get_once_timed(
-        ex, std::move(host), std::move(port), std::move(path),
-        std::move(headers), tls, opts.timeout);
+    Target cur{std::move(host), std::move(port), std::move(path), tls};
+    int hops = 0;
+    for (;;) {
+        auto resp = co_await async_get_once_timed(
+            ex, cur.host, cur.port, cur.path, headers, cur.tls, opts);
+        if (!is_redirect_status(resp.status) || opts.max_redirects <= 0) {
+            co_return resp;
+        }
+        if (++hops > opts.max_redirects || resp.location.empty()) {
+            co_return resp;
+        }
+        cur = checked_redirect_target(cur, resp.location);
+    }
 }
 
 asio::awaitable<HttpResponse> async_get(
@@ -496,19 +462,18 @@ static asio::awaitable<HttpStreamResponse> async_post_stream_owned(
         auto resp = co_await async_post_stream_once_timed(
             ex, cur.host, cur.port, cur.path,
             req_body, headers, cur.tls,
-            on_chunk, opts.timeout);
+            on_chunk, opts);
 
         if (!is_redirect_status(resp.status) || opts.max_redirects <= 0) {
-            co_return resp;
+            co_return HttpStreamResponse{resp.status};
         }
         if (++hops > opts.max_redirects) {
-            co_return resp;
+            co_return HttpStreamResponse{resp.status};
         }
-        // Streaming responses don't populate Location on
-        // HttpStreamResponse (we only carry status). A 3xx here
-        // with a body delivered to on_chunk is unusual; we stop
-        // rather than guess a target.
-        co_return resp;
+        if (resp.location.empty()) {
+            co_return HttpStreamResponse{resp.status};
+        }
+        cur = checked_redirect_target(cur, resp.location);
     }
 }
 

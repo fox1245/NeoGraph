@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2aec329226eb4b687367daba27af8d37f751c54aed3dc50c013cf129db79a27d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9bf6d64809f2f2a508021053bc3bbac5686bd63c508537f12dba5f6af97e0d0e -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -135,8 +135,9 @@ NeoGraph 的所有显著变更均记录于本文件。
 - **C++ ABI 与 SOVERSION 策略（issue #194）。** 所有公开
   `neograph_*` 二进制库现在都带有项目 `VERSION` 和主版本
   `SOVERSION`，安装后的共享库会从自身目录解析同级依赖。v1 之前使用 ABI
-  代次 0，但可以公布强制重新构建边界。包含 bounded `NodeCache` 的版本改变了
-  `NodeCache` 和 `EngineConfig` 的公开对象布局，因此所有基于 `0.11.1` 或
+  代次 0，但可以公布强制重新构建边界。下一版本会改变 `NodeCache`、
+  `EngineConfig`、`CompletionParams`、`Agent`、`RequestOptions`、
+  `SseEventParser` 和 provider config 的公开对象布局，因此所有基于 `0.11.1` 或
   更早版本构建的 C++ 使用者都必须重新构建。1.0 将 ABI 代次改为 1，并冻结
   v1 布局。CI 现在构建并运行隔离的静态和共享安装使用者，并检查 ELF/Mach-O
   加载器元数据。详见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)。
@@ -164,6 +165,11 @@ NeoGraph 的所有显著变更均记录于本文件。
 
 ### 修复
 
+- **限制远程 transport 与 credential origin。** HTTP/1.1、HTTP/2、SSE 和
+  WebSocket 接收路径会在按不可信大小分配之前执行 response、header、chunk、
+  line、frame、handshake 和 message 上限。POST redirect 仅在规范化的
+  same-origin 内跟随；provider credential 除非启用显式数字 loopback 开发例外，
+  否则必须使用 TLS；WebSocket debug 输出不再包含 header 或 payload。
 - **QuickJS `all` join 初始化竞争。** 完成处理程序现在会在初始成员 launch
   注册完成后才关闭 JavaScript join。立即完成的子项不能再在同级初始或替换命令
   dispatch 前使 generator 恢复；重复运行时回归测试覆盖两条路径。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=4094661c9776532f38c3ad525754adea0810191a9739de2f72b224c5ba23c38a -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=d2a0d445bf112968279a8efd4c21953f01b3dae5bb9a5b026a821b04e12a99e9 -->
 # バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -44,7 +44,7 @@ hot-swap しないでください。1.0 で世代 1 のレイアウトを固定�
 | アップグレード | 要件 | 理由 |
 |---|---|---|
 | `0.9.0` 未満から `0.9.0+` | 全 C++ コンシューマーとカスタムノードを再ビルド | `GraphNode` から旧 virtual 8 個が削除され、vtable が変わりました。 |
-| `0.11.1` 以下から bounded `NodeCache` を含む次のリリース | 全 C++ コンシューマーを再ビルド | `NodeCache` と `EngineConfig` の公開レイアウトが変わりました。`SyncGraphNode` 自体は追加のみです。 |
+| `0.11.1` 以下から次のリリース | 全 C++ コンシューマーを再ビルド | bounded runtime/transport 状態のため、`NodeCache`、`EngineConfig`、`CompletionParams`、`Agent`、`RequestOptions`、`SseEventParser`、provider config の公開レイアウトが変わりました。`SyncGraphNode` 自体は追加のみです。 |
 | 任意の `0.x` から `1.0.0` | 全 C++ コンシューマーを再ビルド | v1 レイアウトを固定し、ABI 世代を 0 から 1 に変更します。 |
 
 ## 公開 virtual インターフェース

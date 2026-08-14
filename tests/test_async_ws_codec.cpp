@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+using neograph::async::WsClientOptions;
 using neograph::async::WsOpcode;
 using neograph::async::detail::apply_mask;
 using neograph::async::detail::compute_sec_websocket_accept;
@@ -19,7 +20,9 @@ using neograph::async::detail::parse_frame_header;
 
 namespace {
 
-std::string encode_and_mask(WsOpcode op, bool fin, std::string_view payload,
+std::string encode_and_mask(WsOpcode           op,
+                            bool               fin,
+                            std::string_view   payload,
                             const std::uint8_t mask_key[4]) {
     std::string out;
     encode_frame_header(out, op, fin, /*masked=*/true, payload.size(), mask_key);
@@ -34,7 +37,7 @@ std::string encode_and_mask(WsOpcode op, bool fin, std::string_view payload,
 TEST(WsCodec, SmallTextFrameRoundTrip) {
     // 5-byte text "Hello" with known mask from RFC 6455 §5.7 example.
     const std::uint8_t mask[4] = {0x37, 0xfa, 0x21, 0x3d};
-    std::string frame = encode_and_mask(WsOpcode::Text, true, "Hello", mask);
+    std::string        frame   = encode_and_mask(WsOpcode::Text, true, "Hello", mask);
 
     // RFC 6455 §5.7 expected bytes: 81 85 37 fa 21 3d 7f 9f 4d 51 58
     ASSERT_EQ(frame.size(), 11u);
@@ -85,7 +88,7 @@ TEST(WsCodec, ExtendedLength16Boundary) {
 TEST(WsCodec, ExtendedLength64) {
     // 0x1_0000 = 65536 bytes → 8-byte extended length.
     std::uint64_t len = 0x10000;
-    std::string out;
+    std::string   out;
     encode_frame_header(out, WsOpcode::Binary, true, false, len);
     ASSERT_EQ(out.size(), 10u);
     EXPECT_EQ(static_cast<std::uint8_t>(out[1]), 127);
@@ -130,20 +133,75 @@ TEST(WsCodec, ParseRejectsReservedBits) {
     EXPECT_THROW(parse_frame_header(bad), std::runtime_error);
 }
 
+TEST(WsCodec, DefaultResourceLimitsAreFiniteAndNonzero) {
+    WsClientOptions options;
+    EXPECT_GT(options.max_handshake_bytes, 0u);
+    EXPECT_GT(options.max_frame_payload_bytes, 0u);
+    EXPECT_GT(options.max_message_payload_bytes, 0u);
+    EXPECT_LE(options.max_frame_payload_bytes, options.max_message_payload_bytes);
+}
+
+TEST(WsCodec, ParseRejectsReservedOpcodeFromTwoByteHeader) {
+    std::string bad;
+    bad.push_back(static_cast<char>(0x83));  // FIN=1, reserved opcode 3
+    bad.push_back(static_cast<char>(0x00));
+    EXPECT_THROW(parse_frame_header(bad), std::runtime_error);
+}
+
+TEST(WsCodec, ParseRejectsFragmentedControlFromTwoByteHeader) {
+    std::string bad;
+    bad.push_back(static_cast<char>(0x09));  // FIN=0, Ping
+    bad.push_back(static_cast<char>(0x00));
+    EXPECT_THROW(parse_frame_header(bad), std::runtime_error);
+}
+
+TEST(WsCodec, ParseRejectsOversizedControlMarkerWithoutExtensionOrPayload) {
+    std::string bad;
+    bad.push_back(static_cast<char>(0x89));  // FIN=1, Ping
+    bad.push_back(static_cast<char>(126));   // illegal for every control frame
+    EXPECT_THROW(parse_frame_header(bad), std::runtime_error);
+}
+
+TEST(WsCodec, ParseRejectsNonMinimalExtendedLengthsWithoutPayload) {
+    std::string nonminimal16;
+    nonminimal16.push_back(static_cast<char>(0x82));
+    nonminimal16.push_back(static_cast<char>(126));
+    nonminimal16.push_back(static_cast<char>(0x00));
+    nonminimal16.push_back(static_cast<char>(125));
+    EXPECT_THROW(parse_frame_header(nonminimal16), std::runtime_error);
+
+    std::string nonminimal64;
+    nonminimal64.push_back(static_cast<char>(0x82));
+    nonminimal64.push_back(static_cast<char>(127));
+    for (int i = 0; i < 6; ++i)
+        nonminimal64.push_back(0);
+    nonminimal64.push_back(static_cast<char>(0xFF));
+    nonminimal64.push_back(static_cast<char>(0xFF));
+    EXPECT_THROW(parse_frame_header(nonminimal64), std::runtime_error);
+}
+
+TEST(WsCodec, ParseRejectsOneByteClosePayloadFromHeaderOnlyFrame) {
+    std::string bad;
+    bad.push_back(static_cast<char>(0x88));
+    bad.push_back(static_cast<char>(0x01));
+    EXPECT_THROW(parse_frame_header(bad), std::runtime_error);
+}
+
 TEST(WsCodec, Parse64BitLengthWithHighBitRejected) {
     // MSB of the 8-byte length must be 0 per §5.2.
     std::string bad;
-    bad.push_back(static_cast<char>(0x82));       // FIN=1, op=Binary
-    bad.push_back(static_cast<char>(127));        // 64-bit ext marker
-    bad.push_back(static_cast<char>(0x80));       // MSB set → illegal
-    for (int i = 0; i < 7; ++i) bad.push_back(0);
+    bad.push_back(static_cast<char>(0x82));  // FIN=1, op=Binary
+    bad.push_back(static_cast<char>(127));   // 64-bit ext marker
+    bad.push_back(static_cast<char>(0x80));  // MSB set → illegal
+    for (int i = 0; i < 7; ++i)
+        bad.push_back(0);
     EXPECT_THROW(parse_frame_header(bad), std::runtime_error);
 }
 
 TEST(WsCodec, MaskXorIsItsOwnInverse) {
-    const std::uint8_t key[4] = {0x11, 0x22, 0x33, 0x44};
-    std::string payload = "The quick brown fox jumps over the lazy dog";
-    std::string working = payload;
+    const std::uint8_t key[4]  = {0x11, 0x22, 0x33, 0x44};
+    std::string        payload = "The quick brown fox jumps over the lazy dog";
+    std::string        working = payload;
     apply_mask(working.data(), working.size(), key);
     EXPECT_NE(working, payload);  // actually masked
     apply_mask(working.data(), working.size(), key);
@@ -152,9 +210,14 @@ TEST(WsCodec, MaskXorIsItsOwnInverse) {
 
 TEST(WsCodec, EncodeMaskedFrameWithNullMaskKeyThrows) {
     std::string out;
-    EXPECT_THROW(
-        encode_frame_header(out, WsOpcode::Text, true, /*masked=*/true, 5),
-        std::runtime_error);
+    EXPECT_THROW(encode_frame_header(out, WsOpcode::Text, true, /*masked=*/true, 5),
+                 std::runtime_error);
+}
+
+TEST(WsCodec, EncodeRejectsInvalidControlFrames) {
+    std::string out;
+    EXPECT_THROW(encode_frame_header(out, WsOpcode::Ping, false, false, 0), std::runtime_error);
+    EXPECT_THROW(encode_frame_header(out, WsOpcode::Ping, true, false, 126), std::runtime_error);
 }
 
 // ── Sec-WebSocket-Accept key derivation ─────────────────────────────
@@ -163,9 +226,8 @@ TEST(WsCodec, AcceptKeyMatchesRfcExample) {
     // RFC 6455 §1.3 example test vector:
     //   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
     //   Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
-    EXPECT_EQ(
-        compute_sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
-        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    EXPECT_EQ(compute_sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+              "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 }
 
 TEST(WsCodec, GenerateKeyIs24CharBase64) {

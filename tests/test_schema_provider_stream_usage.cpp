@@ -133,6 +133,7 @@ TEST(SchemaProviderStreamUsage, ClaudeStreamingPopulatesUsage) {
     cfg.timeout_seconds = 10;
     cfg.base_url_override =
         "http://127.0.0.1:" + std::to_string(mock.port);
+    cfg.allow_insecure_loopback = true;
 
     auto provider = llm::SchemaProvider::create(cfg);
 
@@ -166,6 +167,7 @@ TEST(SchemaProviderStreamUsage, OpenAIStreamingPopulatesUsage) {
     cfg.timeout_seconds = 10;
     cfg.base_url_override =
         "http://127.0.0.1:" + std::to_string(mock.port);
+    cfg.allow_insecure_loopback = true;
 
     auto provider = llm::SchemaProvider::create(cfg);
 

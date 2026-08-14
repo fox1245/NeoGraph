@@ -59,13 +59,14 @@ long read_vmhwm_kb() {
 } // namespace
 
 int main(int argc, char** argv) {
-    const std::string base_url = (argc > 1) ? argv[1] : "http://localhost:8090";
+    const std::string base_url = (argc > 1) ? argv[1] : "http://127.0.0.1:8090";
     const int N = (argc > 2) ? std::atoi(argv[2]) : 3;
 
     neograph::llm::OpenAIProvider::Config config;
     config.api_key       = "local-no-key";     // inference server ignores auth
     config.base_url      = base_url;           // ← the only change from stock cloud usage
     config.default_model = "local-llm";        // server may ignore this (already loaded)
+    config.allow_insecure_loopback = true;      // explicit plaintext local-dev opt-in
 
     auto provider = neograph::llm::OpenAIProvider::create(config);
 

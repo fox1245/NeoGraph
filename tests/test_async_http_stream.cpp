@@ -45,10 +45,18 @@ struct ChunkedMockServer {
     std::thread              worker;
     std::vector<std::string> chunks;
     std::string              expected_path;
+    std::string              chunk_size_override;
+    std::string              trailers;
     unsigned short           port = 0;
 
-    ChunkedMockServer(std::vector<std::string> chs, std::string expected = {})
-        : chunks(std::move(chs)), expected_path(std::move(expected)) {
+    ChunkedMockServer(std::vector<std::string> chs,
+                      std::string expected = {},
+                      std::string size_override = {},
+                      std::string response_trailers = {})
+        : chunks(std::move(chs)),
+          expected_path(std::move(expected)),
+          chunk_size_override(std::move(size_override)),
+          trailers(std::move(response_trailers)) {
         acceptor.open(asio::ip::tcp::v4());
         acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
         acceptor.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
@@ -99,13 +107,14 @@ struct ChunkedMockServer {
                 // Hex size, \r\n, payload, \r\n
                 char hex[32];
                 std::snprintf(hex, sizeof(hex), "%zx", c.size());
-                frame.append(hex).append("\r\n");
+                frame.append(chunk_size_override.empty() ? hex : chunk_size_override)
+                     .append("\r\n");
                 frame.append(c).append("\r\n");
                 co_await asio::async_write(sock, asio::buffer(frame), asio::use_awaitable);
             }
             // Terminator chunk.
-            const char* term = "0\r\n\r\n";
-            co_await    asio::async_write(sock, asio::buffer(term, 5), asio::use_awaitable);
+            std::string term = "0\r\n" + trailers + "\r\n";
+            co_await asio::async_write(sock, asio::buffer(term), asio::use_awaitable);
         } catch (...) {}
         asio::error_code ec;
         sock.close(ec);
@@ -180,6 +189,152 @@ TEST(AsyncPost, ChunkedResponseReassembledIntoBody) {
     EXPECT_EQ(err, "") << "async_post threw: " << err;
     EXPECT_EQ(status, 200);
     EXPECT_EQ(body, R"({"part1":"hello","part2":"world"})");
+}
+
+TEST(AsyncPost, ChunkedBodyLimitReturnsMessageSizeBeforeOverflowAppend) {
+    ChunkedMockServer srv({"four", "more"});
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_body_bytes = 6;
+            opts.max_response_chunk_bytes = 8;
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/body-limit", "{}", {}, false, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+}
+
+TEST(AsyncPost, ChunkLimitReturnsMessageSizeBeforeChunkAllocation) {
+    ChunkedMockServer srv({"oversized"});
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_chunk_bytes = 4;
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/chunk-limit", "{}", {}, false, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+}
+
+TEST(AsyncPostStream, ChunkLimitReturnsMessageSizeBeforeCallback) {
+    ChunkedMockServer srv({"oversized"});
+    asio::io_context io;
+    bool message_size = false;
+    int callbacks = 0;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_chunk_bytes = 4;
+            try {
+                co_await neograph::async::async_post_stream(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/stream-chunk-limit", "{}", {}, false,
+                    [&](std::string_view) { ++callbacks; }, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+    EXPECT_EQ(callbacks, 0);
+}
+
+TEST(AsyncPostStream, BodyLimitStopsBeforeOverflowCallback) {
+    ChunkedMockServer srv({"four", "more"});
+    asio::io_context io;
+    bool message_size = false;
+    std::vector<std::string> received;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_body_bytes = 6;
+            opts.max_response_chunk_bytes = 8;
+            try {
+                co_await neograph::async::async_post_stream(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/stream-body-limit", "{}", {}, false,
+                    [&](std::string_view chunk) { received.emplace_back(chunk); }, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+    ASSERT_EQ(received.size(), 1u);
+    EXPECT_EQ(received.front(), "four");
+}
+
+TEST(AsyncPost, ChunkSizeOverflowReturnsMessageSize) {
+    ChunkedMockServer srv({""}, {}, std::string(64, 'f'));
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/chunk-overflow", "{}", {}, false);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+}
+
+TEST(AsyncPost, TrailerBytesCountTowardHeaderLimit) {
+    ChunkedMockServer srv({"ok"}, {}, {},
+                          "X-Trailer: " + std::string(256, 't') + "\r\n");
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_header_bytes = 192;
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/trailer-limit", "{}", {}, false, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
 }
 
 TEST(AsyncPostStream, SseEventsReconstructed) {

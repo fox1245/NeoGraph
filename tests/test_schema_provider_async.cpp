@@ -90,6 +90,7 @@ void expect_socket_cancel(bool prefer_libcurl) {
     config.api_key = "test-key";
     config.default_model = "gpt-4o-mini";
     config.base_url_override = server.base_url();
+    config.allow_insecure_loopback = true;
     config.timeout_seconds = 5;
     config.prefer_libcurl = prefer_libcurl;
     auto provider = llm::SchemaProvider::create(config);
@@ -151,6 +152,7 @@ void expect_stream_socket_cancel() {
     config.api_key = "test-key";
     config.default_model = "gpt-4o-mini";
     config.base_url_override = server.base_url();
+    config.allow_insecure_loopback = true;
     config.timeout_seconds = 5;
     auto provider = llm::SchemaProvider::create(config);
 
@@ -226,6 +228,7 @@ TEST(SchemaProviderAsync, LibcurlPerCallTimeoutRemainsTyped) {
     config.api_key = "test-key";
     config.default_model = "gpt-4o-mini";
     config.base_url_override = server.base_url();
+    config.allow_insecure_loopback = true;
     config.timeout_seconds = 5;
     config.prefer_libcurl = true;
     auto provider = llm::SchemaProvider::create(config);

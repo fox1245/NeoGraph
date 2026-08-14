@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=2aec329226eb4b687367daba27af8d37f751c54aed3dc50c013cf129db79a27d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9bf6d64809f2f2a508021053bc3bbac5686bd63c508537f12dba5f6af97e0d0e -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -142,8 +142,9 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
   `neograph_*` 바이너리 라이브러리에 프로젝트 `VERSION`과 주 버전
   `SOVERSION`이 들어가며, 설치된 공유 라이브러리는 자기 디렉터리에서 형제
   의존성을 찾는다. v1 이전 릴리스는 ABI 세대 0을 쓰지만 필수 재빌드 경계를
-  공지할 수 있다. bounded `NodeCache`가 들어간 릴리스에서는 `NodeCache`와
-  `EngineConfig` 공개 객체 배치가 바뀌므로 `0.11.1` 이하로 빌드한 모든 C++
+  공지할 수 있다. 다음 릴리스에서는 `NodeCache`, `EngineConfig`,
+  `CompletionParams`, `Agent`, `RequestOptions`, `SseEventParser`, provider
+  config의 공개 객체 배치가 바뀌므로 `0.11.1` 이하로 빌드한 모든 C++
   프로그램을 다시 빌드해야 한다. 1.0은 ABI 세대를 1로 바꾸고 v1 배치를
   확정한다. CI는 격리된 정적·공유 설치 소비 프로그램을 빌드·실행하고
   ELF/Mach-O 로더 정보도 검사한다. 자세한 내용은
@@ -157,6 +158,11 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 
 ### 수정
 
+- **원격 transport와 credential origin 제한.** HTTP/1.1, HTTP/2, SSE,
+  WebSocket 수신 경로가 신뢰하지 않는 크기를 할당하기 전에 response, header,
+  chunk, line, frame, handshake, message 제한을 적용한다. POST redirect는 정규화한
+  same-origin 안에서만 따르고, provider credential은 명시적인 숫자 loopback 개발
+  예외가 없으면 TLS를 요구하며, WebSocket debug 출력에는 header와 payload가 남지 않는다.
 - **QuickJS `all` join 초기화 경합.** 완료 핸들러가 초기 멤버 launch 등록 중인
   JavaScript join을 닫지 않도록 했다. 즉시 완료하는 자식 때문에 형제 초기 또는
   교체 명령이 dispatch되기 전에 generator가 재개될 수 있던 문제를 막았고,

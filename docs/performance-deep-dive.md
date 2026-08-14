@@ -165,7 +165,8 @@ valgrind --tool=cachegrind --cache-sim=yes \
 The L3 story survives full-stack production: we pointed NeoGraph at a
 locally-hosted Gemma-4 E2B (Q4_K_M, 4.65 B params, 2.9 GB GGUF) behind
 an OpenAI-compatible HTTP endpoint — zero NeoGraph code changes, just
-`OpenAIProvider::Config::base_url = "http://localhost:8090"`. See
+`OpenAIProvider::Config::base_url = "http://127.0.0.1:8090"` together with
+the explicit local-development option `allow_insecure_loopback = true`. See
 [`examples/31_local_transformer.cpp`](../examples/31_local_transformer.cpp).
 
 | | Pure NeoGraph | **NeoGraph + local Gemma (HTTP)** |

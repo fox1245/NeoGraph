@@ -161,6 +161,13 @@ std::string http_response(int status, const std::string& body,
     return out;
 }
 
+TEST(RequestOptions, ConservativeInboundDefaults) {
+    neograph::async::RequestOptions opts;
+    EXPECT_EQ(opts.max_response_header_bytes, 64u * 1024u);
+    EXPECT_EQ(opts.max_response_body_bytes, 16u * 1024u * 1024u);
+    EXPECT_EQ(opts.max_response_chunk_bytes, 1024u * 1024u);
+}
+
 TEST(RequestOptions, RedirectFollowedWithinLimit) {
     RoutedMock srv([&](const std::string& path) {
         if (path == "/start") {
@@ -190,6 +197,76 @@ TEST(RequestOptions, RedirectFollowedWithinLimit) {
     EXPECT_EQ(status, 200);
     EXPECT_EQ(body, "arrived");
     EXPECT_EQ(srv.requests.load(), 2);   // original + one hop
+}
+
+TEST(RequestOptions, AbsoluteSameOriginPostRedirectIsFollowed) {
+    unsigned short server_port = 0;
+    RoutedMock srv([&](const std::string& path) {
+        if (path == "/start") {
+            return http_response(
+                307, "redirecting",
+                "Location: HTTP://127.0.0.1:0" +
+                    std::to_string(server_port) + "/final\r\n");
+        }
+        return http_response(200, path == "/final" ? "arrived" : "wrong");
+    });
+    server_port = srv.port;
+
+    asio::io_context io;
+    neograph::async::HttpResponse response;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_redirects = 2;
+            response = co_await neograph::async::async_post(
+                io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                "/start", "sensitive-post", {{"Authorization", "Bearer secret"}},
+                false, opts);
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(response.status, 200);
+    EXPECT_EQ(response.body, "arrived");
+    EXPECT_EQ(srv.requests.load(), 2);
+}
+
+TEST(RequestOptions, CrossOriginRedirectDoesNotReplayPost) {
+    RoutedMock target([](const std::string&) {
+        return http_response(200, "must not arrive");
+    });
+    RoutedMock source([&](const std::string&) {
+        return http_response(
+            307, "redirecting",
+            "Location: http://127.0.0.1:" + std::to_string(target.port) +
+                "/capture?token=location-secret\r\n");
+    });
+
+    asio::io_context io;
+    bool rejected = false;
+    std::string error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_redirects = 2;
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(source.port),
+                    "/start", "sensitive-post",
+                    {{"Authorization", "Bearer request-secret"}}, false, opts);
+            } catch (const std::exception& ex) {
+                rejected = true;
+                error = ex.what();
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(rejected);
+    EXPECT_EQ(source.requests.load(), 1);
+    EXPECT_EQ(target.requests.load(), 0);
+    EXPECT_EQ(error.find("location-secret"), std::string::npos);
+    EXPECT_EQ(error.find("request-secret"), std::string::npos);
 }
 
 TEST(RequestOptions, RedirectDisabledReturns3xx) {
@@ -415,6 +492,189 @@ TEST(RequestOptions, PoolTimeoutTriggers) {
     // Timed-out exchange must not pollute the idle pool with a
     // connection in an unknown state.
     EXPECT_EQ(pool.idle_count(), 0u);
+}
+
+TEST(RequestOptions, InterimResponseIsConsumedBeforeFinalResponse) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 100 Continue\r\n"
+            "X-Interim: yes\r\n\r\n") +
+            http_response(200, "final");
+    });
+
+    asio::io_context io;
+    neograph::async::HttpResponse response;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        response = co_await neograph::async::async_post(
+            io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+            "/interim", "{}", {}, false);
+    }, asio::detached);
+    io.run();
+
+    EXPECT_EQ(response.status, 200);
+    EXPECT_EQ(response.body, "final");
+    EXPECT_EQ(response.get_header("X-Interim"), "");
+}
+
+TEST(RequestOptions, AmbiguousTransferEncodingAndLengthIsRejected) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Content-Length: 5\r\n"
+            "Connection: close\r\n\r\n"
+            "0\r\n\r\n");
+    });
+
+    asio::io_context io;
+    std::exception_ptr failure;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try {
+            (void)co_await neograph::async::async_post(
+                io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                "/ambiguous", "{}", {}, false);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    }, asio::detached);
+    io.run();
+
+    ASSERT_NE(failure, nullptr);
+    EXPECT_THROW(std::rethrow_exception(failure), std::runtime_error);
+}
+
+TEST(RequestOptions, BodylessStatusIgnoresRepresentationContentLength) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 304 Not Modified\r\n"
+            "Content-Length: 999\r\n"
+            "Connection: close\r\n\r\n");
+    });
+
+    asio::io_context io;
+    neograph::async::HttpResponse response;
+    std::exception_ptr failure;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try {
+            response = co_await neograph::async::async_post(
+                io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                "/not-modified", "{}", {}, false);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    }, asio::detached);
+    io.run();
+
+    EXPECT_EQ(failure, nullptr);
+    EXPECT_EQ(response.status, 304);
+    EXPECT_TRUE(response.body.empty());
+}
+
+TEST(RequestOptions, HeaderLimitReturnsMessageSize) {
+    RoutedMock srv([](const std::string&) {
+        return http_response(200, "ok", "X-Oversized: " + std::string(512, 'h') + "\r\n");
+    });
+
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_header_bytes = 128;
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/headers", "{}", {}, false, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+}
+
+TEST(RequestOptions, ContentLengthLimitReturnsMessageSizeBeforeBodyRead) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Length: 4096\r\n"
+            "Connection: close\r\n\r\n");
+    });
+
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_body_bytes = 32;
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/length", "{}", {}, false, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+}
+
+TEST(RequestOptions, ContentLengthOverflowReturnsMessageSize) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Length: 999999999999999999999999999999999999\r\n"
+            "Connection: close\r\n\r\n");
+    });
+
+    asio::io_context io;
+    bool message_size = false;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                co_await neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                    "/overflow", "{}", {}, false);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+}
+
+TEST(RequestOptions, PoolPropagatesBodyLimitAndDiscardsConnection) {
+    RoutedMock srv([](const std::string&) {
+        return http_response(200, std::string(128, 'b'));
+    });
+
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+    bool message_size = false;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.max_response_body_bytes = 16;
+            try {
+                co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/pool-limit", "{}", {}, false, opts);
+            } catch (const asio::system_error& error) {
+                message_size = error.code() == asio::error::message_size;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(message_size);
+    EXPECT_EQ(pool.idle_count(), 0u);
+    EXPECT_EQ(srv.requests.load(), 1);
 }
 
 // ---------------------------------------------------------------------------

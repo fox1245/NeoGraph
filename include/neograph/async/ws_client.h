@@ -38,6 +38,7 @@
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -57,6 +58,20 @@ enum class WsOpcode : std::uint8_t {
     Pong         = 0xA,
 };
 
+/// Resource ceilings for a WebSocket connection. Limits are checked
+/// before payload reads or outbound frame construction.
+struct WsClientOptions {
+    /// Maximum HTTP Upgrade response header size, including the final
+    /// CRLF CRLF. Also bounds the serialized client Upgrade request.
+    std::size_t max_handshake_bytes = 64u * 1024u;
+
+    /// Maximum payload size of any individual data or control frame.
+    std::size_t max_frame_payload_bytes = 16u * 1024u * 1024u;
+
+    /// Maximum assembled Text/Binary message size across fragments.
+    std::size_t max_message_payload_bytes = 16u * 1024u * 1024u;
+};
+
 struct WsMessage {
     /// Text or Binary — the assembled opcode of the first frame in a
     /// (possibly fragmented) message. Control frames (Close/Ping/Pong)
@@ -73,9 +88,9 @@ struct WsMessage {
 /// unconditionally (no graceful close unless you called send_close
 /// first).
 class NEOGRAPH_API WsClient {
-  public:
+public:
     ~WsClient();
-    WsClient(const WsClient&) = delete;
+    WsClient(const WsClient&)            = delete;
     WsClient& operator=(const WsClient&) = delete;
     WsClient(WsClient&&) noexcept;
     WsClient& operator=(WsClient&&) noexcept;
@@ -95,8 +110,7 @@ class NEOGRAPH_API WsClient {
     /// until it returns an op==Close frame (peer echo), then let the
     /// destructor close the socket. Calling send_close twice is a
     /// no-op.
-    asio::awaitable<void> send_close(
-        std::uint16_t code = 1000, std::string_view reason = "");
+    asio::awaitable<void> send_close(std::uint16_t code = 1000, std::string_view reason = "");
 
     /// Block until the next application message arrives. Pings are
     /// auto-replied with pongs and consumed; close frames are echoed
@@ -108,33 +122,42 @@ class NEOGRAPH_API WsClient {
     /// masked server-to-client frame, unknown opcode).
     asio::awaitable<WsMessage> recv();
 
-  private:
+private:
     // Friend forward-declaration; the trailing standalone declaration
     // (further down) also carries NEOGRAPH_API. MSVC C2375 fires if
     // the two declarations disagree on linkage, so the macro must
     // appear here too even though it's redundant on POSIX.
-    friend NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>>
-    ws_connect(
-        asio::any_io_executor, std::string_view, std::string_view,
-        std::string_view, std::vector<std::pair<std::string, std::string>>,
+    friend NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+        asio::any_io_executor,
+        std::string_view,
+        std::string_view,
+        std::string_view,
+        std::vector<std::pair<std::string, std::string>>,
         bool);
+    friend NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+        asio::any_io_executor,
+        std::string_view,
+        std::string_view,
+        std::string_view,
+        std::vector<std::pair<std::string, std::string>>,
+        bool,
+        WsClientOptions);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
     explicit WsClient(std::unique_ptr<Impl>);
 
-    asio::awaitable<void> send_frame_owned(WsOpcode opcode,
-                                           std::string payload);
-    asio::awaitable<void> send_close_owned(std::uint16_t code,
-                                           std::string reason);
+    asio::awaitable<void> send_frame_owned(WsOpcode opcode, std::string payload);
+    asio::awaitable<void> send_close_owned(std::uint16_t code, std::string reason);
     static asio::awaitable<std::unique_ptr<WsClient>> connect_owned(
-        asio::any_io_executor ex,
-        std::string host,
-        std::string port,
-        std::string path,
+        asio::any_io_executor                            ex,
+        std::string                                      host,
+        std::string                                      port,
+        std::string                                      path,
         std::vector<std::pair<std::string, std::string>> headers,
-        bool tls);
+        bool                                             tls,
+        WsClientOptions                                  options);
 };
 
 /// Establish a WebSocket connection.
@@ -154,12 +177,23 @@ class NEOGRAPH_API WsClient {
 /// if the server refuses the upgrade (non-101 status or bad Accept).
 /// Request inputs are copied before the returned awaitable is exposed.
 NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
-    asio::any_io_executor ex,
-    std::string_view host,
-    std::string_view port,
-    std::string_view path,
+    asio::any_io_executor                            ex,
+    std::string_view                                 host,
+    std::string_view                                 port,
+    std::string_view                                 path,
     std::vector<std::pair<std::string, std::string>> headers = {},
-    bool tls = true);
+    bool                                             tls     = true);
+
+/// Establish a WebSocket connection with explicit resource ceilings.
+/// Other parameters have the same semantics as the overload above.
+NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+    asio::any_io_executor                            ex,
+    std::string_view                                 host,
+    std::string_view                                 port,
+    std::string_view                                 path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool                                             tls,
+    WsClientOptions                                  options);
 
 namespace detail {
 
@@ -171,24 +205,24 @@ struct WsFrameHeader {
     std::uint64_t payload_len;
     std::uint8_t  mask_key[4];
     /// Offset past the header where payload bytes begin.
-    std::size_t   header_size;
+    std::size_t header_size;
 };
 
 /// Parse a frame header from the front of `buf`. Returns nullopt if
 /// `buf` is too short to contain a complete header (caller must read
 /// more bytes and retry). Throws std::runtime_error on malformed
-/// framing (RSV bits set — we don't negotiate extensions).
+/// framing (reserved bits/opcodes, invalid control framing, non-minimal
+/// lengths, or a 64-bit length with its high bit set).
 NEOGRAPH_API std::optional<WsFrameHeader> parse_frame_header(std::string_view buf);
 
 /// Append an encoded frame header to `out`. Writes either 2, 4, 6,
 /// 10, or 14 bytes depending on payload_len and the `masked` flag.
-NEOGRAPH_API void encode_frame_header(
-    std::string& out,
-    WsOpcode opcode,
-    bool fin,
-    bool masked,
-    std::uint64_t payload_len,
-    const std::uint8_t mask_key[4] = nullptr);
+NEOGRAPH_API void encode_frame_header(std::string&       out,
+                                      WsOpcode           opcode,
+                                      bool               fin,
+                                      bool               masked,
+                                      std::uint64_t      payload_len,
+                                      const std::uint8_t mask_key[4] = nullptr);
 
 /// XOR `data` in place with the 4-byte `mask_key` per §5.3.
 NEOGRAPH_API void apply_mask(char* data, std::size_t len, const std::uint8_t mask_key[4]) noexcept;

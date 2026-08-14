@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=449bb3bd935eed74467ac2aa3bfe61d49484292f6a2bafdbf6e2a32ff102b8a5 -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=6420c556d0eca29b919ff60a7327ec851d1dab1488dddf29e215d7e427849a8a -->
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
 
 # 성능 심층 분석
@@ -167,7 +167,8 @@ valgrind --tool=cachegrind --cache-sim=yes \
 L3 스토리는 풀스택 프로덕션에서도 살아남습니다. 우리는 NeoGraph를 다음과 같이 지적했습니다.
 로컬로 호스팅되는 Gemma-4 E2B(Q4_K_M, 4.65B 매개변수, 2.9GB GGUF) 뒤에
 OpenAI 호환 HTTP 엔드포인트 — NeoGraph 코드 변경이 전혀 없습니다.
-`OpenAIProvider::Config::base_url = "http://localhost:8090"`. 보다
+`OpenAIProvider::Config::base_url = "http://127.0.0.1:8090"`와 명시적인
+로컬 개발 옵션 `allow_insecure_loopback = true`만 바꿨다. 자세한 내용은
 [`examples/31_local_transformer.cpp`](../examples/31_local_transformer.cpp).
 
 | |퓨어 네오그래프|**NeoGraph + 로컬 Gemma(HTTP)**|

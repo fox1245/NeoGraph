@@ -23,6 +23,7 @@
 
 #include <neograph/api.h>
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,10 +36,22 @@ struct SseEvent {
     std::string id;      ///< "id:" field.
 };
 
+struct SseParserOptions {
+    std::size_t max_partial_line_bytes = 64u * 1024u;
+    std::size_t max_event_bytes        = 1u * 1024u * 1024u;
+    std::size_t max_pending_events     = 1024u;
+    std::size_t max_pending_bytes      = 8u * 1024u * 1024u;
+};
+
 class NEOGRAPH_API SseEventParser {
 public:
+    /// All limits must be nonzero.
+    explicit SseEventParser(SseParserOptions options = {});
+
     /// Append raw bytes from the wire. Line terminators may be split
     /// across calls — the parser holds partial lines internally.
+    /// A limit violation throws std::length_error and leaves the parser
+    /// failed until reset() is called.
     void feed(std::string_view bytes);
 
     /// Return every event that completed since the last drain().
@@ -53,13 +66,21 @@ public:
 private:
     void   consume_line(std::string_view line);
     void   finish_event();
+    void   ensure_can_add(std::size_t current, std::size_t addition,
+                          std::size_t limit, const char* message);
+    [[noreturn]] void fail_limit(const char* message);
 
+    SseParserOptions         options_;
     std::string              raw_;              ///< bytes awaiting line split
     std::string              cur_data_;         ///< accumulated data: lines
     std::string              cur_event_;        ///< last event: value
     std::string              cur_id_;           ///< last id: value
+    std::size_t              cur_event_bytes_ = 0;
     bool                     cur_in_progress_ = false;
+    bool                     cur_has_data_ = false;
     std::vector<SseEvent>    pending_;
+    std::size_t              pending_bytes_ = 0;
+    bool                     failed_ = false;
 };
 
 }  // namespace neograph::async

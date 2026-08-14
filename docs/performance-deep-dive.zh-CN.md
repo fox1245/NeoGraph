@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=449bb3bd935eed74467ac2aa3bfe61d49484292f6a2bafdbf6e2a32ff102b8a5 -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=6420c556d0eca29b919ff60a7327ec851d1dab1488dddf29e215d7e427849a8a -->
 # 性能深入探讨
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
@@ -117,7 +117,7 @@ valgrind --tool=cachegrind --cache-sim=yes \
 
 ### 与真实的端对端保持一致LLM在循环中
 
-L3 故事在全栈生产中幸存下来：我们指出NeoGraph在本地托管的 Gemma-4E2B（Q4_K_M, 4.65 B 参数, 2.9 GBGGUF）在 OpenAI 兼容的背后HTTP终点——零NeoGraph代码改变，只是`OpenAIProvider::Config::base_url = "http://localhost:8090"`。看 [`examples/31_local_transformer.cpp`](../examples/31_local_transformer.cpp)。
+L3 故事在全栈生产中幸存下来：我们指出NeoGraph在本地托管的 Gemma-4E2B（Q4_K_M, 4.65 B 参数, 2.9 GBGGUF）在 OpenAI 兼容的背后HTTP终点——只需设置`OpenAIProvider::Config::base_url = "http://127.0.0.1:8090"`和显式的本地开发选项`allow_insecure_loopback = true`。看 [`examples/31_local_transformer.cpp`](../examples/31_local_transformer.cpp)。
 
 | |纯的NeoGraph | **NeoGraph+ 本地Gemma (HTTP)** |
 |---|---:|---:|

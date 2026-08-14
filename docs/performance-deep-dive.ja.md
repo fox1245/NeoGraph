@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=449bb3bd935eed74467ac2aa3bfe61d49484292f6a2bafdbf6e2a32ff102b8a5 -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=6420c556d0eca29b919ff60a7327ec851d1dab1488dddf29e215d7e427849a8a -->
 # パフォーマンスの詳細
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
@@ -166,7 +166,8 @@ valgrind --tool=cachegrind --cache-sim=yes \
 L3 ストーリーはフルスタック運用でも存続します。私たちは NeoGraph を次の点に向けました。
 ローカルでホストされている Gemma-4 E2B (Q4_K_M、4.65 B パラメータ、2.9 GB GGUF) の後ろ
 OpenAI 互換の HTTP エンドポイント — NeoGraph コードの変更は一切なく、
-`OpenAIProvider::Config::base_url = "http://localhost:8090"`。見る
+`OpenAIProvider::Config::base_url = "http://127.0.0.1:8090"` と、明示的な
+ローカル開発オプション `allow_insecure_loopback = true` のみを変更しました。参照:
 [`examples/31_local_transformer.cpp`](../examples/31_local_transformer.cpp)。
 
 | |ピュアネオグラフ | **NeoGraph + ローカル Gemma (HTTP)** |

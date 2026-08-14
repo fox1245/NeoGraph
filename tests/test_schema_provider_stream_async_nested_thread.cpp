@@ -85,7 +85,8 @@ llm::SchemaProvider::Config cfg_for(int port) {
     // real `getaddrinfo` lookup. The downstream SEGV in #16 is on
     // `internal_strlen` inside `getaddrinfo` — IP-literal paths skip
     // resolution entirely and would silently miss the bug.
-    cfg.base_url_override = "http://localhost:" + std::to_string(port);
+    cfg.base_url_override = "http://127.0.0.1:" + std::to_string(port);
+    cfg.allow_insecure_loopback = true;
     return cfg;
 }
 
