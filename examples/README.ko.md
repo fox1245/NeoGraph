@@ -1,12 +1,13 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=bdd60f74da6b396e20b442bafa8e8479ebeeced9e8bef17caf8366a89ae4bf7e -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=51dc1c8896901496c2ff95cb71a3788f11a095a53c10d72292ad1cf29dfd1511 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # C++ API 예제
 
 
 NeoGraph 엔진 API를 보여 주는 56개의 실행 가능한 C++ 프로그램입니다.
-대부분은 이 디렉터리의 단일 소스 파일이며, Docker Compose가 필요한 예제도 하나
-포함되어 있습니다. 예제를 프로젝트에 복사한 뒤 `neograph::core`와 필요한
+대부분은 이 디렉터리의 단일 소스 파일이며, Docker Compose가 필요한
+[`26_postgres_react_hitl/`](26_postgres_react_hitl/) 예제도 하나 포함되어 있습니다.
+예제를 프로젝트에 복사한 뒤 `neograph::core`와 필요한
 `neograph::llm`을 링크하면 바로 출발점으로 사용할 수 있습니다.
 
 ## 빌드

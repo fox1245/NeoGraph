@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=19a1e742b349014d3c9115255a5966a692c37f11c52cdfc3f65a9e747a507a89 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=7499ea89c1228c6687e0d960ad790d3e072b4157c3c125fdf95cc4eca2656e5f -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # NeoGraph WASM - 1단계 스모크 빌드
