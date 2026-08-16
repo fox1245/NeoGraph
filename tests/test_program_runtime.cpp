@@ -122,6 +122,22 @@ private:
     std::string name_;
 };
 
+class AlwaysInterruptNode final : public GraphNode {
+public:
+    explicit AlwaysInterruptNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        ++interrupt_calls;
+        throw NodeInterrupt("second approval required", json{{"request", "approve-second"}});
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class EffectInterruptNode final : public GraphNode {
 public:
     explicit EffectInterruptNode(std::string name, bool non_idempotent = false)
@@ -368,6 +384,12 @@ RegistrySnapshot runtime_registry(
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-always-interrupt", '2'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<AlwaysInterruptNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
         manifest(ExecutableKind::Node, "runtime-effect-interrupt", 'a'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<EffectInterruptNode>(name);
@@ -560,6 +582,19 @@ json program_document(std::string node_type) {
         {"root",
          json{{"op", "call_core"}, {"name", "main"}, {"definition", std::move(definition)}}},
         {"declared_budget_requirements", budget_requirements()}};
+}
+
+json two_interrupt_program_document() {
+    auto document                  = program_document("runtime-interrupt");
+    auto definition                = document["root"]["definition"];
+    definition["nodes"]["second"]  = json{{"type", "runtime-always-interrupt"}};
+    definition["edges"]            = json::array({
+        json{{"from", "__start__"}, {"to", "work"}},
+        json{{"from", "work"}, {"to", "second"}},
+        json{{"from", "second"}, {"to", "__end__"}},
+    });
+    document["root"]["definition"] = std::move(definition);
+    return document;
 }
 
 json parallel_map_child_document(std::string node_type) {
@@ -4191,6 +4226,11 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     ASSERT_TRUE(target_record.has_value());
     ASSERT_TRUE(target_record->fork_receipt().has_value());
     EXPECT_TRUE(target_record->fork_receipt()->compatible());
+    ASSERT_TRUE(target_record->fork_receipt()->initial_resume_binding().has_value());
+    EXPECT_EQ(target_record->fork_receipt()->initial_resume_binding()->target_pending_id,
+              source_pending_id);
+    EXPECT_TRUE(target_record->fork_receipt()->matches_initial_resume(
+        source_pending_id, json{{"decision", "forked"}}));
     EXPECT_EQ(target_record->fork_source_run_id(), source.run_id());
     EXPECT_EQ(target_record->fork_source_program_version_id(), version.id());
     EXPECT_EQ(target_record->fork_source_checkpoint_id(), source.checkpoint()->checkpoint_id);
@@ -4250,6 +4290,62 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
             .wait();
     EXPECT_EQ(retried_after_source_progress.id(), forked.id());
     EXPECT_EQ(interrupt_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, ForkRetryAfterLaterInterruptUsesImmutableInitialResumeBinding) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit_document(two_interrupt_program_document());
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-later-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint());
+    const auto source_pending_id = pending_call_id(source);
+
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:runtime";
+    invocation.agent_id           = "test-fork-later-interrupt";
+    invocation.program_version_id = version.id();
+    invocation.run_id             = "fork-later-interrupt-target";
+    invocation.budget             = source.remaining_budget();
+    invocation.input              = json::object();
+    invocation.message_sequence   = 23;
+    invocation.idempotency_key    = "test-fork-later-interrupt:23";
+    invocation.correlation_id     = "trace-fork-later-target";
+    invocation.validate();
+    const ExactProgramCheckpointReference exact_source{source.run_id(),
+                                                       source.checkpoint()->checkpoint_id};
+    const ProgramResume                   initial_resume{
+        json{{"decision", "first"}}, "trace-fork-later-resume", {}, source_pending_id};
+
+    const auto forked = fixture.runtime->fork(exact_source, invocation, initial_resume).wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Interrupted);
+    const auto later_pending_id = pending_call_id(forked);
+    EXPECT_NE(later_pending_id, source_pending_id);
+    EXPECT_EQ(interrupt_calls.load(), 3U);
+
+    fixture.recreate_catalog_and_runtime();
+    const auto retried = fixture.runtime->fork(exact_source, invocation, initial_resume).wait();
+    EXPECT_EQ(retried.id(), forked.id());
+    EXPECT_EQ(retried.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(pending_call_id(retried), later_pending_id);
+    EXPECT_EQ(interrupt_calls.load(), 3U);
+
+    const auto expect_conflict = [&](ProgramResume resume) {
+        try {
+            (void)fixture.runtime->fork(exact_source, invocation, std::move(resume));
+            FAIL() << "Conflicting fork retry unexpectedly reconnected";
+        } catch (const ProgramDiagnosticError& error) {
+            EXPECT_EQ(error.diagnostic().code, "P_RUN_CONFLICT");
+        }
+    };
+    expect_conflict(ProgramResume{
+        json{{"decision", "changed"}}, "trace-fork-later-value", {}, source_pending_id});
+    expect_conflict(
+        ProgramResume{json{{"decision", "first"}}, "trace-fork-later-id", {}, later_pending_id});
 }
 
 TEST(ProgramRuntimeTest, ConcurrentExactForksAtomicallyDebitSourceOnce) {

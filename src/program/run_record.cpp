@@ -310,6 +310,10 @@ void validate(const ProgramRunRecordData& d) {
             receipt.source_checkpoint_id() != *d.fork_source_checkpoint_id) {
             throw std::invalid_argument("Program fork receipt does not bind target lineage");
         }
+        if (receipt.storage_schema_version() >= ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION &&
+            !receipt.initial_resume_binding()) {
+            throw std::invalid_argument("Program fork receipt has no initial resume binding");
+        }
     }
     std::set<std::string, std::less<>> child_ids;
     for (const auto& child : d.children) {

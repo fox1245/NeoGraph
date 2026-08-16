@@ -8,8 +8,8 @@
 #endif
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <filesystem>
 #include <future>
@@ -549,18 +549,25 @@ ProgramTransitionPublication resumed_effect_publication(
             {event(3, ProgramEventKind::Started, ProgramStartedEvent{budget()}, 30, 2)},
             {}};
 }
-ForkCompatibilityReceipt compatible_fork_receipt() {
-    return ForkCompatibilityReceipt(
-        ForkCompatibilityReceiptData{"owner-a",
-                                     "run-1",
-                                     digest('1'),
-                                     "checkpoint-1",
-                                     digest('1'),
-                                     ForkCompatibilityStatus::Compatible,
-                                     {}});
+ForkCompatibilityReceipt legacy_fork_receipt() {
+    json stored{{"format", "neograph-program-fork-compatibility"},
+                {"id", "sha256:8d44faba019e258d1f64257069c3acded03428562409999265cc12ae1e067245"},
+                {"owner_scope", "owner-a"},
+                {"source_checkpoint_id", "checkpoint-1"},
+                {"source_program_version_id", digest('1')},
+                {"source_run_id", "run-1"},
+                {"status", "compatible"},
+                {"storage_schema_version", 1},
+                {"target_program_version_id", digest('1')},
+                {"witnesses", json::array()}};
+    return ForkCompatibilityReceipt::parse(stored.dump());
 }
 
-void attach_fork_receipt(ProgramTransitionPublication& publication) {
+void attach_fork_receipt(ProgramTransitionPublication& publication,
+                         std::optional<std::string>    pending_id   = std::string("effect-call"),
+                         json                          resume_value = json{{"result", "recorded"}},
+                         bool                          retain_target_pending = true,
+                         bool                          legacy_receipt        = false) {
     const auto           run = publication.run_record;
     ProgramRunRecordData data;
     data.owner_scope                      = run.owner_scope();
@@ -574,8 +581,28 @@ void attach_fork_receipt(ProgramTransitionPublication& publication) {
     data.exact_checkpoint                 = run.exact_checkpoint();
     data.pending_input                    = run.pending_input();
     data.pending_effect                   = run.pending_effect();
+    if (retain_target_pending) {
+        const auto pending = pending_effect();
+        const auto applied = pending.submit(pending.call_id(), pending.effect_id(),
+                                            json{{"result", "recorded"}}, 30);
+        if (applied.disposition != ProgramPendingDisposition::Applied) {
+            throw std::logic_error("Test fork pending effect could not be consumed");
+        }
+        data.pending_effect = applied.value;
+    }
     data.terminal_result                  = run.terminal_result();
-    data.fork_receipt                     = compatible_fork_receipt();
+    auto receipt                          = legacy_receipt
+                                                ? legacy_fork_receipt()
+                                                : ForkCompatibilityReceipt(
+                             ForkCompatibilityReceiptData{"owner-a",
+                                                          "run-1",
+                                                          digest('1'),
+                                                          "checkpoint-1",
+                                                          digest('1'),
+                                                          ForkCompatibilityStatus::Compatible,
+                                                                                   {}})
+                             .with_initial_resume_binding(std::move(pending_id), resume_value);
+    data.fork_receipt                     = std::move(receipt);
     data.children                         = run.children();
     data.journal_head                     = run.journal_head();
     data.recorded_binding_set_fingerprint = run.recorded_binding_set_fingerprint();
@@ -942,6 +969,95 @@ TEST(ProgramTransitionStoreTest, ForkPublicationRequiresDurableMigrationProof) {
     EXPECT_EQ(store.compare_publish("owner-a", {}, publication),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_FALSE(store.load("owner-a", "run-2").has_value());
+}
+
+TEST(ProgramTransitionStoreTest, ForkPublicationRejectsMismatchedInitialResumeBinding) {
+    InMemoryProgramTransitionStore store;
+    auto                           source_start = start_publication();
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
+              ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+
+    auto target = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(target, std::string("wrong-pending"), json{{"result", "recorded"}});
+    target.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(target, *source.run_lineage);
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+}
+
+TEST(ProgramTransitionStoreTest, ForkPublicationCannotDropSourcePendingEffect) {
+    InMemoryProgramTransitionStore store;
+    auto                           source_start = start_publication();
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
+              ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+
+    auto target = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(target, std::nullopt, json(), false);
+    target.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(target, *source.run_lineage);
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+}
+
+TEST(ProgramTransitionStoreTest, ForkPublicationRejectsPendingExpiredAtDurableTargetTime) {
+    InMemoryProgramTransitionStore store;
+    auto                           source_start = start_publication();
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
+              ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+
+    auto target = start_publication_for("run-2", digest('1'), digest('2'), budget(), 6000);
+    attach_fork_receipt(target);
+    target.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(target, *source.run_lineage);
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+}
+
+TEST(ProgramTransitionStoreTest, FreshForkPublicationRejectsLegacyReceiptDowngrade) {
+    InMemoryProgramTransitionStore store;
+    auto                           source_start = start_publication();
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
+              ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+
+    auto target = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(target, std::string("effect-call"), json{{"result", "recorded"}}, true,
+                        true);
+    target.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(target, *source.run_lineage);
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
 }
 
 TEST(ProgramTransitionStoreTest, ForkPublicationRequiresAtomicSourceDebit) {
@@ -1663,6 +1779,15 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensDurableMigrationProof) {
     publication.migration_plan = MigrationPlan::create(MigrationPlanData{
         digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
     attach_fork_split(publication, *source.run_lineage);
+    auto dropped = start_publication_for("run-3", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(dropped, std::nullopt, json(), false);
+    dropped.migration_plan = publication.migration_plan;
+    attach_fork_split(dropped, *source.run_lineage);
+    auto downgraded = start_publication_for("run-4", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(downgraded, std::string("effect-call"), json{{"result", "recorded"}}, true,
+                        true);
+    downgraded.migration_plan = publication.migration_plan;
+    attach_fork_split(downgraded, *source.run_lineage);
     const auto expected_id     = publication.migration_plan->id();
     {
         SQLiteProgramTransitionStore store(path);
@@ -1670,6 +1795,10 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensDurableMigrationProof) {
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
                   ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, dropped),
+                  ProgramTransitionPublishResult::Conflict);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, downgraded),
+                  ProgramTransitionPublishResult::Conflict);
         ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
                   ProgramTransitionPublishResult::Published);
         ASSERT_TRUE(store.load_migration_plan("owner-a", "run-2").has_value());

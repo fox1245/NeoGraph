@@ -11,8 +11,9 @@
 
 #include <cstdint>
 #include <memory>
-#include <string>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -97,11 +98,19 @@ struct ForkCompatibilityReceiptData {
     std::vector<ForkCompatibilityWitness> witnesses;
 };
 
+/** Immutable identity of the value applied at the target's initial fork boundary. */
+struct ForkInitialResumeBinding {
+    std::optional<std::string> target_pending_id;
+    std::string                resume_value_identity;
+
+    bool operator==(const ForkInitialResumeBinding&) const = default;
+};
+
 /** Canonical immutable compatibility receipt stored with target-run lineage. */
 class NEOGRAPH_PROGRAM_API ForkCompatibilityReceipt {
 
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     explicit ForkCompatibilityReceipt(ForkCompatibilityReceiptData data);
     static ForkCompatibilityReceipt parse(std::string_view stored_bytes);
@@ -114,7 +123,12 @@ public:
     const std::string&                           target_program_version_id() const noexcept;
     ForkCompatibilityStatus                     status() const noexcept;
     const std::vector<ForkCompatibilityWitness>& witnesses() const noexcept;
+    std::uint32_t                                  storage_schema_version() const noexcept;
+    const std::optional<ForkInitialResumeBinding>& initial_resume_binding() const noexcept;
     bool                                         compatible() const noexcept;
+    ForkCompatibilityReceipt                       with_initial_resume_binding(
+                              std::optional<std::string> target_pending_id, const json& resume_value) const;
+    bool matches_initial_resume(std::string_view target_pending_id, const json& resume_value) const;
     std::string                                  serialize_canonical() const;
 
 private:

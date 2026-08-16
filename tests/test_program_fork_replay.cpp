@@ -337,6 +337,57 @@ TEST(ProgramForkValuesTest, CompatibleExactCheckpointProducesCanonicalReceipt) {
     EXPECT_TRUE(reparsed.compatible());
 }
 
+TEST(ProgramForkValuesTest, InitialResumeBindingIsCanonicalImmutableAndTamperEvident) {
+    const auto compatibility = check_exact_fork_compatibility(compatible_facts());
+    ASSERT_FALSE(compatibility.initial_resume_binding().has_value());
+
+    const auto bound = compatibility.with_initial_resume_binding(
+        std::string("pending-source"), json{{"approved", true}, {"reason", "fork"}});
+    ASSERT_TRUE(bound.initial_resume_binding().has_value());
+    ASSERT_TRUE(bound.initial_resume_binding()->target_pending_id.has_value());
+    EXPECT_EQ(*bound.initial_resume_binding()->target_pending_id, "pending-source");
+    EXPECT_NE(bound.id(), compatibility.id());
+    EXPECT_TRUE(bound.matches_initial_resume("pending-source",
+                                             json{{"reason", "fork"}, {"approved", true}}));
+    EXPECT_FALSE(bound.matches_initial_resume("pending-source",
+                                              json{{"approved", false}, {"reason", "fork"}}));
+    EXPECT_FALSE(bound.matches_initial_resume("pending-other",
+                                              json{{"approved", true}, {"reason", "fork"}}));
+    EXPECT_THROW((void)bound.with_initial_resume_binding(std::string("pending-other"),
+                                                         json{{"approved", true}}),
+                 std::invalid_argument);
+
+    const auto reparsed = ForkCompatibilityReceipt::parse(bound.serialize_canonical());
+    EXPECT_EQ(reparsed.id(), bound.id());
+    EXPECT_EQ(reparsed.initial_resume_binding(), bound.initial_resume_binding());
+
+    auto tampered = json::parse(bound.serialize_canonical());
+    tampered["initial_resume_binding"]["resume_value_identity"] = digest('f');
+    EXPECT_THROW((void)ForkCompatibilityReceipt::parse(tampered.dump()), std::invalid_argument);
+}
+
+TEST(ProgramForkValuesTest, LegacyReceiptRoundTripPreservesStoredIdentity) {
+    const auto legacy_id =
+        "sha256:2134081484672066b89f738c7a827c8a111e10d2e5f41fd99b3552c2df782d09";
+    json       legacy{{"format", "neograph-program-fork-compatibility"},
+                      {"id", legacy_id},
+                      {"owner_scope", "tenant:fork"},
+                      {"source_checkpoint_id", "checkpoint-source"},
+                      {"source_program_version_id", digest('1')},
+                      {"source_run_id", "source-run"},
+                      {"status", "compatible"},
+                      {"storage_schema_version", 1},
+                      {"target_program_version_id", digest('2')},
+                      {"witnesses", json::array()}};
+    const auto stored_bytes = legacy.dump();
+
+    const auto reparsed = ForkCompatibilityReceipt::parse(stored_bytes);
+    EXPECT_EQ(reparsed.storage_schema_version(), 1U);
+    EXPECT_EQ(reparsed.id(), legacy_id);
+    EXPECT_FALSE(reparsed.initial_resume_binding().has_value());
+    EXPECT_EQ(reparsed.serialize_canonical(), stored_bytes);
+}
+
 TEST(ProgramForkValuesTest, ChannelReducerAndContinuationMismatchesAreTyped) {
     {
         auto facts = compatible_facts();

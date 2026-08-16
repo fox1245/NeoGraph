@@ -1,7 +1,7 @@
+#include <neograph/graph/checkpoint.h>
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
 #include <neograph/mcp/sqlite_harness_store.h>
-#include <neograph/graph/checkpoint.h>
 #include <neograph/program/registry.h>
 
 #include <gtest/gtest.h>
@@ -9,14 +9,13 @@
 
 #include <atomic>
 #include <barrier>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-
-#include <cstdlib>
 #if defined(__linux__)
 #include <sys/wait.h>
 #endif
@@ -233,11 +232,40 @@ void attach_same_generation_lineage(ProgramTransitionPublication& publication,
 }
 
 void attach_fork_receipt(ProgramTransitionPublication& publication,
-                         const ProgramRunRecord&       source) {
+                         const ProgramRunRecord&       source,
+                         bool                          retain_source_pending = true) {
+    std::optional<std::string>          pending_id;
+    json                                resume_value = json::object();
+    std::optional<ProgramPendingInput>  target_pending_input;
+    std::optional<ProgramPendingEffect> target_pending_effect;
+    const auto source_pending_input = retain_source_pending ? source.pending_input() : std::nullopt;
+    const auto source_pending_effect =
+        retain_source_pending ? source.pending_effect() : std::nullopt;
+    if (const auto pending = source_pending_input) {
+        pending_id         = pending->call_id();
+        const auto applied = pending->submit(*pending_id, resume_value, 20);
+        if (applied.disposition != ProgramPendingDisposition::Applied) {
+            throw std::logic_error("Test fork pending input could not be consumed");
+        }
+        target_pending_input = applied.value;
+    } else if (const auto pending = source_pending_effect) {
+        pending_id         = pending->call_id();
+        resume_value       = json{{"result", "forked"}};
+        const auto applied = pending->submit(*pending_id, pending->effect_id(), resume_value, 20);
+        if (applied.disposition != ProgramPendingDisposition::Applied) {
+            throw std::logic_error("Test fork pending effect could not be consumed");
+        }
+        target_pending_effect = applied.value;
+    }
     const auto receipt = ForkCompatibilityReceipt(ForkCompatibilityReceiptData{
-        source.owner_scope(), source.run_id(), source.program_version_id(),
-        source.exact_checkpoint()->checkpoint_id, publication.run_record.program_version_id(),
-        ForkCompatibilityStatus::Compatible, {}});
+                                                      source.owner_scope(),
+                                                      source.run_id(),
+                                                      source.program_version_id(),
+                                                      source.exact_checkpoint()->checkpoint_id,
+                                                      publication.run_record.program_version_id(),
+                                                      ForkCompatibilityStatus::Compatible,
+                                                      {}})
+                             .with_initial_resume_binding(std::move(pending_id), resume_value);
     const auto run = publication.run_record;
     ProgramRunRecordData data;
     data.owner_scope                    = run.owner_scope();
@@ -249,6 +277,8 @@ void attach_fork_receipt(ProgramTransitionPublication& publication,
     data.continuation                   = run.continuation();
     data.remaining_budget               = run.remaining_budget();
     data.exact_checkpoint               = run.exact_checkpoint();
+    data.pending_input                  = std::move(target_pending_input);
+    data.pending_effect                 = std::move(target_pending_effect);
     data.fork_receipt                   = receipt;
     data.fork_source_run_id             = receipt.source_run_id();
     data.fork_source_program_version_id = receipt.source_program_version_id();
@@ -669,6 +699,29 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
                                                source_start.journal_record.id, source),
                   ProgramTransitionPublishResult::Published);
 
+        auto dropped = initial_publication(fixture, "fork-dropped-pending");
+        attach_fork_receipt(dropped, source.run_record, false);
+        dropped.migration_plan =
+            MigrationPlan::create(MigrationPlanData{fixture.version_value.id(),
+                                                    fixture.version_value.id(),
+                                                    fixture.artifact.owner_scope(),
+                                                    MigrationCompatibility::ForkCompatible,
+                                                    {},
+                                                    {},
+                                                    {}});
+        attach_initial_lineage(dropped);
+        dropped.fork_source_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+            source.run_lineage->owner_scope(), source.run_lineage->lineage_id(),
+            source.run_lineage->root_run_id(), source.run_lineage->active_generation(),
+            source.run_lineage->active_generation_id(), source.run_lineage->active_run_record_id(),
+            source.run_lineage->active_journal_head(), RunBudget{},
+            source.run_lineage->inflight_reservation(), source.run_lineage->id(),
+            source.run_lineage->created_at_ms(), dropped.run_record.updated_at_ms(),
+            source.run_lineage->committed_descendant_budget()});
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, dropped),
+                  ProgramTransitionPublishResult::Conflict);
+        EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "fork-dropped-pending"));
+
         auto target = initial_publication(fixture, "fork-target");
         attach_fork_receipt(target, source.run_record);
         target.migration_plan = MigrationPlan::create(MigrationPlanData{
@@ -811,10 +864,11 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
         return quoted;
     };
     const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
-    const auto command =
-        "/usr/bin/env NEOGRAPH_SQLITE_CRASH_DB=" + quote_shell(db.path.string()) + " " +
-        quote_shell(executable) + " --gtest_color=no "
-        "--gtest_filter=HarnessProgramStoreTest.SqliteCrashDuringTransitionReopensWithCommittedPrefix";
+    const auto command = "/usr/bin/env NEOGRAPH_SQLITE_CRASH_DB=" + quote_shell(db.path.string()) +
+                         " " + quote_shell(executable) +
+                         " --gtest_color=no "
+                         "--gtest_filter=HarnessProgramStoreTest."
+                         "SqliteCrashDuringTransitionReopensWithCommittedPrefix";
     const int status = std::system(command.c_str());
     ASSERT_NE(status, -1);
     ASSERT_TRUE(WIFEXITED(status));

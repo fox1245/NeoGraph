@@ -607,7 +607,48 @@ bool fork_binds_predecessor(const ProgramRunRecord&     target,
     const auto receipt = target.fork_receipt();
     if (!receipt) return true;
     const auto checkpoint = source.exact_checkpoint();
+    const auto resume_binds = [&]() noexcept {
+        if (receipt->storage_schema_version() < ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
+            return true;
+        }
+        try {
+            if (const auto source_pending = source.pending_input()) {
+                const auto target_pending = target.pending_input();
+                const auto result =
+                    target_pending ? target_pending->consumed_result() : std::nullopt;
+                if (!target_pending || !result || target.pending_effect() ||
+                    !receipt->matches_initial_resume(target_pending->call_id(), *result)) {
+                    return false;
+                }
+                const auto applied =
+                    source_pending->submit(target_pending->call_id(), *result,
+                                           static_cast<std::uint64_t>(target.created_at_ms()));
+                return applied.disposition == ProgramPendingDisposition::Applied &&
+                       applied.value == *target_pending;
+            }
+            if (const auto source_pending = source.pending_effect()) {
+                const auto target_pending = target.pending_effect();
+                const auto result =
+                    target_pending ? target_pending->reconciled_result() : std::nullopt;
+                if (!target_pending || !result || target.pending_input() ||
+                    !receipt->matches_initial_resume(target_pending->call_id(), *result)) {
+                    return false;
+                }
+                const auto applied = source_pending->submit(
+                    target_pending->call_id(), target_pending->effect_id(), *result,
+                    static_cast<std::uint64_t>(target.created_at_ms()));
+                return applied.disposition == ProgramPendingDisposition::Applied &&
+                       applied.value == *target_pending;
+            }
+            return !target.pending_input() && !target.pending_effect() &&
+                   receipt->initial_resume_binding() &&
+                   !receipt->initial_resume_binding()->target_pending_id;
+        } catch (const std::exception&) {
+            return false;
+        }
+    };
     return checkpoint && target.run_id() != source.run_id() && source.child_depth() == 0 &&
+           target.created_at_ms() >= source.updated_at_ms() &&
            source.invocation().parent_run_id.empty() &&
            source.continuation().state == ContinuationState::Interrupted &&
            lineage.committed_descendant_budget() == RunBudget{} && receipt->compatible() &&
@@ -615,7 +656,7 @@ bool fork_binds_predecessor(const ProgramRunRecord&     target,
            receipt->source_run_id() == predecessor.run_id() &&
            receipt->source_program_version_id() == predecessor.program_version_id() &&
            receipt->source_checkpoint_id() == checkpoint->checkpoint_id &&
-           receipt->target_program_version_id() == target.program_version_id() &&
+           receipt->target_program_version_id() == target.program_version_id() && resume_binds() &&
            source.id() == lineage.active_run_record_id() &&
            source.journal_head() == lineage.active_journal_head();
 }
@@ -1054,6 +1095,14 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
                                 : ProgramTransitionPublishResult::Conflict;
         transaction.commit();
         return result;
+    }
+    if (!current && publication.fork_source_lineage) {
+        const auto fork = publication.run_record.fork_receipt();
+        if (!fork ||
+            fork->storage_schema_version() < ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
     }
 
     if (!current) {

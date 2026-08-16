@@ -192,18 +192,31 @@ std::optional<ActiveRunLineage> load_active_run_lineage(
     return ActiveRunLineage{std::move(*lineage), std::move(*generation)};
 }
 
-bool fork_resume_matches(const ProgramRunRecord& target, const ProgramResume& resume) {
+bool fork_resume_matches(const ForkCompatibilityReceipt& receipt,
+                         const ProgramRunRecord&         target,
+                         const ProgramResume&            resume) {
+    if (receipt.initial_resume_binding()) {
+        return receipt.matches_initial_resume(resume.pending_id, resume.value);
+    }
+    if (receipt.storage_schema_version() >= ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
+        return false;
+    }
+
+    // Legacy receipts did not retain the initial fork value. Preserve retries
+    // only while the current snapshot still proves that exact consumed value.
     if (const auto pending = target.pending_input()) {
         return pending->state() == ProgramPendingState::Consumed &&
                pending->call_id() == resume.pending_id && pending->consumed_result() &&
-               *pending->consumed_result() == resume.value;
+               detail::canonical_json_bytes(*pending->consumed_result()) ==
+                   detail::canonical_json_bytes(resume.value);
     }
     if (const auto pending = target.pending_effect()) {
         return pending->state() == ProgramPendingState::Consumed &&
                pending->call_id() == resume.pending_id && pending->reconciled_result() &&
-               *pending->reconciled_result() == resume.value;
+               detail::canonical_json_bytes(*pending->reconciled_result()) ==
+                   detail::canonical_json_bytes(resume.value);
     }
-    return resume.pending_id.empty();
+    return false;
 }
 
 RunInvocation bind_runtime_invocation(const ProgramInvocation& projection,
@@ -3382,7 +3395,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
             fork && fork->compatible() && fork->source_run_id() == source.source_run_id &&
             fork->source_checkpoint_id() == source.source_checkpoint_id &&
             fork->target_program_version_id() == target.id() &&
-            fork_resume_matches(*existing, resume_value) && plan && expected_plan &&
+            fork_resume_matches(*fork, *existing, resume_value) && plan && expected_plan &&
             expected_plan->is_compatible() && plan->id() == expected_plan->id()) {
             return reconnect(owner_scope, run_id);
         }
@@ -3509,6 +3522,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     }
     auto       fork_pending_input  = source_record->pending_input();
     auto       fork_pending_effect = source_record->pending_effect();
+    std::optional<std::string> fork_initial_pending_id;
     const auto transition_time     = static_cast<std::uint64_t>(now_ms());
     if (fork_pending_input) {
         const auto update = fork_pending_input->submit(resume_value.pending_id, resume_value.value,
@@ -3517,6 +3531,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
             throw_runtime_diagnostic(update.diagnostic_code, update.message);
         }
         fork_pending_input = update.value;
+        fork_initial_pending_id = fork_pending_input->call_id();
     } else if (fork_pending_effect) {
         const auto update =
             fork_pending_effect->submit(resume_value.pending_id, fork_pending_effect->effect_id(),
@@ -3525,10 +3540,13 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
             throw_runtime_diagnostic(update.diagnostic_code, update.message);
         }
         fork_pending_effect = update.value;
+        fork_initial_pending_id = fork_pending_effect->call_id();
     } else if (!resume_value.pending_id.empty()) {
         throw_runtime_diagnostic("P_PENDING_WRONG_ID",
                                  "Source run has no matching pending operation");
     }
+    receipt =
+        receipt.with_initial_resume_binding(std::move(fork_initial_pending_id), resume_value.value);
 
     const auto target_thread_id =
         core_thread_identity(run_id, target_pinned->root->compiled_plan_identity);

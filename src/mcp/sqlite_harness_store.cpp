@@ -1171,6 +1171,14 @@ public:
                            ? program::ProgramTransitionPublishResult::AlreadyPresent
                            : program::ProgramTransitionPublishResult::Conflict;
             }
+            if (!exists && publication.fork_source_lineage) {
+                const auto fork = publication.run_record.fork_receipt();
+                if (!fork || fork->storage_schema_version() <
+                                 program::ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            }
 
             std::optional<std::string> associated_lineage_id;
             {
@@ -1372,8 +1380,55 @@ public:
                     json::parse(source_run_query.text(0))).run_record();
                 const auto fork       = publication.run_record.fork_receipt();
                 const auto checkpoint = source.exact_checkpoint();
+                const auto resume_binds = [&]() noexcept {
+                    if (!fork || fork->storage_schema_version() <
+                                     program::ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
+                        return true;
+                    }
+                    try {
+                        if (const auto source_pending = source.pending_input()) {
+                            const auto target_pending = publication.run_record.pending_input();
+                            const auto result =
+                                target_pending ? target_pending->consumed_result() : std::nullopt;
+                            if (!target_pending || !result ||
+                                publication.run_record.pending_effect() ||
+                                !fork->matches_initial_resume(target_pending->call_id(), *result)) {
+                                return false;
+                            }
+                            const auto applied = source_pending->submit(
+                                target_pending->call_id(), *result,
+                                static_cast<std::uint64_t>(publication.run_record.created_at_ms()));
+                            return applied.disposition ==
+                                       program::ProgramPendingDisposition::Applied &&
+                                   applied.value == *target_pending;
+                        }
+                        if (const auto source_pending = source.pending_effect()) {
+                            const auto target_pending = publication.run_record.pending_effect();
+                            const auto result =
+                                target_pending ? target_pending->reconciled_result() : std::nullopt;
+                            if (!target_pending || !result ||
+                                publication.run_record.pending_input() ||
+                                !fork->matches_initial_resume(target_pending->call_id(), *result)) {
+                                return false;
+                            }
+                            const auto applied = source_pending->submit(
+                                target_pending->call_id(), target_pending->effect_id(), *result,
+                                static_cast<std::uint64_t>(publication.run_record.created_at_ms()));
+                            return applied.disposition ==
+                                       program::ProgramPendingDisposition::Applied &&
+                                   applied.value == *target_pending;
+                        }
+                        return !publication.run_record.pending_input() &&
+                               !publication.run_record.pending_effect() &&
+                               fork->initial_resume_binding() &&
+                               !fork->initial_resume_binding()->target_pending_id;
+                    } catch (const std::exception&) {
+                        return false;
+                    }
+                };
                 if (!fork || !checkpoint || source.run_id() == publication.run_record.run_id() ||
                     source.child_depth() != 0 || !source.invocation().parent_run_id.empty() ||
+                    publication.run_record.created_at_ms() < source.updated_at_ms() ||
                     source.continuation().state != program::ContinuationState::Interrupted ||
                     current_fork_source->committed_descendant_budget() != program::RunBudget{} ||
                     !fork->compatible() ||
@@ -1384,7 +1439,7 @@ public:
                     fork->source_checkpoint_id() != checkpoint->checkpoint_id ||
                     fork->target_program_version_id() !=
                         publication.run_record.program_version_id() ||
-                    source.id() != current_fork_source->active_run_record_id() ||
+                    !resume_binds() || source.id() != current_fork_source->active_run_record_id() ||
                     source.journal_head() != current_fork_source->active_journal_head()) {
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;

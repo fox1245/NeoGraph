@@ -13,6 +13,8 @@ namespace neograph::program {
 namespace {
 
 constexpr std::string_view FORK_RECEIPT_FORMAT = "neograph-program-fork-compatibility";
+constexpr std::uint32_t    LEGACY_FORK_RECEIPT_SCHEMA_VERSION = 1;
+constexpr std::string_view FORK_RESUME_VALUE_DOMAIN           = "program-fork-resume-value/v1";
 
 std::string require_string(const json& value, std::string_view key) {
     const std::string owned_key(key);
@@ -90,24 +92,69 @@ void normalize_receipt_data(ForkCompatibilityReceiptData& data) {
     }
 }
 
-json receipt_body(const ForkCompatibilityReceiptData& data) {
+void normalize_resume_binding(ForkInitialResumeBinding& binding) {
+    if (binding.target_pending_id) {
+        require_token(*binding.target_pending_id, "Fork target initial pending id");
+    }
+    require_sha256(binding.resume_value_identity, "Fork resume value identity");
+}
+
+json encode_resume_binding(const std::optional<ForkInitialResumeBinding>& binding) {
+    if (!binding) return nullptr;
+    return json{{"target_pending_id",
+                 binding->target_pending_id ? json(*binding->target_pending_id) : json(nullptr)},
+                {"resume_value_identity", binding->resume_value_identity}};
+}
+
+std::optional<ForkInitialResumeBinding> parse_resume_binding(const json& value) {
+    if (value.is_null()) return std::nullopt;
+    if (!value.is_object()) {
+        throw std::invalid_argument("Fork initial resume binding must be an object or null");
+    }
+    detail::reject_unknown_fields(value, "Fork initial resume binding",
+                                  {"target_pending_id", "resume_value_identity"});
+    const auto&              encoded_pending = require_value(value, "target_pending_id");
+    ForkInitialResumeBinding binding;
+    if (!encoded_pending.is_null()) {
+        if (!encoded_pending.is_string()) {
+            throw std::invalid_argument(
+                "Fork initial resume binding target_pending_id must be a string or null");
+        }
+        binding.target_pending_id = encoded_pending.get<std::string>();
+    }
+    binding.resume_value_identity = require_string(value, "resume_value_identity");
+    normalize_resume_binding(binding);
+    return binding;
+}
+
+json receipt_body(const ForkCompatibilityReceiptData&            data,
+                  std::uint32_t                                  schema_version,
+                  const std::optional<ForkInitialResumeBinding>& binding) {
     json witnesses = json::array();
     for (const auto& witness : data.witnesses) {
         witnesses.push_back(encode_witness(witness));
     }
-    return json{{"owner_scope", data.owner_scope},
+    json value{{"owner_scope", data.owner_scope},
                 {"source_run_id", data.source_run_id},
                 {"source_program_version_id", data.source_program_version_id},
                 {"source_checkpoint_id", data.source_checkpoint_id},
                 {"target_program_version_id", data.target_program_version_id},
                 {"status", std::string(to_string(data.status))},
                 {"witnesses", std::move(witnesses)}};
+    if (schema_version >= ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
+        value["initial_resume_binding"] = encode_resume_binding(binding);
+    } else if (binding) {
+        throw std::invalid_argument("Legacy fork receipt cannot carry an initial resume binding");
+    }
+    return value;
 }
 
-json receipt_envelope(const ForkCompatibilityReceiptData& data) {
-    auto value                      = receipt_body(data);
+json receipt_envelope(const ForkCompatibilityReceiptData&            data,
+                      std::uint32_t                                  schema_version,
+                      const std::optional<ForkInitialResumeBinding>& binding) {
+    auto value                      = receipt_body(data, schema_version, binding);
     value["format"]                 = std::string(FORK_RECEIPT_FORMAT);
-    value["storage_schema_version"] = ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION;
+    value["storage_schema_version"] = schema_version;
     return value;
 }
 
@@ -259,16 +306,22 @@ ForkCompatibilityStatus fork_compatibility_status_from_string(std::string_view v
 }
 
 struct ForkCompatibilityReceipt::Impl {
-    explicit Impl(ForkCompatibilityReceiptData value) : data(std::move(value)) {}
+    explicit Impl(ForkCompatibilityReceiptData            value,
+                  std::uint32_t                           version,
+                  std::optional<ForkInitialResumeBinding> binding)
+        : data(std::move(value)), schema_version(version), initial_resume(std::move(binding)) {}
     ForkCompatibilityReceiptData data;
+    std::uint32_t                           schema_version;
+    std::optional<ForkInitialResumeBinding> initial_resume;
     std::string                  id;
 };
 
 ForkCompatibilityReceipt::ForkCompatibilityReceipt(ForkCompatibilityReceiptData data) {
     normalize_receipt_data(data);
-    auto impl = std::make_shared<Impl>(std::move(data));
-    impl->id  = detail::sha256_identity("program-fork-compatibility",
-                                        detail::canonical_json_bytes(receipt_envelope(impl->data)));
+    auto impl = std::make_shared<Impl>(std::move(data), STORAGE_SCHEMA_VERSION, std::nullopt);
+    impl->id  = detail::sha256_identity(
+        "program-fork-compatibility", detail::canonical_json_bytes(receipt_envelope(
+                                          impl->data, impl->schema_version, impl->initial_resume)));
     impl_     = std::move(impl);
 }
 
@@ -286,15 +339,31 @@ ForkCompatibilityReceipt ForkCompatibilityReceipt::parse(std::string_view stored
     if (!value.is_object() || require_string(value, "format") != FORK_RECEIPT_FORMAT) {
         throw std::invalid_argument("Stored fork receipt has unknown format");
     }
+    const auto schema_version = require_uint32(value, "storage_schema_version");
+    if (schema_version == LEGACY_FORK_RECEIPT_SCHEMA_VERSION) {
     detail::reject_unknown_fields(
         value, "Stored fork receipt",
         {"format", "storage_schema_version", "id", "owner_scope", "source_run_id",
-         "source_program_version_id", "source_checkpoint_id", "target_program_version_id", "status",
-         "witnesses"});
-    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
+             "source_program_version_id", "source_checkpoint_id", "target_program_version_id",
+             "status", "witnesses"});
+    } else if (schema_version == STORAGE_SCHEMA_VERSION) {
+        detail::reject_unknown_fields(
+            value, "Stored fork receipt",
+            {"format", "storage_schema_version", "id", "owner_scope", "source_run_id",
+             "source_program_version_id", "source_checkpoint_id", "target_program_version_id",
+             "status", "witnesses", "initial_resume_binding"});
+    } else {
         throw std::invalid_argument("Stored fork receipt schema version is unsupported");
     }
-    ForkCompatibilityReceipt parsed(parse_receipt_body(value));
+    auto data    = parse_receipt_body(value);
+    auto binding = schema_version == STORAGE_SCHEMA_VERSION
+                       ? parse_resume_binding(require_value(value, "initial_resume_binding"))
+                       : std::nullopt;
+    auto impl    = std::make_shared<Impl>(std::move(data), schema_version, std::move(binding));
+    impl->id     = detail::sha256_identity(
+        "program-fork-compatibility", detail::canonical_json_bytes(receipt_envelope(
+                                          impl->data, impl->schema_version, impl->initial_resume)));
+    ForkCompatibilityReceipt parsed(std::move(impl));
     const auto               stored_id = require_string(value, "id");
     if (!detail::is_sha256_identity(stored_id) || stored_id != parsed.id()) {
         throw std::invalid_argument("Stored fork receipt id does not match its content");
@@ -326,12 +395,54 @@ ForkCompatibilityStatus ForkCompatibilityReceipt::status() const noexcept {
 const std::vector<ForkCompatibilityWitness>& ForkCompatibilityReceipt::witnesses() const noexcept {
     return impl_->data.witnesses;
 }
+std::uint32_t ForkCompatibilityReceipt::storage_schema_version() const noexcept {
+    return impl_->schema_version;
+}
+const std::optional<ForkInitialResumeBinding>& ForkCompatibilityReceipt::initial_resume_binding()
+    const noexcept {
+    return impl_->initial_resume;
+}
 bool ForkCompatibilityReceipt::compatible() const noexcept {
     return impl_->data.status == ForkCompatibilityStatus::Compatible;
 }
 
+ForkCompatibilityReceipt ForkCompatibilityReceipt::with_initial_resume_binding(
+    std::optional<std::string> target_pending_id, const json& resume_value) const {
+    if (!compatible()) {
+        throw std::invalid_argument("Rejected fork receipt cannot bind an initial resume value");
+    }
+    ForkInitialResumeBinding binding{
+        std::move(target_pending_id),
+        detail::sha256_identity(FORK_RESUME_VALUE_DOMAIN,
+                                detail::canonical_json_bytes(resume_value))};
+    normalize_resume_binding(binding);
+    if (impl_->initial_resume) {
+        if (*impl_->initial_resume == binding) return *this;
+        throw std::invalid_argument("Fork receipt initial resume binding is immutable");
+    }
+    auto impl = std::make_shared<Impl>(impl_->data, STORAGE_SCHEMA_VERSION,
+                                       std::optional<ForkInitialResumeBinding>{std::move(binding)});
+    impl->id  = detail::sha256_identity(
+        "program-fork-compatibility", detail::canonical_json_bytes(receipt_envelope(
+                                          impl->data, impl->schema_version, impl->initial_resume)));
+    return ForkCompatibilityReceipt(std::move(impl));
+}
+
+bool ForkCompatibilityReceipt::matches_initial_resume(std::string_view target_pending_id,
+                                                      const json&      resume_value) const {
+    if (!impl_->initial_resume) return false;
+    const auto& expected_pending = impl_->initial_resume->target_pending_id;
+    if (target_pending_id.empty() ? expected_pending.has_value()
+                                  : !expected_pending || *expected_pending != target_pending_id) {
+        return false;
+    }
+    return impl_->initial_resume->resume_value_identity ==
+           detail::sha256_identity(FORK_RESUME_VALUE_DOMAIN,
+                                   detail::canonical_json_bytes(resume_value));
+}
+
 std::string ForkCompatibilityReceipt::serialize_canonical() const {
-    auto value  = receipt_envelope(impl_->data);
+    auto value  = receipt_envelope(impl_->data, impl_->schema_version, impl_->initial_resume);
     value["id"] = impl_->id;
     return detail::canonical_json_bytes(value);
 }
