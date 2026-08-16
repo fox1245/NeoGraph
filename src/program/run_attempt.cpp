@@ -1420,7 +1420,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         spec->max_dynamic_compiles, control->granted_budget.max_dynamic_compiles);
                     {
                         std::lock_guard lock(plan_mutex);
-                        if (dynamic_compile_count >= compile_limit) {
+                        if (dynamic_compile_count >= compile_limit ||
+                            !control->consume_dynamic_compile()) {
                             co_return plan_failure(
                                 ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
                                 "expand_task_graph dynamic compilation budget exhausted",
@@ -4241,6 +4242,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
         }
     }
+
+    outcome.remaining_budget.max_dynamic_compiles = subtract_saturated(
+        control->granted_budget.max_dynamic_compiles, dynamic_compile_count);
 
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
         control->cancellation_cause() == CancellationCause::None) {

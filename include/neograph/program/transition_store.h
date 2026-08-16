@@ -7,6 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/program/command_journal.h>
 #include <neograph/program/event.h>
+#include <neograph/program/lineage.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/run_record.h>
 
@@ -46,6 +47,13 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     /// inherit it from the durable run publication.
     std::optional<MigrationPlan>            migration_plan;
     std::vector<ProgramJavaScriptCommandJournalEntry> commands;
+    /// Present on lineage-aware publications. A generation accompanies only
+    /// the first head or an admitted successor; ordinary updates omit it.
+    std::optional<ProgramRunGeneration>      run_generation;
+    std::optional<ProgramRunLineage>         run_lineage;
+    /// On a fork's first publication, atomically debits the still-active source
+    /// lineage while the target starts in an independent generation-one lineage.
+    std::optional<ProgramRunLineage>         fork_source_lineage;
 
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
@@ -64,6 +72,7 @@ enum class ProgramTransitionFaultPoint : std::uint8_t {
     AfterJournalSnapshot,
     AfterEventSnapshot,
     AfterEffectSnapshot,
+    AfterLineageSnapshot,
     BeforeCommit,
 };
 
@@ -97,6 +106,28 @@ public:
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>
     load_migration_plan(std::string_view /*owner_scope*/, std::string_view /*run_id*/) const {
+        return std::nullopt;
+    }
+    /** Current immutable lineage head, when the run uses generation accounting. */
+    virtual std::optional<ProgramRunLineage>
+    load_lineage(std::string_view /*owner_scope*/, std::string_view /*lineage_id*/) const {
+        return std::nullopt;
+    }
+    /** Current lineage head associated with one run generation. */
+    virtual std::optional<ProgramRunLineage>
+    load_run_lineage(std::string_view owner_scope, std::string_view run_id) const;
+    /** One immutable historical lineage head addressed by its content identity. */
+    virtual std::optional<ProgramRunLineage>
+    load_lineage_head(std::string_view /*owner_scope*/,
+                      std::string_view /*lineage_id*/,
+                      std::string_view /*head_id*/) const {
+        return std::nullopt;
+    }
+    /** One immutable topology generation retained by ordinal. */
+    virtual std::optional<ProgramRunGeneration>
+    load_generation(std::string_view /*owner_scope*/,
+                    std::string_view /*lineage_id*/,
+                    std::uint64_t /*generation*/) const {
         return std::nullopt;
     }
 
@@ -138,6 +169,16 @@ public:
                              std::uint64_t after_sequence = 0) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner_scope,
+                                                   std::string_view lineage_id) const override;
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner_scope,
+                                                       std::string_view run_id) const override;
+    std::optional<ProgramRunLineage> load_lineage_head(std::string_view owner_scope,
+                                                        std::string_view lineage_id,
+                                                        std::string_view head_id) const override;
+    std::optional<ProgramRunGeneration> load_generation(std::string_view owner_scope,
+                                                         std::string_view lineage_id,
+                                                         std::uint64_t generation) const override;
     ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,

@@ -166,6 +166,8 @@ public:
         std::optional<json>        terminal_result,
         std::optional<RunBudget>   remaining_budget     = std::nullopt,
         std::optional<RunBudget>   inflight_reservation = std::nullopt);
+    /** Durably consumes one nonrenewable dynamic-compilation unit before dispatch. */
+    bool consume_dynamic_compile();
     ProgramEvent make_event(std::string_view operation_id,
                             ProgramEventKind kind,
                             ProgramEventPayload payload);

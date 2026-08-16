@@ -60,6 +60,24 @@ public:
                                                      std::string_view run_id) const override {
         return inner_->load_migration_plan(owner_scope, run_id);
     }
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner_scope,
+                                                    std::string_view lineage_id) const override {
+        return inner_->load_lineage(owner_scope, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner_scope,
+                                                       std::string_view run_id) const override {
+        return inner_->load_run_lineage(owner_scope, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner_scope, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return inner_->load_lineage_head(owner_scope, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner_scope, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return inner_->load_generation(owner_scope, lineage_id, generation);
+    }
 
     ProgramTransitionPublishResult compare_publish(
         std::string_view owner_scope,

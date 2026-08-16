@@ -676,6 +676,24 @@ public:
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
     }
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+                                                    std::string_view lineage_id) const override {
+        return inner_.load_lineage(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+                                                       std::string_view run_id) const override {
+        return inner_.load_run_lineage(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return inner_.load_lineage_head(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return inner_.load_generation(owner, lineage_id, generation);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,

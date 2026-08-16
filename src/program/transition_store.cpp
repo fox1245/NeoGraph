@@ -283,6 +283,85 @@ bool budget_increased(const RunBudget& next, const RunBudget& previous) noexcept
            next.max_total_children > previous.max_total_children;
 }
 
+template <typename Integer>
+bool checked_add(Integer& target, Integer value) noexcept {
+    if (value > std::numeric_limits<Integer>::max() - target) return false;
+    target = static_cast<Integer>(target + value);
+    return true;
+}
+
+std::optional<RunBudget> committed_descendant_budget(const ProgramRunRecord& run) noexcept {
+    RunBudget committed;
+    for (const auto& child : run.children()) {
+        const auto& budget = child.invocation.granted_budget;
+        if (!checked_add(committed.wall_time_ms, budget.wall_time_ms) ||
+            !checked_add(committed.model_tokens, budget.model_tokens) ||
+            !checked_add(committed.monetary_microunits, budget.monetary_microunits) ||
+            !checked_add(committed.max_program_operations, budget.max_program_operations) ||
+            !checked_add(committed.max_core_steps, budget.max_core_steps) ||
+            !checked_add(committed.max_dynamic_compiles, budget.max_dynamic_compiles) ||
+            budget.max_total_children == std::numeric_limits<std::uint64_t>::max() ||
+            !checked_add(committed.max_total_children, budget.max_total_children + 1)) {
+            return std::nullopt;
+        }
+    }
+    return committed;
+}
+
+bool fork_binds_predecessor(const ProgramRunRecord&     target,
+                            const ProgramRunGeneration& predecessor,
+                            const ProgramRunLineage&    lineage,
+                            const ProgramRunRecord&     source) noexcept {
+    const auto receipt = target.fork_receipt();
+    if (!receipt) return true;
+    const auto checkpoint = source.exact_checkpoint();
+    return checkpoint && target.run_id() != source.run_id() && source.child_depth() == 0 &&
+           source.invocation().parent_run_id.empty() &&
+           source.continuation().state == ContinuationState::Interrupted &&
+           lineage.committed_descendant_budget() == RunBudget{} && receipt->compatible() &&
+           receipt->owner_scope() == target.owner_scope() &&
+           receipt->source_run_id() == predecessor.run_id() &&
+           receipt->source_program_version_id() == predecessor.program_version_id() &&
+           receipt->source_checkpoint_id() == checkpoint->checkpoint_id &&
+           receipt->target_program_version_id() == target.program_version_id() &&
+           source.id() == lineage.active_run_record_id() &&
+           source.journal_head() == lineage.active_journal_head();
+}
+
+bool fork_allocation_fits(const ProgramRunLineage& previous,
+                          const ProgramRunLineage& debited,
+                          const RunBudget&         target) noexcept {
+    const auto fits = [](auto before, auto after, auto allocated) {
+        return after <= before && allocated == before - after;
+    };
+    return debited.active_generation() == previous.active_generation() &&
+           debited.active_generation_id() == previous.active_generation_id() &&
+           debited.active_run_record_id() == previous.active_run_record_id() &&
+           debited.active_journal_head() == previous.active_journal_head() &&
+           debited.inflight_reservation() == previous.inflight_reservation() &&
+           debited.committed_descendant_budget() == previous.committed_descendant_budget() &&
+           fits(previous.remaining_budget().wall_time_ms,
+                debited.remaining_budget().wall_time_ms, target.wall_time_ms) &&
+           fits(previous.remaining_budget().model_tokens,
+                debited.remaining_budget().model_tokens, target.model_tokens) &&
+           fits(previous.remaining_budget().monetary_microunits,
+                debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
+           fits(previous.remaining_budget().max_concurrency,
+                debited.remaining_budget().max_concurrency, target.max_concurrency) &&
+           fits(previous.remaining_budget().max_program_operations,
+                debited.remaining_budget().max_program_operations,
+                target.max_program_operations) &&
+           fits(previous.remaining_budget().max_core_steps,
+                debited.remaining_budget().max_core_steps, target.max_core_steps) &&
+           fits(previous.remaining_budget().max_dynamic_compiles,
+                debited.remaining_budget().max_dynamic_compiles,
+                target.max_dynamic_compiles) &&
+           fits(previous.remaining_budget().max_child_depth,
+                debited.remaining_budget().max_child_depth, target.max_child_depth) &&
+           fits(previous.remaining_budget().max_total_children,
+                debited.remaining_budget().max_total_children, target.max_total_children);
+}
+
 std::optional<ProgramUsage> command_terminal_usage(
     const ProgramJavaScriptCommandJournalEntry& entry) {
     const auto terminal_result = entry.terminal_result();
@@ -527,7 +606,48 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
                 "Program migration publication requires a compatible fork receipt");
         }
     }
+    if (publication.run_generation && !publication.run_lineage) {
+        throw std::invalid_argument("Program generation publication requires a lineage head");
+    }
+    if (publication.run_lineage) {
+        const auto& lineage = *publication.run_lineage;
+        const auto  committed = committed_descendant_budget(run);
+        if (lineage.owner_scope() != owner ||
+            lineage.active_run_record_id() != run.id() ||
+            lineage.active_journal_head() != journal.id ||
+            lineage.remaining_budget() != journal.remaining_budget ||
+            lineage.inflight_reservation() != journal.inflight_reservation || !committed ||
+            lineage.committed_descendant_budget() != *committed) {
+            throw std::invalid_argument("Program lineage head does not bind the transition");
+        }
+        if (publication.run_generation) {
+            const auto& generation = *publication.run_generation;
+            if (generation.owner_scope() != owner ||
+                generation.lineage_id() != lineage.lineage_id() ||
+                generation.run_id() != run.run_id() ||
+                generation.program_version_id() != run.program_version_id() ||
+                generation.bundle_id() != run.bundle_id() ||
+                generation.initial_run_record_id() != run.id() ||
+                generation.initial_journal_head() != journal.id ||
+                generation.id() != lineage.active_generation_id() ||
+                generation.child_depth() != run.child_depth()) {
+                throw std::invalid_argument("Program generation does not bind the transition");
+            }
+        }
+    }
+
+    if (publication.fork_source_lineage) {
+        if (!run.fork_receipt() || !publication.run_lineage ||
+            !publication.run_generation || publication.run_generation->generation() != 1 ||
+            !budget_is_empty(journal.inflight_reservation) ||
+            publication.fork_source_lineage->owner_scope() != owner ||
+            publication.fork_source_lineage->lineage_id() ==
+                publication.run_lineage->lineage_id()) {
+            throw std::invalid_argument("Program fork source debit does not bind the target");
+        }
+    }
 }
+
 constexpr std::size_t MAX_CANONICAL_PUBLICATION_BYTES = 16u * 1024u * 1024u;
 
 void append_publication_bytes(std::string& out, std::string_view bytes) {
@@ -560,8 +680,14 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
         append_publication_bytes(bytes, publication.events[index].serialize_canonical());
     }
 
+    append_publication_bytes(bytes, "]");
+    if (publication.fork_source_lineage) {
+        append_publication_bytes(bytes, ",\"fork_source_lineage\":");
+        append_publication_bytes(bytes,
+                                 publication.fork_source_lineage->serialize_canonical());
+    }
     append_publication_bytes(bytes,
-                             "],\"format\":\"neograph-program-transition-publication\","
+                             ",\"format\":\"neograph-program-transition-publication\","
                              "\"journal_record\":");
     append_publication_bytes(bytes, publication.journal_record.serialize_canonical());
     append_publication_bytes(bytes, ",\"migration_plan\":");
@@ -570,9 +696,23 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     } else {
         append_publication_bytes(bytes, "null");
     }
+    if (publication.run_lineage) {
+        append_publication_bytes(bytes, ",\"run_generation\":");
+        if (publication.run_generation) {
+            append_publication_bytes(bytes, publication.run_generation->serialize_canonical());
+        } else {
+            append_publication_bytes(bytes, "null");
+        }
+        append_publication_bytes(bytes, ",\"run_lineage\":");
+        append_publication_bytes(bytes, publication.run_lineage->serialize_canonical());
+    }
     append_publication_bytes(bytes, ",\"run_record\":");
     append_publication_bytes(bytes, publication.run_record.serialize_canonical());
-    append_publication_bytes(bytes, ",\"storage_schema_version\":1}");
+    append_publication_bytes(bytes, publication.fork_source_lineage
+                                        ? ",\"storage_schema_version\":3}"
+                                    : publication.run_lineage
+                                        ? ",\"storage_schema_version\":2}"
+                                        : ",\"storage_schema_version\":1}");
     return bytes;
 }
 }  // namespace
@@ -638,12 +778,26 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     auto v = detail::parse_json_strict(bytes);
     if (!v.is_object() || rs(v, "format") != PUBLICATION_FORMAT)
         throw std::invalid_argument("Stored Program publication has unknown format");
-    detail::reject_unknown_fields(
-        v, "Stored Program publication",
-        {"format", "storage_schema_version", "run_record", "journal_record", "events", "effects",
-         "commands", "migration_plan"});
-    if (r32(v, "storage_schema_version") != 1)
+    const auto schema_version = r32(v, "storage_schema_version");
+    if (schema_version == 1) {
+        detail::reject_unknown_fields(
+            v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan"});
+    } else if (schema_version == 2) {
+        detail::reject_unknown_fields(
+            v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+              "effects", "commands", "migration_plan", "run_generation", "run_lineage"});
+    } else if (schema_version == 3) {
+        detail::reject_unknown_fields(
+            v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan", "run_generation", "run_lineage",
+             "fork_source_lineage"});
+    } else {
         throw std::invalid_argument("Stored Program publication schema unsupported");
+    }
     auto run = ProgramRunRecord::parse(detail::canonical_json_bytes(rv(v, "run_record")));
     auto journal =
         ProgramJournalRecord::parse(detail::canonical_json_bytes(rv(v, "journal_record")));
@@ -672,9 +826,31 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
         const auto& plan = rv(v, "migration_plan");
         if (!plan.is_null()) migration_plan = MigrationPlan::parse(detail::canonical_json_bytes(plan));
     }
+    std::optional<ProgramRunGeneration> run_generation;
+    std::optional<ProgramRunLineage>    run_lineage;
+    if (schema_version >= 2) {
+        const auto& encoded_generation = rv(v, "run_generation");
+        if (!encoded_generation.is_null()) {
+            run_generation = ProgramRunGeneration::parse(
+                detail::canonical_json_bytes(encoded_generation));
+        }
+        const auto& encoded_lineage = rv(v, "run_lineage");
+        if (encoded_lineage.is_null())
+            throw std::invalid_argument("Stored Program publication requires a lineage head");
+        run_lineage = ProgramRunLineage::parse(detail::canonical_json_bytes(encoded_lineage));
+    }
+    std::optional<ProgramRunLineage> fork_source_lineage;
+    if (schema_version == 3) {
+        const auto& encoded_source = rv(v, "fork_source_lineage");
+        if (encoded_source.is_null())
+            throw std::invalid_argument("Stored Program fork publication requires a source debit");
+        fork_source_lineage =
+            ProgramRunLineage::parse(detail::canonical_json_bytes(encoded_source));
+    }
     ProgramTransitionPublication out{std::move(run), std::move(journal), std::move(events),
-                                     std::move(effects), std::move(migration_plan),
-                                     std::move(commands)};
+                                       std::move(effects), std::move(migration_plan),
+                                       std::move(commands), std::move(run_generation),
+                                       std::move(run_lineage), std::move(fork_source_lineage)};
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
@@ -693,10 +869,17 @@ struct InMemoryProgramTransitionStore::Impl {
         std::vector<ProgramJavaScriptCommandJournalEntry> commands;
         ProgramTransitionHistoryPtr              history;
         std::optional<MigrationPlan>             migration_plan;
+        std::optional<std::string>               lineage_id;
         std::string                              bytes;
+    };
+    struct StoredLineage {
+        ProgramRunLineage                         head;
+        std::map<std::uint64_t, ProgramRunGeneration> generations;
+        std::map<std::string, ProgramRunLineage, std::less<>> heads;
     };
     mutable std::mutex                                                mutex;
     std::map<std::string, std::shared_ptr<const Stored>, std::less<>> runs;
+    std::map<std::string, std::shared_ptr<const StoredLineage>, std::less<>> lineages;
     std::optional<ProgramTransitionFaultPoint>                        fault;
 };
 InMemoryProgramTransitionStore::InMemoryProgramTransitionStore()
@@ -793,6 +976,49 @@ std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan
     }
     return snapshot->migration_plan;
 }
+std::optional<ProgramRunLineage> ProgramTransitionStore::load_run_lineage(
+    std::string_view, std::string_view) const {
+    return std::nullopt;
+}
+std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage(
+    std::string_view owner, std::string_view lineage_id) const {
+    if (owner.empty() || lineage_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->lineages.find(key(owner, lineage_id));
+    if (found == impl_->lineages.end()) return std::nullopt;
+    return found->second->head;
+}
+std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_run_lineage(
+    std::string_view owner, std::string_view run_id) const {
+    if (owner.empty() || run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto run = impl_->runs.find(key(owner, run_id));
+    if (run == impl_->runs.end() || !run->second->lineage_id) return std::nullopt;
+    const auto lineage = impl_->lineages.find(key(owner, *run->second->lineage_id));
+    if (lineage == impl_->lineages.end())
+        throw std::invalid_argument("Stored Program run lineage association is corrupt");
+    return lineage->second->head;
+}
+std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage_head(
+    std::string_view owner, std::string_view lineage_id, std::string_view head_id) const {
+    if (owner.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto lineage = impl_->lineages.find(key(owner, lineage_id));
+    if (lineage == impl_->lineages.end()) return std::nullopt;
+    const auto found = lineage->second->heads.find(head_id);
+    if (found == lineage->second->heads.end()) return std::nullopt;
+    return found->second;
+}
+std::optional<ProgramRunGeneration> InMemoryProgramTransitionStore::load_generation(
+    std::string_view owner, std::string_view lineage_id, std::uint64_t generation) const {
+    if (owner.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto lineage = impl_->lineages.find(key(owner, lineage_id));
+    if (lineage == impl_->lineages.end()) return std::nullopt;
+    const auto found = lineage->second->generations.find(generation);
+    if (found == lineage->second->generations.end()) return std::nullopt;
+    return found->second;
+}
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
     std::string publication_bytes;
@@ -822,6 +1048,90 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
         if (!old_plan || old_plan->id() != publication.migration_plan->id()) {
             return ProgramTransitionPublishResult::Conflict;
         }
+    }
+
+    const auto lineage_key = publication.run_lineage
+                                 ? key(owner, publication.run_lineage->lineage_id())
+                                 : std::string{};
+    auto current_lineage = publication.run_lineage ? impl_->lineages.find(lineage_key)
+                                                    : impl_->lineages.end();
+    const bool adopting_legacy_lineage =
+        current != impl_->runs.end() && !current->second->lineage_id && publication.run_lineage;
+    if (current != impl_->runs.end() && current->second->lineage_id) {
+        if (!publication.run_lineage ||
+            *current->second->lineage_id != publication.run_lineage->lineage_id()) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
+    if (publication.run_lineage) {
+        if (current_lineage == impl_->lineages.end()) {
+            if (!publication.run_generation ||
+                !is_valid_program_run_lineage_initial(*publication.run_lineage,
+                                                      *publication.run_generation)) {
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        } else if (adopting_legacy_lineage) {
+            return ProgramTransitionPublishResult::Conflict;
+        } else if (!is_valid_program_run_lineage_transition(
+                       current_lineage->second->head, *publication.run_lineage,
+                       publication.run_generation)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        if (current_lineage != impl_->lineages.end() && !publication.run_generation) {
+            const auto active = current_lineage->second->generations.find(
+                publication.run_lineage->active_generation());
+            if (active == current_lineage->second->generations.end() ||
+                !does_program_run_generation_bind(active->second, *publication.run_lineage,
+                                                  publication.run_record)) {
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        }
+        if (current_lineage != impl_->lineages.end() && publication.run_generation) {
+            const auto active = current_lineage->second->generations.find(
+                current_lineage->second->head.active_generation());
+            if (active == current_lineage->second->generations.end() ||
+                active->second.child_depth() != publication.run_generation->child_depth()) {
+                return ProgramTransitionPublishResult::Conflict;
+            }
+            const auto source = impl_->runs.find(key(owner, active->second.run_id()));
+            if (source == impl_->runs.end() ||
+                !fork_binds_predecessor(publication.run_record, active->second,
+                                        current_lineage->second->head, source->second->run)) {
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        }
+        if (publication.run_generation && current_lineage != impl_->lineages.end() &&
+            current_lineage->second->generations.contains(
+                publication.run_generation->generation())) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
+
+    std::string                                fork_source_key;
+    std::shared_ptr<const Impl::StoredLineage> fork_source_current;
+    if (publication.fork_source_lineage) {
+        fork_source_key = key(owner, publication.fork_source_lineage->lineage_id());
+        const auto found = impl_->lineages.find(fork_source_key);
+        if (found == impl_->lineages.end() ||
+            !is_valid_program_run_lineage_transition(
+                found->second->head, *publication.fork_source_lineage) ||
+            !fork_allocation_fits(found->second->head, *publication.fork_source_lineage,
+                                  publication.journal_record.remaining_budget)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        const auto active =
+            found->second->generations.find(found->second->head.active_generation());
+        if (active == found->second->generations.end())
+            return ProgramTransitionPublishResult::Conflict;
+        const auto source = impl_->runs.find(key(owner, active->second.run_id()));
+        if (source == impl_->runs.end() ||
+            !fork_binds_predecessor(publication.run_record, active->second,
+                                    found->second->head, source->second->run)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        fork_source_current = found->second;
+    } else if (current == impl_->runs.end() && publication.run_record.fork_receipt()) {
+        return ProgramTransitionPublishResult::Conflict;
     }
 
     const auto new_terminal = publication.run_record.terminal_result();
@@ -907,6 +1217,32 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
     auto appended_commands = std::move(publication.commands);
 
+    std::shared_ptr<const Impl::StoredLineage> staged_lineage;
+    if (publication.run_lineage) {
+        std::map<std::uint64_t, ProgramRunGeneration> generations;
+        std::map<std::string, ProgramRunLineage, std::less<>> heads;
+        if (current_lineage != impl_->lineages.end())
+            generations = current_lineage->second->generations;
+        if (current_lineage != impl_->lineages.end()) heads = current_lineage->second->heads;
+        if (publication.run_generation) {
+            generations.emplace(publication.run_generation->generation(),
+                                *publication.run_generation);
+        }
+        heads.emplace(publication.run_lineage->id(), *publication.run_lineage);
+        staged_lineage = std::make_shared<const Impl::StoredLineage>(Impl::StoredLineage{
+            *publication.run_lineage, std::move(generations), std::move(heads)});
+    }
+    std::shared_ptr<const Impl::StoredLineage> staged_fork_source;
+    if (publication.fork_source_lineage) {
+        auto heads = fork_source_current->heads;
+        heads.emplace(publication.fork_source_lineage->id(),
+                      *publication.fork_source_lineage);
+        staged_fork_source = std::make_shared<const Impl::StoredLineage>(Impl::StoredLineage{
+            *publication.fork_source_lineage, fork_source_current->generations,
+            std::move(heads)});
+    }
+    maybe_fail(ProgramTransitionFaultPoint::AfterLineageSnapshot);
+
     std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
     std::vector<ProgramJavaScriptCommandJournalEntry> commands;
@@ -935,11 +1271,24 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                               : current->second->migration_plan;
     auto candidate = std::make_shared<const Impl::Stored>(
         Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                     std::move(effects), std::move(commands), std::move(history),
-                     std::move(migration_plan),
-                     std::move(publication_bytes)});
+                      std::move(effects), std::move(commands), std::move(history),
+                      std::move(migration_plan),
+                      publication.run_lineage
+                          ? std::optional<std::string>(publication.run_lineage->lineage_id())
+                          : std::nullopt,
+                      std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
-    if (current == impl_->runs.end()) {
+    if (staged_lineage || staged_fork_source) {
+        auto staged_runs     = impl_->runs;
+        auto staged_lineages = impl_->lineages;
+        staged_runs.insert_or_assign(storage_key, std::move(candidate));
+        if (staged_lineage)
+            staged_lineages.insert_or_assign(lineage_key, std::move(staged_lineage));
+        if (staged_fork_source)
+            staged_lineages.insert_or_assign(fork_source_key, std::move(staged_fork_source));
+        impl_->runs.swap(staged_runs);
+        impl_->lineages.swap(staged_lineages);
+    } else if (current == impl_->runs.end()) {
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));
     } else {
         current->second = std::move(candidate);

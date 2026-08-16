@@ -48,6 +48,16 @@ public:
                              std::uint64_t after_sequence = 0) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner_scope,
+                                                    std::string_view lineage_id) const override;
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner_scope,
+                                                       std::string_view run_id) const override;
+    std::optional<ProgramRunLineage> load_lineage_head(std::string_view owner_scope,
+                                                        std::string_view lineage_id,
+                                                        std::string_view head_id) const override;
+    std::optional<ProgramRunGeneration> load_generation(std::string_view owner_scope,
+                                                         std::string_view lineage_id,
+                                                         std::uint64_t generation) const override;
     ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,

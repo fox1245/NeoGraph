@@ -98,6 +98,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_module.cpp
         test_program_contract.cpp
         test_program_journal.cpp
+        test_program_lineage.cpp
         test_program_pending.cpp
         test_program_fork_replay.cpp
         test_program_transition_store.cpp
@@ -186,6 +187,16 @@ endif()
 if(TARGET neograph_mcp_sqlite)
     target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTING)
+
+    add_executable(neograph_harness_program_store_tests
+        test_harness_program_store.cpp
+    )
+    target_compile_definitions(neograph_harness_program_store_tests PRIVATE NEOGRAPH_TESTING)
+    target_link_libraries(neograph_harness_program_store_tests PRIVATE
+        neograph::mcp_sqlite
+        SQLite::SQLite3
+        GTest::gtest_main
+    )
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
@@ -392,6 +403,9 @@ if(TARGET neograph_program_tests)
     else()
         gtest_discover_tests(neograph_program_tests)
     endif()
+endif()
+if(TARGET neograph_harness_program_store_tests)
+    gtest_discover_tests(neograph_harness_program_store_tests)
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
     gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)

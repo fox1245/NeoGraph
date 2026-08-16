@@ -166,7 +166,59 @@ std::optional<StoredHead> load_head(sqlite3* db, std::string_view owner_scope,
                       migration_plan_bytes
                           ? std::optional<MigrationPlan>(MigrationPlan::parse(*migration_plan_bytes))
                           : std::nullopt,
-                      column_blob(statement.get(), 3)};
+                       column_blob(statement.get(), 3)};
+}
+
+std::optional<ProgramRunLineage> load_current_lineage_head(sqlite3* db,
+                                                            std::string_view owner_scope,
+                                                            std::string_view lineage_id) {
+    Statement statement(
+        db, "SELECT head_bytes FROM program_run_lineage_heads_v1 "
+            "WHERE owner_scope = ?1 AND lineage_id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, lineage_id);
+    if (!statement.step_row()) return std::nullopt;
+    return ProgramRunLineage::parse(column_blob(statement.get(), 0));
+}
+
+std::optional<ProgramRunLineage> load_historical_lineage_head(sqlite3* db,
+                                                               std::string_view owner_scope,
+                                                               std::string_view lineage_id,
+                                                               std::string_view head_id) {
+    Statement statement(
+        db, "SELECT canonical_bytes FROM program_run_lineage_history_v1 "
+            "WHERE owner_scope = ?1 AND lineage_id = ?2 AND head_id = ?3");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, lineage_id);
+    statement.bind_text(3, head_id);
+    if (!statement.step_row()) return std::nullopt;
+    return ProgramRunLineage::parse(column_blob(statement.get(), 0));
+}
+
+std::optional<ProgramRunGeneration> load_generation_record(sqlite3* db,
+                                                            std::string_view owner_scope,
+                                                            std::string_view lineage_id,
+                                                            std::uint64_t generation) {
+    Statement statement(
+        db, "SELECT canonical_bytes FROM program_run_generations_v1 "
+            "WHERE owner_scope = ?1 AND lineage_id = ?2 AND generation = ?3");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, lineage_id);
+    statement.bind_uint64(3, generation);
+    if (!statement.step_row()) return std::nullopt;
+    return ProgramRunGeneration::parse(column_blob(statement.get(), 0));
+}
+
+std::optional<std::string> load_run_lineage_id(sqlite3* db,
+                                               std::string_view owner_scope,
+                                               std::string_view run_id) {
+    Statement statement(
+        db, "SELECT lineage_id FROM program_run_lineage_runs_v1 "
+            "WHERE owner_scope = ?1 AND run_id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) return std::nullopt;
+    return column_text(statement.get(), 0);
 }
 
 bool is_final(ContinuationState state) noexcept {
@@ -525,7 +577,139 @@ void create_v2_schema(sqlite3* db) {
              "coordinate_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
              "PRIMARY KEY(owner_scope, run_id, sequence), "
              "FOREIGN KEY(owner_scope, run_id) REFERENCES "
-             "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+              "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_run_lineage_heads_v1 ("
+             "owner_scope TEXT NOT NULL, lineage_id TEXT NOT NULL, head_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, lineage_id))");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_run_generations_v1 ("
+             "owner_scope TEXT NOT NULL, lineage_id TEXT NOT NULL, generation INTEGER NOT NULL, "
+             "generation_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, lineage_id, generation), "
+             "UNIQUE(owner_scope, lineage_id, generation_id), "
+             "FOREIGN KEY(owner_scope, lineage_id) REFERENCES "
+             "program_run_lineage_heads_v1(owner_scope, lineage_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_run_lineage_history_v1 ("
+             "owner_scope TEXT NOT NULL, lineage_id TEXT NOT NULL, head_id TEXT NOT NULL, "
+             "canonical_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, lineage_id, head_id), "
+             "FOREIGN KEY(owner_scope, lineage_id) REFERENCES "
+             "program_run_lineage_heads_v1(owner_scope, lineage_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_run_lineage_runs_v1 ("
+             "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, lineage_id TEXT NOT NULL, "
+             "PRIMARY KEY(owner_scope, run_id), "
+             "FOREIGN KEY(owner_scope, lineage_id) REFERENCES "
+             "program_run_lineage_heads_v1(owner_scope, lineage_id) ON DELETE CASCADE)");
+}
+
+bool fork_binds_predecessor(const ProgramRunRecord&     target,
+                            const ProgramRunGeneration& predecessor,
+                            const ProgramRunLineage&    lineage,
+                            const ProgramRunRecord&     source) noexcept {
+    const auto receipt = target.fork_receipt();
+    if (!receipt) return true;
+    const auto checkpoint = source.exact_checkpoint();
+    return checkpoint && target.run_id() != source.run_id() && source.child_depth() == 0 &&
+           source.invocation().parent_run_id.empty() &&
+           source.continuation().state == ContinuationState::Interrupted &&
+           lineage.committed_descendant_budget() == RunBudget{} && receipt->compatible() &&
+           receipt->owner_scope() == target.owner_scope() &&
+           receipt->source_run_id() == predecessor.run_id() &&
+           receipt->source_program_version_id() == predecessor.program_version_id() &&
+           receipt->source_checkpoint_id() == checkpoint->checkpoint_id &&
+           receipt->target_program_version_id() == target.program_version_id() &&
+           source.id() == lineage.active_run_record_id() &&
+           source.journal_head() == lineage.active_journal_head();
+}
+
+bool fork_allocation_fits(const ProgramRunLineage& previous,
+                          const ProgramRunLineage& debited,
+                          const RunBudget&         target) noexcept {
+    const auto fits = [](auto before, auto after, auto allocated) {
+        return after <= before && allocated == before - after;
+    };
+    return debited.active_generation() == previous.active_generation() &&
+           debited.active_generation_id() == previous.active_generation_id() &&
+           debited.active_run_record_id() == previous.active_run_record_id() &&
+           debited.active_journal_head() == previous.active_journal_head() &&
+           debited.inflight_reservation() == previous.inflight_reservation() &&
+           debited.committed_descendant_budget() == previous.committed_descendant_budget() &&
+           fits(previous.remaining_budget().wall_time_ms,
+                debited.remaining_budget().wall_time_ms, target.wall_time_ms) &&
+           fits(previous.remaining_budget().model_tokens,
+                debited.remaining_budget().model_tokens, target.model_tokens) &&
+           fits(previous.remaining_budget().monetary_microunits,
+                debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
+           fits(previous.remaining_budget().max_concurrency,
+                debited.remaining_budget().max_concurrency, target.max_concurrency) &&
+           fits(previous.remaining_budget().max_program_operations,
+                debited.remaining_budget().max_program_operations,
+                target.max_program_operations) &&
+           fits(previous.remaining_budget().max_core_steps,
+                debited.remaining_budget().max_core_steps, target.max_core_steps) &&
+           fits(previous.remaining_budget().max_dynamic_compiles,
+                debited.remaining_budget().max_dynamic_compiles,
+                target.max_dynamic_compiles) &&
+           fits(previous.remaining_budget().max_child_depth,
+                debited.remaining_budget().max_child_depth, target.max_child_depth) &&
+           fits(previous.remaining_budget().max_total_children,
+                debited.remaining_budget().max_total_children, target.max_total_children);
+}
+
+
+void insert_lineage_head(sqlite3* db, const ProgramRunLineage& lineage) {
+    Statement statement(
+        db, "INSERT INTO program_run_lineage_heads_v1"
+            "(owner_scope, lineage_id, head_bytes) VALUES(?1, ?2, ?3)");
+    statement.bind_text(1, lineage.owner_scope());
+    statement.bind_text(2, lineage.lineage_id());
+    statement.bind_blob(3, lineage.serialize_canonical());
+    statement.step_done();
+}
+
+void update_lineage_head(sqlite3* db, const ProgramRunLineage& lineage) {
+    Statement statement(
+        db, "UPDATE program_run_lineage_heads_v1 SET head_bytes = ?1 "
+            "WHERE owner_scope = ?2 AND lineage_id = ?3");
+    statement.bind_blob(1, lineage.serialize_canonical());
+    statement.bind_text(2, lineage.owner_scope());
+    statement.bind_text(3, lineage.lineage_id());
+    statement.step_done();
+}
+
+void insert_generation(sqlite3* db, const ProgramRunGeneration& generation) {
+    Statement statement(
+        db, "INSERT INTO program_run_generations_v1"
+            "(owner_scope, lineage_id, generation, generation_id, canonical_bytes) "
+            "VALUES(?1, ?2, ?3, ?4, ?5)");
+    statement.bind_text(1, generation.owner_scope());
+    statement.bind_text(2, generation.lineage_id());
+    statement.bind_uint64(3, generation.generation());
+    statement.bind_text(4, generation.id());
+    statement.bind_blob(5, generation.serialize_canonical());
+    statement.step_done();
+}
+
+void insert_lineage_history(sqlite3* db, const ProgramRunLineage& lineage) {
+    Statement statement(
+        db, "INSERT INTO program_run_lineage_history_v1"
+            "(owner_scope, lineage_id, head_id, canonical_bytes) VALUES(?1, ?2, ?3, ?4)");
+    statement.bind_text(1, lineage.owner_scope());
+    statement.bind_text(2, lineage.lineage_id());
+    statement.bind_text(3, lineage.id());
+    statement.bind_blob(4, lineage.serialize_canonical());
+    statement.step_done();
+}
+
+void insert_run_lineage(sqlite3* db,
+                        std::string_view owner_scope,
+                        std::string_view run_id,
+                        std::string_view lineage_id) {
+    Statement statement(
+        db, "INSERT INTO program_run_lineage_runs_v1"
+            "(owner_scope, run_id, lineage_id) VALUES(?1, ?2, ?3)");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    statement.bind_text(3, lineage_id);
+    statement.step_done();
 }
 
 void insert_head(sqlite3* db, std::string_view owner_scope, const ProgramRunRecord& run_record,
@@ -812,6 +996,39 @@ std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
     return head->migration_plan;
 }
 
+std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage(
+    std::string_view owner_scope, std::string_view lineage_id) const {
+    if (owner_scope.empty() || lineage_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_current_lineage_head(impl_->db, owner_scope, lineage_id);
+}
+
+std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_run_lineage(
+    std::string_view owner_scope, std::string_view run_id) const {
+    if (owner_scope.empty() || run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id);
+    if (!lineage_id) return std::nullopt;
+    const auto lineage = load_current_lineage_head(impl_->db, owner_scope, *lineage_id);
+    if (!lineage)
+        throw std::invalid_argument("Stored Program run lineage association is corrupt");
+    return lineage;
+}
+
+std::optional<ProgramRunGeneration> SQLiteProgramTransitionStore::load_generation(
+    std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const {
+    if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_generation_record(impl_->db, owner_scope, lineage_id, generation);
+}
+
+std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head(
+    std::string_view owner_scope, std::string_view lineage_id, std::string_view head_id) const {
+    if (owner_scope.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_historical_lineage_head(impl_->db, owner_scope, lineage_id, head_id);
+}
+
 ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication) {
@@ -850,6 +1067,103 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
         return ProgramTransitionPublishResult::Conflict;
     }
 
+    const auto run_lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id);
+    const bool adopting_legacy_lineage = current && !run_lineage_id && publication.run_lineage;
+    if (current && run_lineage_id) {
+        if (!publication.run_lineage ||
+            *run_lineage_id != publication.run_lineage->lineage_id()) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    } else if (run_lineage_id) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
+
+    std::optional<ProgramRunLineage> current_lineage;
+    if (publication.run_lineage) {
+        current_lineage = load_current_lineage_head(
+            impl_->db, owner_scope, publication.run_lineage->lineage_id());
+        if (!current_lineage) {
+            if (!publication.run_generation ||
+                !is_valid_program_run_lineage_initial(*publication.run_lineage,
+                                                      *publication.run_generation)) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        } else if (adopting_legacy_lineage) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        } else if (!is_valid_program_run_lineage_transition(
+                       *current_lineage, *publication.run_lineage,
+                       publication.run_generation)) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        if (current_lineage && !publication.run_generation) {
+            const auto active = load_generation_record(
+                impl_->db, owner_scope, publication.run_lineage->lineage_id(),
+                publication.run_lineage->active_generation());
+            if (!active || !does_program_run_generation_bind(
+                               *active, *publication.run_lineage, publication.run_record)) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        }
+        if (current_lineage && publication.run_generation) {
+            const auto active = load_generation_record(
+                impl_->db, owner_scope, publication.run_lineage->lineage_id(),
+                current_lineage->active_generation());
+            if (!active || active->child_depth() != publication.run_generation->child_depth()) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+            const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
+                                       : std::nullopt;
+            if (!source ||
+                !fork_binds_predecessor(publication.run_record, *active, *current_lineage,
+                                        source->run_record)) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        }
+        if (publication.run_generation && current_lineage &&
+            load_generation_record(impl_->db, owner_scope,
+                                   publication.run_lineage->lineage_id(),
+                                   publication.run_generation->generation())) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
+
+    std::optional<ProgramRunLineage> current_fork_source;
+    if (publication.fork_source_lineage) {
+        current_fork_source = load_current_lineage_head(
+            impl_->db, owner_scope, publication.fork_source_lineage->lineage_id());
+        if (!current_fork_source ||
+            !is_valid_program_run_lineage_transition(
+                *current_fork_source, *publication.fork_source_lineage) ||
+            !fork_allocation_fits(*current_fork_source, *publication.fork_source_lineage,
+                                  publication.journal_record.remaining_budget)) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        const auto active = load_generation_record(
+            impl_->db, owner_scope, current_fork_source->lineage_id(),
+            current_fork_source->active_generation());
+        const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
+                                   : std::nullopt;
+        if (!active || !source ||
+            !fork_binds_predecessor(publication.run_record, *active, *current_fork_source,
+                                    source->run_record)) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    } else if (!current && publication.run_record.fork_receipt()) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
+
     const auto& migration_plan = current ? current->migration_plan : publication.migration_plan;
     if (current)
         update_head(impl_->db, owner_scope, publication.run_record, publication.journal_record,
@@ -860,6 +1174,22 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
     append_events(impl_->db, owner_scope, run_id, publication.events);
     append_effects(impl_->db, owner_scope, run_id, publication.effects);
     append_javascript_commands(impl_->db, owner_scope, run_id, publication.commands);
+    if (publication.run_lineage) {
+        if (current_lineage)
+            update_lineage_head(impl_->db, *publication.run_lineage);
+        else
+            insert_lineage_head(impl_->db, *publication.run_lineage);
+        insert_lineage_history(impl_->db, *publication.run_lineage);
+        if (publication.run_generation)
+            insert_generation(impl_->db, *publication.run_generation);
+        if (!run_lineage_id)
+            insert_run_lineage(impl_->db, owner_scope, run_id,
+                               publication.run_lineage->lineage_id());
+    }
+    if (publication.fork_source_lineage) {
+        update_lineage_head(impl_->db, *publication.fork_source_lineage);
+        insert_lineage_history(impl_->db, *publication.fork_source_lineage);
+    }
     transaction.commit();
     return ProgramTransitionPublishResult::Published;
 }

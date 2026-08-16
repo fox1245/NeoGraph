@@ -90,6 +90,40 @@ bool effect_ids_are_unique(
     return true;
 }
 
+bool fork_allocation_fits(const program::ProgramRunLineage& previous,
+                          const program::ProgramRunLineage& debited,
+                          const program::RunBudget&         target) noexcept {
+    const auto fits = [](auto before, auto after, auto allocated) {
+        return after <= before && allocated == before - after;
+    };
+    return debited.active_generation() == previous.active_generation() &&
+           debited.active_generation_id() == previous.active_generation_id() &&
+           debited.active_run_record_id() == previous.active_run_record_id() &&
+           debited.active_journal_head() == previous.active_journal_head() &&
+           debited.inflight_reservation() == previous.inflight_reservation() &&
+           debited.committed_descendant_budget() == previous.committed_descendant_budget() &&
+           fits(previous.remaining_budget().wall_time_ms,
+                debited.remaining_budget().wall_time_ms, target.wall_time_ms) &&
+           fits(previous.remaining_budget().model_tokens,
+                debited.remaining_budget().model_tokens, target.model_tokens) &&
+           fits(previous.remaining_budget().monetary_microunits,
+                debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
+           fits(previous.remaining_budget().max_concurrency,
+                debited.remaining_budget().max_concurrency, target.max_concurrency) &&
+           fits(previous.remaining_budget().max_program_operations,
+                debited.remaining_budget().max_program_operations,
+                target.max_program_operations) &&
+           fits(previous.remaining_budget().max_core_steps,
+                debited.remaining_budget().max_core_steps, target.max_core_steps) &&
+           fits(previous.remaining_budget().max_dynamic_compiles,
+                debited.remaining_budget().max_dynamic_compiles,
+                target.max_dynamic_compiles) &&
+           fits(previous.remaining_budget().max_child_depth,
+                debited.remaining_budget().max_child_depth, target.max_child_depth) &&
+           fits(previous.remaining_budget().max_total_children,
+                debited.remaining_budget().max_total_children, target.max_total_children);
+}
+
 bool valid_effect_outbox_binding(
     const program::ProgramRunRecord& run,
     const std::vector<program::ProgramEffectOutboxEntry>& effects) {
@@ -659,6 +693,44 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_javascript_commands (
     FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
         ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS neograph_harness_program_lineage_heads (
+    owner_scope TEXT NOT NULL,
+    lineage_id  TEXT NOT NULL,
+    head_id     TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, lineage_id)
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_lineage_history (
+    owner_scope TEXT NOT NULL,
+    lineage_id  TEXT NOT NULL,
+    head_id     TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, lineage_id, head_id),
+    FOREIGN KEY (owner_scope, lineage_id)
+        REFERENCES neograph_harness_program_lineage_heads (owner_scope, lineage_id)
+        ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_generations (
+    owner_scope  TEXT    NOT NULL,
+    lineage_id   TEXT    NOT NULL,
+    generation   INTEGER NOT NULL,
+    generation_id TEXT   NOT NULL,
+    record_json  TEXT    NOT NULL,
+    PRIMARY KEY (owner_scope, lineage_id, generation),
+    UNIQUE (owner_scope, lineage_id, generation_id),
+    FOREIGN KEY (owner_scope, lineage_id)
+        REFERENCES neograph_harness_program_lineage_heads (owner_scope, lineage_id)
+        ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_lineage_runs (
+    owner_scope   TEXT NOT NULL,
+    program_run_id TEXT NOT NULL,
+    lineage_id    TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, program_run_id),
+    FOREIGN KEY (owner_scope, lineage_id)
+        REFERENCES neograph_harness_program_lineage_heads (owner_scope, lineage_id)
+        ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
     run_id             TEXT PRIMARY KEY,
     owner_scope        TEXT NOT NULL,
@@ -884,6 +956,102 @@ public:
         return publication.migration_plan;
     }
 
+    std::optional<program::ProgramRunLineage> load_lineage(
+        std::string_view owner_scope, std::string_view lineage_id) const override {
+        if (owner_scope.empty() || lineage_id.empty()) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        Statement query(impl_->db,
+                        "SELECT head_id, record_json FROM "
+                        "neograph_harness_program_lineage_heads "
+                        "WHERE owner_scope=? AND lineage_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(lineage_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program lineage read failed");
+        auto lineage = program::ProgramRunLineage::parse(query.text(1));
+        if (lineage.id() != query.text(0) || lineage.owner_scope() != owner_scope ||
+            lineage.lineage_id() != lineage_id) {
+            throw std::invalid_argument("Stored Program lineage binding is corrupt");
+        }
+        return lineage;
+    }
+
+    std::optional<program::ProgramRunLineage> load_run_lineage(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        if (owner_scope.empty() || run_id.empty()) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        Statement query(impl_->db,
+                        "SELECT r.lineage_id, h.head_id, h.record_json FROM "
+                        "neograph_harness_program_lineage_runs r "
+                        "JOIN neograph_harness_program_lineage_heads h "
+                        "ON h.owner_scope=r.owner_scope AND h.lineage_id=r.lineage_id "
+                        "WHERE r.owner_scope=? AND r.program_run_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(run_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW)
+            throw_sqlite_error(impl_->db, "Program run lineage read failed");
+        auto lineage = program::ProgramRunLineage::parse(query.text(2));
+        if (lineage.lineage_id() != query.text(0) || lineage.id() != query.text(1) ||
+            lineage.owner_scope() != owner_scope) {
+            throw std::invalid_argument("Stored Program run lineage association is corrupt");
+        }
+        return lineage;
+    }
+
+    std::optional<program::ProgramRunLineage> load_lineage_head(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::string_view head_id) const override {
+        if (owner_scope.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        Statement query(impl_->db,
+                        "SELECT record_json FROM neograph_harness_program_lineage_history "
+                        "WHERE owner_scope=? AND lineage_id=? AND head_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(lineage_id));
+        query.bind_text(3, std::string(head_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW)
+            throw_sqlite_error(impl_->db, "Program lineage history read failed");
+        auto lineage = program::ProgramRunLineage::parse(query.text(0));
+        if (lineage.id() != head_id || lineage.owner_scope() != owner_scope ||
+            lineage.lineage_id() != lineage_id) {
+            throw std::invalid_argument("Stored Program lineage history binding is corrupt");
+        }
+        return lineage;
+    }
+
+    std::optional<program::ProgramRunGeneration> load_generation(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
+        if (generation > static_cast<std::uint64_t>(INT64_MAX))
+            throw std::invalid_argument("Program generation is out of SQLite range");
+        std::lock_guard lock(impl_->mutex);
+        Statement query(impl_->db,
+                        "SELECT generation_id, record_json FROM "
+                        "neograph_harness_program_generations "
+                        "WHERE owner_scope=? AND lineage_id=? AND generation=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(lineage_id));
+        query.bind_int64(3, static_cast<std::int64_t>(generation));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW)
+            throw_sqlite_error(impl_->db, "Program generation read failed");
+        auto value = program::ProgramRunGeneration::parse(query.text(1));
+        if (value.id() != query.text(0) || value.owner_scope() != owner_scope ||
+            value.lineage_id() != lineage_id || value.generation() != generation) {
+            throw std::invalid_argument("Stored Program generation binding is corrupt");
+        }
+        return value;
+    }
+
     program::ProgramTransitionPublishResult compare_publish(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
@@ -901,6 +1069,14 @@ public:
             wrapper.emplace(HarnessProgramRunRecord::create(artifact_, publication.run_record,
                                                             artifact_.projection()));
             if (publication.journal_record.sequence > static_cast<std::uint64_t>(INT64_MAX)) {
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            if ((publication.run_generation &&
+                 publication.run_generation->generation() >
+                     static_cast<std::uint64_t>(INT64_MAX)) ||
+                (publication.run_lineage &&
+                 publication.run_lineage->active_generation() >
+                     static_cast<std::uint64_t>(INT64_MAX))) {
                 return program::ProgramTransitionPublishResult::Conflict;
             }
             for (const auto& event : publication.events) {
@@ -996,6 +1172,228 @@ public:
                            : program::ProgramTransitionPublishResult::Conflict;
             }
 
+            std::optional<std::string> associated_lineage_id;
+            {
+                Statement association(
+                    impl_->db,
+                    "SELECT lineage_id FROM neograph_harness_program_lineage_runs "
+                    "WHERE owner_scope=? AND program_run_id=?");
+                association.bind_text(1, std::string(owner_scope));
+                association.bind_text(2, run_id);
+                const auto result = association.step();
+                if (result == SQLITE_ROW)
+                    associated_lineage_id = association.text(0);
+                else if (result != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program lineage association read failed");
+            }
+            if (exists && associated_lineage_id) {
+                if (!publication.run_lineage ||
+                    *associated_lineage_id != publication.run_lineage->lineage_id()) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            } else if (!exists && associated_lineage_id) {
+                throw std::invalid_argument("Stored Program lineage association is orphaned");
+            }
+
+            std::optional<program::ProgramRunLineage> current_lineage;
+            if (publication.run_lineage) {
+                Statement lineage_query(
+                    impl_->db,
+                    "SELECT head_id, record_json FROM neograph_harness_program_lineage_heads "
+                    "WHERE owner_scope=? AND lineage_id=?");
+                lineage_query.bind_text(1, std::string(owner_scope));
+                lineage_query.bind_text(2, publication.run_lineage->lineage_id());
+                const auto lineage_result = lineage_query.step();
+                if (lineage_result == SQLITE_ROW) {
+                    current_lineage = program::ProgramRunLineage::parse(lineage_query.text(1));
+                    if (current_lineage->id() != lineage_query.text(0) ||
+                        current_lineage->owner_scope() != owner_scope ||
+                        current_lineage->lineage_id() != publication.run_lineage->lineage_id()) {
+                        throw std::invalid_argument("Stored Program lineage head binding is corrupt");
+                    }
+                } else if (lineage_result != SQLITE_DONE) {
+                    throw_sqlite_error(impl_->db, "Program lineage CAS read failed");
+                }
+
+                const bool adopting_legacy = exists && !associated_lineage_id;
+                if (!current_lineage) {
+                    if (!publication.run_generation ||
+                        !program::is_valid_program_run_lineage_initial(
+                            *publication.run_lineage, *publication.run_generation)) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                } else if (adopting_legacy ||
+                           !program::is_valid_program_run_lineage_transition(
+                               *current_lineage, *publication.run_lineage,
+                               publication.run_generation)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+
+                if (current_lineage && !publication.run_generation) {
+                    Statement generation_query(
+                        impl_->db,
+                        "SELECT generation_id, record_json FROM "
+                        "neograph_harness_program_generations "
+                        "WHERE owner_scope=? AND lineage_id=? AND generation=?");
+                    generation_query.bind_text(1, std::string(owner_scope));
+                    generation_query.bind_text(2, publication.run_lineage->lineage_id());
+                    generation_query.bind_int64(
+                        3, static_cast<std::int64_t>(publication.run_lineage->active_generation()));
+                    if (generation_query.step() != SQLITE_ROW) {
+                        throw std::invalid_argument("Stored Program lineage has no active generation");
+                    }
+                    const auto active =
+                        program::ProgramRunGeneration::parse(generation_query.text(1));
+                    if (active.id() != generation_query.text(0) ||
+                        !program::does_program_run_generation_bind(
+                            active, *publication.run_lineage, publication.run_record)) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                }
+                if (current_lineage && publication.run_generation) {
+                    Statement previous_generation_query(
+                        impl_->db,
+                        "SELECT record_json FROM neograph_harness_program_generations "
+                        "WHERE owner_scope=? AND lineage_id=? AND generation=?");
+                    previous_generation_query.bind_text(1, std::string(owner_scope));
+                    previous_generation_query.bind_text(2,
+                                                        publication.run_lineage->lineage_id());
+                    previous_generation_query.bind_int64(
+                        3, static_cast<std::int64_t>(current_lineage->active_generation()));
+                    if (previous_generation_query.step() != SQLITE_ROW) {
+                        throw std::invalid_argument("Stored Program predecessor generation is missing");
+                    }
+                    const auto previous_generation = program::ProgramRunGeneration::parse(
+                        previous_generation_query.text(0));
+                    if (previous_generation.child_depth() !=
+                        publication.run_generation->child_depth()) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                    if (const auto fork = publication.run_record.fork_receipt()) {
+                        Statement source_query(
+                            impl_->db,
+                            "SELECT record_json FROM neograph_harness_runs "
+                            "WHERE run_id=? AND owner_scope=?");
+                        source_query.bind_text(
+                            1, program_storage_run_id(owner_scope, previous_generation.run_id()));
+                        source_query.bind_text(2, std::string(owner_scope));
+                        if (source_query.step() != SQLITE_ROW) {
+                            impl_->exec("ROLLBACK;");
+                            return program::ProgramTransitionPublishResult::Conflict;
+                        }
+                        const auto source = HarnessProgramRunRecord::parse(
+                            json::parse(source_query.text(0))).run_record();
+                        const auto checkpoint = source.exact_checkpoint();
+                        if (!checkpoint || !fork->compatible() ||
+                            fork->owner_scope() != owner_scope ||
+                            fork->source_run_id() != previous_generation.run_id() ||
+                            fork->source_program_version_id() !=
+                                previous_generation.program_version_id() ||
+                            fork->source_checkpoint_id() != checkpoint->checkpoint_id ||
+                            fork->target_program_version_id() !=
+                                publication.run_record.program_version_id() ||
+                            source.id() != current_lineage->active_run_record_id() ||
+                            source.journal_head() != current_lineage->active_journal_head()) {
+                            impl_->exec("ROLLBACK;");
+                            return program::ProgramTransitionPublishResult::Conflict;
+                        }
+                    }
+                    Statement duplicate_generation(
+                        impl_->db,
+                        "SELECT 1 FROM neograph_harness_program_generations "
+                        "WHERE owner_scope=? AND lineage_id=? AND generation=?");
+                    duplicate_generation.bind_text(1, std::string(owner_scope));
+                    duplicate_generation.bind_text(2, publication.run_lineage->lineage_id());
+                    duplicate_generation.bind_int64(
+                        3, static_cast<std::int64_t>(publication.run_generation->generation()));
+                    if (duplicate_generation.step() == SQLITE_ROW) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                }
+            }
+
+            std::optional<program::ProgramRunLineage> current_fork_source;
+            if (publication.fork_source_lineage) {
+                Statement source_lineage_query(
+                    impl_->db,
+                    "SELECT head_id, record_json FROM neograph_harness_program_lineage_heads "
+                    "WHERE owner_scope=? AND lineage_id=?");
+                source_lineage_query.bind_text(1, std::string(owner_scope));
+                source_lineage_query.bind_text(
+                    2, publication.fork_source_lineage->lineage_id());
+                if (source_lineage_query.step() != SQLITE_ROW) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                current_fork_source =
+                    program::ProgramRunLineage::parse(source_lineage_query.text(1));
+                if (current_fork_source->id() != source_lineage_query.text(0) ||
+                    !program::is_valid_program_run_lineage_transition(
+                        *current_fork_source, *publication.fork_source_lineage) ||
+                    !fork_allocation_fits(*current_fork_source,
+                                          *publication.fork_source_lineage,
+                                          publication.journal_record.remaining_budget)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+
+                Statement source_generation_query(
+                    impl_->db,
+                    "SELECT record_json FROM neograph_harness_program_generations "
+                    "WHERE owner_scope=? AND lineage_id=? AND generation=?");
+                source_generation_query.bind_text(1, std::string(owner_scope));
+                source_generation_query.bind_text(2, current_fork_source->lineage_id());
+                source_generation_query.bind_int64(
+                    3, static_cast<std::int64_t>(current_fork_source->active_generation()));
+                if (source_generation_query.step() != SQLITE_ROW) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                const auto source_generation = program::ProgramRunGeneration::parse(
+                    source_generation_query.text(0));
+                Statement source_run_query(
+                    impl_->db,
+                    "SELECT record_json FROM neograph_harness_runs "
+                    "WHERE run_id=? AND owner_scope=?");
+                source_run_query.bind_text(
+                    1, program_storage_run_id(owner_scope, source_generation.run_id()));
+                source_run_query.bind_text(2, std::string(owner_scope));
+                if (source_run_query.step() != SQLITE_ROW) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                const auto source = HarnessProgramRunRecord::parse(
+                    json::parse(source_run_query.text(0))).run_record();
+                const auto fork       = publication.run_record.fork_receipt();
+                const auto checkpoint = source.exact_checkpoint();
+                if (!fork || !checkpoint || source.run_id() == publication.run_record.run_id() ||
+                    source.child_depth() != 0 || !source.invocation().parent_run_id.empty() ||
+                    source.continuation().state != program::ContinuationState::Interrupted ||
+                    current_fork_source->committed_descendant_budget() != program::RunBudget{} ||
+                    !fork->compatible() ||
+                    fork->owner_scope() != owner_scope ||
+                    fork->source_run_id() != source_generation.run_id() ||
+                    fork->source_program_version_id() !=
+                        source_generation.program_version_id() ||
+                    fork->source_checkpoint_id() != checkpoint->checkpoint_id ||
+                    fork->target_program_version_id() !=
+                        publication.run_record.program_version_id() ||
+                    source.id() != current_fork_source->active_run_record_id() ||
+                    source.journal_head() != current_fork_source->active_journal_head()) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            } else if (!exists && publication.run_record.fork_receipt()) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+
             const auto new_terminal = publication.run_record.terminal_result();
             const bool publishes_terminal_event =
                 !publication.events.empty() &&
@@ -1004,7 +1402,9 @@ public:
             if (!exists) {
                 if (!expected_journal_head.empty() ||
                     !publication.journal_record.previous_id.empty() ||
-                    publication.journal_record.sequence != 1 || publication.events.empty() ||
+                    publication.journal_record.sequence != 1 ||
+                    !budget_is_empty(publication.journal_record.inflight_reservation) ||
+                    publication.events.empty() ||
                     publication.events.front().kind != program::ProgramEventKind::Started ||
                     publication.run_record.event_sequence() != publication.events.size() ||
                     publication.run_record.effect_sequence() != publication.effects.size() ||
@@ -1043,11 +1443,6 @@ public:
                 if ((old_terminal && old_is_final && !new_terminal) ||
                     (new_terminal && (!old_terminal || old_terminal->id() != new_terminal->id()) &&
                      !publishes_terminal_event)) {
-                    impl_->exec("ROLLBACK;");
-                    return program::ProgramTransitionPublishResult::Conflict;
-                }
-                if (publication.events.empty() && publication.effects.empty() &&
-                    publication.commands.empty()) {
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
@@ -1183,6 +1578,96 @@ public:
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
             }
+            if (publication.run_lineage) {
+                if (current_lineage) {
+                    Statement update_lineage(
+                        impl_->db,
+                        "UPDATE neograph_harness_program_lineage_heads "
+                        "SET head_id=?, record_json=? WHERE owner_scope=? AND lineage_id=?");
+                    update_lineage.bind_text(1, publication.run_lineage->id());
+                    update_lineage.bind_text(2, publication.run_lineage->serialize_canonical());
+                    update_lineage.bind_text(3, std::string(owner_scope));
+                    update_lineage.bind_text(4, publication.run_lineage->lineage_id());
+                    if (update_lineage.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1)
+                        throw_sqlite_error(impl_->db, "Program lineage head update failed");
+                } else {
+                    Statement insert_lineage(
+                        impl_->db,
+                        "INSERT INTO neograph_harness_program_lineage_heads "
+                        "(owner_scope, lineage_id, head_id, record_json) VALUES(?, ?, ?, ?)");
+                    insert_lineage.bind_text(1, std::string(owner_scope));
+                    insert_lineage.bind_text(2, publication.run_lineage->lineage_id());
+                    insert_lineage.bind_text(3, publication.run_lineage->id());
+                    insert_lineage.bind_text(4, publication.run_lineage->serialize_canonical());
+                    if (insert_lineage.step() != SQLITE_DONE)
+                        throw_sqlite_error(impl_->db, "Program lineage head insert failed");
+                }
+                Statement insert_history(
+                    impl_->db,
+                    "INSERT INTO neograph_harness_program_lineage_history "
+                    "(owner_scope, lineage_id, head_id, record_json) VALUES(?, ?, ?, ?)");
+                insert_history.bind_text(1, std::string(owner_scope));
+                insert_history.bind_text(2, publication.run_lineage->lineage_id());
+                insert_history.bind_text(3, publication.run_lineage->id());
+                insert_history.bind_text(4, publication.run_lineage->serialize_canonical());
+                if (insert_history.step() != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program lineage history insert failed");
+                if (publication.run_generation) {
+                    Statement insert_generation(
+                        impl_->db,
+                        "INSERT INTO neograph_harness_program_generations "
+                        "(owner_scope, lineage_id, generation, generation_id, record_json) "
+                        "VALUES(?, ?, ?, ?, ?)");
+                    insert_generation.bind_text(1, std::string(owner_scope));
+                    insert_generation.bind_text(2, publication.run_lineage->lineage_id());
+                    insert_generation.bind_int64(
+                        3, static_cast<std::int64_t>(publication.run_generation->generation()));
+                    insert_generation.bind_text(4, publication.run_generation->id());
+                    insert_generation.bind_text(5,
+                                                publication.run_generation->serialize_canonical());
+                    if (insert_generation.step() != SQLITE_DONE)
+                        throw_sqlite_error(impl_->db, "Program generation insert failed");
+                }
+                if (!associated_lineage_id) {
+                    Statement insert_association(
+                        impl_->db,
+                        "INSERT INTO neograph_harness_program_lineage_runs "
+                        "(owner_scope, program_run_id, lineage_id) VALUES(?, ?, ?)");
+                    insert_association.bind_text(1, std::string(owner_scope));
+                    insert_association.bind_text(2, run_id);
+                    insert_association.bind_text(3, publication.run_lineage->lineage_id());
+                    if (insert_association.step() != SQLITE_DONE)
+                        throw_sqlite_error(impl_->db, "Program lineage association insert failed");
+                }
+            }
+            if (publication.fork_source_lineage) {
+                Statement update_source_lineage(
+                    impl_->db,
+                    "UPDATE neograph_harness_program_lineage_heads "
+                    "SET head_id=?, record_json=? WHERE owner_scope=? AND lineage_id=?");
+                update_source_lineage.bind_text(1, publication.fork_source_lineage->id());
+                update_source_lineage.bind_text(
+                    2, publication.fork_source_lineage->serialize_canonical());
+                update_source_lineage.bind_text(3, std::string(owner_scope));
+                update_source_lineage.bind_text(
+                    4, publication.fork_source_lineage->lineage_id());
+                if (update_source_lineage.step() != SQLITE_DONE ||
+                    sqlite3_changes(impl_->db) != 1) {
+                    throw_sqlite_error(impl_->db, "Program fork source lineage update failed");
+                }
+                Statement insert_source_history(
+                    impl_->db,
+                    "INSERT INTO neograph_harness_program_lineage_history "
+                    "(owner_scope, lineage_id, head_id, record_json) VALUES(?, ?, ?, ?)");
+                insert_source_history.bind_text(1, std::string(owner_scope));
+                insert_source_history.bind_text(
+                    2, publication.fork_source_lineage->lineage_id());
+                insert_source_history.bind_text(3, publication.fork_source_lineage->id());
+                insert_source_history.bind_text(
+                    4, publication.fork_source_lineage->serialize_canonical());
+                if (insert_source_history.step() != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program fork source history insert failed");
+            }
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
 
             insert_journal(storage_run_id, owner_scope, publication.journal_record);
@@ -1213,8 +1698,12 @@ private:
     void maybe_fail(SqliteHarnessProgramFaultPoint point) {
         if (impl_->program_crash && *impl_->program_crash == point) {
             impl_->program_crash.reset();
+#if defined(_WIN32)
+            std::abort();
+#else
             std::raise(SIGKILL);
             std::abort();
+#endif
         }
         if (impl_->program_fault && *impl_->program_fault == point) {
             impl_->program_fault.reset();

@@ -638,6 +638,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/activation.cpp
         src/program/migration.cpp
         src/program/journal.cpp
+        src/program/lineage.cpp
         src/program/run_record.cpp
         src/program/transition_store.cpp
         src/program/catalog.cpp

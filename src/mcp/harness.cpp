@@ -459,6 +459,32 @@ public:
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_migration_plan(owner_scope, run_id);
     }
+    std::optional<program::ProgramRunLineage> load_lineage(
+        std::string_view owner_scope, std::string_view lineage_id) const override {
+        if (const auto target = target_->load_lineage(owner_scope, lineage_id)) return target;
+        return source_->load_lineage(owner_scope, lineage_id);
+    }
+    std::optional<program::ProgramRunLineage> load_run_lineage(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        if (const auto target = target_->load_run_lineage(owner_scope, run_id)) return target;
+        return source_->load_run_lineage(owner_scope, run_id);
+    }
+    std::optional<program::ProgramRunLineage> load_lineage_head(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::string_view head_id) const override {
+        if (const auto target = target_->load_lineage_head(owner_scope, lineage_id, head_id))
+            return target;
+        return source_->load_lineage_head(owner_scope, lineage_id, head_id);
+    }
+    std::optional<program::ProgramRunGeneration> load_generation(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        if (const auto target = target_->load_generation(owner_scope, lineage_id, generation))
+            return target;
+        return source_->load_generation(owner_scope, lineage_id, generation);
+    }
     program::ProgramTransitionPublishResult compare_publish(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
@@ -941,8 +967,12 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             const auto source_record =
                 fork_source_transitions->load(resources.owner_scope, fork_source->source_run_id);
             if (!source_record) return {{"started", false}, {"status", "not_found"}};
+            const auto source_lineage = fork_source_transitions->load_run_lineage(
+                resources.owner_scope, fork_source->source_run_id);
+            if (!source_lineage)
+                return {{"started", false}, {"status", "lineage_unavailable"}};
             invocation_template.budget =
-                bounded_budget(invocation_template.budget, source_record->remaining_budget());
+                bounded_budget(invocation_template.budget, source_lineage->remaining_budget());
         }
         auto id = run_id(resources.snapshots.policy.fingerprint());
         auto invocation =

@@ -3,6 +3,9 @@
 #include <neograph/graph/node.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <neograph/program/sqlite_transition_store.h>
+#endif
 
 #include "javascript.h"
 #include "registry_access.h"
@@ -17,6 +20,7 @@
 #include <barrier>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <map>
@@ -1035,6 +1039,24 @@ public:
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
     }
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+                                                    std::string_view lineage_id) const override {
+        return inner_.load_lineage(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+                                                       std::string_view run_id) const override {
+        return inner_.load_run_lineage(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return inner_.load_lineage_head(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return inner_.load_generation(owner, lineage_id, generation);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -1075,6 +1097,24 @@ public:
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+                                                    std::string_view lineage_id) const override {
+        return inner_.load_lineage(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+                                                       std::string_view run_id) const override {
+        return inner_.load_run_lineage(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return inner_.load_lineage_head(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return inner_.load_generation(owner, lineage_id, generation);
     }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
@@ -1134,6 +1174,24 @@ public:
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
     }
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+                                                    std::string_view lineage_id) const override {
+        return inner_.load_lineage(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+                                                       std::string_view run_id) const override {
+        return inner_.load_run_lineage(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return inner_.load_lineage_head(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return inner_.load_generation(owner, lineage_id, generation);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -1177,6 +1235,24 @@ public:
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
+    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+                                                    std::string_view lineage_id) const override {
+        return inner_.load_lineage(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+                                                       std::string_view run_id) const override {
+        return inner_.load_run_lineage(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return inner_.load_lineage_head(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return inner_.load_generation(owner, lineage_id, generation);
     }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
@@ -1386,6 +1462,17 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
     EXPECT_EQ(journal->core_checkpoint->core_name, result.checkpoint()->core_name);
     EXPECT_EQ(journal->core_checkpoint->core_thread_id, result.checkpoint()->core_thread_id);
     EXPECT_EQ(journal->core_checkpoint->checkpoint_id, result.checkpoint()->checkpoint_id);
+    const auto lineage_id = program_run_lineage_id("tenant:runtime", result.run_id());
+    const auto lineage    = fixture.journal->load_lineage("tenant:runtime", lineage_id);
+    ASSERT_TRUE(lineage.has_value());
+    EXPECT_EQ(lineage->active_generation(), 1U);
+    EXPECT_EQ(lineage->remaining_budget(), journal->remaining_budget);
+    EXPECT_EQ(lineage->inflight_reservation(), journal->inflight_reservation);
+    const auto generation = fixture.journal->load_generation("tenant:runtime", lineage_id, 1);
+    ASSERT_TRUE(generation.has_value());
+    EXPECT_EQ(generation->program_version_id(), version.id());
+    EXPECT_EQ(generation->bundle_id(), version.bundle_id());
+    EXPECT_EQ(generation->run_id(), result.run_id());
 
     const auto events = handle.events_after(0);
     ASSERT_GE(events.size(), 4U);
@@ -4046,6 +4133,10 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     ASSERT_EQ(source_record->continuation().state, ContinuationState::Interrupted);
     ASSERT_TRUE(source_record->pending_input().has_value());
     const auto source_pending_id = source_record->pending_input()->call_id();
+    const auto source_lineage_before =
+        fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_lineage_before);
+    ASSERT_EQ(source_lineage_before->active_generation(), 1U);
 
     fixture.recreate_catalog_and_runtime();
     RunInvocation fork_invocation;
@@ -4054,6 +4145,7 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     fork_invocation.program_version_id = version.id();
     fork_invocation.run_id             = "fork-target-run";
     fork_invocation.budget             = source.remaining_budget();
+    --fork_invocation.budget.wall_time_ms;
     fork_invocation.input              = json::object();
     fork_invocation.message_sequence   = 19;
     fork_invocation.idempotency_key    = "test-fork:19";
@@ -4076,6 +4168,25 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     EXPECT_NE(forked.checkpoint()->checkpoint_id, source.checkpoint()->checkpoint_id);
     EXPECT_EQ(interrupt_calls.load(), 2U);
 
+    const auto retried =
+        fixture.runtime
+            ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                   source.checkpoint()->checkpoint_id},
+                   fork_invocation,
+                   ProgramResume{
+                       json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
+            .wait();
+    EXPECT_EQ(retried.run_id(), forked.run_id());
+    EXPECT_EQ(retried.status(), forked.status());
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    EXPECT_THROW((void)fixture.runtime->fork(
+                     ExactProgramCheckpointReference{source.run_id(),
+                                                     source.checkpoint()->checkpoint_id},
+                     fork_invocation,
+                     ProgramResume{json{{"decision", "different"}}, "trace-fork-conflict", {},
+                                   source_pending_id}),
+                 ProgramDiagnosticError);
+
     const auto target_record = fixture.journal->load("tenant:runtime", forked.run_id());
     ASSERT_TRUE(target_record.has_value());
     ASSERT_TRUE(target_record->fork_receipt().has_value());
@@ -4085,10 +4196,254 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     EXPECT_EQ(target_record->fork_source_checkpoint_id(), source.checkpoint()->checkpoint_id);
     EXPECT_EQ(target_record->invocation(), fork_invocation);
 
+    const auto source_lineage_after =
+        fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+    const auto target_lineage =
+        fixture.journal->load_run_lineage("tenant:runtime", forked.run_id());
+    ASSERT_TRUE(source_lineage_after);
+    ASSERT_TRUE(target_lineage);
+    EXPECT_EQ(source_lineage_after->lineage_id(), source_lineage_before->lineage_id());
+    EXPECT_NE(target_lineage->lineage_id(), source_lineage_after->lineage_id());
+    EXPECT_EQ(source_lineage_after->active_generation(), 1U);
+    EXPECT_EQ(target_lineage->active_generation(), 1U);
+    const auto source_generation = fixture.journal->load_generation(
+        "tenant:runtime", source_lineage_after->lineage_id(), 1);
+    const auto target_generation = fixture.journal->load_generation(
+        "tenant:runtime", target_lineage->lineage_id(), 1);
+    ASSERT_TRUE(source_generation);
+    ASSERT_TRUE(target_generation);
+    EXPECT_EQ(source_generation->run_id(), source.run_id());
+    EXPECT_EQ(target_generation->run_id(), forked.run_id());
+    auto expected_source_budget = source.remaining_budget();
+    expected_source_budget.wall_time_ms -= fork_invocation.budget.wall_time_ms;
+    expected_source_budget.model_tokens -= fork_invocation.budget.model_tokens;
+    expected_source_budget.monetary_microunits -= fork_invocation.budget.monetary_microunits;
+    expected_source_budget.max_concurrency -= fork_invocation.budget.max_concurrency;
+    expected_source_budget.max_program_operations -=
+        fork_invocation.budget.max_program_operations;
+    expected_source_budget.max_core_steps -= fork_invocation.budget.max_core_steps;
+    expected_source_budget.max_dynamic_compiles -= fork_invocation.budget.max_dynamic_compiles;
+    expected_source_budget.max_child_depth -= fork_invocation.budget.max_child_depth;
+    expected_source_budget.max_total_children -= fork_invocation.budget.max_total_children;
+    EXPECT_EQ(source_lineage_after->remaining_budget(), expected_source_budget);
+    EXPECT_EQ(source_lineage_after->remaining_budget().wall_time_ms, 1U);
+    EXPECT_EQ(target_lineage->remaining_budget(), target_record->remaining_budget());
+
     const auto source_after = fixture.runtime->reconnect("tenant:runtime", source.run_id()).wait();
     EXPECT_EQ(source_after.status(), ProgramTerminalStatus::Interrupted);
     EXPECT_EQ(source_after.checkpoint()->checkpoint_id, source.checkpoint()->checkpoint_id);
+    const auto resumed_source =
+        fixture.runtime
+            ->resume("tenant:runtime", source.run_id(),
+                     ProgramResume{json{{"decision", "source"}}, "trace-source-after-fork", {},
+                                   source_pending_id})
+            .wait();
+    EXPECT_NE(resumed_source.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto retried_after_source_progress =
+        fixture.runtime
+            ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                   source.checkpoint()->checkpoint_id},
+                   fork_invocation,
+                   ProgramResume{
+                       json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
+            .wait();
+    EXPECT_EQ(retried_after_source_progress.id(), forked.id());
+    EXPECT_EQ(interrupt_calls.load(), 2U);
 }
+
+TEST(ProgramRuntimeTest, ConcurrentExactForksAtomicallyDebitSourceOnce) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-race-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint());
+    const auto source_record = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_record);
+    ASSERT_TRUE(source_record->pending_input());
+    const auto pending_id = source_record->pending_input()->call_id();
+
+    fixture.recreate_catalog_and_runtime();
+    const auto make_invocation = [&](std::string run_id) {
+        RunInvocation invocation;
+        invocation.owner_scope        = "tenant:runtime";
+        invocation.agent_id           = "test-fork-race";
+        invocation.program_version_id = version.id();
+        invocation.run_id             = std::move(run_id);
+        invocation.budget             = source.remaining_budget();
+        invocation.input              = json::object();
+        invocation.message_sequence   = 20;
+        invocation.idempotency_key    = "test-fork-race:" + invocation.run_id;
+        invocation.correlation_id     = "trace-" + invocation.run_id;
+        invocation.validate();
+        return invocation;
+    };
+    std::barrier ready(3);
+    auto fork = [&](std::string run_id) {
+        ready.arrive_and_wait();
+        try {
+            const auto result = fixture.runtime
+                                    ->fork(ExactProgramCheckpointReference{
+                                               source.run_id(),
+                                               source.checkpoint()->checkpoint_id},
+                                           make_invocation(run_id),
+                                           ProgramResume{json{{"decision", run_id}},
+                                                         "trace-fork-race-resume", {}, pending_id})
+                                    .wait();
+            return result.status() == ProgramTerminalStatus::Completed;
+        } catch (const ProgramDiagnosticError&) {
+            return false;
+        }
+    };
+    auto first  = std::async(std::launch::async, [&] { return fork("fork-race-first"); });
+    auto second = std::async(std::launch::async, [&] { return fork("fork-race-second"); });
+    ready.arrive_and_wait();
+    const auto first_won  = first.get();
+    const auto second_won = second.get();
+
+    EXPECT_NE(first_won, second_won);
+    const auto first_record = fixture.journal->load("tenant:runtime", "fork-race-first");
+    const auto second_record = fixture.journal->load("tenant:runtime", "fork-race-second");
+    EXPECT_NE(first_record.has_value(), second_record.has_value());
+    const auto winner_id = first_record ? "fork-race-first" : "fork-race-second";
+    const auto source_lineage =
+        fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+    const auto target_lineage = fixture.journal->load_run_lineage("tenant:runtime", winner_id);
+    ASSERT_TRUE(source_lineage);
+    ASSERT_TRUE(target_lineage);
+    EXPECT_EQ(source_lineage->active_generation(), 1U);
+    EXPECT_EQ(source_lineage->remaining_budget(), RunBudget{});
+    EXPECT_EQ(target_lineage->active_generation(), 1U);
+    EXPECT_NE(target_lineage->lineage_id(), source_lineage->lineage_id());
+    EXPECT_EQ(fixture.journal
+                  ->load_generation("tenant:runtime", target_lineage->lineage_id(), 1)
+                  ->run_id(),
+              winner_id);
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, ConcurrentIdenticalForksReconnectOneTargetDispatch) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), grant(), "trace-identical-fork-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint());
+    const auto pending_id = pending_call_id(source);
+
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:runtime";
+    invocation.agent_id           = "test-identical-fork";
+    invocation.program_version_id = version.id();
+    invocation.run_id             = "identical-fork-target";
+    invocation.budget             = source.remaining_budget();
+    invocation.input              = json::object();
+    invocation.message_sequence   = 22;
+    invocation.idempotency_key    = "test-identical-fork:22";
+    invocation.correlation_id     = "trace-identical-fork-target";
+    invocation.validate();
+
+    std::barrier ready(3);
+    auto fork = [&] {
+        ready.arrive_and_wait();
+        return fixture.runtime
+            ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                   source.checkpoint()->checkpoint_id},
+                   invocation,
+                   ProgramResume{json{{"decision", "same"}}, "trace-identical-fork-resume", {},
+                                 pending_id})
+            .wait();
+    };
+    auto first  = std::async(std::launch::async, fork);
+    auto second = std::async(std::launch::async, fork);
+    ready.arrive_and_wait();
+    const auto first_result  = first.get();
+    const auto second_result = second.get();
+    EXPECT_EQ(first_result.run_id(), "identical-fork-target");
+    EXPECT_EQ(second_result.run_id(), "identical-fork-target");
+    EXPECT_EQ(first_result.id(), second_result.id());
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto events = fixture.journal->load_events("tenant:runtime", "identical-fork-target");
+    EXPECT_EQ(std::count_if(events.begin(), events.end(), [](const ProgramEvent& event) {
+                  return event.kind == ProgramEventKind::Started;
+              }),
+              1);
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramRuntimeTest, ExactForkLineageSurvivesSqliteRuntimeReconnect) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-runtime-fork-lineage-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    interrupt_calls.store(0);
+    {
+        auto transitions = std::make_shared<SQLiteProgramTransitionStore>(path);
+        AdmittedRuntime fixture(1, {}, transitions);
+        const auto      version = fixture.admit("runtime-interrupt");
+        const auto      source =
+            fixture.runtime
+                ->start("tenant:runtime", version,
+                        ProgramInvocation{json::object(), grant(), "trace-sqlite-fork-source", {}})
+                .wait();
+        ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+        ASSERT_TRUE(source.checkpoint());
+
+        RunInvocation invocation;
+        invocation.owner_scope        = "tenant:runtime";
+        invocation.agent_id           = "test-sqlite-fork";
+        invocation.program_version_id = version.id();
+        invocation.run_id             = "sqlite-fork-target";
+        invocation.budget             = source.remaining_budget();
+        invocation.input              = json::object();
+        invocation.message_sequence   = 21;
+        invocation.idempotency_key    = "test-sqlite-fork:21";
+        invocation.correlation_id     = "trace-sqlite-fork-target";
+        invocation.validate();
+        const auto target =
+            fixture.runtime
+                ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                       source.checkpoint()->checkpoint_id},
+                       invocation,
+                       ProgramResume{json{{"decision", "sqlite"}}, "trace-sqlite-fork-resume", {},
+                                     pending_call_id(source)})
+                .wait();
+        ASSERT_EQ(target.status(), ProgramTerminalStatus::Completed);
+
+        fixture.runtime.reset();
+        fixture.journal.reset();
+        fixture.journal = std::make_shared<SQLiteProgramTransitionStore>(path);
+        fixture.runtime = fixture.make_runtime();
+        const auto lineage =
+            fixture.journal->load_run_lineage("tenant:runtime", target.run_id());
+        ASSERT_TRUE(lineage);
+        const auto source_lineage =
+            fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+        ASSERT_TRUE(source_lineage);
+        EXPECT_EQ(lineage->active_generation(), 1U);
+        EXPECT_EQ(source_lineage->active_generation(), 1U);
+        EXPECT_NE(source_lineage->lineage_id(), lineage->lineage_id());
+        EXPECT_EQ(source_lineage->remaining_budget(), RunBudget{});
+        EXPECT_EQ(fixture.journal
+                      ->load_generation("tenant:runtime", lineage->lineage_id(), 1)
+                      ->run_id(),
+                  target.run_id());
+    }
+    std::filesystem::remove(path);
+}
+#endif
 
 TEST(ProgramRuntimeTest, ForkAllowsBudgetOnlyMigrationButEnforcesTargetDeclaredBounds) {
     interrupt_calls.store(0);
@@ -4174,6 +4529,37 @@ TEST(ProgramRuntimeTest, ForkRejectsSourceRunIdBeforeCloningCheckpoint) {
     EXPECT_EQ(after->id(), before->id());
     EXPECT_EQ(interrupt_calls.load(), 1U);
     EXPECT_EQ(fixture.checkpoints->list(source_thread, 100).size(), source_checkpoints_before);
+}
+
+TEST(ProgramRuntimeTest, DirectForkOverloadRejectsUntrackedChildTopology) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-child-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint());
+
+    ProgramInvocation invocation{json::object(),
+                                 source.remaining_budget(),
+                                 "trace-fork-child-target",
+                                 {},
+                                 "fork-child-target",
+                                 "untracked-parent",
+                                 1};
+    EXPECT_THROW((void)fixture.runtime->fork(
+                     "tenant:runtime",
+                     ExactProgramCheckpointReference{source.run_id(),
+                                                     source.checkpoint()->checkpoint_id},
+                     version, std::move(invocation),
+                     ProgramResume{json{{"decision", "must-not-fork"}},
+                                   "trace-fork-child-resume", {}, pending_call_id(source)}),
+                 std::invalid_argument);
+    EXPECT_FALSE(fixture.journal->load("tenant:runtime", "fork-child-target"));
+    EXPECT_EQ(interrupt_calls.load(), 1U);
 }
 
 TEST(ProgramRuntimeTest, ForkMismatchesRejectBeforeTargetRunAndLeaveSourceUnchanged) {
@@ -4531,6 +4917,12 @@ TEST(ProgramRuntimeTest, ExpandTaskGraphPublishesAndBindsDependentChildTasks) {
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(completed_calls.load(), 2U);
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 0U);
+    const auto lineage_id = program_run_lineage_id("tenant:runtime", result.run_id());
+    const auto lineage    = fixture.journal->load_lineage("tenant:runtime", lineage_id);
+    ASSERT_TRUE(lineage.has_value());
+    EXPECT_EQ(lineage->remaining_budget().max_dynamic_compiles, 0U);
+    EXPECT_GT(lineage->committed_descendant_budget().max_total_children, 0U);
     const auto output = result.output();
     ASSERT_TRUE(output.is_object());
     ASSERT_TRUE(output.contains("fragment_id"));
