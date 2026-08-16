@@ -13,6 +13,7 @@ std::string_view to_string(InvocationStatus status) noexcept {
         case InvocationStatus::Completed: return "completed";
         case InvocationStatus::Interrupted: return "interrupted";
         case InvocationStatus::MaxSteps: return "max_steps";
+        case InvocationStatus::SafePoint: return "safe_point";
         case InvocationStatus::Cancelled: return "cancelled";
         case InvocationStatus::Error: return "error";
     }
@@ -70,6 +71,9 @@ InvocationResult RunInvocation::classify(RunResult result) {
             break;
         case RunStatus::StepLimit:
             outcome.status = InvocationStatus::MaxSteps;
+            break;
+        case RunStatus::SafePoint:
+            outcome.status = InvocationStatus::SafePoint;
             break;
     }
     return outcome;

@@ -83,6 +83,7 @@ add_executable(neograph_tests
     test_openinference_cpp.cpp
     test_schema_provider_stream_async_outer_io.cpp
     test_graph_invocation.cpp
+    test_graph_safe_point.cpp
 )
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_program_tests
@@ -101,6 +102,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_lineage.cpp
         test_program_pending.cpp
         test_program_fork_replay.cpp
+        test_graph_migration_capsule.cpp
         test_program_transition_store.cpp
         test_program_runtime.cpp
         test_program_invocation.cpp
@@ -364,6 +366,17 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 include(GoogleTest)
+
+# Keep the live safe-point boundary independently runnable from optional
+# backend tests in the aggregate Core binary.
+add_executable(neograph_graph_safe_point_tests
+    test_graph_safe_point.cpp
+)
+target_link_libraries(neograph_graph_safe_point_tests PRIVATE
+    neograph::core
+    GTest::gtest_main
+)
+gtest_discover_tests(neograph_graph_safe_point_tests)
 
 # Cross-repository compatibility metadata is owner-local. Keep its fail-closed
 # check available without making a clean public checkout depend on private files.

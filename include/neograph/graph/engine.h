@@ -20,6 +20,7 @@
 #include <neograph/graph/node_cache.h>
 #include <neograph/graph/registry.h>
 #include <neograph/graph/run_context.h>
+#include <neograph/graph/safe_point.h>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
@@ -208,6 +209,7 @@ enum class RunStatus {
     Completed,
     Interrupted,
     StepLimit,
+    SafePoint,
 };
 
 /**
@@ -268,9 +270,17 @@ struct RunResult {
         return metadata.is_object() && metadata.value("max_steps_exhausted", false);
     }
 
+    /// True only when a host-owned request stopped the run at a durable boundary.
+    inline bool safe_point_reached() const noexcept {
+        if (!output.is_object()) return false;
+        const auto metadata = output["_neograph"];
+        return metadata.is_object() && metadata.value("safe_point", false);
+    }
+
     /// @brief Return a typed outcome without changing the legacy result layout.
     RunStatus status() const noexcept {
         if (interrupted) return RunStatus::Interrupted;
+        if (safe_point_reached()) return RunStatus::SafePoint;
         if (max_steps_exhausted()) return RunStatus::StepLimit;
         return RunStatus::Completed;
     }
@@ -446,6 +456,13 @@ public:
                                              EngineConfig    config,
                                              EngineResources resources);
 
+    /** Link an engine permanently bound to one exact host generation. */
+    static std::unique_ptr<GraphEngine> link(
+        CompiledGraph graph,
+        EngineConfig config,
+        EngineResources resources,
+        GraphGenerationIdentity generation);
+
     /**
      * @brief Instantiate and link a topology already proven semantically valid.
      */
@@ -587,6 +604,14 @@ public:
         RunMetadata metadata,
         RunResources resources);
 
+    /** Execute normally until a one-shot host request captures a safe point. */
+    asio::awaitable<RunResult> run_until_safe_point_async(
+        RunConfig config,
+        std::shared_ptr<GraphSafePointRequest> request,
+        GraphStreamCallback cb = {},
+        RunMetadata metadata = {},
+        RunResources resources = {});
+
     /**
      * @brief Resume execution from a HITL interrupt.
      *
@@ -666,6 +691,16 @@ public:
     asio::awaitable<RunResult> resume_from_async(
         RunConfig config,
         std::string checkpoint_id,
+        json resume_value = {},
+        GraphStreamCallback cb = {},
+        RunMetadata metadata = {},
+        RunResources resources = {});
+
+    /** Exact resume peer that may stop at the next requested safe point. */
+    asio::awaitable<RunResult> resume_from_until_safe_point_async(
+        RunConfig config,
+        std::string checkpoint_id,
+        std::shared_ptr<GraphSafePointRequest> request,
         json resume_value = {},
         GraphStreamCallback cb = {},
         RunMetadata metadata = {},
@@ -917,6 +952,7 @@ private:
         std::optional<std::shared_ptr<Store>> store;
         std::optional<ToolGate> parent_tool_gate;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
+        std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };
 
     GraphEngine() = default;
@@ -978,6 +1014,7 @@ private:
         const RuntimeResources* resources = nullptr);
 
     RetryPolicy get_retry_policy(const std::string& node_name) const;
+    const GraphGenerationIdentity* bound_generation_identity() const noexcept;
 
     // --- Graph definition ---
     std::string name_;

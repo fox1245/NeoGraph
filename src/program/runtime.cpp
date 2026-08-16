@@ -1,4 +1,5 @@
 #include <neograph/program/runtime.h>
+#include <neograph/program/graph_migration.h>
 #include <neograph/program/schema.h>
 
 #include "canonical_json.h"
@@ -282,12 +283,7 @@ ProgramInvocation runtime_projection(RunInvocation                     invocatio
 }
 
 std::string core_thread_identity(std::string_view run_id, std::string_view generation_id) {
-    std::string identity(run_id);
-    identity.push_back('\0');
-    identity.append("root");
-    identity.push_back('\0');
-    identity.append(generation_id);
-    return detail::sha256_identity("program-core-thread/v1", identity);
+    return program_root_core_thread_id(run_id, generation_id);
 }
 
 std::string core_thread_identity(std::string_view run_id,

@@ -4,6 +4,7 @@
 #include "channel_write_codec.h"
 
 #include <chrono>
+#include <limits>
 #include <stdexcept>
 
 namespace neograph::graph {
@@ -81,6 +82,23 @@ inline int64_t now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+int resume_start_step(const Checkpoint& checkpoint) {
+    if (checkpoint.step < 0) {
+        throw std::runtime_error("Checkpoint step must not be negative");
+    }
+    const bool advances =
+        checkpoint.interrupt_phase == CheckpointPhase::After ||
+        checkpoint.interrupt_phase == CheckpointPhase::Completed ||
+        checkpoint.interrupt_phase == CheckpointPhase::Updated;
+    const auto maximum = static_cast<std::int64_t>(
+        std::numeric_limits<int>::max());
+    if (checkpoint.step >= maximum) {
+        throw std::runtime_error("Checkpoint step exceeds the executable range");
+    }
+    const auto start = checkpoint.step + (advances ? 1 : 0);
+    return static_cast<int>(start);
+}
+
 }  // namespace
 
 // =========================================================================
@@ -137,12 +155,7 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     //     finished, so resume starts at the NEXT step.
     //   Updated                → treated like Completed for step
     //     advancement (update_state substitutes for a committed step).
-    ctx.start_step = static_cast<int>(cp_opt->step);
-    if (cp_opt->interrupt_phase == CheckpointPhase::After ||
-        cp_opt->interrupt_phase == CheckpointPhase::Completed ||
-        cp_opt->interrupt_phase == CheckpointPhase::Updated) {
-        ctx.start_step += 1;
-    }
+    ctx.start_step = resume_start_step(*cp_opt);
 
     // Rehydrate in-flight super-step writes so the engine can replay
     // completed tasks instead of re-executing them.
@@ -227,6 +240,37 @@ asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
     co_return id;
 }
 
+asio::awaitable<Checkpoint> CheckpointCoordinator::commit_super_step_async(
+    const GraphState&               state,
+    const std::string&              current_node,
+    const std::vector<std::string>& next_nodes,
+    int                             step,
+    const std::string&              parent_id,
+    const BarrierState&             barrier_state,
+    const json&                     metadata) const {
+    if (!enabled()) {
+        throw std::logic_error(
+            "Completed super-step commit requires a checkpoint store and thread id");
+    }
+
+    Checkpoint checkpoint;
+    checkpoint.id              = Checkpoint::generate_id();
+    checkpoint.thread_id       = thread_id_;
+    checkpoint.channel_values  = state.serialize();
+    checkpoint.parent_id       = parent_id;
+    checkpoint.current_node    = current_node;
+    checkpoint.next_nodes      = next_nodes;
+    checkpoint.interrupt_phase = CheckpointPhase::Completed;
+    checkpoint.barrier_state   = barrier_state;
+    checkpoint.metadata        = metadata;
+    checkpoint.step            = step;
+    checkpoint.timestamp       = now_ms();
+
+    co_await store_->save_async(checkpoint);
+    co_await clear_pending_writes_async(parent_id);
+    co_return checkpoint;
+}
+
 asio::awaitable<void> CheckpointCoordinator::record_pending_write_async(
     const std::string& parent_cp_id,
     const std::string& task_id,
@@ -260,12 +304,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     ctx.barrier_state  = cp_opt->barrier_state;
 
     // Same phase-aware step offset as load_for_resume.
-    ctx.start_step = static_cast<int>(cp_opt->step);
-    if (cp_opt->interrupt_phase == CheckpointPhase::After ||
-        cp_opt->interrupt_phase == CheckpointPhase::Completed ||
-        cp_opt->interrupt_phase == CheckpointPhase::Updated) {
-        ctx.start_step += 1;
-    }
+    ctx.start_step = resume_start_step(*cp_opt);
 
     auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
     for (const auto& pw : pending) {
@@ -299,12 +338,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 
-    ctx.start_step = static_cast<int>(cp_opt->step);
-    if (cp_opt->interrupt_phase == CheckpointPhase::After ||
-        cp_opt->interrupt_phase == CheckpointPhase::Completed ||
-        cp_opt->interrupt_phase == CheckpointPhase::Updated) {
-        ctx.start_step += 1;
-    }
+    ctx.start_step = resume_start_step(*cp_opt);
 
     auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
     for (const auto& pw : pending) {

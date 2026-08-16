@@ -21,11 +21,30 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <thread>
 
 namespace neograph::graph {
 
 namespace {
+class GraphGenerationIdentityCarrier final : public Tool {
+public:
+    explicit GraphGenerationIdentityCarrier(GraphGenerationIdentity value)
+        : identity(std::move(value)) {}
+
+    ChatTool get_definition() const override {
+        return {"__neograph_internal_generation_identity__", "", json::object()};
+    }
+    std::string execute(const json&) override {
+        throw std::logic_error("Graph generation identity is not an executable tool");
+    }
+    std::string get_name() const override {
+        return "__neograph_internal_generation_identity__";
+    }
+
+    GraphGenerationIdentity identity;
+};
+
 // Default fan-out pool size. hardware_concurrency() can return 0 on
 // platforms that fail to detect; fall back to 4 so we always have
 // real parallelism instead of the old single-thread default that
@@ -160,6 +179,23 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph   cg,
     return link_impl(std::move(cg), std::move(config), std::move(resources), true);
 }
 
+std::unique_ptr<GraphEngine> GraphEngine::link(
+    CompiledGraph cg,
+    EngineConfig config,
+    EngineResources resources,
+    GraphGenerationIdentity generation) {
+    if (generation.core_name.empty() || generation.core_generation_id.empty() ||
+        generation.core_name != cg.name) {
+        throw std::invalid_argument(
+            "GraphEngine generation identity must match the compiled graph");
+    }
+    auto engine = link_impl(
+        std::move(cg), std::move(config), std::move(resources), true);
+    engine->owned_tools_.push_back(
+        std::make_unique<GraphGenerationIdentityCarrier>(std::move(generation)));
+    return engine;
+}
+
 std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
                                                EngineConfig config) {
     return link(std::move(topology), std::move(config), {});
@@ -281,7 +317,26 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
 // =========================================================================
 
 void GraphEngine::own_tools(std::vector<std::unique_ptr<Tool>> tools) {
+    std::unique_ptr<Tool> generation_identity;
+    for (auto& tool : owned_tools_) {
+        if (dynamic_cast<GraphGenerationIdentityCarrier*>(tool.get())) {
+            generation_identity = std::move(tool);
+            break;
+        }
+    }
     owned_tools_ = std::move(tools);
+    if (generation_identity) {
+        owned_tools_.push_back(std::move(generation_identity));
+    }
+}
+
+const GraphGenerationIdentity* GraphEngine::bound_generation_identity() const noexcept {
+    for (const auto& tool : owned_tools_) {
+        const auto* carrier =
+            dynamic_cast<const GraphGenerationIdentityCarrier*>(tool.get());
+        if (carrier) return &carrier->identity;
+    }
+    return nullptr;
 }
 
 void GraphEngine::set_checkpoint_store(std::shared_ptr<CheckpointStore> store) {
@@ -582,6 +637,12 @@ asio::awaitable<RunResult> GraphEngine::run_async_with_runtime(
     GraphStreamCallback cb,
     RunMetadata metadata,
     RuntimeResources resources) {
+    struct SafePointRequestCloseGuard {
+        std::shared_ptr<GraphSafePointRequest> request;
+        ~SafePointRequestCloseGuard() {
+            if (request) request->reject();
+        }
+    } safe_point_close_guard{resources.safe_point_request};
     auto operation = config.cancel_token
         ? config.cancel_token->fork()
         : std::shared_ptr<CancelToken>{};
@@ -667,6 +728,32 @@ GraphEngine::run_stream_async(RunConfig config,
     if (resources.tool_gate) {
         runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
     }
+    co_return co_await run_async_with_runtime(
+        std::move(config), std::move(cb), std::move(metadata),
+        std::move(runtime_resources));
+}
+
+asio::awaitable<RunResult> GraphEngine::run_until_safe_point_async(
+    RunConfig config,
+    std::shared_ptr<GraphSafePointRequest> request,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RunResources resources) {
+    if (!request) {
+        throw std::invalid_argument(
+            "run_until_safe_point_async requires a safe-point request");
+    }
+    RuntimeResources runtime_resources;
+    if (resources.checkpoint_store) {
+        runtime_resources.checkpoint_store = std::move(resources.checkpoint_store);
+    }
+    if (resources.store) {
+        runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
+    runtime_resources.safe_point_request = std::move(request);
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata),
         std::move(runtime_resources));
@@ -783,6 +870,40 @@ asio::awaitable<RunResult> GraphEngine::resume_from_async(
         std::move(checkpoint_id));
 }
 
+asio::awaitable<RunResult> GraphEngine::resume_from_until_safe_point_async(
+    RunConfig config,
+    std::string checkpoint_id,
+    std::shared_ptr<GraphSafePointRequest> request,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RunResources resources) {
+    if (!request) {
+        throw std::invalid_argument(
+            "resume_from_until_safe_point_async requires a safe-point request");
+    }
+    if (checkpoint_id.empty()) {
+        request->reject();
+        throw std::invalid_argument(
+            "Cannot resume to a safe point without a checkpoint id");
+    }
+    RuntimeResources runtime_resources;
+    if (resources.checkpoint_store) {
+        runtime_resources.checkpoint_store = std::move(resources.checkpoint_store);
+    }
+    if (resources.store) {
+        runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
+    runtime_resources.safe_point_request = std::move(request);
+    co_return co_await resume_async_with_runtime(
+        std::move(config), std::move(resume_value), std::move(cb),
+        std::move(metadata), std::move(runtime_resources),
+        std::move(checkpoint_id));
+}
+
 asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
     RunConfig config,
     json resume_value,
@@ -790,6 +911,12 @@ asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
     RunMetadata metadata,
     RuntimeResources resources,
     std::optional<std::string> checkpoint_id) {
+    struct SafePointRequestCloseGuard {
+        std::shared_ptr<GraphSafePointRequest> request;
+        ~SafePointRequestCloseGuard() {
+            if (request) request->reject();
+        }
+    } safe_point_close_guard{resources.safe_point_request};
     auto operation = config.cancel_token
         ? config.cancel_token->fork()
         : std::shared_ptr<CancelToken>{};
@@ -839,6 +966,12 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
     RunMetadata metadata,
     RuntimeResources resources,
     std::optional<std::string> checkpoint_id) {
+    struct SafePointRequestCloseGuard {
+        std::shared_ptr<GraphSafePointRequest> request;
+        ~SafePointRequestCloseGuard() {
+            if (request) request->reject();
+        }
+    } safe_point_close_guard{resources.safe_point_request};
     auto checkpoint_store = resources.checkpoint_store
         ? *resources.checkpoint_store
         : checkpoint_store_;
@@ -981,6 +1114,29 @@ GraphEngine::execute_graph_async(
         ? *resources->checkpoint_store
         : checkpoint_store_;
     CheckpointCoordinator coord(checkpoint_store, config.thread_id);
+    auto safe_point_request = resources ? resources->safe_point_request : nullptr;
+    struct SafePointOperationGuard {
+        std::shared_ptr<GraphSafePointRequest> request;
+        bool attached = false;
+        ~SafePointOperationGuard() {
+            if (request && attached) request->close();
+        }
+    } safe_point_guard{safe_point_request};
+    const GraphGenerationIdentity* safe_point_generation = nullptr;
+    if (safe_point_request) {
+        safe_point_generation = bound_generation_identity();
+        if (!safe_point_generation ||
+            !safe_point_request->attach(*safe_point_generation)) {
+            safe_point_request->reject();
+            throw std::runtime_error(
+                "Graph safe-point request does not match this engine generation");
+        }
+        safe_point_guard.attached = true;
+        if (!coord.enabled()) {
+            throw std::runtime_error(
+                "Graph safe-point capture requires a checkpoint store and thread id");
+        }
+    }
 
     // PR 1 (v0.4.0): build the per-run RunContext from RunConfig and
     // carry it by reference through every NodeExecutor hop. Plumbing-
@@ -1083,9 +1239,14 @@ GraphEngine::execute_graph_async(
             auto cp_opt =
                 co_await checkpoint_store->load_latest_async(config.thread_id);
             if (cp_opt) {
+                if (cp_opt->step < 0 ||
+                    cp_opt->step >= std::numeric_limits<int>::max()) {
+                    throw std::runtime_error(
+                        "Checkpoint step exceeds the executable range");
+                }
                 state.restore(cp_opt->channel_values);
                 last_checkpoint_id = cp_opt->id;
-                start_step         = cp_opt->step + 1;
+                start_step = static_cast<int>(cp_opt->step + 1);
             }
         }
         apply_input(state, config.input);
@@ -1098,7 +1259,19 @@ GraphEngine::execute_graph_async(
     std::vector<std::string> trace;
     bool hit_end = false;
     std::vector<Send> pending_sends;
-    for (int step = start_step; step < config.max_steps + start_step; ++step) {
+    if (safe_point_request &&
+        start_step >= std::numeric_limits<int>::max() - 1) {
+        throw std::runtime_error(
+            "Checkpoint step cannot reach another capturable safe point");
+    }
+    const auto end_step = static_cast<std::int64_t>(start_step) +
+                          std::max(config.max_steps, 0);
+    for (std::int64_t step_value = start_step;
+         step_value < end_step; ++step_value) {
+        if (step_value > std::numeric_limits<int>::max()) {
+            throw std::runtime_error("Graph super-step index exceeds the executable range");
+        }
+        const int step = static_cast<int>(step_value);
         ctx.step = step;
         // A budget-aware node cancels the shared sibling scope, not the
         // operation token that owns this graph. Finish the current
@@ -1111,10 +1284,10 @@ GraphEngine::execute_graph_async(
                     trace.empty() ? (std::string("__budget__") + std::to_string(step))
                                   : trace.back();
                 const std::string parent_cp_id = last_checkpoint_id;
-                last_checkpoint_id = co_await coord.save_super_step_async(
-                    state, trace_tag, ready, CheckpointPhase::Completed, step,
-                    parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
-                co_await coord.clear_pending_writes_async(parent_cp_id);
+                auto checkpoint = co_await coord.commit_super_step_async(
+                    state, trace_tag, ready, step, parent_cp_id, barrier_state,
+                    detail::checkpoint_metadata_for(ctx));
+                last_checkpoint_id = std::move(checkpoint.id);
             }
             RunResult result;
             result.usage = ctx.usage->snapshot();
@@ -1352,29 +1525,34 @@ GraphEngine::execute_graph_async(
             }
         }
 
-        if (coord.enabled()) {
-            std::vector<std::string> next_nodes_for_cp =
-                ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
-                              : ready;
-            const std::string parent_cp_id = last_checkpoint_id;
-            // Guard against an executor path that returns without
-            // pushing to `trace` (e.g. all-Send-targets-missing in
-            // run_sends_async, or future cancellation paths). The
-            // checkpoint store keys on a single "executed node" string;
-            // a synthesised __step__<N> tag keeps the invariant
-            // "every super-step's checkpoint has a non-empty key"
-            // without crashing on UB.
-            const std::string trace_tag = trace.empty()
-                ? (std::string("__step__") + std::to_string(step))
-                : trace.back();
-            auto cp_id = co_await coord.save_super_step_async(state,
-                trace_tag, next_nodes_for_cp, CheckpointPhase::Completed,
-                step, parent_cp_id, barrier_state,
-                detail::checkpoint_metadata_for(ctx));
-            last_checkpoint_id = cp_id;
+        if (!coord.enabled()) continue;
 
-            co_await coord.clear_pending_writes_async(parent_cp_id);
-            replay_results.clear();
+        std::vector<std::string> next_nodes_for_cp =
+            ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
+                          : ready;
+        const std::string parent_cp_id = last_checkpoint_id;
+        // Guard against an executor path that returns without pushing to
+        // trace. Every committed super-step still receives a stable node key.
+        const std::string trace_tag = trace.empty()
+            ? (std::string("__step__") + std::to_string(step))
+            : trace.back();
+        auto checkpoint = co_await coord.commit_super_step_async(
+            state, trace_tag, next_nodes_for_cp, step, parent_cp_id,
+            barrier_state, detail::checkpoint_metadata_for(ctx));
+        last_checkpoint_id = checkpoint.id;
+        replay_results.clear();
+
+        if (safe_point_request &&
+            safe_point_request->capture(*safe_point_generation,
+                                        std::move(checkpoint),
+                                        ctx.cancel_token.get())) {
+            RunResult result;
+            result.usage = ctx.usage->snapshot();
+            result.output = state.serialize();
+            result.output["_neograph"] = json{{"safe_point", true}};
+            result.checkpoint_id = last_checkpoint_id;
+            result.execution_trace = std::move(trace);
+            co_return result;
         }
     }
 

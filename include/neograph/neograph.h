@@ -37,6 +37,7 @@
 #include <neograph/graph/react_graph.h>
 #include <neograph/graph/registry.h>
 #include <neograph/graph/run_context.h>
+#include <neograph/graph/safe_point.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>

@@ -1530,8 +1530,11 @@ ProgramVersion ProgramCatalog::materialize(
             graph::EngineResources resources;
             resources.registry = runtime_registry;
             resources.tools    = std::move(binding.tools);
-            auto unique_engine = graph::GraphEngine::link(std::move(compiled), std::move(config),
-                                                          std::move(resources));
+            auto unique_engine = graph::GraphEngine::link(
+                std::move(compiled), std::move(config), std::move(resources),
+                graph::GraphGenerationIdentity{
+                    recomputed_plan->name,
+                    recomputed_plan->compiled_plan_identity});
             std::shared_ptr<graph::GraphEngine> engine(std::move(unique_engine));
             generation =
                 std::make_shared<detail::PinnedCoreGeneration>(detail::PinnedCoreGeneration{

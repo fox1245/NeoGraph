@@ -171,6 +171,19 @@ public:
         const BarrierState& barrier_state,
         const json& metadata) const;
 
+    /**
+     * Persist one completed super-step, settle the prior pending-write bucket,
+     * and return the exact deeply owned checkpoint only after both succeed.
+     */
+    asio::awaitable<Checkpoint> commit_super_step_async(
+        const GraphState& state,
+        const std::string& current_node,
+        const std::vector<std::string>& next_nodes,
+        int step,
+        const std::string& parent_id,
+        const BarrierState& barrier_state,
+        const json& metadata = json()) const;
+
     asio::awaitable<void> record_pending_write_async(
         const std::string& parent_cp_id,
         const std::string& task_id,

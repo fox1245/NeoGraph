@@ -529,6 +529,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/evidence_ledger.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
+    src/core/graph_safe_point.cpp
     src/core/graph_compiler.cpp
     src/core/graph_validator.cpp
     src/core/graph_coordinator.cpp
@@ -633,6 +634,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/event.cpp
         src/program/pending.cpp
         src/program/fork.cpp
+        src/program/graph_migration.cpp
         src/program/replacement.cpp
         src/program/replay.cpp
         src/program/store.cpp

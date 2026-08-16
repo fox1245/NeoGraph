@@ -25,11 +25,12 @@ namespace neograph::graph {
 
 /** The five terminal outcomes visible to every protocol host. */
 enum class InvocationStatus : std::uint8_t {
-    Completed,
-    Interrupted,
-    MaxSteps,
-    Cancelled,
-    Error,
+    Completed   = 0,
+    Interrupted = 1,
+    MaxSteps    = 2,
+    Cancelled   = 3,
+    Error       = 4,
+    SafePoint   = 5,
 };
 
 NEOGRAPH_API std::string_view to_string(InvocationStatus status) noexcept;
@@ -58,7 +59,8 @@ struct InvocationResult {
     bool succeeded() const noexcept {
         return status == InvocationStatus::Completed ||
                status == InvocationStatus::Interrupted ||
-               status == InvocationStatus::MaxSteps;
+               status == InvocationStatus::MaxSteps ||
+               status == InvocationStatus::SafePoint;
     }
     bool cancelled() const noexcept { return status == InvocationStatus::Cancelled; }
 };
