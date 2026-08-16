@@ -430,6 +430,12 @@ public:
         }
     }
 
+    std::string process_coordination_key() const override {
+        const auto source_key = source_->process_coordination_key();
+        const auto target_key = target_->process_coordination_key();
+        return !source_key.empty() && source_key == target_key ? source_key : std::string{};
+    }
+
     std::optional<program::ProgramRunRecord> load(std::string_view owner_scope,
                                                   std::string_view run_id) const override {
         return select(run_id).load(owner_scope, run_id);
@@ -484,6 +490,16 @@ public:
         if (const auto target = target_->load_generation(owner_scope, lineage_id, generation))
             return target;
         return source_->load_generation(owner_scope, lineage_id, generation);
+    }
+    std::optional<program::ProgramTransitionPublication> load_generation_initial_publication(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        if (const auto target = target_->load_generation_initial_publication(
+                owner_scope, lineage_id, generation)) {
+            return target;
+        }
+        return source_->load_generation_initial_publication(owner_scope, lineage_id, generation);
     }
     program::ProgramTransitionPublishResult compare_publish(
         std::string_view                      owner_scope,

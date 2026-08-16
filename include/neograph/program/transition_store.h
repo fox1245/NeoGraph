@@ -80,6 +80,9 @@ class NEOGRAPH_PROGRAM_API ProgramTransitionStore {
 public:
     virtual ~ProgramTransitionStore() = default;
 
+    /** Process-local namespace used to coordinate wrappers over one backend. */
+    virtual std::string process_coordination_key() const { return {}; }
+
     /** Wrong-owner lookups are indistinguishable from absence. */
     virtual std::optional<ProgramRunRecord> load(std::string_view owner_scope,
                                                   std::string_view run_id) const = 0;
@@ -130,6 +133,11 @@ public:
                     std::uint64_t /*generation*/) const {
         return std::nullopt;
     }
+    /** Exact immutable publication that created one topology generation. */
+    virtual std::optional<ProgramTransitionPublication>
+    load_generation_initial_publication(std::string_view /*owner_scope*/,
+                                        std::string_view /*lineage_id*/,
+                                        std::uint64_t /*generation*/) const;
 
     /**
      * Atomically publishes the run snapshot, journal head, events, effect outbox,
@@ -177,8 +185,12 @@ public:
                                                         std::string_view lineage_id,
                                                         std::string_view head_id) const override;
     std::optional<ProgramRunGeneration> load_generation(std::string_view owner_scope,
-                                                         std::string_view lineage_id,
-                                                         std::uint64_t generation) const override;
+                                                          std::string_view lineage_id,
+                                                          std::uint64_t generation) const override;
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::uint64_t generation) const override;
     ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,

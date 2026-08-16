@@ -924,6 +924,13 @@ std::vector<ProgramJavaScriptCommandJournalEntry> ProgramTransitionStore::load_j
         "ProgramTransitionStore does not support durable JavaScript command-history reads");
 }
 
+std::optional<ProgramTransitionPublication>
+ProgramTransitionStore::load_generation_initial_publication(
+    std::string_view, std::string_view, std::uint64_t) const {
+    throw std::runtime_error(
+        "ProgramTransitionStore does not support generation publication-history reads");
+}
+
 struct InMemoryProgramTransitionStore::Impl {
     struct Stored {
         ProgramRunRecord                         run;
@@ -939,6 +946,7 @@ struct InMemoryProgramTransitionStore::Impl {
     struct StoredLineage {
         ProgramRunLineage                         head;
         std::map<std::uint64_t, ProgramRunGeneration> generations;
+        std::map<std::uint64_t, std::string>          initial_publications;
         std::map<std::string, ProgramRunLineage, std::less<>> heads;
     };
     mutable std::mutex                                                mutex;
@@ -1082,6 +1090,21 @@ std::optional<ProgramRunGeneration> InMemoryProgramTransitionStore::load_generat
     const auto found = lineage->second->generations.find(generation);
     if (found == lineage->second->generations.end()) return std::nullopt;
     return found->second;
+}
+std::optional<ProgramTransitionPublication>
+InMemoryProgramTransitionStore::load_generation_initial_publication(
+    std::string_view owner, std::string_view lineage_id, std::uint64_t generation) const {
+    if (owner.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
+    std::string bytes;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto lineage = impl_->lineages.find(key(owner, lineage_id));
+        if (lineage == impl_->lineages.end()) return std::nullopt;
+        const auto found = lineage->second->initial_publications.find(generation);
+        if (found == lineage->second->initial_publications.end()) return std::nullopt;
+        bytes = found->second;
+    }
+    return ProgramTransitionPublication::parse(bytes);
 }
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
@@ -1296,17 +1319,23 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::shared_ptr<const Impl::StoredLineage> staged_lineage;
     if (publication.run_lineage) {
         std::map<std::uint64_t, ProgramRunGeneration> generations;
+        std::map<std::uint64_t, std::string>          initial_publications;
         std::map<std::string, ProgramRunLineage, std::less<>> heads;
-        if (current_lineage != impl_->lineages.end())
+        if (current_lineage != impl_->lineages.end()) {
             generations = current_lineage->second->generations;
+            initial_publications = current_lineage->second->initial_publications;
+        }
         if (current_lineage != impl_->lineages.end()) heads = current_lineage->second->heads;
         if (publication.run_generation) {
             generations.emplace(publication.run_generation->generation(),
                                 *publication.run_generation);
+            initial_publications.emplace(publication.run_generation->generation(),
+                                         publication_bytes);
         }
         heads.emplace(publication.run_lineage->id(), *publication.run_lineage);
         staged_lineage = std::make_shared<const Impl::StoredLineage>(Impl::StoredLineage{
-            *publication.run_lineage, std::move(generations), std::move(heads)});
+            *publication.run_lineage, std::move(generations),
+            std::move(initial_publications), std::move(heads)});
     }
     std::shared_ptr<const Impl::StoredLineage> staged_fork_source;
     if (publication.fork_source_lineage) {
@@ -1315,6 +1344,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                       *publication.fork_source_lineage);
         staged_fork_source = std::make_shared<const Impl::StoredLineage>(Impl::StoredLineage{
             *publication.fork_source_lineage, fork_source_current->generations,
+            fork_source_current->initial_publications,
             std::move(heads)});
     }
     maybe_fail(ProgramTransitionFaultPoint::AfterLineageSnapshot);

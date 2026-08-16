@@ -6,6 +6,7 @@
 
 #include <neograph/program/catalog.h>
 #include <neograph/program/pending.h>
+#include <neograph/program/transition_store.h>
 
 #include <cstdint>
 #include <memory>
@@ -111,6 +112,49 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+class ProgramHistoricalReplacementChain;
+
+NEOGRAPH_PROGRAM_API ProgramHistoricalReplacementChain
+inspect_program_replacement_chain(const ProgramTransitionStore& store,
+                                  std::string_view owner_scope,
+                                  std::string_view any_run_id);
+
+/** One fully revalidated transition in a historical replacement chain. */
+class NEOGRAPH_PROGRAM_API ProgramHistoricalReplacementStep final {
+public:
+    const ProgramRunGeneration& source_generation() const noexcept;
+    const ProgramRunLineage& source_lineage() const noexcept;
+    const ProgramRunRecord& source_run() const noexcept;
+    const ProgramJavaScriptCommandJournalEntry& checkpoint() const noexcept;
+    const ProgramRunGeneration& target_generation() const noexcept;
+    const ProgramRunLineage& target_initial_lineage() const noexcept;
+    const ProgramTransitionPublication& target_initial_publication() const noexcept;
+
+private:
+    struct Impl;
+    explicit ProgramHistoricalReplacementStep(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+
+    friend ProgramHistoricalReplacementChain inspect_program_replacement_chain(
+        const ProgramTransitionStore&, std::string_view, std::string_view);
+};
+
+/** Read-only, fail-closed evidence for one immutable A -> ... -> N lineage. */
+class NEOGRAPH_PROGRAM_API ProgramHistoricalReplacementChain final {
+public:
+    const ProgramRunLineage& anchor() const noexcept;
+    const std::vector<ProgramRunGeneration>& generations() const noexcept;
+    const std::vector<ProgramHistoricalReplacementStep>& replacements() const noexcept;
+
+private:
+    struct Impl;
+    explicit ProgramHistoricalReplacementChain(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+
+    friend ProgramHistoricalReplacementChain inspect_program_replacement_chain(
+        const ProgramTransitionStore&, std::string_view, std::string_view);
 };
 
 }  // namespace neograph::program

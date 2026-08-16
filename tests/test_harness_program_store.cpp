@@ -3,6 +3,7 @@
 #include <neograph/mcp/harness_program_store.h>
 #include <neograph/mcp/sqlite_harness_store.h>
 #include <neograph/program/registry.h>
+#include <neograph/program/replay.h>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -737,6 +738,9 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
                                                       source),
                   ProgramTransitionPublishResult::Published);
         auto target_transitions = persist_and_bind(store, target_fixture);
+        EXPECT_FALSE(source_transitions->process_coordination_key().empty());
+        EXPECT_EQ(source_transitions->process_coordination_key(),
+                  target_transitions->process_coordination_key());
         store->fail_next_program_transition_for_testing(
             SqliteHarnessProgramFaultPoint::AfterRunWrite);
         EXPECT_THROW((void)target_transitions->compare_publish(
@@ -751,7 +755,9 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
         EXPECT_FALSE(
             transitions->load(target_fixture.artifact.owner_scope(), "lineage-successor"));
         EXPECT_FALSE(transitions->load_generation(target_fixture.artifact.owner_scope(),
-                                                  lineage_id, 2));
+                                                   lineage_id, 2));
+        EXPECT_FALSE(transitions->load_generation_initial_publication(
+            target_fixture.artifact.owner_scope(), lineage_id, 2));
         const auto old_head =
             transitions->load_lineage(target_fixture.artifact.owner_scope(), lineage_id);
         ASSERT_TRUE(old_head);
@@ -759,6 +765,10 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
         ASSERT_EQ(transitions->compare_publish(target_fixture.artifact.owner_scope(), {}, target),
                   ProgramTransitionPublishResult::Published);
     }
+
+    sqlite_exec(db.path,
+                "DELETE FROM neograph_harness_program_generation_publications; "
+                "UPDATE neograph_harness_schema SET version=6 WHERE singleton=1;");
 
     auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     auto transitions = require_harness_program_adapter_store(store)
@@ -785,6 +795,18 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
                   ->load(target_fixture.artifact.owner_scope(), "lineage-successor")
                   ->remaining_budget(),
               successor_budget);
+    const auto source_initial = transitions->load_generation_initial_publication(
+        target_fixture.artifact.owner_scope(), lineage_id, 1);
+    const auto target_initial = transitions->load_generation_initial_publication(
+        target_fixture.artifact.owner_scope(), lineage_id, 2);
+    ASSERT_TRUE(source_initial);
+    ASSERT_TRUE(target_initial);
+    EXPECT_EQ(source_initial->run_record.id(), source.run_record.id());
+    EXPECT_EQ(target_initial->run_record.id(), target.run_record.id());
+    const auto chain = inspect_program_replacement_chain(
+        *transitions, target_fixture.artifact.owner_scope(), "lineage-source");
+    ASSERT_EQ(chain.replacements().size(), 1U);
+    EXPECT_EQ(chain.replacements().front().target_generation().id(), target_generation_id);
 }
 
 TEST(HarnessProgramStoreTest, SqliteReplacementRejectsMissingPredecessorArtifact) {

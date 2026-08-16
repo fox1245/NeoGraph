@@ -7,7 +7,9 @@
 #include <cctype>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -447,6 +449,17 @@ struct SqliteHarnessRecordStore::Impl {
         }
 
         try {
+            if (const auto* filename = sqlite3_db_filename(db, "main");
+                filename && *filename) {
+                std::error_code error;
+                auto canonical = std::filesystem::weakly_canonical(filename, error);
+                if (error)
+                    canonical = std::filesystem::absolute(filename, error).lexically_normal();
+                if (!error) {
+                    program_coordination_key =
+                        "neograph-harness-sqlite:" + canonical.generic_string();
+                }
+            }
             // SQLite documents that this handler waits for transient locks until
             // the configured budget is exhausted.
             // https://www.sqlite.org/c3ref/busy_timeout.html (fetched 2026-07-21)
@@ -488,7 +501,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_schema (
     version   INTEGER NOT NULL
 );
 INSERT INTO neograph_harness_schema (singleton, version)
-VALUES (1, 6)
+VALUES (1, 7)
 ON CONFLICT(singleton) DO NOTHING;
 CREATE TABLE IF NOT EXISTS neograph_harness_artifacts (
     artifact_id  TEXT PRIMARY KEY,
@@ -610,7 +623,25 @@ UPDATE neograph_harness_schema SET version = 6 WHERE singleton = 1;
 )SQL");
                 schema_version = 6;
             }
-            if (schema_version != 6) {
+            if (schema_version == 6) {
+                exec(R"SQL(
+CREATE TABLE IF NOT EXISTS neograph_harness_program_generation_publications (
+    owner_scope    TEXT    NOT NULL,
+    lineage_id     TEXT    NOT NULL,
+    generation     INTEGER NOT NULL,
+    generation_id  TEXT    NOT NULL,
+    publication_json TEXT  NOT NULL,
+    PRIMARY KEY (owner_scope, lineage_id, generation),
+    FOREIGN KEY (owner_scope, lineage_id, generation)
+        REFERENCES neograph_harness_program_generations
+            (owner_scope, lineage_id, generation)
+        ON DELETE RESTRICT
+);
+UPDATE neograph_harness_schema SET version = 7 WHERE singleton = 1;
+)SQL");
+                schema_version = 7;
+            }
+            if (schema_version != 7) {
                 throw std::runtime_error("SqliteHarnessRecordStore: unsupported schema version");
             }
             exec(R"SQL(
@@ -722,6 +753,18 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_generations (
         REFERENCES neograph_harness_program_lineage_heads (owner_scope, lineage_id)
         ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS neograph_harness_program_generation_publications (
+    owner_scope    TEXT    NOT NULL,
+    lineage_id     TEXT    NOT NULL,
+    generation     INTEGER NOT NULL,
+    generation_id  TEXT    NOT NULL,
+    publication_json TEXT  NOT NULL,
+    PRIMARY KEY (owner_scope, lineage_id, generation),
+    FOREIGN KEY (owner_scope, lineage_id, generation)
+        REFERENCES neograph_harness_program_generations
+            (owner_scope, lineage_id, generation)
+        ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS neograph_harness_program_lineage_runs (
     owner_scope   TEXT NOT NULL,
     program_run_id TEXT NOT NULL,
@@ -744,6 +787,74 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
         ON DELETE RESTRICT
 );
 )SQL");
+            struct MissingGenerationPublication {
+                std::string                   owner_scope;
+                std::string                   lineage_id;
+                std::int64_t                  generation = 0;
+                program::ProgramRunGeneration record;
+            };
+            std::vector<MissingGenerationPublication> missing_publications;
+            {
+                Statement query(
+                    db,
+                    "SELECT g.owner_scope, g.lineage_id, g.generation, g.record_json FROM "
+                    "neograph_harness_program_generations g LEFT JOIN "
+                    "neograph_harness_program_generation_publications p ON "
+                    "p.owner_scope=g.owner_scope AND p.lineage_id=g.lineage_id "
+                    "AND p.generation=g.generation WHERE p.generation IS NULL");
+                while (true) {
+                    const auto result = query.step();
+                    if (result == SQLITE_DONE) break;
+                    if (result != SQLITE_ROW) {
+                        throw_sqlite_error(
+                            db, "Program generation publication migration read failed");
+                    }
+                    auto generation =
+                        program::ProgramRunGeneration::parse(query.text(3));
+                    if (query.int64(2) <= 0 ||
+                        generation.owner_scope() != query.text(0) ||
+                        generation.lineage_id() != query.text(1) ||
+                        generation.generation() !=
+                            static_cast<std::uint64_t>(query.int64(2))) {
+                        throw std::invalid_argument(
+                            "Stored Program generation migration binding is corrupt");
+                    }
+                    missing_publications.push_back(MissingGenerationPublication{
+                        query.text(0), query.text(1), query.int64(2),
+                        std::move(generation)});
+                }
+            }
+            for (const auto& item : missing_publications) {
+                Statement current(
+                    db,
+                    "SELECT program_publication_json FROM neograph_harness_runs "
+                    "WHERE owner_scope=? AND program_run_id=? AND program_run_id<>''");
+                current.bind_text(1, item.owner_scope);
+                current.bind_text(2, item.record.initial_run_record_id());
+                if (current.step() != SQLITE_ROW || current.text(0).empty()) continue;
+                const auto publication =
+                    program::ProgramTransitionPublication::parse(current.text(0));
+                if (!publication.run_generation || !publication.run_lineage ||
+                    publication.run_generation->id() != item.record.id() ||
+                    publication.run_record.id() != item.record.initial_run_record_id() ||
+                    publication.journal_record.id != item.record.initial_journal_head()) {
+                    continue;
+                }
+                Statement insert(
+                    db,
+                    "INSERT INTO neograph_harness_program_generation_publications "
+                    "(owner_scope, lineage_id, generation, generation_id, publication_json) "
+                    "VALUES(?, ?, ?, ?, ?)");
+                insert.bind_text(1, item.owner_scope);
+                insert.bind_text(2, item.lineage_id);
+                insert.bind_int64(3, item.generation);
+                insert.bind_text(4, item.record.id());
+                insert.bind_text(5, publication.serialize_canonical());
+                if (insert.step() != SQLITE_DONE) {
+                    throw_sqlite_error(db,
+                                       "Program generation publication migration write failed");
+                }
+            }
             exec("COMMIT;");
         } catch (...) {
             try {
@@ -767,6 +878,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
     }
 
     sqlite3*                   db = nullptr;
+    std::string                program_coordination_key;
     std::mutex                 mutex;
     SqliteHarnessJournalConfig journal_config;
 
@@ -781,6 +893,12 @@ public:
     SqliteHarnessProgramTransitionStore(std::shared_ptr<SqliteHarnessRecordStore::Impl> impl,
                                         HarnessProgramArtifactRecord                    artifact)
         : impl_(std::move(impl)), artifact_(std::move(artifact)) {}
+
+    std::string process_coordination_key() const override {
+        if (!impl_->program_coordination_key.empty()) return impl_->program_coordination_key;
+        return "neograph-harness-sqlite-memory:" +
+               std::to_string(reinterpret_cast<std::uintptr_t>(impl_.get()));
+    }
 
     std::optional<program::ProgramRunRecord> load(std::string_view owner_scope,
                                                   std::string_view run_id) const override {
@@ -1050,6 +1168,42 @@ public:
             throw std::invalid_argument("Stored Program generation binding is corrupt");
         }
         return value;
+    }
+
+    std::optional<program::ProgramTransitionPublication> load_generation_initial_publication(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
+        if (generation > static_cast<std::uint64_t>(INT64_MAX))
+            throw std::invalid_argument("Program generation is out of SQLite range");
+        std::lock_guard lock(impl_->mutex);
+        Statement query(
+            impl_->db,
+            "SELECT p.generation_id, p.publication_json, g.generation_id FROM "
+            "neograph_harness_program_generation_publications p "
+            "JOIN neograph_harness_program_generations g "
+            "ON g.owner_scope=p.owner_scope AND g.lineage_id=p.lineage_id "
+            "AND g.generation=p.generation "
+            "WHERE p.owner_scope=? AND p.lineage_id=? AND p.generation=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(lineage_id));
+        query.bind_int64(3, static_cast<std::int64_t>(generation));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW)
+            throw_sqlite_error(impl_->db, "Program generation publication read failed");
+        auto publication = program::ProgramTransitionPublication::parse(query.text(1));
+        if (!publication.run_generation || !publication.run_lineage ||
+            query.text(0) != query.text(2) ||
+            publication.run_generation->id() != query.text(2) ||
+            publication.run_generation->owner_scope() != owner_scope ||
+            publication.run_generation->lineage_id() != lineage_id ||
+            publication.run_generation->generation() != generation) {
+            throw std::invalid_argument(
+                "Stored Program generation publication binding is corrupt");
+        }
+        return publication;
     }
 
     program::ProgramTransitionPublishResult compare_publish(
@@ -1685,6 +1839,23 @@ public:
                                                 publication.run_generation->serialize_canonical());
                     if (insert_generation.step() != SQLITE_DONE)
                         throw_sqlite_error(impl_->db, "Program generation insert failed");
+                    Statement insert_generation_publication(
+                        impl_->db,
+                        "INSERT INTO neograph_harness_program_generation_publications "
+                        "(owner_scope, lineage_id, generation, generation_id, publication_json) "
+                        "VALUES(?, ?, ?, ?, ?)");
+                    insert_generation_publication.bind_text(1, std::string(owner_scope));
+                    insert_generation_publication.bind_text(
+                        2, publication.run_lineage->lineage_id());
+                    insert_generation_publication.bind_int64(
+                        3, static_cast<std::int64_t>(publication.run_generation->generation()));
+                    insert_generation_publication.bind_text(
+                        4, publication.run_generation->id());
+                    insert_generation_publication.bind_text(5, publication_bytes);
+                    if (insert_generation_publication.step() != SQLITE_DONE) {
+                        throw_sqlite_error(impl_->db,
+                                           "Program generation publication insert failed");
+                    }
                 }
                 if (!associated_lineage_id) {
                     Statement insert_association(

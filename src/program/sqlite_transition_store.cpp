@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -207,6 +208,31 @@ std::optional<ProgramRunGeneration> load_generation_record(sqlite3* db,
     statement.bind_uint64(3, generation);
     if (!statement.step_row()) return std::nullopt;
     return ProgramRunGeneration::parse(column_blob(statement.get(), 0));
+}
+
+std::optional<ProgramTransitionPublication> load_generation_initial_publication_record(
+    sqlite3* db, std::string_view owner_scope, std::string_view lineage_id,
+    std::uint64_t generation) {
+    Statement statement(
+        db, "SELECT p.generation_id, p.canonical_bytes, g.generation_id FROM "
+            "program_run_generation_publications_v1 p JOIN program_run_generations_v1 g "
+            "ON g.owner_scope = p.owner_scope AND g.lineage_id = p.lineage_id "
+            "AND g.generation = p.generation "
+            "WHERE p.owner_scope = ?1 AND p.lineage_id = ?2 AND p.generation = ?3");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, lineage_id);
+    statement.bind_uint64(3, generation);
+    if (!statement.step_row()) return std::nullopt;
+    auto publication = ProgramTransitionPublication::parse(column_blob(statement.get(), 1));
+    if (!publication.run_generation || !publication.run_lineage ||
+        column_text(statement.get(), 0) != column_text(statement.get(), 2) ||
+        publication.run_generation->id() != column_text(statement.get(), 2) ||
+        publication.run_generation->owner_scope() != owner_scope ||
+        publication.run_generation->lineage_id() != lineage_id ||
+        publication.run_generation->generation() != generation) {
+        throw std::invalid_argument("Stored Program generation publication binding is corrupt");
+    }
+    return publication;
 }
 
 std::optional<std::string> load_run_lineage_id(sqlite3* db,
@@ -605,6 +631,12 @@ void create_v2_schema(sqlite3* db) {
              "UNIQUE(owner_scope, lineage_id, generation_id), "
              "FOREIGN KEY(owner_scope, lineage_id) REFERENCES "
              "program_run_lineage_heads_v1(owner_scope, lineage_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_run_generation_publications_v1 ("
+             "owner_scope TEXT NOT NULL, lineage_id TEXT NOT NULL, generation INTEGER NOT NULL, "
+             "generation_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, lineage_id, generation), "
+             "FOREIGN KEY(owner_scope, lineage_id, generation) REFERENCES "
+             "program_run_generations_v1(owner_scope, lineage_id, generation) ON DELETE CASCADE)");
     exec(db, "CREATE TABLE IF NOT EXISTS program_run_lineage_history_v1 ("
              "owner_scope TEXT NOT NULL, lineage_id TEXT NOT NULL, head_id TEXT NOT NULL, "
              "canonical_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, lineage_id, head_id), "
@@ -743,6 +775,20 @@ void insert_generation(sqlite3* db, const ProgramRunGeneration& generation) {
     statement.bind_uint64(3, generation.generation());
     statement.bind_text(4, generation.id());
     statement.bind_blob(5, generation.serialize_canonical());
+    statement.step_done();
+}
+
+void insert_generation_initial_publication(
+    sqlite3* db, const ProgramRunGeneration& generation, std::string_view publication_bytes) {
+    Statement statement(
+        db, "INSERT INTO program_run_generation_publications_v1"
+            "(owner_scope, lineage_id, generation, generation_id, canonical_bytes) "
+            "VALUES(?1, ?2, ?3, ?4, ?5)");
+    statement.bind_text(1, generation.owner_scope());
+    statement.bind_text(2, generation.lineage_id());
+    statement.bind_uint64(3, generation.generation());
+    statement.bind_text(4, generation.id());
+    statement.bind_blob(5, publication_bytes);
     statement.step_done();
 }
 
@@ -923,10 +969,63 @@ void migrate_legacy_schema(sqlite3* db) {
     exec(db, "DROP TABLE program_transition_runs");
 }
 
+void backfill_generation_initial_publications(sqlite3* db) {
+    struct MissingPublication {
+        std::string          owner_scope;
+        std::string          lineage_id;
+        std::uint64_t        generation = 0;
+        ProgramRunGeneration record;
+    };
+    std::vector<MissingPublication> missing;
+    {
+        Statement statement(
+            db, "SELECT g.owner_scope, g.lineage_id, g.generation, g.canonical_bytes FROM "
+                "program_run_generations_v1 g LEFT JOIN "
+                "program_run_generation_publications_v1 p ON "
+                "p.owner_scope = g.owner_scope AND p.lineage_id = g.lineage_id "
+                "AND p.generation = g.generation WHERE p.generation IS NULL");
+        while (statement.step_row()) {
+            const auto stored_ordinal = sqlite3_column_int64(statement.get(), 2);
+            if (stored_ordinal <= 0) {
+                throw std::invalid_argument("Stored Program generation ordinal is corrupt");
+            }
+            const auto ordinal = static_cast<std::uint64_t>(stored_ordinal);
+            auto       generation =
+                ProgramRunGeneration::parse(column_blob(statement.get(), 3));
+            if (generation.owner_scope() != column_text(statement.get(), 0) ||
+                generation.lineage_id() != column_text(statement.get(), 1) ||
+                generation.generation() != ordinal) {
+                throw std::invalid_argument("Stored Program generation binding is corrupt");
+            }
+            missing.push_back(MissingPublication{
+                column_text(statement.get(), 0), column_text(statement.get(), 1), ordinal,
+                std::move(generation)});
+        }
+    }
+    for (const auto& item : missing) {
+        const auto head = load_head(db, item.owner_scope, item.record.run_id());
+        if (!head || head->run_record.id() != item.record.initial_run_record_id() ||
+            head->journal_record.id != item.record.initial_journal_head()) {
+            continue;
+        }
+        const auto publication = ProgramTransitionPublication::parse(
+            head->last_publication_bytes);
+        if (!publication.run_generation || !publication.run_lineage ||
+            publication.run_generation->id() != item.record.id() ||
+            publication.run_record.id() != item.record.initial_run_record_id() ||
+            publication.journal_record.id != item.record.initial_journal_head()) {
+            continue;
+        }
+        insert_generation_initial_publication(
+            db, item.record, publication.serialize_canonical());
+    }
+}
+
 void initialize_schema(sqlite3* db) {
     Transaction transaction(db);
     create_v2_schema(db);
     migrate_legacy_schema(db);
+    backfill_generation_initial_publications(db);
     transaction.commit();
 }
 
@@ -939,6 +1038,7 @@ struct SQLiteProgramTransitionStore::Impl {
     }
 
     std::string       path;
+    std::string       coordination_key;
     sqlite3*          db = nullptr;
     mutable std::mutex mutex;
 };
@@ -953,6 +1053,16 @@ SQLiteProgramTransitionStore::SQLiteProgramTransitionStore(std::string database_
         throw_sqlite(impl_->db, "SQLite open");
 
     try {
+        if (const auto* filename = sqlite3_db_filename(impl_->db, "main");
+            filename && *filename) {
+            std::error_code error;
+            auto canonical = std::filesystem::weakly_canonical(filename, error);
+            if (error) canonical = std::filesystem::absolute(filename, error).lexically_normal();
+            if (!error) {
+                impl_->coordination_key =
+                    "neograph-program-sqlite:" + canonical.generic_string();
+            }
+        }
         // https://www.sqlite.org/c3ref/busy_timeout.html (fetched 2026-08-06)
         // Serialize concurrent SQLite writers instead of surfacing transient SQLITE_BUSY.
         if (sqlite3_busy_timeout(impl_->db, 5000) != SQLITE_OK)
@@ -971,6 +1081,10 @@ SQLiteProgramTransitionStore::SQLiteProgramTransitionStore(SQLiteProgramTransiti
 SQLiteProgramTransitionStore&
 SQLiteProgramTransitionStore::operator=(SQLiteProgramTransitionStore&&) noexcept = default;
 SQLiteProgramTransitionStore::~SQLiteProgramTransitionStore() = default;
+
+std::string SQLiteProgramTransitionStore::process_coordination_key() const {
+    return impl_->coordination_key;
+}
 
 std::optional<ProgramRunRecord> SQLiteProgramTransitionStore::load(
     std::string_view owner_scope, std::string_view run_id) const {
@@ -1078,6 +1192,16 @@ std::optional<ProgramRunGeneration> SQLiteProgramTransitionStore::load_generatio
     if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_generation_record(impl_->db, owner_scope, lineage_id, generation);
+}
+
+std::optional<ProgramTransitionPublication>
+SQLiteProgramTransitionStore::load_generation_initial_publication(
+    std::string_view owner_scope, std::string_view lineage_id,
+    std::uint64_t generation) const {
+    if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_generation_initial_publication_record(
+        impl_->db, owner_scope, lineage_id, generation);
 }
 
 std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head(
@@ -1251,8 +1375,11 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
         else
             insert_lineage_head(impl_->db, *publication.run_lineage);
         insert_lineage_history(impl_->db, *publication.run_lineage);
-        if (publication.run_generation)
+        if (publication.run_generation) {
             insert_generation(impl_->db, *publication.run_generation);
+            insert_generation_initial_publication(
+                impl_->db, *publication.run_generation, publication_bytes);
+        }
         if (!run_lineage_id)
             insert_run_lineage(impl_->db, owner_scope, run_id,
                                publication.run_lineage->lineage_id());

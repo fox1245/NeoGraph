@@ -1023,6 +1023,27 @@ public:
     std::atomic<unsigned> calls{0};
 };
 
+class CallbackSink final : public ProgramEventSink {
+public:
+    void set_callback(std::function<void(const ProgramEvent&)> callback) {
+        std::lock_guard lock(mutex_);
+        callback_ = std::move(callback);
+    }
+
+    void on_event(const ProgramEvent& event) override {
+        std::function<void(const ProgramEvent&)> callback;
+        {
+            std::lock_guard lock(mutex_);
+            callback = callback_;
+        }
+        if (callback) callback(event);
+    }
+
+private:
+    std::mutex                               mutex_;
+    std::function<void(const ProgramEvent&)> callback_;
+};
+
 class JournalObservingSink final : public ProgramEventSink {
 public:
     explicit JournalObservingSink(std::shared_ptr<ProgramTransitionStore> journal)
@@ -1114,6 +1135,9 @@ class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
 public:
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
+        if (throw_next_load_.exchange(false)) {
+            throw std::runtime_error("simulated Program run read failure");
+        }
         return inner_.load(owner, run_id);
     }
     std::optional<ProgramJournalRecord> latest(std::string_view owner,
@@ -1140,6 +1164,9 @@ public:
     }
     std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
                                                        std::string_view run_id) const override {
+        if (consume_replacement_readback_failure()) {
+            throw std::runtime_error("simulated replacement lineage readback failure");
+        }
         return inner_.load_run_lineage(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage_head(
@@ -1150,6 +1177,9 @@ public:
     std::optional<ProgramRunGeneration> load_generation(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
+        if (consume_replacement_readback_failure()) {
+            throw std::runtime_error("simulated replacement generation readback failure");
+        }
         return inner_.load_generation(owner, lineage_id, generation);
     }
     ProgramTransitionPublishResult compare_publish(
@@ -1172,6 +1202,9 @@ public:
         const auto published = inner_.compare_publish(owner, expected, std::move(publication));
         if (replacement && published == ProgramTransitionPublishResult::Published &&
             crash_after_replacement_.exchange(false)) {
+            if (unreadable_replacement_commit_.exchange(false)) {
+                replacement_readback_failures_.store(2);
+            }
             throw std::runtime_error("simulated crash after replacement publication");
         }
         if (!command_result || published != ProgramTransitionPublishResult::Published) {
@@ -1193,6 +1226,11 @@ public:
         condition_.notify_all();
     }
     void crash_after_next_replacement() { crash_after_replacement_.store(true); }
+    void crash_after_next_replacement_with_unreadable_commit() {
+        unreadable_replacement_commit_.store(true);
+        crash_after_replacement_.store(true);
+    }
+    void throw_on_next_load() { throw_next_load_.store(true); }
     void throw_before_next_replacement_with_occupied_target(
         std::function<void()> publish_collision) {
         {
@@ -1203,13 +1241,26 @@ public:
     }
 
 private:
+    bool consume_replacement_readback_failure() const noexcept {
+        auto remaining = replacement_readback_failures_.load();
+        while (remaining > 0) {
+            if (replacement_readback_failures_.compare_exchange_weak(remaining, remaining - 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     InMemoryProgramTransitionStore inner_;
     mutable std::mutex             mutex_;
     std::condition_variable        condition_;
     bool                           observed_ = false;
     bool                           released_ = false;
     std::atomic<bool>              crash_after_replacement_{false};
+    std::atomic<bool>              unreadable_replacement_commit_{false};
+    mutable std::atomic<int>       replacement_readback_failures_{0};
     std::atomic<bool>              throw_before_replacement_{false};
+    mutable std::atomic<bool>      throw_next_load_{false};
     std::function<void()>          publish_collision_;
 };
 
@@ -2386,9 +2437,10 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
         ProgramInvocation{json::object(), javascript_budget(1, 4),
                           "trace-replacement-source", {}});
     ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
-    const auto handoff = source.latest_handoff();
-    ASSERT_TRUE(handoff);
-    EXPECT_EQ(handoff->value, (json{{"cursor", 7}, {"state", "ready"}}));
+    auto handoff = source.next_handoff();
+    journal->release_result();
+    EXPECT_EQ(handoff.value(), (json{{"cursor", 7}, {"state", "ready"}}));
+    const auto handoff_reference = handoff.reference();
     const auto source_boundary = source.snapshot();
     const auto source_lineage =
         journal->load_run_lineage("tenant:runtime", source.run_id());
@@ -2396,13 +2448,12 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
     EXPECT_EQ(source_lineage->active_generation(), 1U);
 
     const auto target_input =
-        json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}};
+        json{{"handoff", handoff.value()}, {"previous_run_id", source.run_id()}};
     auto replacement_runtime = fixture.make_runtime();
     auto target = replacement_runtime->replace(
-        "tenant:runtime", handoff->reference, target_version,
+        "tenant:runtime", std::move(handoff), target_version,
         ProgramInvocation{target_input, source_boundary.remaining_budget(),
                           "trace-replacement-target", {}});
-    journal->release_result();
     const auto result = target.wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
         << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
@@ -2432,7 +2483,7 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
     ASSERT_TRUE(generation->replacement_receipt());
     EXPECT_EQ(generation->replacement_receipt()->source_run_id(), source.run_id());
     EXPECT_EQ(generation->replacement_receipt()->checkpoint_entry_id(),
-              handoff->reference.command_entry_id);
+              handoff_reference.command_entry_id);
     EXPECT_EQ(generation->replacement_receipt()->target_run_id(), target.run_id());
 
     const auto reconnected =
@@ -2464,16 +2515,16 @@ TEST(ProgramRuntimeTest, ReplacementCommitBeforeDispatchRecoversExactSuccessor) 
         ProgramInvocation{json::object(), javascript_budget(1, 4),
                           "trace-replacement-crash-source", {}});
     ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
-    const auto handoff = source.latest_handoff();
-    ASSERT_TRUE(handoff);
+    auto handoff = source.next_handoff();
+    journal->release_result();
     const auto source_boundary = source.snapshot();
     const auto target_input =
-        json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}};
+        json{{"handoff", handoff.value()}, {"previous_run_id", source.run_id()}};
 
     journal->crash_after_next_replacement();
     EXPECT_THROW(
         (void)fixture.runtime->replace(
-            "tenant:runtime", handoff->reference, target_version,
+            "tenant:runtime", std::move(handoff), target_version,
             ProgramInvocation{target_input, source_boundary.remaining_budget(),
                               "trace-replacement-crash-target", {}}),
         std::runtime_error);
@@ -2483,7 +2534,6 @@ TEST(ProgramRuntimeTest, ReplacementCommitBeforeDispatchRecoversExactSuccessor) 
     EXPECT_EQ(committed_lineage->active_generation(), 2U);
     EXPECT_EQ(completed_calls.load(), 0U);
 
-    journal->release_result();
     auto first_runtime  = fixture.make_runtime();
     auto second_runtime = fixture.make_runtime();
     std::barrier reconnect_ready(3);
@@ -2515,6 +2565,94 @@ TEST(ProgramRuntimeTest, ReplacementCommitBeforeDispatchRecoversExactSuccessor) 
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, DifferentTransitionStoreCannotConsumeHandoffLease) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 23}, "handoff:wrong-store");
+    yield ng.callCore("main", {}, "handoff:source-continues");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    return {generation: "target", handoff: input.handoff};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-wrong-store-source", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    {
+        auto handoff = source.next_handoff();
+        journal->release_result();
+        const auto source_boundary = source.snapshot();
+        const auto input =
+            json{{"handoff", handoff.value()}, {"previous_run_id", source.run_id()}};
+        AdmittedRuntime other_store(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        EXPECT_THROW(
+            (void)other_store.runtime->replace(
+                "tenant:runtime", std::move(handoff), target_version,
+                ProgramInvocation{input, source_boundary.remaining_budget(),
+                                  "trace-handoff-wrong-store-target", {}}),
+            std::invalid_argument);
+        EXPECT_TRUE(handoff);
+    }
+
+    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, UnreadableCommittedReplacementNeverReleasesHeldSource) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 19}, "handoff:ambiguous-commit");
+    yield ng.callCore("main", {}, "handoff:ambiguous-source-must-not-run");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    const output = yield ng.callCore("main", input.handoff, "handoff:ambiguous-target");
+    return {generation: "target", value: output.value};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-ambiguous-source", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    auto handoff = source.next_handoff();
+    journal->release_result();
+    EXPECT_EQ(handoff.value(), (json{{"cursor", 19}}));
+    const auto source_boundary = source.snapshot();
+
+    journal->crash_after_next_replacement_with_unreadable_commit();
+    EXPECT_THROW(
+        (void)fixture.runtime->replace(
+            "tenant:runtime", std::move(handoff), target_version,
+            ProgramInvocation{
+                json{{"handoff", json{{"cursor", 19}}},
+                     {"previous_run_id", source.run_id()}},
+                source_boundary.remaining_budget(), "trace-handoff-ambiguous-target", {}}),
+        std::runtime_error);
+    EXPECT_FALSE(handoff);
+    const auto committed = journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(committed);
+    EXPECT_EQ(committed->active_generation(), 2U);
+
+    auto recovery_runtime = fixture.make_runtime();
+    const auto recovered = recovery_runtime->reconnect("tenant:runtime", source.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(recovered.output(), (json{{"generation", "target"}, {"value", "completed"}}));
+    (void)source.wait();
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
 TEST(ProgramRuntimeTest, ReplacementFailureBeforeCommitLeavesSourceExecutable) {
     completed_calls.store(0);
     auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
@@ -2535,39 +2673,301 @@ TEST(ProgramRuntimeTest, ReplacementFailureBeforeCommitLeavesSourceExecutable) {
         ProgramInvocation{json::object(), javascript_budget(1, 4),
                           "trace-replacement-failed-source", {}});
     ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
-    const auto handoff = source.latest_handoff();
-    ASSERT_TRUE(handoff);
 
     const std::string target_run_id = "replacement-occupied-target";
     auto              collider_runtime = fixture.make_runtime();
     std::optional<ProgramHandle> collider;
-    journal->throw_before_next_replacement_with_occupied_target([&] {
-        collider.emplace(collider_runtime->start(
-            "tenant:runtime", target_version,
-            ProgramInvocation{json{{"handoff", handoff->value},
-                                   {"previous_run_id", source.run_id()},
-                                   {"collision", true}},
-                              javascript_budget(1, 4),
-                              "trace-replacement-collision", {}, target_run_id}));
-    });
-    EXPECT_THROW(
-        (void)fixture.runtime->replace(
-            "tenant:runtime", handoff->reference, target_version,
-            ProgramInvocation{
-                json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}},
-                source.snapshot().remaining_budget(), "trace-replacement-failed-target", {},
-                target_run_id}),
-        std::runtime_error);
-    ASSERT_TRUE(collider);
-    EXPECT_EQ(collider->wait().status(), ProgramTerminalStatus::Completed);
-    const auto lineage = journal->load_run_lineage("tenant:runtime", source.run_id());
-    ASSERT_TRUE(lineage);
-    EXPECT_EQ(lineage->active_generation(), 1U);
+    {
+        auto handoff = source.next_handoff();
+        journal->release_result();
+        EXPECT_EQ(handoff.value(), (json{{"cursor", 12}}));
+        EXPECT_EQ(completed_calls.load(), 0U);
+        journal->throw_before_next_replacement_with_occupied_target([&] {
+            collider.emplace(collider_runtime->start(
+                "tenant:runtime", target_version,
+                ProgramInvocation{json{{"handoff", handoff.value()},
+                                       {"previous_run_id", source.run_id()},
+                                       {"collision", true}},
+                                  javascript_budget(1, 4),
+                                  "trace-replacement-collision", {}, target_run_id}));
+        });
+        EXPECT_THROW(
+            (void)fixture.runtime->replace(
+                "tenant:runtime", std::move(handoff), target_version,
+                ProgramInvocation{
+                    json{{"handoff", json{{"cursor", 12}}},
+                         {"previous_run_id", source.run_id()}},
+                    source.snapshot().remaining_budget(), "trace-replacement-failed-target", {},
+                    target_run_id}),
+            std::runtime_error);
+        ASSERT_TRUE(collider);
+        EXPECT_EQ(collider->wait().status(), ProgramTerminalStatus::Completed);
+        const auto lineage = journal->load_run_lineage("tenant:runtime", source.run_id());
+        ASSERT_TRUE(lineage);
+        EXPECT_EQ(lineage->active_generation(), 1U);
+    }
 
-    journal->release_result();
     const auto result = source.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), (json{{"generation", "source"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, AbandonedHandoffLeaseResumesSourceExactlyOnce) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 14}, "handoff:abandon");
+    yield ng.callCore("main", {}, "handoff:continued");
+    return {status: "continued"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-abandon", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    {
+        auto handoff = source.next_handoff();
+        EXPECT_THROW((void)source.next_handoff(), std::logic_error);
+        auto reached = std::async(std::launch::async, [&] {
+            return neograph::async::run_sync(handoff.wait_async());
+        });
+        journal->release_result();
+        EXPECT_EQ(reached.get().value, (json{{"cursor", 14}}));
+        EXPECT_FALSE(source.try_result());
+        EXPECT_EQ(completed_calls.load(), 0U);
+    }
+
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), (json{{"status", "continued"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, DetachedAsyncHandoffWaitRemainsSafeAfterLeaseRelease) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 20}, "handoff:detached-async");
+    yield ng.callCore("main", {}, "handoff:detached-continued");
+    return {status: "continued"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-detached-async", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    std::optional<asio::awaitable<ExactProgramHandoff>> pending;
+    {
+        auto handoff = source.next_handoff();
+        pending.emplace(handoff.wait_async());
+    }
+    journal->release_result();
+    EXPECT_THROW((void)neograph::async::run_sync(std::move(*pending)), std::runtime_error);
+
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, HeldHandoffCannotBeBypassedBySecondRuntime) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 21}, "handoff:process-dedupe");
+    yield ng.callCore("main", {}, "handoff:one-continuation");
+    return {status: "continued"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-process-dedupe", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    {
+        auto handoff = source.next_handoff();
+        journal->release_result();
+        EXPECT_EQ(handoff.value(), (json{{"cursor", 21}}));
+        auto second_runtime = fixture.make_runtime();
+        auto duplicate = second_runtime->reconnect("tenant:runtime", source.run_id());
+        EXPECT_EQ(duplicate.run_id(), source.run_id());
+        EXPECT_FALSE(duplicate.try_result());
+        EXPECT_EQ(completed_calls.load(), 0U);
+    }
+
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, HandoffRejectsAnAlreadyDuplicatedProcessControl) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-blocking", R"JS(
+    yield ng.checkpoint({cursor: 22}, "handoff:duplicate-first");
+    yield ng.callCore("main", {}, "handoff:blocking-continuation");
+    return {status: "continued"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-duplicate-first", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    auto second_runtime = fixture.make_runtime();
+    auto duplicate = second_runtime->reconnect("tenant:runtime", source.run_id());
+    for (unsigned attempt = 0; blocking_active.load() == 0 && attempt < 2000; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(blocking_active.load(), 1U);
+    EXPECT_THROW((void)source.next_handoff(), std::runtime_error);
+
+    duplicate.cancel();
+    source.cancel();
+    journal->release_result();
+    EXPECT_EQ(duplicate.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_NE(source.wait().status(), ProgramTerminalStatus::Completed);
+}
+
+TEST(ProgramRuntimeTest, CancellationWakesHeldHandoffWithoutResumingJavaScript) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 15}, "handoff:cancel");
+    yield ng.callCore("main", {}, "handoff:must-not-run");
+    return {status: "unexpected"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-cancel", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    auto handoff = source.next_handoff();
+    journal->release_result();
+    EXPECT_EQ(handoff.value(), (json{{"cursor", 15}}));
+    EXPECT_TRUE(source.cancel());
+
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, StoreReadFailureStillCancelsHeldHandoffLocally) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 16}, "handoff:store-failure");
+    yield ng.callCore("main", {}, "handoff:must-not-run-after-store-failure");
+    return {status: "unexpected"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-handoff-store-failure", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    auto handoff = source.next_handoff();
+    journal->release_result();
+    EXPECT_EQ(handoff.value(), (json{{"cursor", 16}}));
+    journal->throw_on_next_load();
+    EXPECT_TRUE(source.cancel());
+
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, RuntimeShutdownWakesHeldHandoff) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 17}, "handoff:shutdown");
+    return {status: "unexpected"};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 3),
+                          "trace-handoff-shutdown", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    auto handoff = source.next_handoff();
+    journal->release_result();
+    EXPECT_EQ(handoff.value(), (json{{"cursor", 17}}));
+
+    fixture.runtime.reset();
+    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, CheckpointEventCanSynchronouslyCommitArmedHandoff) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    auto sink    = std::make_shared<CallbackSink>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.callCore("main", {}, "handoff:event-prime");
+    yield ng.checkpoint({cursor: 18}, "handoff:event-boundary");
+    yield ng.callCore("main", {}, "handoff:event-must-not-run");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    return {generation: "target", handoff: input.handoff};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 6),
+                          "trace-handoff-event-source", sink});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    auto replacement_runtime = fixture.make_runtime();
+    auto handoff = std::make_shared<std::optional<ProgramHandoff>>(source.next_handoff());
+    std::promise<ProgramHandle> replacement_promise;
+    auto replacement_future = replacement_promise.get_future();
+    auto invoked = std::make_shared<std::atomic_bool>(false);
+    sink->set_callback([&, handoff, invoked](const ProgramEvent& event) {
+        if (event.kind != ProgramEventKind::CheckpointPublished ||
+            event.operation_id != "root.javascript.2" || invoked->exchange(true)) {
+            return;
+        }
+        try {
+            auto target = replacement_runtime->replace(
+                "tenant:runtime", std::move(**handoff), target_version,
+                ProgramInvocation{
+                    json{{"handoff", json{{"cursor", 18}}},
+                         {"previous_run_id", source.run_id()}},
+                    source.snapshot().remaining_budget(), "trace-handoff-event-target", {}});
+            handoff->reset();
+            replacement_promise.set_value(std::move(target));
+        } catch (...) {
+            replacement_promise.set_exception(std::current_exception());
+        }
+    });
+
+    journal->release_result();
+    ASSERT_EQ(replacement_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const auto result = replacement_future.get().wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(),
+              (json{{"generation", "target"}, {"handoff", json{{"cursor", 18}}}}));
+    (void)source.wait();
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 

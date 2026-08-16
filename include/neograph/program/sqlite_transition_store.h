@@ -31,6 +31,8 @@ public:
     SQLiteProgramTransitionStore& operator=(const SQLiteProgramTransitionStore&) = delete;
     ~SQLiteProgramTransitionStore() override;
 
+    std::string process_coordination_key() const override;
+
     std::optional<ProgramRunRecord> load(std::string_view owner_scope,
                                          std::string_view run_id) const override;
     std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
@@ -56,8 +58,12 @@ public:
                                                         std::string_view lineage_id,
                                                         std::string_view head_id) const override;
     std::optional<ProgramRunGeneration> load_generation(std::string_view owner_scope,
-                                                         std::string_view lineage_id,
-                                                         std::uint64_t generation) const override;
+                                                          std::string_view lineage_id,
+                                                          std::uint64_t generation) const override;
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+        std::string_view owner_scope,
+        std::string_view lineage_id,
+        std::uint64_t generation) const override;
     ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,

@@ -47,6 +47,8 @@ public:
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
     /** Latest completed top-level ng.checkpoint that still owns the lineage head. */
     std::optional<ExactProgramHandoff>    latest_handoff() const;
+    /** Hold the source before it consumes the next completed top-level checkpoint. */
+    ProgramHandoff                        next_handoff() const;
     ProgramRunRecord                      snapshot() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;
     ProgramHandle reconcile(ProgramRuntime& runtime,

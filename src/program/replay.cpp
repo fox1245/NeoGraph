@@ -510,4 +510,200 @@ CatalogCapabilityBinding RecordedBindingSet::release_owned_binding() && {
     return std::move(impl_->binding);
 }
 
+struct ProgramHistoricalReplacementStep::Impl {
+    ProgramRunGeneration                     source_generation;
+    ProgramRunLineage                        source_lineage;
+    ProgramRunRecord                         source_run;
+    ProgramJavaScriptCommandJournalEntry      checkpoint;
+    ProgramRunGeneration                     target_generation;
+    ProgramRunLineage                        target_initial_lineage;
+    ProgramTransitionPublication             target_initial_publication;
+};
+
+ProgramHistoricalReplacementStep::ProgramHistoricalReplacementStep(
+    std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+const ProgramRunGeneration&
+ProgramHistoricalReplacementStep::source_generation() const noexcept {
+    return impl_->source_generation;
+}
+const ProgramRunLineage& ProgramHistoricalReplacementStep::source_lineage() const noexcept {
+    return impl_->source_lineage;
+}
+const ProgramRunRecord& ProgramHistoricalReplacementStep::source_run() const noexcept {
+    return impl_->source_run;
+}
+const ProgramJavaScriptCommandJournalEntry&
+ProgramHistoricalReplacementStep::checkpoint() const noexcept {
+    return impl_->checkpoint;
+}
+const ProgramRunGeneration&
+ProgramHistoricalReplacementStep::target_generation() const noexcept {
+    return impl_->target_generation;
+}
+const ProgramRunLineage&
+ProgramHistoricalReplacementStep::target_initial_lineage() const noexcept {
+    return impl_->target_initial_lineage;
+}
+const ProgramTransitionPublication&
+ProgramHistoricalReplacementStep::target_initial_publication() const noexcept {
+    return impl_->target_initial_publication;
+}
+
+struct ProgramHistoricalReplacementChain::Impl {
+    ProgramRunLineage                            anchor;
+    std::vector<ProgramRunGeneration>            generations;
+    std::vector<ProgramHistoricalReplacementStep> replacements;
+};
+
+ProgramHistoricalReplacementChain::ProgramHistoricalReplacementChain(
+    std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+const ProgramRunLineage& ProgramHistoricalReplacementChain::anchor() const noexcept {
+    return impl_->anchor;
+}
+const std::vector<ProgramRunGeneration>&
+ProgramHistoricalReplacementChain::generations() const noexcept {
+    return impl_->generations;
+}
+const std::vector<ProgramHistoricalReplacementStep>&
+ProgramHistoricalReplacementChain::replacements() const noexcept {
+    return impl_->replacements;
+}
+
+ProgramHistoricalReplacementChain inspect_program_replacement_chain(
+    const ProgramTransitionStore& store,
+    std::string_view owner_scope,
+    std::string_view any_run_id) {
+    if (owner_scope.empty() || any_run_id.empty()) {
+        throw std::invalid_argument(
+            "Program replacement history owner scope and run id must not be empty");
+    }
+    const auto fail = []() -> void {
+        throw std::invalid_argument(
+            "Program historical replacement evidence is absent or invalid");
+    };
+
+    const auto anchor = store.load_run_lineage(owner_scope, any_run_id);
+    if (!anchor || anchor->owner_scope() != owner_scope || anchor->active_generation() == 0) fail();
+
+    std::vector<ProgramRunGeneration>        generations;
+    std::vector<ProgramTransitionPublication> initial_publications;
+    for (std::uint64_t ordinal = 1; ordinal <= anchor->active_generation(); ++ordinal) {
+        const auto generation = store.load_generation(owner_scope, anchor->lineage_id(), ordinal);
+        const auto publication = store.load_generation_initial_publication(
+            owner_scope, anchor->lineage_id(), ordinal);
+        if (!generation || !publication || !publication->run_generation ||
+            !publication->run_lineage || publication->run_generation->id() != generation->id() ||
+            generation->owner_scope() != owner_scope ||
+            generation->lineage_id() != anchor->lineage_id() ||
+            generation->generation() != ordinal ||
+            generation->initial_run_record_id() != publication->run_record.id() ||
+            generation->initial_journal_head() != publication->journal_record.id ||
+            publication->run_record.journal_head() != publication->journal_record.id ||
+            publication->run_lineage->active_run_record_id() != publication->run_record.id() ||
+            publication->run_lineage->active_journal_head() != publication->journal_record.id ||
+            !does_program_run_generation_bind(*generation, *publication->run_lineage,
+                                               publication->run_record)) {
+            fail();
+        }
+        if (ordinal == 1) {
+            if (generation->replacement_receipt() ||
+                !is_valid_program_run_lineage_initial(*publication->run_lineage, *generation)) {
+                fail();
+            }
+        } else {
+            if (!generation->replacement_receipt() ||
+                !generation->predecessor_generation_id() ||
+                *generation->predecessor_generation_id() != generations.back().id()) {
+                fail();
+            }
+        }
+        generations.push_back(*generation);
+        initial_publications.push_back(*publication);
+        if (ordinal == std::numeric_limits<std::uint64_t>::max()) fail();
+    }
+    if (std::none_of(generations.begin(), generations.end(), [&](const auto& generation) {
+            return generation.run_id() == any_run_id;
+        })) {
+        fail();
+    }
+
+    std::set<std::string, std::less<>> lineage_path;
+    auto                               current = *anchor;
+    while (true) {
+        if (!lineage_path.insert(current.id()).second) fail();
+        if (!current.predecessor_head_id()) break;
+        const auto previous = store.load_lineage_head(
+            owner_scope, anchor->lineage_id(), *current.predecessor_head_id());
+        if (!previous) fail();
+        std::optional<ProgramRunGeneration> successor;
+        if (current.active_generation() != previous->active_generation()) {
+            if (previous->active_generation() == std::numeric_limits<std::uint64_t>::max() ||
+                current.active_generation() != previous->active_generation() + 1 ||
+                current.active_generation() > generations.size()) {
+                fail();
+            }
+            successor = generations[static_cast<std::size_t>(current.active_generation() - 1)];
+        }
+        if (!is_valid_program_run_lineage_transition(*previous, current, successor)) fail();
+        current = *previous;
+    }
+    if (!is_valid_program_run_lineage_initial(current, generations.front())) fail();
+    for (const auto& publication : initial_publications) {
+        if (!lineage_path.contains(publication.run_lineage->id())) fail();
+    }
+
+    std::vector<ProgramHistoricalReplacementStep> replacements;
+    replacements.reserve(generations.size() - 1);
+    for (std::size_t index = 1; index < generations.size(); ++index) {
+        const auto& source_generation = generations[index - 1];
+        const auto& target_generation = generations[index];
+        const auto  receipt = target_generation.replacement_receipt();
+        if (!receipt) fail();
+        const auto source_lineage = store.load_lineage_head(
+            owner_scope, anchor->lineage_id(), receipt->source_lineage_head_id());
+        const auto source_run = store.load(owner_scope, receipt->source_run_id());
+        const auto source_journal = store.latest(owner_scope, receipt->source_run_id());
+        if (!source_lineage || !source_run || !source_journal ||
+            source_generation.id() != receipt->source_generation_id() ||
+            source_run->id() != receipt->source_run_record_id() ||
+            source_journal->id != receipt->source_journal_head() ||
+            source_run->journal_head() != source_journal->id ||
+            !lineage_path.contains(source_lineage->id())) {
+            fail();
+        }
+
+        const auto commands =
+            store.load_javascript_commands(owner_scope, source_run->run_id());
+        if (commands.empty() || commands.back().id() != receipt->checkpoint_entry_id()) fail();
+        const auto& checkpoint = commands.back();
+        const auto& target_publication = initial_publications[index];
+        if (checkpoint.coordinate_id() != receipt->checkpoint_coordinate_id() ||
+            target_publication.run_generation->id() != target_generation.id() ||
+            !target_publication.run_lineage->predecessor_head_id() ||
+            *target_publication.run_lineage->predecessor_head_id() != source_lineage->id() ||
+            !is_valid_program_run_lineage_transition(
+                *source_lineage, *target_publication.run_lineage, target_generation) ||
+            !is_valid_program_replacement_transition(
+                source_generation, *source_lineage, *source_run, checkpoint,
+                target_generation, *target_publication.run_lineage,
+                target_publication.run_record)) {
+            fail();
+        }
+        replacements.push_back(ProgramHistoricalReplacementStep(
+            std::make_shared<const ProgramHistoricalReplacementStep::Impl>(
+                ProgramHistoricalReplacementStep::Impl{
+                    source_generation, *source_lineage, *source_run, checkpoint,
+                    target_generation, *target_publication.run_lineage, target_publication})));
+    }
+
+    return ProgramHistoricalReplacementChain(
+        std::make_shared<const ProgramHistoricalReplacementChain::Impl>(
+            ProgramHistoricalReplacementChain::Impl{
+                *anchor, std::move(generations), std::move(replacements)}));
+}
+
 }  // namespace neograph::program

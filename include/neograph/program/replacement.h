@@ -7,6 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/program/result.h>
 
+#include <asio/awaitable.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -15,6 +16,8 @@
 namespace neograph::program {
 
 class ProgramJavaScriptCommandJournalEntry;
+class ProgramHandle;
+class ProgramRuntime;
 class ProgramRunGeneration;
 class ProgramRunLineage;
 class ProgramRunRecord;
@@ -33,6 +36,36 @@ struct ExactProgramHandoffReference {
 struct ExactProgramHandoff {
     ExactProgramHandoffReference reference;
     json                         value;
+};
+
+/**
+ * Move-only host lease holding a source generator at an exact durable checkpoint.
+ * Destroying an unconsumed lease lets the source continue from that checkpoint.
+ */
+class NEOGRAPH_PROGRAM_API ProgramHandoff final {
+public:
+    ProgramHandoff(const ProgramHandoff&)            = delete;
+    ProgramHandoff& operator=(const ProgramHandoff&) = delete;
+    ProgramHandoff(ProgramHandoff&& other) noexcept;
+    ProgramHandoff& operator=(ProgramHandoff&& other) noexcept;
+    ~ProgramHandoff();
+
+    const ExactProgramHandoffReference& reference() const;
+    json                                value() const;
+    asio::awaitable<ExactProgramHandoff> wait_async() const;
+    explicit operator bool() const noexcept;
+
+private:
+    struct Impl;
+    explicit ProgramHandoff(std::shared_ptr<Impl> impl) noexcept;
+    static asio::awaitable<ExactProgramHandoff> wait_async_with_impl(
+        std::shared_ptr<Impl> impl);
+    void consume() noexcept;
+
+    std::shared_ptr<Impl> impl_;
+
+    friend class ProgramHandle;
+    friend class ProgramRuntime;
 };
 
 struct ProgramReplacementReceiptData {

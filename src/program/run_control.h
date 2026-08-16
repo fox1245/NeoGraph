@@ -62,6 +62,11 @@ struct AsyncWaiter {
     std::weak_ptr<asio::steady_timer> timer;
 };
 
+struct HeldProgramHandoff {
+    std::uint64_t       request_id = 0;
+    ExactProgramHandoff handoff;
+};
+
 class RunControl final : public std::enable_shared_from_this<RunControl> {
 private:
     static asio::awaitable<ProgramResult>
@@ -182,6 +187,16 @@ public:
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
     std::optional<ExactProgramHandoff>    latest_handoff() const;
+    void set_handoff_coordination_mutex(
+        std::shared_ptr<std::recursive_mutex> coordination_mutex,
+        std::function<bool(const RunControl*)> admission);
+    std::uint64_t                         request_handoff();
+    HeldProgramHandoff                    wait_handoff(std::uint64_t request_id);
+    asio::awaitable<HeldProgramHandoff>   wait_handoff_async(std::uint64_t request_id);
+    bool                                  has_active_handoff_request() const noexcept;
+    void                                  reach_latest_handoff_if_requested();
+    asio::awaitable<void>                 hold_latest_handoff_if_requested();
+    void                                  release_handoff(std::uint64_t request_id) noexcept;
     ProgramRunRecord                      snapshot() const;
     void              cancel_children(CancellationCause cause) noexcept;
 
@@ -211,6 +226,16 @@ private:
     bool                                     terminal_decided_ = false;
     bool                                     completion_claimed_ = false;
     std::vector<std::weak_ptr<RunControl>> children_;
+    mutable std::condition_variable          handoff_cv_;
+    std::shared_ptr<std::recursive_mutex>     handoff_coordination_mutex_;
+    std::function<bool(const RunControl*)>    handoff_admission_;
+    std::uint64_t                            next_handoff_request_id_ = 1;
+    std::uint64_t                            handoff_request_id_ = 0;
+    std::optional<ExactProgramHandoff>       held_handoff_;
+    std::weak_ptr<asio::steady_timer>        handoff_release_waiter_;
+    mutable std::vector<AsyncWaiter>         handoff_waiters_;
+
+    void abort_handoff() noexcept;
 };
 struct CommandBudgetReservation {
     RunBudget remaining;

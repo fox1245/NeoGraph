@@ -184,12 +184,20 @@ public:
      * only input.handoff crosses the generation boundary.
      */
     ProgramHandle replace(ExactProgramHandoffReference source,
-                          RunInvocation                invocation,
+                           RunInvocation                invocation,
+                           std::shared_ptr<ProgramEventSink> events = {});
+    /** Replace a source that is held by a host-owned checkpoint lease. */
+    ProgramHandle replace(ProgramHandoff&&             source,
+                          RunInvocation                 invocation,
                           std::shared_ptr<ProgramEventSink> events = {});
     ProgramHandle replace(std::string_view                owner_scope,
-                          ExactProgramHandoffReference     source,
-                          const ProgramVersion&            target,
-                          ProgramInvocation                invocation);
+                           ExactProgramHandoffReference     source,
+                           const ProgramVersion&            target,
+                           ProgramInvocation                invocation);
+    ProgramHandle replace(std::string_view      owner_scope,
+                          ProgramHandoff&&       source,
+                          const ProgramVersion&  target,
+                          ProgramInvocation      invocation);
 
     asio::awaitable<ProgramResult> run_async(std::string owner_scope,
                                              ProgramVersion version,

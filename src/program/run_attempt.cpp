@@ -3846,6 +3846,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 control->transitions->load(control->owner_scope, control->run_id)) {
                             unreconciled_javascript_remaining = durable_replay->remaining_budget();
                         }
+                        if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
+                            co_await control->hold_latest_handoff_if_requested();
+                        }
                         response = std::move(recorded.output);
                         continue;
                     }
@@ -4041,6 +4044,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 active_javascript_command.reset();
                 if (command_result.status != ProgramTerminalStatus::Completed)
                     co_return command_result;
+                if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
+                    co_await control->hold_latest_handoff_if_requested();
+                }
                 response = std::move(command_result.output);
             }
         };

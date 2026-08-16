@@ -11,6 +11,7 @@
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -1864,6 +1865,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                     callback = completion_callback_;
                 }
                 cancel_token->cancel();
+                abort_handoff();
                 cancel_children(cause);
                 if (callback) {
                     try {
@@ -1891,10 +1893,23 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
             cancellation_cause_ = cause;
         }
         cancel_token->cancel();
+        abort_handoff();
         cancel_children(cause);
         return true;
     } catch (...) {
-        return false;
+        bool applied = false;
+        {
+            std::lock_guard lock(mutex_);
+            if (!result_ && !terminal_decided_ &&
+                cancellation_cause_ == CancellationCause::None) {
+                cancellation_cause_ = cause;
+                applied             = true;
+            }
+        }
+        cancel_token->cancel();
+        abort_handoff();
+        if (applied) cancel_children(cause);
+        return applied;
     }
 }
 
@@ -2059,6 +2074,7 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             terminal_decided_   = true;
             terminal_cleanups.swap(terminal_cleanups_);
         }
+        abort_handoff();
         for (auto& cleanup : terminal_cleanups) {
             if (cleanup) cleanup();
         }
@@ -2254,6 +2270,188 @@ std::optional<ExactProgramHandoff> RunControl::latest_handoff() const {
         detail::owned_json_copy(arguments.at("value"))};
 }
 
+void RunControl::set_handoff_coordination_mutex(
+    std::shared_ptr<std::recursive_mutex> coordination_mutex,
+    std::function<bool(const RunControl*)> admission) {
+    if (!coordination_mutex || !admission) {
+        throw std::invalid_argument("Program handoff coordination must be complete");
+    }
+    std::lock_guard lock(mutex_);
+    if (handoff_coordination_mutex_ && handoff_coordination_mutex_ != coordination_mutex) {
+        throw std::logic_error("Program handoff coordination mutex is already configured");
+    }
+    handoff_coordination_mutex_ = std::move(coordination_mutex);
+    handoff_admission_          = std::move(admission);
+}
+
+std::uint64_t RunControl::request_handoff() {
+    std::shared_ptr<std::recursive_mutex> coordination_mutex;
+    std::function<bool(const RunControl*)> admission;
+    {
+        std::lock_guard lock(mutex_);
+        coordination_mutex = handoff_coordination_mutex_;
+        admission           = handoff_admission_;
+    }
+    if (!coordination_mutex || !admission) {
+        throw std::logic_error("Program handoff coordination is not configured");
+    }
+    std::unique_lock coordination_lock(*coordination_mutex);
+    if (!admission(this)) {
+        throw std::runtime_error(
+            "Program handoff requires one process-local execution control");
+    }
+    std::lock_guard lock(mutex_);
+    if (result_ || terminal_decided_ || cancellation_cause_ != CancellationCause::None) {
+        throw std::runtime_error("Program cannot arm a handoff after termination or cancellation");
+    }
+    if (handoff_request_id_ != 0) {
+        throw std::logic_error("Program already has an outstanding handoff request");
+    }
+    if (next_handoff_request_id_ == 0) {
+        throw std::overflow_error("Program handoff request identity overflowed");
+    }
+    handoff_request_id_ = next_handoff_request_id_++;
+    held_handoff_.reset();
+    return handoff_request_id_;
+}
+
+HeldProgramHandoff RunControl::wait_handoff(std::uint64_t request_id) {
+    std::unique_lock lock(mutex_);
+    handoff_cv_.wait(lock, [&] {
+        return handoff_request_id_ != request_id || held_handoff_ || result_ ||
+               cancellation_cause_ != CancellationCause::None;
+    });
+    if (handoff_request_id_ == request_id && held_handoff_) {
+        return HeldProgramHandoff{request_id, *held_handoff_};
+    }
+    throw std::runtime_error("Program handoff request ended before reaching a checkpoint");
+}
+
+asio::awaitable<HeldProgramHandoff> RunControl::wait_handoff_async(
+    std::uint64_t request_id) {
+    auto       control    = shared_from_this();
+    auto       timer      = std::make_shared<asio::steady_timer>(waiter_strand);
+    timer->expires_at((asio::steady_timer::time_point::max)());
+    co_await asio::co_spawn(
+        waiter_strand,
+        [control, request_id, timer]() -> asio::awaitable<void> {
+            {
+                std::lock_guard lock(control->mutex_);
+                if (control->handoff_request_id_ != request_id || control->held_handoff_ ||
+                    control->result_ ||
+                    control->cancellation_cause_ != CancellationCause::None) {
+                    co_return;
+                }
+                control->handoff_waiters_.push_back(AsyncWaiter{timer});
+            }
+            asio::error_code error;
+            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+        },
+        asio::use_awaitable);
+
+    std::lock_guard lock(mutex_);
+    if (handoff_request_id_ == request_id && held_handoff_) {
+        co_return HeldProgramHandoff{request_id, *held_handoff_};
+    }
+    throw std::runtime_error("Program handoff request ended before reaching a checkpoint");
+}
+
+bool RunControl::has_active_handoff_request() const noexcept {
+    std::lock_guard lock(mutex_);
+    return handoff_request_id_ != 0;
+}
+
+void RunControl::reach_latest_handoff_if_requested() {
+    {
+        std::lock_guard lock(mutex_);
+        if (handoff_request_id_ == 0 || held_handoff_ || result_ || terminal_decided_ ||
+            cancellation_cause_ != CancellationCause::None) {
+            return;
+        }
+    }
+
+    const auto handoff = latest_handoff();
+    if (!handoff) return;
+    std::vector<AsyncWaiter> waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (handoff_request_id_ == 0 || held_handoff_ || result_ || terminal_decided_ ||
+            cancellation_cause_ != CancellationCause::None) {
+            return;
+        }
+        held_handoff_ = *handoff;
+        waiters.swap(handoff_waiters_);
+        handoff_cv_.notify_all();
+    }
+    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+        for (const auto& waiter : waiters) {
+            if (auto waiting = waiter.timer.lock()) waiting->cancel();
+        }
+    });
+}
+
+asio::awaitable<void> RunControl::hold_latest_handoff_if_requested() {
+    reach_latest_handoff_if_requested();
+
+    const auto executor = co_await asio::this_coro::executor;
+    auto       timer    = std::make_shared<asio::steady_timer>(executor);
+    timer->expires_at((asio::steady_timer::time_point::max)());
+    {
+        std::lock_guard lock(mutex_);
+        if (handoff_request_id_ == 0 || !held_handoff_ || result_ || terminal_decided_ ||
+            cancellation_cause_ != CancellationCause::None) {
+            co_return;
+        }
+        handoff_release_waiter_ = timer;
+    }
+
+    asio::error_code error;
+    co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    co_return;
+}
+
+void RunControl::release_handoff(std::uint64_t request_id) noexcept {
+    try {
+        std::shared_ptr<asio::steady_timer> release_waiter;
+        std::vector<AsyncWaiter>            waiters;
+        {
+            std::lock_guard lock(mutex_);
+            if (handoff_request_id_ != request_id) return;
+            handoff_request_id_ = 0;
+            held_handoff_.reset();
+            release_waiter = handoff_release_waiter_.lock();
+            handoff_release_waiter_.reset();
+            waiters.swap(handoff_waiters_);
+            handoff_cv_.notify_all();
+        }
+        if (release_waiter) {
+            asio::dispatch(release_waiter->get_executor(),
+                           [release_waiter] {
+                               try {
+                                   release_waiter->expires_at(
+                                       (asio::steady_timer::time_point::min)());
+                               } catch (...) {}
+                           });
+        }
+        asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+            for (const auto& waiter : waiters) {
+                if (auto waiting = waiter.timer.lock()) waiting->cancel();
+            }
+        });
+    } catch (...) {}
+}
+
+void RunControl::abort_handoff() noexcept {
+    try {
+        std::uint64_t request_id = 0;
+        {
+            std::lock_guard lock(mutex_);
+            request_id = handoff_request_id_;
+        }
+        if (request_id != 0) release_handoff(request_id);
+    } catch (...) {}
+}
+
 ProgramRunRecord RunControl::snapshot() const {
     const auto record = transitions->load(owner_scope, run_id);
     if (!record) {
@@ -2416,6 +2614,9 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
             *transitions, owner_scope, previous->journal_head(), std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
+            if (terminal_result && command.kind() == JavaScriptCommandKind::Checkpoint) {
+                reach_latest_handoff_if_requested();
+            }
             if (terminal_result && latest_command_checkpoint) {
                 std::lock_guard lock(mutex_);
                 latest_checkpoint_ = latest_command_checkpoint;
@@ -2445,26 +2646,119 @@ struct ProcessRuntimeState {
         std::weak_ptr<detail::RunControl> control;
     };
 
-    std::recursive_mutex      transition_mutex;
+    std::shared_ptr<std::recursive_mutex> transition_mutex =
+        std::make_shared<std::recursive_mutex>();
     std::mutex                controls_mutex;
     std::vector<ControlEntry> controls;
 };
 
 std::shared_ptr<ProcessRuntimeState> process_runtime_state(
-    const ProgramTransitionStore* transitions) {
+    const ProgramTransitionStore& transitions) {
     static std::mutex registry_mutex;
     static std::unordered_map<const ProgramTransitionStore*, std::weak_ptr<ProcessRuntimeState>>
-        registry;
+        address_registry;
+    static std::unordered_map<std::string, std::weak_ptr<ProcessRuntimeState>> key_registry;
     std::lock_guard lock(registry_mutex);
-    std::erase_if(registry, [](const auto& entry) { return entry.second.expired(); });
-    auto&           weak = registry[transitions];
+    std::erase_if(address_registry, [](const auto& entry) { return entry.second.expired(); });
+    std::erase_if(key_registry, [](const auto& entry) { return entry.second.expired(); });
+    const auto coordination_key = transitions.process_coordination_key();
+    auto& weak = coordination_key.empty() ? address_registry[&transitions]
+                                          : key_registry[coordination_key];
     if (auto state = weak.lock()) return state;
     auto state = std::make_shared<ProcessRuntimeState>();
     weak       = state;
     return state;
 }
 
+bool same_process_coordination_backend(const ProgramTransitionStore& lhs,
+                                       const ProgramTransitionStore& rhs) {
+    const auto lhs_key = lhs.process_coordination_key();
+    const auto rhs_key = rhs.process_coordination_key();
+    return !lhs_key.empty() || !rhs_key.empty() ? !lhs_key.empty() && lhs_key == rhs_key
+                                                : &lhs == &rhs;
+}
+
 }  // namespace
+
+struct ProgramHandoff::Impl {
+    Impl(std::shared_ptr<detail::RunControl> source, std::uint64_t request)
+        : control(std::move(source)), request_id(request) {}
+    Impl(std::shared_ptr<detail::RunControl> source, detail::HeldProgramHandoff held)
+        : control(std::move(source)), request_id(held.request_id), handoff(std::move(held.handoff)) {}
+
+    const ExactProgramHandoff& resolved() const {
+        {
+            std::lock_guard lock(resolve_mutex);
+            if (handoff) return *handoff;
+        }
+        auto reached = control->wait_handoff(request_id).handoff;
+        std::lock_guard lock(resolve_mutex);
+        if (!handoff) handoff = std::move(reached);
+        return *handoff;
+    }
+
+    std::shared_ptr<detail::RunControl> control;
+    std::uint64_t                       request_id = 0;
+    mutable std::mutex                  resolve_mutex;
+    mutable std::optional<ExactProgramHandoff> handoff;
+    std::atomic_bool                    consumed{false};
+};
+
+ProgramHandoff::ProgramHandoff(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+ProgramHandoff::ProgramHandoff(ProgramHandoff&& other) noexcept : impl_(std::move(other.impl_)) {}
+
+ProgramHandoff& ProgramHandoff::operator=(ProgramHandoff&& other) noexcept {
+    if (this == &other) return *this;
+    if (impl_ && !impl_->consumed.exchange(true)) {
+        impl_->control->release_handoff(impl_->request_id);
+    }
+    impl_ = std::move(other.impl_);
+    return *this;
+}
+
+ProgramHandoff::~ProgramHandoff() {
+    if (impl_ && !impl_->consumed.exchange(true)) {
+        impl_->control->release_handoff(impl_->request_id);
+    }
+}
+
+const ExactProgramHandoffReference& ProgramHandoff::reference() const {
+    if (!*this) throw std::logic_error("Program handoff lease is empty or consumed");
+    return impl_->resolved().reference;
+}
+
+json ProgramHandoff::value() const {
+    if (!*this) throw std::logic_error("Program handoff lease is empty or consumed");
+    return detail::owned_json_copy(impl_->resolved().value);
+}
+
+asio::awaitable<ExactProgramHandoff> ProgramHandoff::wait_async() const {
+    if (!*this) throw std::logic_error("Program handoff lease is empty or consumed");
+    return wait_async_with_impl(impl_);
+}
+
+asio::awaitable<ExactProgramHandoff> ProgramHandoff::wait_async_with_impl(
+    std::shared_ptr<Impl> impl) {
+    {
+        std::lock_guard lock(impl->resolve_mutex);
+        if (impl->handoff) co_return *impl->handoff;
+    }
+    auto reached = co_await impl->control->wait_handoff_async(impl->request_id);
+    {
+        std::lock_guard lock(impl->resolve_mutex);
+        if (!impl->handoff) impl->handoff = std::move(reached.handoff);
+        co_return *impl->handoff;
+    }
+}
+
+ProgramHandoff::operator bool() const noexcept {
+    return impl_ && !impl_->consumed.load();
+}
+
+void ProgramHandoff::consume() noexcept {
+    if (impl_) impl_->consumed.store(true);
+}
 
 ProgramHandle::ProgramHandle(std::shared_ptr<detail::RunControl> control)
     : control_(std::move(control)) {}
@@ -2499,6 +2793,16 @@ std::optional<CoreCheckpointIdentity> ProgramHandle::latest_checkpoint() const {
 std::optional<ExactProgramHandoff> ProgramHandle::latest_handoff() const {
     return control_->latest_handoff();
 }
+ProgramHandoff ProgramHandle::next_handoff() const {
+    const auto request_id = control_->request_handoff();
+    try {
+        return ProgramHandoff(
+            std::make_shared<ProgramHandoff::Impl>(control_, request_id));
+    } catch (...) {
+        control_->release_handoff(request_id);
+        throw;
+    }
+}
 ProgramRunRecord ProgramHandle::snapshot() const {
     return control_->snapshot();
 }
@@ -2514,7 +2818,7 @@ struct ProgramRuntime::Impl {
     explicit Impl(RuntimeConfig runtime_config)
         : config(std::move(runtime_config)), pool(config.scheduler_threads) {
         global_child_quota = std::make_shared<GlobalChildQuotaState>(config.child_quota);
-        process_state      = process_runtime_state(config.transitions.get());
+        process_state      = process_runtime_state(*config.transitions);
     }
     ProgramRuntime* owner = nullptr;
 
@@ -2637,6 +2941,29 @@ struct ProgramRuntime::Impl {
     ControlRegistration register_control(const std::shared_ptr<detail::RunControl>& control,
                                          bool process_unique = false) {
         configure_child_launcher(control);
+        const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
+        control->set_handoff_coordination_mutex(
+            process_state->transition_mutex,
+            [weak_process_state](const detail::RunControl* requester) {
+                const auto state = weak_process_state.lock();
+                if (!state) return false;
+                std::lock_guard process_lock(state->controls_mutex);
+                std::erase_if(state->controls, [](const auto& entry) {
+                    const auto live = entry.control.lock();
+                    return !live || live->try_result().has_value();
+                });
+                for (const auto& entry : state->controls) {
+                    if (entry.owner_scope != requester->owner_scope ||
+                        entry.run_id != requester->run_id) {
+                        continue;
+                    }
+                    if (const auto live = entry.control.lock();
+                        live && live.get() != requester) {
+                        return false;
+                    }
+                }
+                return true;
+            });
         std::lock_guard lock(mutex);
         if (stopping) throw std::runtime_error("ProgramRuntime is stopping");
         {
@@ -3841,13 +4168,50 @@ ProgramHandle ProgramRuntime::replace(ExactProgramHandoffReference source,
                    runtime_projection(std::move(invocation), std::move(events)));
 }
 
+ProgramHandle ProgramRuntime::replace(ProgramHandoff&&             source,
+                                      RunInvocation                 invocation,
+                                      std::shared_ptr<ProgramEventSink> events) {
+    if (!source || !source.impl_ || !source.impl_->control) {
+        throw std::invalid_argument("Program replacement requires an active handoff lease");
+    }
+    if (!same_process_coordination_backend(*source.impl_->control->transitions,
+                                           *impl_->config.transitions)) {
+        throw std::invalid_argument(
+            "Program handoff lease and replacement runtime use different transition stores");
+    }
+    if (source.impl_->control->owner_scope != invocation.owner_scope ||
+        source.impl_->control->run_id != source.reference().source_run_id) {
+        throw std::invalid_argument("Program handoff lease does not bind the replacement source");
+    }
+    const auto source_record_id = source.impl_->control->snapshot().id();
+    try {
+        auto result = replace(source.reference(), std::move(invocation), std::move(events));
+        source.consume();
+        (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+        return result;
+    } catch (...) {
+        bool definitely_uncommitted = false;
+        try {
+            const auto lineage = impl_->config.transitions->load_run_lineage(
+                source.impl_->control->owner_scope, source.impl_->control->run_id);
+            definitely_uncommitted =
+                lineage && lineage->active_run_record_id() == source_record_id;
+        } catch (...) {}
+        if (!definitely_uncommitted) {
+            source.consume();
+            (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+        }
+        throw;
+    }
+}
+
 ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
                                       ExactProgramHandoffReference   source,
                                       const ProgramVersion&          target,
                                       ProgramInvocation              invocation) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     std::unique_lock transition_lock(impl_->fork_mutex);
-    std::unique_lock reconnect_lock(impl_->process_state->transition_mutex);
+    std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
     if (!invocation.parent_run_id.empty() || invocation.child_depth != 0) {
         throw std::invalid_argument("Program replacement invocation must be top-level");
     }
@@ -4107,6 +4471,44 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     return ProgramHandle(std::move(control));
 }
 
+ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
+                                      ProgramHandoff&&       source,
+                                      const ProgramVersion&  target,
+                                      ProgramInvocation      invocation) {
+    if (!source || !source.impl_ || !source.impl_->control) {
+        throw std::invalid_argument("Program replacement requires an active handoff lease");
+    }
+    if (!same_process_coordination_backend(*source.impl_->control->transitions,
+                                           *impl_->config.transitions)) {
+        throw std::invalid_argument(
+            "Program handoff lease and replacement runtime use different transition stores");
+    }
+    if (source.impl_->control->owner_scope != owner_scope ||
+        source.impl_->control->run_id != source.reference().source_run_id) {
+        throw std::invalid_argument("Program handoff lease does not bind the replacement source");
+    }
+    const auto source_record_id = source.impl_->control->snapshot().id();
+    try {
+        auto result = replace(owner_scope, source.reference(), target, std::move(invocation));
+        source.consume();
+        (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+        return result;
+    } catch (...) {
+        bool definitely_uncommitted = false;
+        try {
+            const auto lineage = impl_->config.transitions->load_run_lineage(
+                source.impl_->control->owner_scope, source.impl_->control->run_id);
+            definitely_uncommitted =
+                lineage && lineage->active_run_record_id() == source_record_id;
+        } catch (...) {}
+        if (!definitely_uncommitted) {
+            source.consume();
+            (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+        }
+        throw;
+    }
+}
+
 std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view owner_scope,
                                                             std::string_view parent_run_id) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
@@ -4168,7 +4570,7 @@ std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view own
 ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::string_view run_id) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");
-    std::unique_lock reconnect_lock(impl_->process_state->transition_mutex);
+    std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
     std::string resolved_run_id(run_id);
     bool        replacement_generation = false;
     const auto  requested_record = impl_->config.transitions->load(owner_scope, run_id);
@@ -4187,9 +4589,14 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         resolved_run_id = active->run_id();
     }
     run_id = resolved_run_id;
-    auto existing_control = replacement_generation
-                                ? impl_->find_process_control(owner_scope, run_id)
-                                : impl_->find_control(owner_scope, run_id);
+    auto existing_control = impl_->find_control(owner_scope, run_id);
+    if (!existing_control) {
+        auto process_control = impl_->find_process_control(owner_scope, run_id);
+        if (process_control &&
+            (replacement_generation || process_control->has_active_handoff_request())) {
+            existing_control = std::move(process_control);
+        }
+    }
     if (existing_control) {
         auto control = std::move(existing_control);
         return ProgramHandle(std::move(control));
