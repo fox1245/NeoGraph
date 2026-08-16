@@ -1282,34 +1282,37 @@ public:
                         impl_->exec("ROLLBACK;");
                         return program::ProgramTransitionPublishResult::Conflict;
                     }
-                    if (const auto fork = publication.run_record.fork_receipt()) {
-                        Statement source_query(
-                            impl_->db,
-                            "SELECT record_json FROM neograph_harness_runs "
-                            "WHERE run_id=? AND owner_scope=?");
-                        source_query.bind_text(
-                            1, program_storage_run_id(owner_scope, previous_generation.run_id()));
-                        source_query.bind_text(2, std::string(owner_scope));
-                        if (source_query.step() != SQLITE_ROW) {
-                            impl_->exec("ROLLBACK;");
-                            return program::ProgramTransitionPublishResult::Conflict;
-                        }
-                        const auto source = HarnessProgramRunRecord::parse(
-                            json::parse(source_query.text(0))).run_record();
-                        const auto checkpoint = source.exact_checkpoint();
-                        if (!checkpoint || !fork->compatible() ||
-                            fork->owner_scope() != owner_scope ||
-                            fork->source_run_id() != previous_generation.run_id() ||
-                            fork->source_program_version_id() !=
-                                previous_generation.program_version_id() ||
-                            fork->source_checkpoint_id() != checkpoint->checkpoint_id ||
-                            fork->target_program_version_id() !=
-                                publication.run_record.program_version_id() ||
-                            source.id() != current_lineage->active_run_record_id() ||
-                            source.journal_head() != current_lineage->active_journal_head()) {
-                            impl_->exec("ROLLBACK;");
-                            return program::ProgramTransitionPublishResult::Conflict;
-                        }
+                    const auto source_wrapper =
+                        load_wrapper_locked(owner_scope, previous_generation.run_id());
+                    if (!source_wrapper) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                    const auto& source = source_wrapper->run_record();
+                    Statement checkpoint_query(
+                        impl_->db,
+                        "SELECT record_json, owner_scope, bundle_id, coordinate_id, record_id "
+                        "FROM neograph_harness_program_javascript_commands "
+                        "WHERE run_id=? ORDER BY sequence DESC LIMIT 1");
+                    checkpoint_query.bind_text(
+                        1, program_storage_run_id(owner_scope, previous_generation.run_id()));
+                    if (checkpoint_query.step() != SQLITE_ROW) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                    const auto checkpoint =
+                        program::ProgramJavaScriptCommandJournalEntry::parse(
+                            checkpoint_query.text(0));
+                    if (checkpoint_query.text(1) != owner_scope ||
+                        checkpoint_query.text(2) != checkpoint.bundle_id() ||
+                        checkpoint_query.text(3) != checkpoint.coordinate_id() ||
+                        checkpoint_query.text(4) != checkpoint.id() ||
+                        !program::is_valid_program_replacement_transition(
+                            previous_generation, *current_lineage, source, checkpoint,
+                            *publication.run_generation, *publication.run_lineage,
+                            publication.run_record)) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
                     }
                     Statement duplicate_generation(
                         impl_->db,
@@ -1865,11 +1868,10 @@ private:
         require_count("neograph_harness_program_effects", run.effect_sequence());
     }
 
-    std::optional<HarnessProgramRunRecord> load_wrapper(std::string_view owner_scope,
-                                                        std::string_view run_id) const {
+    std::optional<HarnessProgramRunRecord> load_wrapper_locked(
+        std::string_view owner_scope, std::string_view run_id) const {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
-        Statement       query(
+        Statement query(
             impl_->db,
             "SELECT record_json, artifact_id, owner_scope, bundle_id, "
                   "program_version_id, program_run_id, journal_head, program_publication_json "
@@ -1896,6 +1898,12 @@ private:
         wrapper.validate_artifact(*artifact);
         validate_publication_locked(wrapper, query.text(6), query.text(7));
         return wrapper;
+    }
+
+    std::optional<HarnessProgramRunRecord> load_wrapper(std::string_view owner_scope,
+                                                        std::string_view run_id) const {
+        std::lock_guard lock(impl_->mutex);
+        return load_wrapper_locked(owner_scope, run_id);
     }
 
     void insert_journal(const std::string&                   run_id,

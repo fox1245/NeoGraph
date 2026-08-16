@@ -73,13 +73,15 @@ RegistrySnapshot registry() {
     return std::move(builder).build();
 }
 
-ProgramBundle bundle(const RegistrySnapshot& registry) {
+ProgramBundle bundle(const RegistrySnapshot& registry,
+                     char                    source_hash = '1',
+                     char                    program_hash = '2') {
     const json definition = {{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
                              {"nodes", json{{"main", json{{"type", "persist-node"}}}}}};
     ProgramBundleData data;
     data.source_kind                   = SourceKind::CppBuilder;
-    data.source_hash                   = digest('1');
-    data.canonical_program_hash        = digest('2');
+    data.source_hash                   = digest(source_hash);
+    data.canonical_program_hash        = digest(program_hash);
     data.compiler_build_id             = "persist-compiler/v1";
     data.program_schema_version        = 1;
     data.registry_snapshot_fingerprint = registry.fingerprint();
@@ -164,36 +166,41 @@ ProgramEvent event(const Fixture&      fixture,
 }
 
 ProgramTransitionPublication initial_publication(const Fixture& fixture,
-                                                  std::string    run_id = "run-one") {
+                                                  std::string    run_id = "run-one",
+                                                  RunBudget     granted = budget(),
+                                                  std::int64_t  timestamp = 10) {
     auto                 journal = ProgramJournalRecord::create({{},
                                                                  run_id,
                                                                  fixture.version_value.id(),
                                                                  fixture.bundle_value.id(),
                                                                  1,
                                                                  {"root", ContinuationState::Running, 1},
-                                                                 budget(),
+                                                                 granted,
                                                                  {},
                                                                  std::nullopt,
-                                                                 10});
+                                                                 timestamp});
     ProgramRunRecordData data;
     data.owner_scope         = fixture.policy_value.owner_scope();
     data.run_id              = run_id;
     data.program_version_id  = fixture.version_value.id();
     data.bundle_id           = fixture.bundle_value.id();
     data.binding_fingerprint = digest('6');
-    data.invocation = bind_harness_invocation(
+    auto invocation = bind_harness_invocation(
         fixture.artifact.invocation_template(), fixture.artifact.owner_scope(),
         fixture.version_value.id(), run_id, "trace-one");
+    invocation.budget        = granted;
+    data.invocation          = std::move(invocation);
     data.continuation        = journal.continuation;
     data.remaining_budget    = journal.remaining_budget;
     data.journal_head        = journal.id;
     data.event_sequence      = 1;
-    data.created_at_ms       = 10;
-    data.updated_at_ms       = 10;
+    data.created_at_ms       = timestamp;
+    data.updated_at_ms       = timestamp;
     return {
         ProgramRunRecord::create(std::move(data)),
         journal,
-        {event(fixture, run_id, 1, ProgramEventKind::Started, ProgramStartedEvent{budget()}, 10)},
+        {event(fixture, run_id, 1, ProgramEventKind::Started, ProgramStartedEvent{granted},
+               timestamp)},
         {}};
 }
 
@@ -304,6 +311,72 @@ void attach_successor_lineage(ProgramTransitionPublication& publication,
         publication.journal_record.remaining_budget,
         publication.journal_record.inflight_reservation, previous.id(), previous.created_at_ms(),
         run.updated_at_ms(), previous.committed_descendant_budget()});
+    publication.run_generation = std::move(generation);
+}
+
+std::vector<ProgramJavaScriptCommandJournalEntry> replacement_checkpoint_entries(
+    const Fixture& fixture, const json& handoff) {
+    const auto command = JavaScriptCommand::checkpoint("replacement:harness", handoff);
+    return {
+        ProgramJavaScriptCommandJournalEntry(ProgramJavaScriptCommandJournalEntryData{
+            1, fixture.bundle_value.id(), 1, command, digest('9'), std::nullopt}),
+        ProgramJavaScriptCommandJournalEntry(ProgramJavaScriptCommandJournalEntryData{
+            2, fixture.bundle_value.id(), 1, command, digest('9'),
+            json{{"status", "completed"},
+                 {"output", handoff},
+                 {"failure", nullptr},
+                 {"execution_trace", json::array()},
+                 {"usage", json{{"wall_time_ms", 0},
+                                {"model_tokens", 0},
+                                {"monetary_microunits", 0},
+                                {"program_operations", 0},
+                                {"core_steps", 0},
+                                {"peak_concurrency", 0}}}}})};
+}
+
+void attach_replacement_successor(
+    ProgramTransitionPublication&                 publication,
+    const ProgramRunLineage&                      previous,
+    const ProgramRunGeneration&                   predecessor,
+    const ProgramRunRecord&                       source,
+    const ProgramJavaScriptCommandJournalEntry& checkpoint) {
+    const auto handoff = checkpoint.command().arguments().at("value");
+    auto receipt = ProgramReplacementReceipt(ProgramReplacementReceiptData{
+        source.owner_scope(),
+        previous.lineage_id(),
+        predecessor.generation(),
+        predecessor.id(),
+        previous.id(),
+        source.run_id(),
+        source.id(),
+        source.journal_head(),
+        source.program_version_id(),
+        source.bundle_id(),
+        checkpoint.coordinate_id(),
+        checkpoint.id(),
+        program_replacement_handoff_identity(handoff),
+        predecessor.generation() + 1,
+        publication.run_record.run_id(),
+        publication.run_record.program_version_id(),
+        publication.run_record.bundle_id(),
+        program_replacement_input_identity(publication.run_record.invocation().input),
+        publication.run_record.invocation().canonical_identity(),
+        publication.run_record.binding_fingerprint(),
+        publication.run_record.id(),
+        publication.run_record.journal_head()});
+    auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        publication.run_record.owner_scope(), previous.lineage_id(),
+        predecessor.generation() + 1, publication.run_record.run_id(),
+        publication.run_record.program_version_id(), publication.run_record.bundle_id(),
+        publication.run_record.id(), publication.run_record.journal_head(), predecessor.id(),
+        publication.run_record.created_at_ms(), publication.run_record.child_depth(),
+        std::move(receipt)});
+    publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        previous.owner_scope(), previous.lineage_id(), previous.root_run_id(),
+        generation.generation(), generation.id(), publication.run_record.id(),
+        publication.run_record.journal_head(), publication.journal_record.remaining_budget,
+        publication.journal_record.inflight_reservation, previous.id(), previous.created_at_ms(),
+        publication.run_record.updated_at_ms(), previous.committed_descendant_budget()});
     publication.run_generation = std::move(generation);
 }
 
@@ -569,13 +642,12 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
     }
 }
 
-TEST(HarnessProgramStoreTest, SqlitePersistsLineageSuccessorHistoryAcrossReconnect) {
+TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) {
     TempDb  db;
     Fixture fixture;
-    auto    source     = initial_lineage_publication(fixture, "lineage-source");
-    const auto lineage_id = source.run_lineage->lineage_id();
-    const auto generation_one_id = source.run_generation->id();
-    const auto head_one_id       = source.run_lineage->id();
+    auto       source      = initial_lineage_publication(fixture, "lineage-source");
+    const auto lineage_id  = source.run_lineage->lineage_id();
+    const auto head_one_id = source.run_lineage->id();
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
@@ -586,8 +658,6 @@ TEST(HarnessProgramStoreTest, SqlitePersistsLineageSuccessorHistoryAcrossReconne
         EXPECT_FALSE(transitions->load_lineage("tenant-other", lineage_id));
     }
 
-    std::string generation_two_id;
-    std::string head_two_id;
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         auto transitions = require_harness_program_adapter_store(store)
@@ -599,16 +669,9 @@ TEST(HarnessProgramStoreTest, SqlitePersistsLineageSuccessorHistoryAcrossReconne
 
         auto successor = initial_publication(fixture, "lineage-successor");
         attach_successor_lineage(successor, *previous);
-        generation_two_id = successor.run_generation->id();
-        head_two_id       = successor.run_lineage->id();
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, successor),
-                  ProgramTransitionPublishResult::Published);
-
-        auto stale = initial_publication(fixture, "lineage-stale-successor");
-        attach_successor_lineage(stale, *previous);
-        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, stale),
-                  ProgramTransitionPublishResult::Conflict);
-        EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "lineage-stale-successor"));
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, successor),
+                   ProgramTransitionPublishResult::Conflict);
+        EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "lineage-successor"));
     }
 
     auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
@@ -616,68 +679,159 @@ TEST(HarnessProgramStoreTest, SqlitePersistsLineageSuccessorHistoryAcrossReconne
                            ->bind_program_transitions(fixture.artifact);
     const auto head = transitions->load_lineage(fixture.artifact.owner_scope(), lineage_id);
     ASSERT_TRUE(head);
-    EXPECT_EQ(head->id(), head_two_id);
-    EXPECT_EQ(head->active_generation(), 2U);
-    EXPECT_EQ(head->active_generation_id(), generation_two_id);
-    EXPECT_EQ(head->active_journal_head(),
-              transitions->latest(fixture.artifact.owner_scope(), "lineage-successor")->id);
+    EXPECT_EQ(head->id(), head_one_id);
+    EXPECT_EQ(head->active_generation(), 1U);
+    EXPECT_EQ(head->active_generation_id(), source.run_generation->id());
+    EXPECT_EQ(head->active_journal_head(), source.journal_record.id);
     EXPECT_EQ(transitions
                   ->load_run_lineage(fixture.artifact.owner_scope(), "lineage-source")
                   ->id(),
-              head_two_id);
-    EXPECT_EQ(transitions
-                  ->load_run_lineage(fixture.artifact.owner_scope(), "lineage-successor")
-                  ->id(),
-              head_two_id);
+              head_one_id);
+    EXPECT_FALSE(transitions->load_run_lineage(fixture.artifact.owner_scope(),
+                                               "lineage-successor"));
     ASSERT_TRUE(transitions->load_lineage_head(fixture.artifact.owner_scope(), lineage_id,
                                                head_one_id));
-    ASSERT_TRUE(transitions->load_lineage_head(fixture.artifact.owner_scope(), lineage_id,
-                                               head_two_id));
     const auto generation_one =
         transitions->load_generation(fixture.artifact.owner_scope(), lineage_id, 1);
     const auto generation_two =
         transitions->load_generation(fixture.artifact.owner_scope(), lineage_id, 2);
     ASSERT_TRUE(generation_one);
-    ASSERT_TRUE(generation_two);
-    EXPECT_EQ(generation_one->id(), generation_one_id);
-    EXPECT_EQ(generation_two->id(), generation_two_id);
-    ASSERT_TRUE(generation_two->predecessor_generation_id());
-    EXPECT_EQ(*generation_two->predecessor_generation_id(), generation_one_id);
+    EXPECT_EQ(generation_one->id(), source.run_generation->id());
+    EXPECT_FALSE(generation_two);
 }
 
-TEST(HarnessProgramStoreTest, SqliteLineageSuccessorFaultRollsBackTargetAndHead) {
+TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesReconnect) {
     TempDb  db;
-    Fixture fixture;
-    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto    transitions = persist_and_bind(store, fixture);
-    auto    source      = initial_lineage_publication(fixture, "lineage-fault-source");
-    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, source),
-              ProgramTransitionPublishResult::Published);
+    Fixture source_fixture;
+    Fixture target_fixture;
+    const json handoff{{"cursor", 7}, {"state", "ready"}};
+    const json input{{"handoff", handoff}, {"previous_run_id", "lineage-source"}};
+    target_fixture.bundle_value = bundle(target_fixture.registry_value, 'a', 'b');
+    target_fixture.version_value = ProgramVersion(ProgramVersionData(
+        target_fixture.bundle_value.id(), target_fixture.profile_value,
+        target_fixture.policy_value, {}, target_fixture.policy_value.owner_scope(),
+        CoreMaterializationReceipt{"persist-compiler/v1",
+                                   target_fixture.registry_value.fingerprint(),
+                                   target_fixture.bundle_value.core_plan_identities(), {}}));
+    target_fixture.artifact = HarnessProgramArtifactRecord::create(
+        "artifact-two", target_fixture.policy_value.owner_scope(), target_fixture.bundle_value,
+        target_fixture.version_value, HarnessInvocationTemplate{input, budget()},
+        json{{"status", "queued"}});
 
+    auto source = initial_lineage_publication(source_fixture, "lineage-source");
+    source.commands = replacement_checkpoint_entries(source_fixture, handoff);
     const auto lineage_id = source.run_lineage->lineage_id();
-    const auto old_head_id = source.run_lineage->id();
-    auto successor = initial_publication(fixture, "lineage-fault-successor");
-    attach_successor_lineage(successor, *source.run_lineage);
-    store->fail_next_program_transition_for_testing(
-        SqliteHarnessProgramFaultPoint::AfterRunWrite);
-    EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, successor),
-                 std::runtime_error);
+    const auto successor_budget = program_replacement_remaining_budget(
+        source.run_record, *source.run_lineage, 40);
+    auto target =
+        initial_publication(target_fixture, "lineage-successor", successor_budget, 40);
+    attach_replacement_successor(target, *source.run_lineage, *source.run_generation,
+                                 source.run_record, source.commands.back());
+    const auto target_generation_id = target.run_generation->id();
+    const auto receipt_id = target.run_generation->replacement_receipt()->id();
 
-    transitions.reset();
-    store.reset();
-    auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto recovered = require_harness_program_adapter_store(reopened)
-                         ->bind_program_transitions(fixture.artifact);
-    EXPECT_FALSE(recovered->load(fixture.artifact.owner_scope(), "lineage-fault-successor"));
-    EXPECT_FALSE(recovered->load_generation(fixture.artifact.owner_scope(), lineage_id, 2));
-    const auto head = recovered->load_lineage(fixture.artifact.owner_scope(), lineage_id);
+    {
+        auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto source_transitions = persist_and_bind(store, source_fixture);
+        ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {},
+                                                      source),
+                  ProgramTransitionPublishResult::Published);
+        auto target_transitions = persist_and_bind(store, target_fixture);
+        store->fail_next_program_transition_for_testing(
+            SqliteHarnessProgramFaultPoint::AfterRunWrite);
+        EXPECT_THROW((void)target_transitions->compare_publish(
+                         target_fixture.artifact.owner_scope(), {}, target),
+                      std::runtime_error);
+    }
+
+    {
+        auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = require_harness_program_adapter_store(store)
+                               ->bind_program_transitions(target_fixture.artifact);
+        EXPECT_FALSE(
+            transitions->load(target_fixture.artifact.owner_scope(), "lineage-successor"));
+        EXPECT_FALSE(transitions->load_generation(target_fixture.artifact.owner_scope(),
+                                                  lineage_id, 2));
+        const auto old_head =
+            transitions->load_lineage(target_fixture.artifact.owner_scope(), lineage_id);
+        ASSERT_TRUE(old_head);
+        EXPECT_EQ(old_head->id(), source.run_lineage->id());
+        ASSERT_EQ(transitions->compare_publish(target_fixture.artifact.owner_scope(), {}, target),
+                  ProgramTransitionPublishResult::Published);
+    }
+
+    auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto transitions = require_harness_program_adapter_store(store)
+                           ->bind_program_transitions(target_fixture.artifact);
+    const auto head =
+        transitions->load_lineage(target_fixture.artifact.owner_scope(), lineage_id);
     ASSERT_TRUE(head);
-    EXPECT_EQ(head->id(), old_head_id);
+    EXPECT_EQ(head->active_generation(), 2U);
+    EXPECT_EQ(head->active_generation_id(), target_generation_id);
+    const auto generation =
+        transitions->load_generation(target_fixture.artifact.owner_scope(), lineage_id, 2);
+    ASSERT_TRUE(generation);
+    ASSERT_TRUE(generation->replacement_receipt());
+    EXPECT_EQ(generation->replacement_receipt()->id(), receipt_id);
+    EXPECT_EQ(transitions
+                  ->load_run_lineage(target_fixture.artifact.owner_scope(), "lineage-source")
+                  ->id(),
+              head->id());
+    EXPECT_EQ(transitions
+                  ->load_run_lineage(target_fixture.artifact.owner_scope(), "lineage-successor")
+                  ->id(),
+              head->id());
+    EXPECT_EQ(transitions
+                  ->load(target_fixture.artifact.owner_scope(), "lineage-successor")
+                  ->remaining_budget(),
+              successor_budget);
+}
 
-    EXPECT_EQ(recovered->compare_publish(fixture.artifact.owner_scope(), {}, successor),
+TEST(HarnessProgramStoreTest, SqliteReplacementRejectsMissingPredecessorArtifact) {
+    TempDb  db;
+    Fixture source_fixture;
+    Fixture target_fixture;
+    const json handoff{{"cursor", 8}, {"state", "ready"}};
+    const json input{{"handoff", handoff}, {"previous_run_id", "lineage-source"}};
+    target_fixture.bundle_value = bundle(target_fixture.registry_value, 'a', 'b');
+    target_fixture.version_value = ProgramVersion(ProgramVersionData(
+        target_fixture.bundle_value.id(), target_fixture.profile_value,
+        target_fixture.policy_value, {}, target_fixture.policy_value.owner_scope(),
+        CoreMaterializationReceipt{"persist-compiler/v1",
+                                   target_fixture.registry_value.fingerprint(),
+                                   target_fixture.bundle_value.core_plan_identities(), {}}));
+    target_fixture.artifact = HarnessProgramArtifactRecord::create(
+        "artifact-two", target_fixture.policy_value.owner_scope(), target_fixture.bundle_value,
+        target_fixture.version_value, HarnessInvocationTemplate{input, budget()},
+        json{{"status", "queued"}});
+
+    auto source = initial_lineage_publication(source_fixture, "lineage-source");
+    source.commands = replacement_checkpoint_entries(source_fixture, handoff);
+    const auto successor_budget = program_replacement_remaining_budget(
+        source.run_record, *source.run_lineage, 40);
+    auto target = initial_publication(target_fixture, "lineage-successor", successor_budget, 40);
+    attach_replacement_successor(target, *source.run_lineage, *source.run_generation,
+                                 source.run_record, source.commands.back());
+
+    auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto source_transitions = persist_and_bind(store, source_fixture);
+    ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {}, source),
               ProgramTransitionPublishResult::Published);
-    EXPECT_EQ(recovered->load_lineage(fixture.artifact.owner_scope(), lineage_id)->active_generation(),
-              2U);
+    auto target_transitions = persist_and_bind(store, target_fixture);
+    sqlite_exec(db.path,
+                "PRAGMA foreign_keys=OFF; DELETE FROM neograph_harness_artifacts "
+                "WHERE artifact_id='artifact-one';");
+
+    EXPECT_THROW((void)target_transitions->compare_publish(
+                     target_fixture.artifact.owner_scope(), {}, target),
+                 std::invalid_argument);
+    EXPECT_FALSE(
+        target_transitions->load_generation(target_fixture.artifact.owner_scope(),
+                                            source.run_lineage->lineage_id(), 2));
+    const auto head = target_transitions->load_lineage(target_fixture.artifact.owner_scope(),
+                                                       source.run_lineage->lineage_id());
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->id(), source.run_lineage->id());
 }
 
 TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLineage) {

@@ -377,16 +377,13 @@ void HarnessProgramRunRecord::validate_artifact(
     auto expected = bind_harness_invocation(
         artifact.invocation_template(), artifact.owner_scope(), artifact.version().id(),
         impl_->run_record.run_id(), impl_->invocation.correlation_id);
-    if (impl_->run_record.fork_receipt()) {
-        if (!budget_within_template(impl_->invocation.budget, expected.budget)) {
-            throw std::invalid_argument(
-                "Harness Program fork invocation exceeds its artifact template budget");
-        }
-        // ProgramRuntime derives an exact fork continuation budget from the
-        // source remainder before publishing its immutable migration receipt.
-        // The artifact template remains the upper authority bound.
-        expected.budget = impl_->invocation.budget;
+    if (!budget_within_template(impl_->invocation.budget, expected.budget)) {
+        throw std::invalid_argument(
+            "Harness Program invocation exceeds its artifact template budget");
     }
+    // Forks, replacements, and recovery may consume nonrenewable budget before
+    // this snapshot is published. The artifact template remains the upper bound.
+    expected.budget = impl_->invocation.budget;
     if (impl_->artifact_id != artifact.artifact_id() ||
         impl_->owner_scope != artifact.owner_scope() ||
         impl_->run_record.bundle_id() != artifact.bundle().id() ||

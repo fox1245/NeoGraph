@@ -89,10 +89,10 @@ RunBudget parse_budget(const json& value) {
         require_uint64(value, "max_total_children")};
 }
 
-json generation_body(const ProgramRunGenerationData& data) {
-    return {
+json generation_body(const ProgramRunGenerationData& data, std::uint32_t schema_version) {
+    json value = {
         {"format", std::string(GENERATION_FORMAT)},
-        {"storage_schema_version", ProgramRunGeneration::STORAGE_SCHEMA_VERSION},
+        {"storage_schema_version", schema_version},
         {"owner_scope", data.owner_scope},
         {"lineage_id", data.lineage_id},
         {"generation", data.generation},
@@ -103,8 +103,15 @@ json generation_body(const ProgramRunGenerationData& data) {
         {"initial_journal_head", data.initial_journal_head},
          {"predecessor_generation_id",
           data.predecessor_generation_id ? json(*data.predecessor_generation_id) : json(nullptr)},
-         {"created_at_ms", data.created_at_ms},
-         {"child_depth", data.child_depth}};
+        {"created_at_ms", data.created_at_ms},
+        {"child_depth", data.child_depth}};
+    if (schema_version >= ProgramRunGeneration::STORAGE_SCHEMA_VERSION) {
+        value["replacement_receipt"] =
+            data.replacement_receipt
+                ? detail::parse_json_strict(data.replacement_receipt->serialize_canonical())
+                : json(nullptr);
+    }
+    return value;
 }
 
 json lineage_body(const ProgramRunLineageData& data) {
@@ -148,6 +155,19 @@ void validate_generation(const ProgramRunGenerationData& data) {
         throw std::invalid_argument("Program run generation predecessor must be a sha256 identity");
     if (data.created_at_ms < 0)
         throw std::invalid_argument("Program run generation timestamp must not be negative");
+    if (data.replacement_receipt) {
+        const auto& receipt = *data.replacement_receipt;
+        if (data.generation == 1 || receipt.owner_scope() != data.owner_scope ||
+            receipt.lineage_id() != data.lineage_id ||
+            receipt.target_generation() != data.generation ||
+            receipt.target_run_id() != data.run_id ||
+            receipt.target_program_version_id() != data.program_version_id ||
+            receipt.target_bundle_id() != data.bundle_id ||
+            receipt.source_generation_id() != *data.predecessor_generation_id) {
+            throw std::invalid_argument(
+                "Program replacement receipt does not bind its successor generation");
+        }
+    }
 }
 
 void validate_lineage(const ProgramRunLineageData& data) {
@@ -239,8 +259,9 @@ std::string program_run_lineage_id(std::string_view owner_scope, std::string_vie
 }
 
 struct ProgramRunGeneration::Impl {
-    explicit Impl(ProgramRunGenerationData value) : data(std::move(value)) {
-        auto value_body  = generation_body(data);
+    explicit Impl(ProgramRunGenerationData value, std::uint32_t version)
+        : data(std::move(value)), schema_version(version) {
+        auto value_body  = generation_body(data, schema_version);
         id               = detail::sha256_identity("program-run-generation/v1",
                                                    detail::canonical_json_bytes(value_body));
         value_body["id"] = id;
@@ -248,6 +269,7 @@ struct ProgramRunGeneration::Impl {
     }
 
     ProgramRunGenerationData data;
+    std::uint32_t             schema_version;
     std::string              id;
     std::string              canonical_bytes;
 };
@@ -257,28 +279,54 @@ ProgramRunGeneration::ProgramRunGeneration(std::shared_ptr<const Impl> impl)
 
 ProgramRunGeneration ProgramRunGeneration::create(ProgramRunGenerationData data) {
     validate_generation(data);
-    return ProgramRunGeneration(std::make_shared<const Impl>(std::move(data)));
+    return ProgramRunGeneration(
+        std::make_shared<const Impl>(std::move(data), STORAGE_SCHEMA_VERSION));
 }
 
 ProgramRunGeneration ProgramRunGeneration::parse(std::string_view stored_bytes) {
     const auto value = detail::parse_json_strict(stored_bytes);
     if (!value.is_object() || require_string(value, "format") != GENERATION_FORMAT)
         throw std::invalid_argument("Stored Program run generation has unknown format");
-    detail::reject_unknown_fields(
-        value, "Stored Program run generation",
-        {"format", "storage_schema_version", "id", "owner_scope", "lineage_id", "generation",
-         "run_id", "program_version_id", "bundle_id", "initial_run_record_id",
-         "initial_journal_head", "predecessor_generation_id", "created_at_ms", "child_depth"});
-    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
+    const auto schema_version = require_uint32(value, "storage_schema_version");
+    if (schema_version == 1) {
+        detail::reject_unknown_fields(
+            value, "Stored Program run generation",
+            {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
+             "generation", "run_id", "program_version_id", "bundle_id",
+             "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
+             "created_at_ms", "child_depth"});
+    } else if (schema_version == STORAGE_SCHEMA_VERSION) {
+        detail::reject_unknown_fields(
+            value, "Stored Program run generation",
+            {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
+             "generation", "run_id", "program_version_id", "bundle_id",
+             "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
+             "created_at_ms", "child_depth", "replacement_receipt"});
+    } else {
         throw std::invalid_argument("Stored Program run generation schema is unsupported");
-    auto result = create(ProgramRunGenerationData{
+    }
+    std::optional<ProgramReplacementReceipt> replacement_receipt;
+    if (schema_version == STORAGE_SCHEMA_VERSION) {
+        if (!value.contains("replacement_receipt")) {
+            throw std::invalid_argument("Stored generation requires a replacement receipt field");
+        }
+        if (!value.at("replacement_receipt").is_null()) {
+            replacement_receipt = ProgramReplacementReceipt::parse(
+                detail::canonical_json_bytes(value.at("replacement_receipt")));
+        }
+    }
+    ProgramRunGenerationData data{
         require_string(value, "owner_scope"), require_string(value, "lineage_id"),
         require_uint64(value, "generation"), require_string(value, "run_id"),
         require_string(value, "program_version_id"), require_string(value, "bundle_id"),
         require_string(value, "initial_run_record_id"),
         require_string(value, "initial_journal_head"),
         require_optional_identity(value, "predecessor_generation_id"),
-        require_int64(value, "created_at_ms"), require_uint32(value, "child_depth")});
+        require_int64(value, "created_at_ms"), require_uint32(value, "child_depth"),
+        std::move(replacement_receipt)};
+    validate_generation(data);
+    ProgramRunGeneration result(
+        std::make_shared<const Impl>(std::move(data), schema_version));
     if (result.id() != require_string(value, "id"))
         throw std::invalid_argument(
             "Stored Program run generation identity does not match content");
@@ -316,6 +364,9 @@ std::int64_t ProgramRunGeneration::created_at_ms() const noexcept {
     return impl_->data.created_at_ms;
 }
 std::uint32_t ProgramRunGeneration::child_depth() const noexcept { return impl_->data.child_depth; }
+std::optional<ProgramReplacementReceipt> ProgramRunGeneration::replacement_receipt() const {
+    return impl_->data.replacement_receipt;
+}
 const std::string& ProgramRunGeneration::id() const noexcept {
     return impl_->id;
 }

@@ -9,6 +9,7 @@
 namespace {
 
 using namespace neograph::program;
+using neograph::json;
 
 std::string digest(char value) {
     return "sha256:" + std::string(64, value);
@@ -73,6 +74,19 @@ TEST(ProgramRunLineageTest, CanonicalValuesRoundTripAndRejectTamper) {
     auto lineage_bytes = lineage.serialize_canonical();
     lineage_bytes.replace(lineage_bytes.find("owner-a"), 7, "owner-b");
     EXPECT_THROW((void)ProgramRunLineage::parse(lineage_bytes), std::invalid_argument);
+}
+
+TEST(ProgramRunLineageTest, LegacyGenerationRoundTripPreservesStoredIdentity) {
+    const std::string bytes =
+        R"({"bundle_id":"sha256:2222222222222222222222222222222222222222222222222222222222222222","child_depth":0,"created_at_ms":10,"format":"neograph-program-run-generation","generation":1,)"
+        R"("id":"sha256:78d8f5d67f9b533b2b8370cc464b1d6c12aa321ea53d0ab149c5e4a39c2a2c5d","initial_journal_head":"sha256:4444444444444444444444444444444444444444444444444444444444444444",)"
+        R"("initial_run_record_id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","lineage_id":"sha256:be6d40e4efc288ec895d6db85c84e1d6fee70b592bcb50d42efb6ff362bf3ce3",)"
+        R"("owner_scope":"owner-a","predecessor_generation_id":null,"program_version_id":"sha256:1111111111111111111111111111111111111111111111111111111111111111","run_id":"run-1","storage_schema_version":1})";
+    const auto parsed = ProgramRunGeneration::parse(bytes);
+    EXPECT_EQ(parsed.id(),
+              "sha256:78d8f5d67f9b533b2b8370cc464b1d6c12aa321ea53d0ab149c5e4a39c2a2c5d");
+    EXPECT_FALSE(parsed.replacement_receipt());
+    EXPECT_EQ(parsed.serialize_canonical(), bytes);
 }
 
 TEST(ProgramRunLineageTest, InitialHeadBindsExactGenerationAndRunHeads) {

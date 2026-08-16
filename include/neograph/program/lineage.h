@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/program/replacement.h>
 #include <neograph/program/result.h>
 
 #include <cstdint>
@@ -33,12 +34,13 @@ struct ProgramRunGenerationData {
     std::optional<std::string> predecessor_generation_id;
     std::int64_t               created_at_ms = 0;
     std::uint32_t              child_depth   = 0;
+    std::optional<ProgramReplacementReceipt> replacement_receipt;
 };
 
 /** Immutable identity of one admitted topology generation in a run lineage. */
 class NEOGRAPH_PROGRAM_API ProgramRunGeneration final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     static ProgramRunGeneration create(ProgramRunGenerationData data);
     static ProgramRunGeneration parse(std::string_view stored_bytes);
@@ -54,6 +56,7 @@ public:
     const std::optional<std::string>& predecessor_generation_id() const noexcept;
     std::int64_t                      created_at_ms() const noexcept;
     std::uint32_t                     child_depth() const noexcept;
+    std::optional<ProgramReplacementReceipt> replacement_receipt() const;
     const std::string&                id() const noexcept;
     std::string                       serialize_canonical() const;
 

@@ -181,6 +181,7 @@ public:
     std::optional<ProgramResult>          try_result() const;
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
+    std::optional<ExactProgramHandoff>    latest_handoff() const;
     ProgramRunRecord                      snapshot() const;
     void              cancel_children(CancellationCause cause) noexcept;
 

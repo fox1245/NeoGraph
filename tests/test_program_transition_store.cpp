@@ -86,6 +86,34 @@ ProgramRunRecord start_run(const ProgramJournalRecord& journal) {
     data.updated_at_ms            = 10;
     return ProgramRunRecord::create(std::move(data));
 }
+ProgramRunRecordData copy_run_record_data(const ProgramRunRecord& run) {
+    ProgramRunRecordData data;
+    data.owner_scope                      = run.owner_scope();
+    data.run_id                           = run.run_id();
+    data.program_version_id               = run.program_version_id();
+    data.bundle_id                        = run.bundle_id();
+    data.binding_fingerprint              = run.binding_fingerprint();
+    data.invocation                       = run.invocation();
+    data.child_depth                      = run.child_depth();
+    data.continuation                     = run.continuation();
+    data.remaining_budget                 = run.remaining_budget();
+    data.exact_checkpoint                 = run.exact_checkpoint();
+    data.pending_input                    = run.pending_input();
+    data.pending_effect                   = run.pending_effect();
+    data.terminal_result                  = run.terminal_result();
+    data.fork_receipt                     = run.fork_receipt();
+    data.children                         = run.children();
+    data.journal_head                     = run.journal_head();
+    data.fork_source_run_id               = run.fork_source_run_id();
+    data.fork_source_program_version_id   = run.fork_source_program_version_id();
+    data.fork_source_checkpoint_id        = run.fork_source_checkpoint_id();
+    data.recorded_binding_set_fingerprint = run.recorded_binding_set_fingerprint();
+    data.event_sequence                   = run.event_sequence();
+    data.effect_sequence                  = run.effect_sequence();
+    data.created_at_ms                    = run.created_at_ms();
+    data.updated_at_ms                    = run.updated_at_ms();
+    return data;
+}
 ProgramTransitionPublication start_publication() {
     auto journal = start_journal();
     return {start_run(journal),
@@ -95,10 +123,11 @@ ProgramTransitionPublication start_publication() {
 }
 
 ProgramTransitionPublication start_publication_for(std::string run_id,
-                                                   std::string version_id,
-                                                   std::string bundle_id,
-                                                   RunBudget   granted,
-                                                   std::int64_t time) {
+                                                    std::string version_id,
+                                                    std::string bundle_id,
+                                                    RunBudget   granted,
+                                                    std::int64_t time,
+                                                    json input = json{{"input", 1}}) {
     auto journal = ProgramJournalRecord::create({{},
                                                  run_id,
                                                  version_id,
@@ -115,7 +144,7 @@ ProgramTransitionPublication start_publication_for(std::string run_id,
     invocation.program_version_id = version_id;
     invocation.run_id             = run_id;
     invocation.budget             = granted;
-    invocation.input              = {{"input", 1}};
+    invocation.input              = std::move(input);
     invocation.message_sequence   = 1;
     invocation.idempotency_key    = "idem-" + run_id;
     invocation.correlation_id     = "trace-" + run_id;
@@ -194,6 +223,73 @@ void attach_successor_lineage(ProgramTransitionPublication& publication,
     publication.run_generation = std::move(generation);
 }
 
+ProgramJavaScriptCommandJournalEntry replacement_checkpoint_entry(
+    std::uint64_t sequence, bool completed, const json& handoff) {
+    std::optional<json> result;
+    if (completed) {
+        result = json{{"status", "completed"},
+                      {"output", handoff},
+                      {"failure", nullptr},
+                      {"execution_trace", json::array()},
+                      {"usage", json{{"wall_time_ms", 0},
+                                     {"model_tokens", 0},
+                                     {"monetary_microunits", 0},
+                                     {"program_operations", 0},
+                                     {"core_steps", 0},
+                                     {"peak_concurrency", 0}}}};
+    }
+    return ProgramJavaScriptCommandJournalEntry(ProgramJavaScriptCommandJournalEntryData{
+        sequence, digest('2'), 1,
+        JavaScriptCommand::checkpoint("replacement:checkpoint", handoff), digest('8'),
+        std::move(result)});
+}
+
+void attach_replacement_successor(
+    ProgramTransitionPublication&                 publication,
+    const ProgramRunLineage&                      previous,
+    const ProgramRunGeneration&                   predecessor,
+    const ProgramRunRecord&                       source,
+    const ProgramJavaScriptCommandJournalEntry& checkpoint) {
+    const auto handoff = checkpoint.command().arguments().at("value");
+    auto receipt = ProgramReplacementReceipt(ProgramReplacementReceiptData{
+        source.owner_scope(),
+        previous.lineage_id(),
+        predecessor.generation(),
+        predecessor.id(),
+        previous.id(),
+        source.run_id(),
+        source.id(),
+        source.journal_head(),
+        source.program_version_id(),
+        source.bundle_id(),
+        checkpoint.coordinate_id(),
+        checkpoint.id(),
+        program_replacement_handoff_identity(handoff),
+        predecessor.generation() + 1,
+        publication.run_record.run_id(),
+        publication.run_record.program_version_id(),
+        publication.run_record.bundle_id(),
+        program_replacement_input_identity(publication.run_record.invocation().input),
+        publication.run_record.invocation().canonical_identity(),
+        publication.run_record.binding_fingerprint(),
+        publication.run_record.id(),
+        publication.run_record.journal_head()});
+    auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        publication.run_record.owner_scope(), previous.lineage_id(),
+        predecessor.generation() + 1, publication.run_record.run_id(),
+        publication.run_record.program_version_id(), publication.run_record.bundle_id(),
+        publication.run_record.id(), publication.run_record.journal_head(), predecessor.id(),
+        publication.run_record.created_at_ms(), publication.run_record.child_depth(),
+        std::move(receipt)});
+    publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        previous.owner_scope(), previous.lineage_id(), previous.root_run_id(),
+        generation.generation(), generation.id(), publication.run_record.id(),
+        publication.run_record.journal_head(), publication.journal_record.remaining_budget,
+        publication.journal_record.inflight_reservation, previous.id(), previous.created_at_ms(),
+        publication.run_record.updated_at_ms(), previous.committed_descendant_budget()});
+    publication.run_generation = std::move(generation);
+}
+
 void attach_fork_split(ProgramTransitionPublication& publication,
                        const ProgramRunLineage&      source) {
     attach_initial_lineage(publication);
@@ -269,7 +365,43 @@ ProgramTransitionPublication javascript_command_publication(
             {},
             {},
             std::nullopt,
-            {std::move(command)}};
+             {std::move(command)}};
+}
+
+struct ReplacementBoundary {
+    ProgramTransitionPublication                 publication;
+    ProgramJavaScriptCommandJournalEntry completed_checkpoint;
+};
+
+ReplacementBoundary publish_replacement_boundary(ProgramTransitionStore& store,
+                                                  bool recorded_source = false) {
+    auto source = start_publication();
+    if (recorded_source) {
+        auto source_data = copy_run_record_data(source.run_record);
+        source_data.recorded_binding_set_fingerprint = digest('f');
+        source.run_record = ProgramRunRecord::create(std::move(source_data));
+    }
+    attach_initial_lineage(source);
+    if (store.compare_publish("owner-a", {}, source) !=
+        ProgramTransitionPublishResult::Published) {
+        throw std::runtime_error("could not publish replacement source");
+    }
+    const json handoff{{"cursor", 7}, {"state", "ready"}};
+    auto pending = javascript_command_publication(
+        source, replacement_checkpoint_entry(1, false, handoff), 20);
+    attach_same_generation_lineage(pending, *source.run_lineage);
+    if (store.compare_publish("owner-a", source.journal_record.id, pending) !=
+        ProgramTransitionPublishResult::Published) {
+        throw std::runtime_error("could not publish replacement checkpoint coordinate");
+    }
+    auto completed_entry = replacement_checkpoint_entry(2, true, handoff);
+    auto completed = javascript_command_publication(pending, completed_entry, 30);
+    attach_same_generation_lineage(completed, *pending.run_lineage);
+    if (store.compare_publish("owner-a", pending.journal_record.id, completed) !=
+        ProgramTransitionPublishResult::Published) {
+        throw std::runtime_error("could not publish replacement checkpoint result");
+    }
+    return {std::move(completed), std::move(completed_entry)};
 }
 
 void exercise_javascript_command_history(ProgramTransitionStore& store) {
@@ -1385,7 +1517,7 @@ TEST(ProgramTransitionStoreTest, LineageAwareRunCannotBypassHeadAccounting) {
               terminal.run_lineage->id());
 }
 
-TEST(ProgramTransitionStoreTest, LineageGenerationCasAllowsExactlyOneSuccessor) {
+TEST(ProgramTransitionStoreTest, LineageGenerationRejectsReceiptlessSuccessors) {
     InMemoryProgramTransitionStore store;
     auto source = start_publication();
     attach_initial_lineage(source);
@@ -1397,37 +1529,166 @@ TEST(ProgramTransitionStoreTest, LineageGenerationCasAllowsExactlyOneSuccessor) 
     attach_successor_lineage(first, *source.run_lineage);
     attach_successor_lineage(second, *source.run_lineage);
 
+    EXPECT_EQ(store.compare_publish("owner-a", {}, first),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, second),
+              ProgramTransitionPublishResult::Conflict);
+
+    const auto lineage = store.load_lineage("owner-a", source.run_lineage->lineage_id());
+    ASSERT_TRUE(lineage.has_value());
+    EXPECT_EQ(lineage->id(), source.run_lineage->id());
+    EXPECT_EQ(lineage->active_generation(), 1U);
+    EXPECT_EQ(lineage->active_generation_id(), source.run_generation->id());
+    ASSERT_TRUE(store.load_generation("owner-a", lineage->lineage_id(), 1).has_value());
+    EXPECT_FALSE(store.load_generation("owner-a", lineage->lineage_id(), 2).has_value());
+    EXPECT_FALSE(store.load("owner-a", "run-2").has_value());
+    EXPECT_FALSE(store.load("owner-a", "run-3").has_value());
+}
+
+TEST(ProgramTransitionStoreTest, ExactCheckpointReplacementPublishesOneSuccessor) {
+    InMemoryProgramTransitionStore store;
+    const auto boundary = publish_replacement_boundary(store);
+    const auto lineage = store.load_run_lineage("owner-a", boundary.publication.run_record.run_id());
+    ASSERT_TRUE(lineage);
+    const auto predecessor =
+        store.load_generation("owner-a", lineage->lineage_id(), lineage->active_generation());
+    ASSERT_TRUE(predecessor);
+
+    const auto input = json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                            {"previous_run_id", "run-1"}};
+    const auto successor_budget = program_replacement_remaining_budget(
+        boundary.publication.run_record, *lineage, 40);
+    auto first =
+        start_publication_for("run-2", digest('7'), digest('8'), successor_budget, 40, input);
+    auto second =
+        start_publication_for("run-3", digest('9'), digest('a'), successor_budget, 40, input);
+    attach_replacement_successor(first, *lineage, *predecessor,
+                                 boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+    attach_replacement_successor(second, *lineage, *predecessor,
+                                 boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+
     std::barrier ready(3);
     auto publish = [&](ProgramTransitionPublication value) {
         ready.arrive_and_wait();
         return store.compare_publish("owner-a", {}, std::move(value));
     };
-    auto a = std::async(std::launch::async, [&] { return publish(first); });
-    auto b = std::async(std::launch::async, [&] { return publish(second); });
+    auto first_result = std::async(std::launch::async, [&] { return publish(first); });
+    auto second_result = std::async(std::launch::async, [&] { return publish(second); });
     ready.arrive_and_wait();
-    const auto a_result = a.get();
-    const auto b_result = b.get();
-    EXPECT_TRUE((a_result == ProgramTransitionPublishResult::Published &&
-                 b_result == ProgramTransitionPublishResult::Conflict) ||
-                (b_result == ProgramTransitionPublishResult::Published &&
-                 a_result == ProgramTransitionPublishResult::Conflict));
+    const auto a = first_result.get();
+    const auto b = second_result.get();
+    EXPECT_TRUE((a == ProgramTransitionPublishResult::Published &&
+                 b == ProgramTransitionPublishResult::Conflict) ||
+                (b == ProgramTransitionPublishResult::Published &&
+                 a == ProgramTransitionPublishResult::Conflict));
 
-    const auto lineage = store.load_lineage("owner-a", source.run_lineage->lineage_id());
-    ASSERT_TRUE(lineage.has_value());
-    EXPECT_EQ(lineage->active_generation(), 2U);
-    EXPECT_TRUE(lineage->active_generation_id() == first.run_generation->id() ||
-                lineage->active_generation_id() == second.run_generation->id());
-    ASSERT_TRUE(store.load_generation("owner-a", lineage->lineage_id(), 1).has_value());
-    ASSERT_TRUE(store.load_generation("owner-a", lineage->lineage_id(), 2).has_value());
-    const auto source_head = store.load_run_lineage("owner-a", source.run_record.run_id());
-    const auto target_run_id = a_result == ProgramTransitionPublishResult::Published
-                                   ? first.run_record.run_id()
-                                   : second.run_record.run_id();
-    const auto target_head = store.load_run_lineage("owner-a", target_run_id);
-    ASSERT_TRUE(source_head);
-    ASSERT_TRUE(target_head);
-    EXPECT_EQ(source_head->id(), lineage->id());
-    EXPECT_EQ(target_head->id(), lineage->id());
+    const auto& winner = a == ProgramTransitionPublishResult::Published ? first : second;
+    const auto& loser  = a == ProgramTransitionPublishResult::Published ? second : first;
+    const auto current = store.load_lineage("owner-a", lineage->lineage_id());
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->active_generation(), 2U);
+    EXPECT_EQ(current->active_generation_id(), winner.run_generation->id());
+    EXPECT_EQ(current->remaining_budget(), successor_budget);
+    EXPECT_TRUE(store.load("owner-a", winner.run_record.run_id()));
+    EXPECT_FALSE(store.load("owner-a", loser.run_record.run_id()));
+    const auto generation = store.load_generation("owner-a", lineage->lineage_id(), 2);
+    ASSERT_TRUE(generation);
+    ASSERT_TRUE(generation->replacement_receipt());
+    EXPECT_EQ(generation->replacement_receipt()->checkpoint_entry_id(),
+              boundary.completed_checkpoint.id());
+    const auto parsed = ProgramRunGeneration::parse(generation->serialize_canonical());
+    ASSERT_TRUE(parsed.replacement_receipt());
+    EXPECT_EQ(parsed.id(), generation->id());
+    EXPECT_EQ(parsed.replacement_receipt()->id(), generation->replacement_receipt()->id());
+    EXPECT_EQ(store.compare_publish("owner-a", {}, winner),
+              ProgramTransitionPublishResult::AlreadyPresent);
+}
+
+TEST(ProgramTransitionStoreTest, ReplacementReceiptRejectsWrongHandoffWithoutMutation) {
+    InMemoryProgramTransitionStore store;
+    const auto boundary = publish_replacement_boundary(store);
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation("owner-a", lineage->lineage_id(), 1);
+    ASSERT_TRUE(predecessor);
+
+    const auto successor_budget = program_replacement_remaining_budget(
+        boundary.publication.run_record, *lineage, 40);
+    auto target = start_publication_for(
+        "run-2", digest('7'), digest('8'), successor_budget, 40,
+        json{{"handoff", json{{"cursor", 8}, {"state", "wrong"}}},
+             {"previous_run_id", "run-1"}});
+    attach_replacement_successor(target, *lineage, *predecessor,
+                                 boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+    EXPECT_EQ(store.load_lineage("owner-a", lineage->lineage_id())->id(), lineage->id());
+}
+
+TEST(ProgramTransitionStoreTest, ReplacementReceiptRejectsRetargetedInitialSnapshot) {
+    InMemoryProgramTransitionStore store;
+    const auto boundary = publish_replacement_boundary(store);
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation("owner-a", lineage->lineage_id(), 1);
+    ASSERT_TRUE(predecessor);
+    const auto successor_budget = program_replacement_remaining_budget(
+        boundary.publication.run_record, *lineage, 40);
+    auto target = start_publication_for(
+        "run-2", digest('7'), digest('8'), successor_budget, 40,
+        json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+             {"previous_run_id", "run-1"}});
+    attach_replacement_successor(target, *lineage, *predecessor,
+                                 boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+
+    auto retargeted_data = copy_run_record_data(target.run_record);
+    retargeted_data.binding_fingerprint = digest('b');
+    target.run_record = ProgramRunRecord::create(std::move(retargeted_data));
+    auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        target.run_record.owner_scope(), lineage->lineage_id(), 2, target.run_record.run_id(),
+        target.run_record.program_version_id(), target.run_record.bundle_id(),
+        target.run_record.id(), target.run_record.journal_head(), predecessor->id(),
+        target.run_record.created_at_ms(), target.run_record.child_depth(),
+        target.run_generation->replacement_receipt()});
+    target.run_generation = generation;
+    target.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        lineage->owner_scope(), lineage->lineage_id(), lineage->root_run_id(), 2,
+        generation.id(), target.run_record.id(), target.run_record.journal_head(),
+        successor_budget, RunBudget{}, lineage->id(), lineage->created_at_ms(),
+        target.run_record.updated_at_ms(), lineage->committed_descendant_budget()});
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+    EXPECT_EQ(store.load_lineage("owner-a", lineage->lineage_id())->id(), lineage->id());
+}
+
+TEST(ProgramTransitionStoreTest, RecordedReplaySourceCannotPublishLiveReplacement) {
+    InMemoryProgramTransitionStore store;
+    const auto boundary = publish_replacement_boundary(store, true);
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation("owner-a", lineage->lineage_id(), 1);
+    ASSERT_TRUE(predecessor);
+    const auto successor_budget = program_replacement_remaining_budget(
+        boundary.publication.run_record, *lineage, 40);
+    auto target = start_publication_for(
+        "run-2", digest('7'), digest('8'), successor_budget, 40,
+        json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+             {"previous_run_id", "run-1"}});
+    attach_replacement_successor(target, *lineage, *predecessor,
+                                 boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+    EXPECT_EQ(store.load_lineage("owner-a", lineage->lineage_id())->id(), lineage->id());
 }
 
 TEST(ProgramTransitionStoreTest, LineageSuccessorCannotReplenishBudget) {
@@ -1576,7 +1837,7 @@ TEST(ProgramTransitionStoreTest, TerminalChildResultSurvivesRecordRoundTrip) {
     EXPECT_EQ(parsed.children().front().terminal_result->run_id(), child_id);
 }
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
-TEST(ProgramTransitionStoreTest, SQLiteReopensLineageAndImmutableGenerations) {
+TEST(ProgramTransitionStoreTest, SQLiteRejectsReceiptlessSuccessorAcrossReopen) {
     static std::atomic<unsigned> sequence{0};
     const auto path =
         (std::filesystem::temp_directory_path() /
@@ -1593,35 +1854,142 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensLineageAndImmutableGenerations) {
         SQLiteProgramTransitionStore store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, source),
                   ProgramTransitionPublishResult::Published);
-        ASSERT_EQ(store.compare_publish("owner-a", {}, target),
-                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, target),
+                  ProgramTransitionPublishResult::Conflict);
     }
     {
         SQLiteProgramTransitionStore store(path);
         const auto lineage = store.load_lineage("owner-a", lineage_id);
         ASSERT_TRUE(lineage.has_value());
-        EXPECT_EQ(lineage->id(), target.run_lineage->id());
-        EXPECT_EQ(lineage->active_generation(), 2U);
+        EXPECT_EQ(lineage->id(), source.run_lineage->id());
+        EXPECT_EQ(lineage->active_generation(), 1U);
         ASSERT_TRUE(store.load_generation("owner-a", lineage_id, 1).has_value());
-        ASSERT_TRUE(store.load_generation("owner-a", lineage_id, 2).has_value());
+        EXPECT_FALSE(store.load_generation("owner-a", lineage_id, 2).has_value());
         EXPECT_EQ(store.load_generation("owner-a", lineage_id, 1)->id(),
                   source.run_generation->id());
-        EXPECT_EQ(store.load_generation("owner-a", lineage_id, 2)->id(),
-                  target.run_generation->id());
         EXPECT_EQ(store.load_lineage_head("owner-a", lineage_id, source.run_lineage->id())->id(),
                   source.run_lineage->id());
-        EXPECT_EQ(store.load_lineage_head("owner-a", lineage_id, target.run_lineage->id())->id(),
-                  target.run_lineage->id());
         EXPECT_EQ(store.load_run_lineage("owner-a", source.run_record.run_id())->id(),
-                  target.run_lineage->id());
-        EXPECT_EQ(store.load_run_lineage("owner-a", target.run_record.run_id())->id(),
-                  target.run_lineage->id());
+                  source.run_lineage->id());
+        EXPECT_FALSE(store.load_run_lineage("owner-a", target.run_record.run_id()));
+        EXPECT_FALSE(store.load("owner-a", target.run_record.run_id()));
         EXPECT_FALSE(store.load_lineage("owner-b", lineage_id).has_value());
     }
     std::filesystem::remove(path);
 }
 
-TEST(ProgramTransitionStoreTest, SQLiteLineageCasAcrossConnectionsHasOneSuccessor) {
+TEST(ProgramTransitionStoreTest, SQLiteReplacementReceiptSurvivesReopen) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-replacement-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    std::string lineage_id;
+    std::string generation_id;
+    std::string receipt_id;
+    RunBudget   successor_budget;
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto boundary = publish_replacement_boundary(store);
+        const auto lineage = store.load_run_lineage("owner-a", "run-1");
+        ASSERT_TRUE(lineage);
+        const auto predecessor = store.load_generation("owner-a", lineage->lineage_id(), 1);
+        ASSERT_TRUE(predecessor);
+        successor_budget = program_replacement_remaining_budget(
+            boundary.publication.run_record, *lineage, 40);
+        auto target = start_publication_for(
+            "run-2", digest('7'), digest('8'), successor_budget, 40,
+            json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                 {"previous_run_id", "run-1"}});
+        attach_replacement_successor(target, *lineage, *predecessor,
+                                     boundary.publication.run_record,
+                                     boundary.completed_checkpoint);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, target),
+                  ProgramTransitionPublishResult::Published);
+        lineage_id   = lineage->lineage_id();
+        generation_id = target.run_generation->id();
+        receipt_id    = target.run_generation->replacement_receipt()->id();
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto lineage = store.load_lineage("owner-a", lineage_id);
+        ASSERT_TRUE(lineage);
+        EXPECT_EQ(lineage->active_generation(), 2U);
+        EXPECT_EQ(lineage->active_generation_id(), generation_id);
+        const auto generation = store.load_generation("owner-a", lineage_id, 2);
+        ASSERT_TRUE(generation);
+        ASSERT_TRUE(generation->replacement_receipt());
+        EXPECT_EQ(generation->replacement_receipt()->id(), receipt_id);
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-1")->id(), lineage->id());
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-2")->id(), lineage->id());
+        EXPECT_EQ(store.load("owner-a", "run-2")->remaining_budget(), successor_budget);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteConnectionsPublishExactlyOneReplacementSuccessor) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-replacement-cas-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    {
+        SQLiteProgramTransitionStore first_store(path);
+        SQLiteProgramTransitionStore second_store(path);
+        const auto boundary = publish_replacement_boundary(first_store);
+        const auto lineage = first_store.load_run_lineage("owner-a", "run-1");
+        ASSERT_TRUE(lineage);
+        const auto predecessor =
+            first_store.load_generation("owner-a", lineage->lineage_id(), 1);
+        ASSERT_TRUE(predecessor);
+        const auto successor_budget = program_replacement_remaining_budget(
+            boundary.publication.run_record, *lineage, 40);
+        const auto input = json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                                {"previous_run_id", "run-1"}};
+        auto first =
+            start_publication_for("run-2", digest('7'), digest('8'), successor_budget, 40, input);
+        auto second =
+            start_publication_for("run-3", digest('9'), digest('a'), successor_budget, 40, input);
+        attach_replacement_successor(first, *lineage, *predecessor,
+                                     boundary.publication.run_record,
+                                     boundary.completed_checkpoint);
+        attach_replacement_successor(second, *lineage, *predecessor,
+                                     boundary.publication.run_record,
+                                     boundary.completed_checkpoint);
+
+        std::barrier ready(3);
+        auto first_result = std::async(std::launch::async, [&] {
+            ready.arrive_and_wait();
+            return first_store.compare_publish("owner-a", {}, first);
+        });
+        auto second_result = std::async(std::launch::async, [&] {
+            ready.arrive_and_wait();
+            return second_store.compare_publish("owner-a", {}, second);
+        });
+        ready.arrive_and_wait();
+        const auto a = first_result.get();
+        const auto b = second_result.get();
+        ASSERT_TRUE((a == ProgramTransitionPublishResult::Published &&
+                     b == ProgramTransitionPublishResult::Conflict) ||
+                    (b == ProgramTransitionPublishResult::Published &&
+                     a == ProgramTransitionPublishResult::Conflict));
+
+        const auto& winner = a == ProgramTransitionPublishResult::Published ? first : second;
+        const auto& loser  = a == ProgramTransitionPublishResult::Published ? second : first;
+        const auto head = first_store.load_lineage("owner-a", lineage->lineage_id());
+        ASSERT_TRUE(head);
+        EXPECT_EQ(head->active_generation_id(), winner.run_generation->id());
+        EXPECT_TRUE(first_store.load("owner-a", winner.run_record.run_id()));
+        EXPECT_FALSE(first_store.load("owner-a", loser.run_record.run_id()));
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteConnectionsRejectReceiptlessSuccessors) {
     static std::atomic<unsigned> sequence{0};
     const auto path =
         (std::filesystem::temp_directory_path() /
@@ -1641,27 +2009,18 @@ TEST(ProgramTransitionStoreTest, SQLiteLineageCasAcrossConnectionsHasOneSuccesso
         auto second = start_publication_for("run-3", digest('9'), digest('a'), budget(), 20);
         attach_successor_lineage(first, *source.run_lineage);
         attach_successor_lineage(second, *source.run_lineage);
-        std::barrier ready(3);
-        auto publish = [&](SQLiteProgramTransitionStore& store,
-                           ProgramTransitionPublication value) {
-            ready.arrive_and_wait();
-            return store.compare_publish("owner-a", {}, std::move(value));
-        };
-        auto a = std::async(std::launch::async, [&] { return publish(first_store, first); });
-        auto b = std::async(std::launch::async, [&] { return publish(second_store, second); });
-        ready.arrive_and_wait();
-        const auto a_result = a.get();
-        const auto b_result = b.get();
-        EXPECT_TRUE((a_result == ProgramTransitionPublishResult::Published &&
-                     b_result == ProgramTransitionPublishResult::Conflict) ||
-                    (b_result == ProgramTransitionPublishResult::Published &&
-                     a_result == ProgramTransitionPublishResult::Conflict));
+        EXPECT_EQ(first_store.compare_publish("owner-a", {}, first),
+                  ProgramTransitionPublishResult::Conflict);
+        EXPECT_EQ(second_store.compare_publish("owner-a", {}, second),
+                  ProgramTransitionPublishResult::Conflict);
 
         const auto lineage = first_store.load_lineage("owner-a", source.run_lineage->lineage_id());
         ASSERT_TRUE(lineage.has_value());
-        EXPECT_EQ(lineage->active_generation(), 2U);
-        EXPECT_TRUE(lineage->active_generation_id() == first.run_generation->id() ||
-                    lineage->active_generation_id() == second.run_generation->id());
+        EXPECT_EQ(lineage->id(), source.run_lineage->id());
+        EXPECT_EQ(lineage->active_generation(), 1U);
+        EXPECT_FALSE(first_store.load_generation("owner-a", lineage->lineage_id(), 2));
+        EXPECT_FALSE(first_store.load("owner-a", first.run_record.run_id()));
+        EXPECT_FALSE(second_store.load("owner-a", second.run_record.run_id()));
     }
     std::filesystem::remove(path);
 }

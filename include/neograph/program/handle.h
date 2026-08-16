@@ -6,6 +6,7 @@
 
 #include <neograph/api.h>
 #include <neograph/program/event.h>
+#include <neograph/program/replacement.h>
 #include <neograph/program/result.h>
 #include <neograph/program/run_record.h>
 
@@ -44,6 +45,8 @@ public:
     std::optional<ProgramResult>          try_result() const;
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
+    /** Latest completed top-level ng.checkpoint that still owns the lineage head. */
+    std::optional<ExactProgramHandoff>    latest_handoff() const;
     ProgramRunRecord                      snapshot() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;
     ProgramHandle reconcile(ProgramRuntime& runtime,

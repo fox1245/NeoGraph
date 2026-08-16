@@ -70,6 +70,20 @@ std::string generate_run_id() {
     return id;
 }
 
+std::string replacement_run_id(const ExactProgramHandoffReference& source,
+                               std::string_view                     target_version_id,
+                               const json&                          target_input) {
+    return detail::sha256_identity(
+        "program-replacement-run/v1",
+        detail::canonical_json_bytes(
+            json{{"source_run_id", source.source_run_id},
+                 {"source_journal_head", source.source_journal_head},
+                 {"checkpoint_coordinate_id", source.command_coordinate_id},
+                 {"checkpoint_entry_id", source.command_entry_id},
+                 {"target_program_version_id", std::string(target_version_id)},
+                 {"target_input_identity", program_replacement_input_identity(target_input)}}));
+}
+
 RunBudget lineage_descendant_budget(const ProgramRunRecord& run) {
     RunBudget committed;
     const auto add = [](auto& target, auto value) {
@@ -730,10 +744,58 @@ std::string contract_fingerprint(const ContractRecord& contract) {
 }
 
 bool contains_all(const std::vector<std::string>& available,
-                  const std::vector<std::string>& requested) {
+                   const std::vector<std::string>& requested) {
     return std::all_of(requested.begin(), requested.end(), [&](const auto& value) {
         return std::find(available.begin(), available.end(), value) != available.end();
     });
+}
+
+template <class T>
+bool contains_all_values(const std::vector<T>& available, const std::vector<T>& requested) {
+    return std::all_of(requested.begin(), requested.end(), [&](const auto& value) {
+        return std::find(available.begin(), available.end(), value) != available.end();
+    });
+}
+
+bool replacement_authority_is_attenuated(const detail::MaterializedProgram& source,
+                                         const detail::MaterializedProgram& target) {
+    const auto source_profile = source.version.admission_profile();
+    const auto target_profile = target.version.admission_profile();
+    const auto source_policy  = source.version.policy_snapshot();
+    const auto target_policy  = target.version.policy_snapshot();
+    const auto& source_closure = source.bundle.capability_effect_closure();
+    const auto& target_closure = target.bundle.capability_effect_closure();
+
+    return source.version.ownership_scope() == target.version.ownership_scope() &&
+           execution_guarantee_rank(target.version.execution_guarantee()) >=
+               execution_guarantee_rank(source.version.execution_guarantee()) &&
+           execution_guarantee_rank(target_profile.minimum_execution_guarantee()) >=
+               execution_guarantee_rank(source_profile.minimum_execution_guarantee()) &&
+           execution_guarantee_rank(target_policy.minimum_execution_guarantee()) >=
+               execution_guarantee_rank(source_policy.minimum_execution_guarantee()) &&
+           source_profile.mode() == target_profile.mode() &&
+           source_profile.registry_fingerprint() == target_profile.registry_fingerprint() &&
+           target_profile.max_program_schema_version() <=
+               source_profile.max_program_schema_version() &&
+           contains_all_values(source_profile.allowed_source_kinds(),
+                               target_profile.allowed_source_kinds()) &&
+           contains_all_values(source_profile.allowed_executables(),
+                               target_profile.allowed_executables()) &&
+           contains_all_values(source_profile.allowed_effect_modes(),
+                               target_profile.allowed_effect_modes()) &&
+           source_policy.owner_scope() == target_policy.owner_scope() &&
+           source_policy.registry_fingerprint() == target_policy.registry_fingerprint() &&
+           contains_all(source_policy.allowed_capabilities(),
+                        target_policy.allowed_capabilities()) &&
+           contains_all(source_policy.allowed_effects(), target_policy.allowed_effects()) &&
+           contains_all(source_policy.allowed_module_digests(),
+                        target_policy.allowed_module_digests()) &&
+           contains_all(source_closure.capabilities, target_closure.capabilities) &&
+           contains_all(source_closure.effects, target_closure.effects) &&
+           contains_all_values(source.bundle.executable_registry_identities(),
+                               target.bundle.executable_registry_identities()) &&
+           contains_all_values(source.version.core_materialization_receipt().capability_bindings,
+                               target.version.core_materialization_receipt().capability_bindings);
 }
 
 bool budget_leq(const RunBudget& budget, const BudgetLimits& ceiling) {
@@ -1291,11 +1353,12 @@ bool is_unstarted_child_dispatch(const std::shared_ptr<ProgramTransitionStore>& 
 }
 ProgramJournalRecord initial_record(
     const detail::RunControl&             control,
-    std::optional<CoreCheckpointIdentity> checkpoint = std::nullopt) {
+    std::optional<CoreCheckpointIdentity> checkpoint = std::nullopt,
+    std::optional<std::int64_t>           timestamp  = std::nullopt) {
     return ProgramJournalRecord::create(ProgramJournalRecordData{
         "", control.run_id, control.program_version_id, control.bundle_id, 1,
         ProgramContinuation{"root", ContinuationState::Running, control.attempt},
-        control.granted_budget, RunBudget{}, std::move(checkpoint), now_ms()});
+        control.granted_budget, RunBudget{}, std::move(checkpoint), timestamp.value_or(now_ms())});
 }
 
 ProgramTransitionPublication initial_publication(
@@ -1305,8 +1368,9 @@ ProgramTransitionPublication initial_publication(
     std::optional<ForkCompatibilityReceipt> fork_receipt         = std::nullopt,
     std::optional<std::string>              recorded_binding_set = std::nullopt,
     std::optional<ProgramPendingInput>      pending_input        = std::nullopt,
-    std::optional<ProgramPendingEffect>     pending_effect       = std::nullopt) {
-    auto                 journal = initial_record(control, checkpoint);
+    std::optional<ProgramPendingEffect>     pending_effect       = std::nullopt,
+    std::optional<std::int64_t>             timestamp            = std::nullopt) {
+    auto journal = initial_record(control, checkpoint, timestamp);
     ProgramRunRecordData data;
     data.owner_scope         = control.owner_scope;
     data.run_id              = control.run_id;
@@ -2154,6 +2218,42 @@ std::optional<CoreCheckpointIdentity> RunControl::latest_checkpoint() const {
     return latest_checkpoint_;
 }
 
+std::optional<ExactProgramHandoff> RunControl::latest_handoff() const {
+    const auto record  = transitions->load(owner_scope, run_id);
+    const auto journal = transitions->latest(owner_scope, run_id);
+    const auto lineage = transitions->load_run_lineage(owner_scope, run_id);
+    if (!record || !journal || !lineage || record->journal_head() != journal->id ||
+        lineage->active_run_record_id() != record->id() ||
+        lineage->active_journal_head() != record->journal_head() ||
+        lineage->inflight_reservation() != RunBudget{} ||
+        record->continuation().state != ContinuationState::Running) {
+        return std::nullopt;
+    }
+    const auto generation = transitions->load_generation(
+        owner_scope, lineage->lineage_id(), lineage->active_generation());
+    if (!generation || !does_program_run_generation_bind(*generation, *lineage, *record)) {
+        return std::nullopt;
+    }
+    const auto commands = transitions->load_javascript_commands(owner_scope, run_id);
+    if (commands.empty()) return std::nullopt;
+    const auto& checkpoint = commands.back();
+    const auto  terminal   = checkpoint.terminal_result();
+    const auto  arguments  = checkpoint.command().arguments();
+    if (!checkpoint.completed() ||
+        checkpoint.command().kind() != JavaScriptCommandKind::Checkpoint || !terminal ||
+        !terminal->is_object() || !terminal->contains("status") ||
+        terminal->at("status") != "completed" || !terminal->contains("output") ||
+        !arguments.is_object() || !arguments.contains("value") ||
+        detail::canonical_json_bytes(terminal->at("output")) !=
+            detail::canonical_json_bytes(arguments.at("value"))) {
+        return std::nullopt;
+    }
+    return ExactProgramHandoff{
+        ExactProgramHandoffReference{run_id, record->journal_head(), checkpoint.coordinate_id(),
+                                     checkpoint.id()},
+        detail::owned_json_copy(arguments.at("value"))};
+}
+
 ProgramRunRecord RunControl::snapshot() const {
     const auto record = transitions->load(owner_scope, run_id);
     if (!record) {
@@ -2338,6 +2438,32 @@ asio::awaitable<ProgramResult> wait_for_control(std::shared_ptr<detail::RunContr
     co_return co_await control->wait_async();
 }
 
+struct ProcessRuntimeState {
+    struct ControlEntry {
+        std::string                       owner_scope;
+        std::string                       run_id;
+        std::weak_ptr<detail::RunControl> control;
+    };
+
+    std::recursive_mutex      transition_mutex;
+    std::mutex                controls_mutex;
+    std::vector<ControlEntry> controls;
+};
+
+std::shared_ptr<ProcessRuntimeState> process_runtime_state(
+    const ProgramTransitionStore* transitions) {
+    static std::mutex registry_mutex;
+    static std::unordered_map<const ProgramTransitionStore*, std::weak_ptr<ProcessRuntimeState>>
+        registry;
+    std::lock_guard lock(registry_mutex);
+    std::erase_if(registry, [](const auto& entry) { return entry.second.expired(); });
+    auto&           weak = registry[transitions];
+    if (auto state = weak.lock()) return state;
+    auto state = std::make_shared<ProcessRuntimeState>();
+    weak       = state;
+    return state;
+}
+
 }  // namespace
 
 ProgramHandle::ProgramHandle(std::shared_ptr<detail::RunControl> control)
@@ -2370,6 +2496,9 @@ std::vector<ProgramEvent> ProgramHandle::events_after(std::uint64_t sequence) co
 std::optional<CoreCheckpointIdentity> ProgramHandle::latest_checkpoint() const {
     return control_->latest_checkpoint();
 }
+std::optional<ExactProgramHandoff> ProgramHandle::latest_handoff() const {
+    return control_->latest_handoff();
+}
 ProgramRunRecord ProgramHandle::snapshot() const {
     return control_->snapshot();
 }
@@ -2385,6 +2514,7 @@ struct ProgramRuntime::Impl {
     explicit Impl(RuntimeConfig runtime_config)
         : config(std::move(runtime_config)), pool(config.scheduler_threads) {
         global_child_quota = std::make_shared<GlobalChildQuotaState>(config.child_quota);
+        process_state      = process_runtime_state(config.transitions.get());
     }
     ProgramRuntime* owner = nullptr;
 
@@ -2499,14 +2629,41 @@ struct ProgramRuntime::Impl {
                                                       config.task_graph_policy_resolver);
     }
 
-    void register_control(const std::shared_ptr<detail::RunControl>& control) {
+    struct ControlRegistration {
+        std::shared_ptr<detail::RunControl> control;
+        bool                                inserted = false;
+    };
+
+    ControlRegistration register_control(const std::shared_ptr<detail::RunControl>& control,
+                                         bool process_unique = false) {
         configure_child_launcher(control);
+        std::lock_guard lock(mutex);
         if (stopping) throw std::runtime_error("ProgramRuntime is stopping");
+        {
+            std::lock_guard process_lock(process_state->controls_mutex);
+            std::erase_if(process_state->controls, [](const auto& entry) {
+                const auto live = entry.control.lock();
+                return !live || live->try_result().has_value();
+            });
+            if (process_unique) {
+                for (auto& entry : process_state->controls) {
+                    if (entry.owner_scope == control->owner_scope &&
+                        entry.run_id == control->run_id) {
+                        if (auto existing = entry.control.lock()) {
+                            return {std::move(existing), false};
+                        }
+                    }
+                }
+            }
+            process_state->controls.push_back(
+                {control->owner_scope, control->run_id, control});
+        }
         std::erase_if(controls, [](const std::weak_ptr<detail::RunControl>& weak) {
             const auto live = weak.lock();
             return !live || live->try_result().has_value();
         });
         controls.push_back(control);
+        return {control, true};
     }
 
     std::shared_ptr<ChildQuotaReservation> reserve_global_child(std::string_view owner_scope) {
@@ -2560,7 +2717,7 @@ struct ProgramRuntime::Impl {
     }
 
     std::shared_ptr<detail::RunControl> find_control(std::string_view owner_scope,
-                                                     std::string_view run_id) {
+                                                      std::string_view run_id) {
         std::lock_guard lock(mutex);
         for (auto& weak : controls) {
             auto control = weak.lock();
@@ -2569,6 +2726,39 @@ struct ProgramRuntime::Impl {
             }
         }
         return {};
+    }
+
+    std::shared_ptr<detail::RunControl> find_process_control(std::string_view owner_scope,
+                                                              std::string_view run_id) {
+        std::lock_guard lock(process_state->controls_mutex);
+        std::erase_if(process_state->controls, [](const auto& entry) {
+            const auto live = entry.control.lock();
+            return !live || live->try_result().has_value();
+        });
+        for (auto& entry : process_state->controls) {
+            if (entry.owner_scope == owner_scope && entry.run_id == run_id) {
+                if (auto control = entry.control.lock()) return control;
+            }
+        }
+        return {};
+    }
+
+    void cancel_process_controls(std::string_view owner_scope, std::string_view run_id) {
+        std::vector<std::shared_ptr<detail::RunControl>> matches;
+        {
+            std::lock_guard lock(process_state->controls_mutex);
+            std::erase_if(process_state->controls, [](const auto& entry) {
+                const auto live = entry.control.lock();
+                return !live || live->try_result().has_value();
+            });
+            for (auto& entry : process_state->controls) {
+                if (entry.owner_scope == owner_scope && entry.run_id == run_id) {
+                    if (auto control = entry.control.lock()) matches.push_back(std::move(control));
+                }
+            }
+        }
+        for (auto& control : matches)
+            (void)control->cancel(detail::CancellationCause::ParentTerminal);
     }
 
     struct ChildReservationState {
@@ -2837,6 +3027,7 @@ struct ProgramRuntime::Impl {
     RuntimeConfig                                          config;
     asio::thread_pool                                      pool;
     std::shared_ptr<GlobalChildQuotaState>                 global_child_quota;
+    std::shared_ptr<ProcessRuntimeState>                   process_state;
     asio::thread_pool                                      deadline_pool{1};
     std::mutex                                             mutex;
     std::mutex                                             fork_mutex;
@@ -3632,6 +3823,290 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     return ProgramHandle(std::move(control));
 }
 
+ProgramHandle ProgramRuntime::replace(ExactProgramHandoffReference source,
+                                      RunInvocation                invocation,
+                                      std::shared_ptr<ProgramEventSink> events) {
+    invocation.validate();
+    if (!invocation.parent_run_id.empty()) {
+        throw std::invalid_argument(
+            "Top-level replacement invocation must not carry parent_run_id");
+    }
+    const auto owner_scope = invocation.owner_scope;
+    const auto resolved =
+        impl_->config.catalog->resolve_version(owner_scope, invocation.program_version_id);
+    if (!resolved) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    return replace(owner_scope, std::move(source), *resolved,
+                   runtime_projection(std::move(invocation), std::move(events)));
+}
+
+ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
+                                      ExactProgramHandoffReference   source,
+                                      const ProgramVersion&          target,
+                                      ProgramInvocation              invocation) {
+    if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
+    std::unique_lock transition_lock(impl_->fork_mutex);
+    std::unique_lock reconnect_lock(impl_->process_state->transition_mutex);
+    if (!invocation.parent_run_id.empty() || invocation.child_depth != 0) {
+        throw std::invalid_argument("Program replacement invocation must be top-level");
+    }
+    if (source.source_run_id.empty() || source.source_journal_head.empty() ||
+        source.command_coordinate_id.empty() || source.command_entry_id.empty()) {
+        throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
+                                 "Program replacement requires an exact handoff reference");
+    }
+    if (target.ownership_scope() != owner_scope) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    const auto resolved_target = impl_->config.catalog->resolve_version(owner_scope, target.id());
+    if (!resolved_target) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    auto target_pinned =
+        detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *resolved_target);
+    if (!target_pinned->bundle.control_source()) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_TARGET",
+            "Program replacement target must expose restricted JavaScript control");
+    }
+    if (!invocation.input.is_object() || !invocation.input.contains("handoff") ||
+        !invocation.input.contains("previous_run_id") ||
+        !invocation.input.at("previous_run_id").is_string() ||
+        invocation.input.at("previous_run_id").get<std::string>() != source.source_run_id) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_INPUT",
+            "Replacement input must bind handoff state and the exact predecessor run");
+    }
+
+    const auto run_id = invocation.requested_run_id.empty()
+                            ? replacement_run_id(source, target.id(), invocation.input)
+                            : invocation.requested_run_id;
+    if (run_id == source.source_run_id) {
+        throw_runtime_diagnostic("P_REPLACEMENT_SAME_RUN",
+                                 "Replacement target run must differ from its source");
+    }
+    const auto cancel_source_control = [&] {
+        impl_->cancel_process_controls(owner_scope, source.source_run_id);
+    };
+    const auto reconnect_existing = [&]() -> std::optional<ProgramHandle> {
+        const auto existing = impl_->config.transitions->load(owner_scope, run_id);
+        if (!existing) return std::nullopt;
+        const auto lineage = impl_->config.transitions->load_run_lineage(owner_scope, run_id);
+        const auto generation = lineage ? impl_->config.transitions->load_generation(
+                                              owner_scope, lineage->lineage_id(),
+                                              lineage->active_generation())
+                                        : std::nullopt;
+        const auto receipt = generation ? generation->replacement_receipt() : std::nullopt;
+        auto retry_projection = invocation;
+        retry_projection.budget = existing->invocation().budget;
+        if (retry_projection.canonical_request) {
+            retry_projection.canonical_request->budget = existing->invocation().budget;
+        }
+        const auto retry_canonical =
+            bind_runtime_invocation(retry_projection, owner_scope, target.id(), run_id);
+        if (lineage && generation && receipt && generation->run_id() == run_id &&
+            existing->program_version_id() == target.id() &&
+            existing->bundle_id() == target.bundle_id() &&
+            existing->invocation() == retry_canonical &&
+            receipt->source_run_id() == source.source_run_id &&
+            receipt->source_journal_head() == source.source_journal_head &&
+            receipt->checkpoint_coordinate_id() == source.command_coordinate_id &&
+            receipt->checkpoint_entry_id() == source.command_entry_id &&
+            receipt->target_generation() == generation->generation() &&
+            receipt->target_run_id() == run_id &&
+            receipt->target_program_version_id() == target.id() &&
+            receipt->target_bundle_id() == target.bundle_id() &&
+            receipt->target_invocation_id() == existing->invocation().canonical_identity() &&
+            receipt->target_binding_fingerprint() == existing->binding_fingerprint() &&
+            receipt->target_initial_run_record_id() == generation->initial_run_record_id() &&
+            receipt->target_initial_journal_head() == generation->initial_journal_head() &&
+            receipt->matches_target_input(invocation.input)) {
+            auto reconnected = reconnect(owner_scope, run_id);
+            cancel_source_control();
+            return reconnected;
+        }
+        throw_runtime_diagnostic("P_RUN_CONFLICT",
+                                 "Requested replacement run id is unavailable");
+    };
+    if (auto existing = reconnect_existing()) return std::move(*existing);
+
+    const auto source_record =
+        impl_->config.transitions->load(owner_scope, source.source_run_id);
+    if (!source_record || source_record->journal_head() != source.source_journal_head) {
+        throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
+                                 "Program replacement handoff is not the active source head");
+    }
+    if (source_record->recorded_binding_set_fingerprint()) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_RECORDED_SOURCE",
+            "Recorded replay evidence cannot authorize a live-bound replacement");
+    }
+    const auto source_lineage =
+        load_active_run_lineage(*impl_->config.transitions, *source_record);
+    if (!source_lineage || source_record->continuation().state != ContinuationState::Running ||
+        source_record->child_depth() != 0 ||
+        !source_record->invocation().parent_run_id.empty() || source_record->pending_input() ||
+        source_record->pending_effect() || source_record->terminal_result() ||
+        !source_record->children().empty() ||
+        source_lineage->lineage.inflight_reservation() != RunBudget{} ||
+        source_lineage->lineage.committed_descendant_budget() != RunBudget{}) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_STATE",
+            "Program replacement source is not at an admitted quiescent boundary");
+    }
+    const auto source_journal =
+        impl_->config.transitions->latest(owner_scope, source.source_run_id);
+    if (!source_journal || source_journal->id != source.source_journal_head ||
+        source_journal->inflight_reservation != RunBudget{}) {
+        throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
+                                 "Program replacement source journal is not quiescent");
+    }
+    const auto commands =
+        impl_->config.transitions->load_javascript_commands(owner_scope, source.source_run_id);
+    if (commands.empty()) {
+        throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
+                                 "Program replacement checkpoint was not found");
+    }
+    const auto& checkpoint = commands.back();
+    const auto  terminal   = checkpoint.terminal_result();
+    const auto  arguments  = checkpoint.command().arguments();
+    if (!checkpoint.completed() ||
+        checkpoint.command().kind() != JavaScriptCommandKind::Checkpoint ||
+        checkpoint.coordinate_id() != source.command_coordinate_id ||
+        checkpoint.id() != source.command_entry_id || !terminal || !terminal->is_object() ||
+        !terminal->contains("status") || terminal->at("status") != "completed" ||
+        !terminal->contains("output") || !arguments.is_object() || !arguments.contains("value") ||
+        detail::canonical_json_bytes(terminal->at("output")) !=
+            detail::canonical_json_bytes(arguments.at("value")) ||
+        detail::canonical_json_bytes(invocation.input.at("handoff")) !=
+            detail::canonical_json_bytes(arguments.at("value"))) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_HANDOFF",
+            "Program replacement requires the exact latest completed ng.checkpoint");
+    }
+
+    const auto source_version = impl_->config.catalog->resolve_version(
+        owner_scope, source_record->program_version_id());
+    if (!source_version) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    auto source_pinned =
+        detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *source_version);
+    if (!source_pinned->bundle.control_source() ||
+        !replacement_authority_is_attenuated(*source_pinned, *target_pinned)) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_AUTHORITY",
+            "Program replacement target authority is not an attenuation of the source");
+    }
+
+    const auto requested_budget = source_lineage->lineage.remaining_budget();
+    if (invocation.budget != requested_budget) {
+        throw_runtime_diagnostic(
+            "P_REPLACEMENT_BUDGET",
+            "Program replacement must transfer the exact authoritative remaining budget");
+    }
+    const auto transition_time = std::max(now_ms(), source_record->updated_at_ms());
+    const auto remaining = program_replacement_remaining_budget(
+        *source_record, source_lineage->lineage, transition_time);
+    invocation.budget = remaining;
+    if (invocation.canonical_request) invocation.canonical_request->budget = remaining;
+    validate_invocation(*target_pinned, invocation);
+    const auto canonical = bind_runtime_invocation(invocation, owner_scope, target.id(), run_id);
+
+    const auto target_thread_id =
+        core_thread_identity(run_id, target_pinned->root->compiled_plan_identity);
+    const auto binding_fingerprint = capability_binding_receipt_root(
+        resolved_target->core_materialization_receipt().capability_bindings);
+    ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
+                                         canonical.correlation_id, canonical.parent_run_id, 0};
+    auto control = std::make_shared<detail::RunControl>(
+        std::string(owner_scope), run_id, 1, std::move(target_pinned), binding_fingerprint,
+        std::move(persisted), canonical, target_thread_id, 0, std::move(invocation.events),
+        impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+        impl_->config.state_store, impl_->config.transitions);
+    const auto started =
+        control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{remaining});
+    auto publication = initial_publication(*control, started, std::nullopt, std::nullopt,
+                                           std::nullopt, std::nullopt, std::nullopt,
+                                           transition_time);
+    auto receipt = ProgramReplacementReceipt(ProgramReplacementReceiptData{
+        std::string(owner_scope),
+        source_lineage->lineage.lineage_id(),
+        source_lineage->generation.generation(),
+        source_lineage->generation.id(),
+        source_lineage->lineage.id(),
+        source_record->run_id(),
+        source_record->id(),
+        source_record->journal_head(),
+        source_record->program_version_id(),
+        source_record->bundle_id(),
+        checkpoint.coordinate_id(),
+        checkpoint.id(),
+        program_replacement_handoff_identity(arguments.at("value")),
+        source_lineage->generation.generation() + 1,
+        run_id,
+        target.id(),
+        target.bundle_id(),
+        program_replacement_input_identity(invocation.input),
+        publication.run_record.invocation().canonical_identity(),
+        publication.run_record.binding_fingerprint(),
+        publication.run_record.id(),
+        publication.run_record.journal_head()});
+    auto successor = ProgramRunGeneration::create(ProgramRunGenerationData{
+        std::string(owner_scope), source_lineage->lineage.lineage_id(),
+        source_lineage->generation.generation() + 1, run_id, target.id(), target.bundle_id(),
+        publication.run_record.id(), publication.journal_record.id,
+        source_lineage->generation.id(), publication.run_record.created_at_ms(), 0,
+        std::move(receipt)});
+    publication.run_generation = successor;
+    publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        std::string(owner_scope), source_lineage->lineage.lineage_id(),
+        source_lineage->lineage.root_run_id(), successor.generation(), successor.id(),
+        publication.run_record.id(), publication.journal_record.id, remaining, RunBudget{},
+        source_lineage->lineage.id(), source_lineage->lineage.created_at_ms(),
+        std::max(source_lineage->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),
+        source_lineage->lineage.committed_descendant_budget()});
+
+    ProgramTransitionPublishResult published;
+    try {
+        published =
+            control->transitions->compare_publish(owner_scope, "", std::move(publication));
+    } catch (...) {
+        try {
+            const auto durable = control->transitions->load_generation(
+                owner_scope, successor.lineage_id(), successor.generation());
+            if (durable && durable->id() == successor.id()) cancel_source_control();
+        } catch (...) {}
+        throw;
+    }
+    if (published != ProgramTransitionPublishResult::Published) {
+        if (auto existing = reconnect_existing()) return std::move(*existing);
+        throw_runtime_diagnostic("P_REPLACEMENT_CONFLICT",
+                                 "Program lineage already selected another successor");
+    }
+
+    auto registration = impl_->register_control(control, true);
+    cancel_source_control();
+    if (!registration.inserted) return ProgramHandle(std::move(registration.control));
+    reconnect_lock.unlock();
+    transition_lock.unlock();
+    try {
+        control->deliver_event(started);
+    } catch (const std::exception& error) {
+        detail::RunOutcome failed;
+        failed.status           = ProgramTerminalStatus::Failed;
+        failed.remaining_budget = remaining;
+        failed.failure =
+            ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        control->complete(std::move(failed));
+        return ProgramHandle(std::move(control));
+    }
+    spawn_run_attempt(impl_->pool, control, invocation.input, std::nullopt,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver);
+    return ProgramHandle(std::move(control));
+}
+
 std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view owner_scope,
                                                             std::string_view parent_run_id) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
@@ -3693,7 +4168,30 @@ std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view own
 ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::string_view run_id) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");
-    if (auto control = impl_->find_control(owner_scope, run_id)) {
+    std::unique_lock reconnect_lock(impl_->process_state->transition_mutex);
+    std::string resolved_run_id(run_id);
+    bool        replacement_generation = false;
+    const auto  requested_record = impl_->config.transitions->load(owner_scope, run_id);
+    if (!requested_record) {
+        throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
+    }
+    if (const auto lineage =
+            impl_->config.transitions->load_run_lineage(owner_scope, requested_record->run_id())) {
+        const auto active = impl_->config.transitions->load_generation(
+            owner_scope, lineage->lineage_id(), lineage->active_generation());
+        if (!active || active->id() != lineage->active_generation_id()) {
+            throw_runtime_diagnostic("P_RUN_LINEAGE",
+                                     "Program run lineage has no valid active generation");
+        }
+        replacement_generation = active->replacement_receipt().has_value();
+        resolved_run_id = active->run_id();
+    }
+    run_id = resolved_run_id;
+    auto existing_control = replacement_generation
+                                ? impl_->find_process_control(owner_scope, run_id)
+                                : impl_->find_control(owner_scope, run_id);
+    if (existing_control) {
+        auto control = std::move(existing_control);
         return ProgramHandle(std::move(control));
     }
 
@@ -3850,7 +4348,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             if (auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id))
                 parent->attach_child(control);
         }
-        impl_->register_control(control);
+        auto registration = impl_->register_control(control, replacement_generation);
+        if (!registration.inserted) return ProgramHandle(std::move(registration.control));
         spawn_run_attempt(impl_->pool, control, record->invocation().input,
                           std::move(resume_checkpoint_id), impl_->config.host_admission,
                           impl_->config.host_admission_resolver);

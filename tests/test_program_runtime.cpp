@@ -21,6 +21,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <limits>
 #include <map>
@@ -1157,7 +1158,22 @@ public:
         ProgramTransitionPublication publication) override {
         const bool command_result =
             !publication.commands.empty() && publication.commands.back().completed();
+        const bool replacement =
+            publication.run_generation && publication.run_generation->replacement_receipt();
+        if (replacement && throw_before_replacement_.exchange(false)) {
+            std::function<void()> publish_collision;
+            {
+                std::lock_guard lock(mutex_);
+                publish_collision = std::move(publish_collision_);
+            }
+            if (publish_collision) publish_collision();
+            throw std::runtime_error("simulated replacement failure before publication");
+        }
         const auto published = inner_.compare_publish(owner, expected, std::move(publication));
+        if (replacement && published == ProgramTransitionPublishResult::Published &&
+            crash_after_replacement_.exchange(false)) {
+            throw std::runtime_error("simulated crash after replacement publication");
+        }
         if (!command_result || published != ProgramTransitionPublishResult::Published) {
             return published;
         }
@@ -1176,6 +1192,15 @@ public:
         released_ = true;
         condition_.notify_all();
     }
+    void crash_after_next_replacement() { crash_after_replacement_.store(true); }
+    void throw_before_next_replacement_with_occupied_target(
+        std::function<void()> publish_collision) {
+        {
+            std::lock_guard lock(mutex_);
+            publish_collision_ = std::move(publish_collision);
+        }
+        throw_before_replacement_.store(true);
+    }
 
 private:
     InMemoryProgramTransitionStore inner_;
@@ -1183,6 +1208,9 @@ private:
     std::condition_variable        condition_;
     bool                           observed_ = false;
     bool                           released_ = false;
+    std::atomic<bool>              crash_after_replacement_{false};
+    std::atomic<bool>              throw_before_replacement_{false};
+    std::function<void()>          publish_collision_;
 };
 
 class FailChildDispatchOnceJournal final : public ProgramTransitionStore {
@@ -1889,6 +1917,12 @@ TEST(ProgramRuntimeTest, ProgramEnvelopePreservesDirectCoreBehavior) {
 }
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+std::string javascript_runtime_source(std::string node_type, std::string body);
+RunBudget javascript_budget(std::uint64_t max_concurrency        = 2,
+                            std::uint64_t max_program_operations = 32,
+                            std::uint64_t max_child_depth        = 0,
+                            std::uint64_t max_total_children     = 0);
+
 TEST(ProgramRuntimeTest, JavaScriptGeneratorPreservesLocalYieldValue) {
     const auto source = ProgramSource::from_javascript("test:generator-lifetime.js",
                                                        R"JS(
@@ -2327,6 +2361,254 @@ TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResul
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGenerationTwo) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    const handoff = {cursor: 7, state: "ready"};
+    yield ng.checkpoint(handoff, "replacement:boundary");
+    yield ng.callCore("main", {}, "replacement:old-must-not-run");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    return {
+        generation: "target",
+        handoff: input.handoff,
+        previous_run_id: input.previous_run_id
+    };
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-replacement-source", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    const auto handoff = source.latest_handoff();
+    ASSERT_TRUE(handoff);
+    EXPECT_EQ(handoff->value, (json{{"cursor", 7}, {"state", "ready"}}));
+    const auto source_boundary = source.snapshot();
+    const auto source_lineage =
+        journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_lineage);
+    EXPECT_EQ(source_lineage->active_generation(), 1U);
+
+    const auto target_input =
+        json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}};
+    auto replacement_runtime = fixture.make_runtime();
+    auto target = replacement_runtime->replace(
+        "tenant:runtime", handoff->reference, target_version,
+        ProgramInvocation{target_input, source_boundary.remaining_budget(),
+                          "trace-replacement-target", {}});
+    journal->release_result();
+    const auto result = target.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                             : "no failure detail");
+    EXPECT_EQ(result.output(),
+              (json{{"generation", "target"},
+                    {"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                    {"previous_run_id", source.run_id()}}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+
+    const auto lineage = journal->load_run_lineage("tenant:runtime", target.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->lineage_id(), source_lineage->lineage_id());
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    const auto target_record = journal->load("tenant:runtime", target.run_id());
+    ASSERT_TRUE(target_record);
+    EXPECT_EQ(target_record->invocation().budget,
+              program_replacement_remaining_budget(source_boundary, *source_lineage,
+                                                   target_record->created_at_ms()));
+    EXPECT_LT(target_record->invocation().budget.wall_time_ms,
+              source_boundary.remaining_budget().wall_time_ms);
+    EXPECT_EQ(lineage->remaining_budget(), result.remaining_budget());
+    const auto generation =
+        journal->load_generation("tenant:runtime", lineage->lineage_id(), 2);
+    ASSERT_TRUE(generation);
+    ASSERT_TRUE(generation->replacement_receipt());
+    EXPECT_EQ(generation->replacement_receipt()->source_run_id(), source.run_id());
+    EXPECT_EQ(generation->replacement_receipt()->checkpoint_entry_id(),
+              handoff->reference.command_entry_id);
+    EXPECT_EQ(generation->replacement_receipt()->target_run_id(), target.run_id());
+
+    const auto reconnected =
+        fixture.runtime->reconnect("tenant:runtime", source.run_id()).wait();
+    EXPECT_EQ(reconnected.id(), result.id());
+    EXPECT_EQ(reconnected.run_id(), target.run_id());
+    (void)source.wait();
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, ReplacementCommitBeforeDispatchRecoversExactSuccessor) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 11}, "replacement:crash-boundary");
+    yield ng.callCore("main", {}, "replacement:stale-source");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    const output = yield ng.callCore("main", input.handoff, "replacement:target");
+    return {generation: "target", value: output.value, handoff: input.handoff};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-replacement-crash-source", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    const auto handoff = source.latest_handoff();
+    ASSERT_TRUE(handoff);
+    const auto source_boundary = source.snapshot();
+    const auto target_input =
+        json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}};
+
+    journal->crash_after_next_replacement();
+    EXPECT_THROW(
+        (void)fixture.runtime->replace(
+            "tenant:runtime", handoff->reference, target_version,
+            ProgramInvocation{target_input, source_boundary.remaining_budget(),
+                              "trace-replacement-crash-target", {}}),
+        std::runtime_error);
+    const auto committed_lineage =
+        journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(committed_lineage);
+    EXPECT_EQ(committed_lineage->active_generation(), 2U);
+    EXPECT_EQ(completed_calls.load(), 0U);
+
+    journal->release_result();
+    auto first_runtime  = fixture.make_runtime();
+    auto second_runtime = fixture.make_runtime();
+    std::barrier reconnect_ready(3);
+    const auto reconnect = [&](ProgramRuntime& runtime) {
+        reconnect_ready.arrive_and_wait();
+        return runtime.reconnect("tenant:runtime", source.run_id());
+    };
+    auto first_reconnect =
+        std::async(std::launch::async, [&] { return reconnect(*first_runtime); });
+    auto second_reconnect =
+        std::async(std::launch::async, [&] { return reconnect(*second_runtime); });
+    reconnect_ready.arrive_and_wait();
+    auto first_handle = first_reconnect.get();
+    auto second_handle = second_reconnect.get();
+    const auto recovered = first_handle.wait();
+    const auto duplicate = second_handle.wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed)
+        << (recovered.failure()
+                ? recovered.failure()->code + ": " + recovered.failure()->message + " " +
+                      recovered.failure()->witness.dump()
+                : "no failure detail");
+    EXPECT_EQ(recovered.output(),
+              (json{{"generation", "target"},
+                    {"value", "completed"},
+                    {"handoff", json{{"cursor", 11}}}}));
+    EXPECT_EQ(duplicate.id(), recovered.id());
+    EXPECT_EQ(completed_calls.load(), 1U);
+    (void)source.wait();
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ReplacementFailureBeforeCommitLeavesSourceExecutable) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 12}, "replacement:failed-boundary");
+    yield ng.callCore("main", {}, "replacement:source-continues");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    return {generation: "target", handoff: input.handoff};
+)JS"));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-replacement-failed-source", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    const auto handoff = source.latest_handoff();
+    ASSERT_TRUE(handoff);
+
+    const std::string target_run_id = "replacement-occupied-target";
+    auto              collider_runtime = fixture.make_runtime();
+    std::optional<ProgramHandle> collider;
+    journal->throw_before_next_replacement_with_occupied_target([&] {
+        collider.emplace(collider_runtime->start(
+            "tenant:runtime", target_version,
+            ProgramInvocation{json{{"handoff", handoff->value},
+                                   {"previous_run_id", source.run_id()},
+                                   {"collision", true}},
+                              javascript_budget(1, 4),
+                              "trace-replacement-collision", {}, target_run_id}));
+    });
+    EXPECT_THROW(
+        (void)fixture.runtime->replace(
+            "tenant:runtime", handoff->reference, target_version,
+            ProgramInvocation{
+                json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}},
+                source.snapshot().remaining_budget(), "trace-replacement-failed-target", {},
+                target_run_id}),
+        std::runtime_error);
+    ASSERT_TRUE(collider);
+    EXPECT_EQ(collider->wait().status(), ProgramTerminalStatus::Completed);
+    const auto lineage = journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 1U);
+
+    journal->release_result();
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), (json{{"generation", "source"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, RecordedReplayCheckpointCannotAuthorizeLiveReplacement) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto source_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    yield ng.checkpoint({cursor: 13}, "replacement:recorded-boundary");
+    yield ng.callCore("main", {}, "replacement:recorded-must-not-run");
+    return {generation: "source"};
+)JS"));
+    const auto target_version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", R"JS(
+    return {generation: "target", handoff: input.handoff};
+)JS"));
+
+    auto source = fixture.runtime->start_recorded(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4),
+                          "trace-recorded-replacement-source", {}},
+        RecordedBindingSet({}, {}, CatalogCapabilityBinding{}, {}));
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    const auto handoff = source.latest_handoff();
+    ASSERT_TRUE(handoff);
+
+    try {
+        (void)fixture.runtime->replace(
+            "tenant:runtime", handoff->reference, target_version,
+            ProgramInvocation{
+                json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}},
+                source.snapshot().remaining_budget(), "trace-recorded-replacement-target", {}});
+        FAIL() << "recorded replay checkpoint authorized a live replacement";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_REPLACEMENT_RECORDED_SOURCE");
+    }
+
+    journal->release_result();
+    (void)source.wait();
+}
+
 TEST(ProgramRuntimeTest, JavaScriptPendingHeadFreshRuntimeResumesWithoutRedispatch) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
@@ -2458,10 +2740,10 @@ std::string javascript_runtime_source(std::string node_type, std::string body) {
            std::move(body) + "\n}\n";
 }
 
-RunBudget javascript_budget(std::uint64_t max_concurrency        = 2,
-                            std::uint64_t max_program_operations = 32,
-                            std::uint64_t max_child_depth        = 0,
-                            std::uint64_t max_total_children     = 0) {
+RunBudget javascript_budget(std::uint64_t max_concurrency,
+                            std::uint64_t max_program_operations,
+                            std::uint64_t max_child_depth,
+                            std::uint64_t max_total_children) {
     return RunBudget{10000,
                      1000,
                      1000,

@@ -374,7 +374,7 @@ bool fork_binds_predecessor(const ProgramRunRecord&     target,
                             const ProgramRunLineage&    lineage,
                             const ProgramRunRecord&     source) noexcept {
     const auto receipt = target.fork_receipt();
-    if (!receipt) return true;
+    if (!receipt) return false;
     const auto checkpoint = source.exact_checkpoint();
     return checkpoint && target.run_id() != source.run_id() && source.child_depth() == 0 &&
            target.created_at_ms() >= source.updated_at_ms() &&
@@ -1087,6 +1087,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
     std::string publication_bytes;
     try {
+        if (publication.run_record.owner_scope() != owner) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
         publication_bytes = publication.serialize_canonical();
         if (!valid_effect_outbox_binding(publication.run_record, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
@@ -1165,9 +1168,11 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                 return ProgramTransitionPublishResult::Conflict;
             }
             const auto source = impl_->runs.find(key(owner, active->second.run_id()));
-            if (source == impl_->runs.end() ||
-                !fork_binds_predecessor(publication.run_record, active->second,
-                                        current_lineage->second->head, source->second->run)) {
+            if (source == impl_->runs.end() || source->second->commands.empty() ||
+                !is_valid_program_replacement_transition(
+                    active->second, current_lineage->second->head, source->second->run,
+                    source->second->commands.back(), *publication.run_generation,
+                    *publication.run_lineage, publication.run_record)) {
                 return ProgramTransitionPublishResult::Conflict;
             }
         }

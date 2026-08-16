@@ -178,6 +178,18 @@ public:
                        const ProgramVersion&             target,
                        ProgramInvocation                 invocation,
                        ProgramResume                     resume);
+    /**
+     * Replace the active source generation at one exact completed ng.checkpoint.
+     * The target is already admitted and starts fresh from invocation.input;
+     * only input.handoff crosses the generation boundary.
+     */
+    ProgramHandle replace(ExactProgramHandoffReference source,
+                          RunInvocation                invocation,
+                          std::shared_ptr<ProgramEventSink> events = {});
+    ProgramHandle replace(std::string_view                owner_scope,
+                          ExactProgramHandoffReference     source,
+                          const ProgramVersion&            target,
+                          ProgramInvocation                invocation);
 
     asio::awaitable<ProgramResult> run_async(std::string owner_scope,
                                              ProgramVersion version,

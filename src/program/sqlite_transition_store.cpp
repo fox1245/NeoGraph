@@ -221,6 +221,23 @@ std::optional<std::string> load_run_lineage_id(sqlite3* db,
     return column_text(statement.get(), 0);
 }
 
+std::optional<ProgramJavaScriptCommandJournalEntry> load_latest_javascript_command(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id) {
+    Statement statement(
+        db, "SELECT coordinate_id, canonical_bytes FROM "
+            "program_transition_javascript_command_log_v2 "
+            "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence DESC LIMIT 1");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) return std::nullopt;
+    auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 1));
+    if (column_text(statement.get(), 0) != entry.coordinate_id()) {
+        throw std::invalid_argument(
+            "Stored JavaScript command journal coordinate column mismatch");
+    }
+    return entry;
+}
+
 bool is_final(ContinuationState state) noexcept {
     return state != ContinuationState::Running && state != ContinuationState::Interrupted &&
            state != ContinuationState::AmbiguousEffect;
@@ -605,7 +622,7 @@ bool fork_binds_predecessor(const ProgramRunRecord&     target,
                             const ProgramRunLineage&    lineage,
                             const ProgramRunRecord&     source) noexcept {
     const auto receipt = target.fork_receipt();
-    if (!receipt) return true;
+    if (!receipt) return false;
     const auto checkpoint = source.exact_checkpoint();
     const auto resume_binds = [&]() noexcept {
         if (receipt->storage_schema_version() < ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
@@ -1169,9 +1186,14 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
             }
             const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
                                        : std::nullopt;
-            if (!source ||
-                !fork_binds_predecessor(publication.run_record, *active, *current_lineage,
-                                        source->run_record)) {
+            const auto checkpoint =
+                source ? load_latest_javascript_command(impl_->db, owner_scope, active->run_id())
+                       : std::nullopt;
+            if (!source || !checkpoint ||
+                !is_valid_program_replacement_transition(
+                    *active, *current_lineage, source->run_record, *checkpoint,
+                    *publication.run_generation, *publication.run_lineage,
+                    publication.run_record)) {
                 transaction.commit();
                 return ProgramTransitionPublishResult::Conflict;
             }

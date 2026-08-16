@@ -633,6 +633,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/event.cpp
         src/program/pending.cpp
         src/program/fork.cpp
+        src/program/replacement.cpp
         src/program/replay.cpp
         src/program/store.cpp
         src/program/activation.cpp
