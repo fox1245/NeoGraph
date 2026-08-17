@@ -1845,13 +1845,16 @@ void RunControl::set_child_binding_validation_callback(
 }
 
 void RunControl::set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept {
+    if (!runtime && !hook_runtime_enabled_.load(std::memory_order_relaxed)) return;
     std::lock_guard lock(mutex_);
     hook_runtime_ = std::move(runtime);
+    hook_runtime_enabled_.store(static_cast<bool>(hook_runtime_), std::memory_order_release);
 }
 
 void RunControl::emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
                                      std::optional<ProgramTerminalStatus> status,
                                      bool observe_cancellation) const {
+    if (!hook_runtime_enabled_.load(std::memory_order_acquire)) return;
     std::shared_ptr<HookRuntime> runtime;
     {
         std::lock_guard lock(mutex_);

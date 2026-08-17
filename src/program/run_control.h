@@ -240,6 +240,7 @@ private:
     ChildLaunchCallback                     child_launch_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;
     std::shared_ptr<HookRuntime>               hook_runtime_;
+    std::atomic<bool>                          hook_runtime_enabled_{false};
     std::shared_ptr<TaskGraphFragmentStore>  task_graph_fragments_;
     TaskGraphExpansionPolicyResolver         task_graph_policy_resolver_;
     std::uint64_t                            next_sequence_ = 1;

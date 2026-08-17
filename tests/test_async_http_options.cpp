@@ -218,10 +218,10 @@ TEST(RequestOptions, AbsoluteSameOriginPostRedirectIsFollowed) {
         [&]() -> asio::awaitable<void> {
             neograph::async::RequestOptions opts;
             opts.max_redirects = 2;
-            response = co_await neograph::async::async_post(
-                io.get_executor(), "127.0.0.1", std::to_string(srv.port),
-                "/start", "sensitive-post", {{"Authorization", "Bearer secret"}},
-                false, opts);
+            auto request = neograph::async::async_post(
+                io.get_executor(), "127.0.0.1", std::to_string(srv.port), "/start",
+                "sensitive-post", {{"Authorization", "Bearer secret"}}, false, opts);
+            response = co_await std::move(request);
         },
         asio::detached);
     io.run();
