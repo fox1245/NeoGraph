@@ -65,6 +65,7 @@ add_executable(neograph_tests
     test_completion_provider.cpp
     test_artifact_provider.cpp
     test_run_context_store.cpp
+    test_runtime_context.cpp
     test_run_result_channel.cpp
     test_typed_events.cpp
     test_error_messages_friendly.cpp
@@ -374,6 +375,17 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 include(GoogleTest)
+
+# Keep durable runtime-contract verification independent from optional provider
+# transports so canonical identity tests remain runnable in minimal Core builds.
+add_executable(neograph_runtime_context_tests
+    test_runtime_context.cpp
+)
+target_link_libraries(neograph_runtime_context_tests PRIVATE
+    neograph::core
+    GTest::gtest_main
+)
+gtest_discover_tests(neograph_runtime_context_tests)
 
 # Keep the live safe-point boundary independently runnable from optional
 # backend tests in the aggregate Core binary.

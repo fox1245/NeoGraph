@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/context-artifact-v1.schema.json",
+  "title": "NeoGraph ContextArtifact stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "kind", "producer_id", "source_digest", "source_feed_id", "covers_from_sequence", "covers_through_sequence", "media_type", "placement", "priority", "required", "content", "content_digest"],
+  "properties": {
+    "format": { "const": "neograph-context-artifact" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "kind": { "enum": ["raw_history", "derived_context", "required_skill", "hook_output"] },
+    "producer_id": { "$ref": "#/$defs/token" },
+    "source_digest": { "$ref": "#/$defs/sha256" },
+    "source_feed_id": { "type": "string" },
+    "covers_from_sequence": { "type": "integer", "minimum": 0 },
+    "covers_through_sequence": { "type": "integer", "minimum": 0 },
+    "media_type": { "$ref": "#/$defs/token" },
+    "placement": { "enum": ["before_latest_user", "after_latest_user"] },
+    "priority": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+    "required": { "type": "boolean" },
+    "content": {},
+    "content_digest": { "$ref": "#/$defs/sha256" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "required_skill" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "required": { "const": true },
+          "source_feed_id": { "const": "" },
+          "covers_from_sequence": { "const": 0 },
+          "covers_through_sequence": { "const": 0 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$" }
+  }
+}

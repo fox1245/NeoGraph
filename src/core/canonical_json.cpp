@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace neograph::program::detail {
+namespace neograph::detail {
 namespace {
 
 constexpr std::size_t MAX_JSON_BYTES = 16u * 1024u * 1024u;
@@ -554,8 +554,10 @@ void reject_unknown_fields(const json&                             value,
     }
 }
 
-std::string sha256_identity(std::string_view domain, std::string_view bytes) {
-    std::string input = "NeoGraph Program identity v1";
+std::string sha256_identity(std::string_view preamble,
+                            std::string_view domain,
+                            std::string_view bytes) {
+    std::string input(preamble);
     input.push_back('\0');
     input.append(domain);
     input.push_back('\0');
@@ -581,4 +583,4 @@ bool is_sha256_identity(std::string_view value) noexcept {
     });
 }
 
-}  // namespace neograph::program::detail
+}  // namespace neograph::detail

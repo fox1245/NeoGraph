@@ -496,6 +496,8 @@ endif()
 
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
+file(GLOB NEOGRAPH_SCHEMA_FILES CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/schemas/*.json)
 
 add_custom_command(
     OUTPUT ${GENERATED_DIR}/builtin_schemas.h
@@ -504,10 +506,7 @@ add_custom_command(
             ${PROJECT_SOURCE_DIR}/schemas
             ${GENERATED_DIR}/builtin_schemas.h
     DEPENDS
-        ${PROJECT_SOURCE_DIR}/schemas/openai.json
-        ${PROJECT_SOURCE_DIR}/schemas/openai_responses.json
-        ${PROJECT_SOURCE_DIR}/schemas/claude.json
-        ${PROJECT_SOURCE_DIR}/schemas/gemini.json
+        ${NEOGRAPH_SCHEMA_FILES}
         ${PROJECT_SOURCE_DIR}/scripts/embed_schemas.py
     COMMENT "Embedding LLM provider schemas"
 )
@@ -518,6 +517,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # ===========================================================================
 set(NEOGRAPH_CORE_SOURCES
     src/core/json.cpp
+    src/core/canonical_json.cpp
     src/core/cancel.cpp
     src/core/graph_invocation.cpp
     src/core/provider.cpp
@@ -527,6 +527,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/tool_execution.cpp
     src/core/host_admission.cpp
     src/core/evidence_ledger.cpp
+    src/core/runtime_context.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
     src/core/graph_safe_point.cpp
@@ -612,7 +613,6 @@ add_library(neograph::core ALIAS neograph_core)
 if(NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_program
         src/program/authoring.cpp
-        src/program/canonical_json.cpp
         src/program/command.cpp
         src/program/command_journal.cpp
         src/program/contract.cpp

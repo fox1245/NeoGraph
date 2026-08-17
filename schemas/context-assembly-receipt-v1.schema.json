@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/context-assembly-receipt-v1.schema.json",
+  "title": "NeoGraph ContextAssemblyReceipt stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "context_epoch_id", "normalized_request_digest", "message_window_digest", "artifact_ids", "required_skill_artifact_ids", "raw_from_sequence", "raw_through_sequence", "estimated_input_tokens", "mandatory_input_tokens"],
+  "properties": {
+    "format": { "const": "neograph-context-assembly-receipt" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "context_epoch_id": { "$ref": "#/$defs/sha256" },
+    "normalized_request_digest": { "$ref": "#/$defs/sha256" },
+    "message_window_digest": { "$ref": "#/$defs/sha256" },
+    "artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
+    "required_skill_artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
+    "raw_from_sequence": { "type": "integer", "minimum": 0 },
+    "raw_through_sequence": { "type": "integer", "minimum": 0 },
+    "estimated_input_tokens": { "type": "integer", "minimum": 0 },
+    "mandatory_input_tokens": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

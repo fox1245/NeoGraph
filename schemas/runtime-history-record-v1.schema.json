@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/runtime-history-record-v1.schema.json",
+  "title": "NeoGraph RuntimeHistoryRecord stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "feed_id", "sequence", "message_id", "trust", "message"],
+  "properties": {
+    "format": { "const": "neograph-runtime-history-record" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "feed_id": { "$ref": "#/$defs/token" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "message_id": { "$ref": "#/$defs/token" },
+    "trust": { "enum": ["untrusted_input", "model_output", "tool_output", "developer", "host_policy"] },
+    "message": { "$ref": "#/$defs/message" },
+    "source_payload": {},
+    "source_media_type": { "$ref": "#/$defs/token" },
+    "predecessor_id": { "$ref": "#/$defs/sha256" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "sequence": { "const": 1 } }, "required": ["sequence"] },
+      "then": { "not": { "required": ["predecessor_id"] } },
+      "else": { "required": ["predecessor_id"] }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "untrusted_input" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": "user" } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "model_output" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": "assistant" } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "tool_output" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": "tool" } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "enum": ["developer", "host_policy"] } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": "system" } } } } }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$" },
+    "toolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "arguments"],
+      "properties": {
+        "id": { "$ref": "#/$defs/token" },
+        "name": { "$ref": "#/$defs/token" },
+        "arguments": { "type": "string" }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "enum": ["user", "assistant", "tool", "system"] },
+        "content": { "type": "string" },
+        "tool_calls": { "type": "array", "items": { "$ref": "#/$defs/toolCall" } },
+        "tool_call_id": { "$ref": "#/$defs/token" },
+        "tool_name": { "$ref": "#/$defs/token" },
+        "tool_status": { "$ref": "#/$defs/token" },
+        "tool_retryable": { "type": "boolean" },
+        "tool_effect_uncertain": { "type": "boolean" },
+        "image_urls": { "type": "array", "items": { "type": "string" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "role": { "const": "tool" } }, "required": ["role"] },
+          "then": { "required": ["tool_call_id"] }
+        },
+        {
+          "if": { "properties": { "role": { "not": { "const": "assistant" } } }, "required": ["role"] },
+          "then": { "not": { "required": ["tool_calls"] } }
+        }
+      ]
+    }
+  }
+}

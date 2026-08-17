@@ -19,6 +19,7 @@
 #include <neograph/completion_provider.h>
 #include <neograph/artifact_provider.h>
 #include <neograph/provider.h>
+#include <neograph/runtime_context.h>
 #include <neograph/host_admission.h>
 #include <neograph/research/evidence_ledger.h>
 #include <neograph/tool.h>

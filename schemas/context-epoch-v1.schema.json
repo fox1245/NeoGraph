@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/context-epoch-v1.schema.json",
+  "title": "NeoGraph ContextEpoch stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "run_id", "sequence", "feed_id", "raw_from_sequence", "raw_through_sequence", "raw_window_digest", "artifact_ids", "guarantee_profile"],
+  "properties": {
+    "format": { "const": "neograph-context-epoch" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "run_id": { "$ref": "#/$defs/token" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "predecessor_id": { "$ref": "#/$defs/sha256" },
+    "feed_id": { "type": "string" },
+    "raw_from_sequence": { "type": "integer", "minimum": 0 },
+    "raw_through_sequence": { "type": "integer", "minimum": 0 },
+    "raw_window_digest": { "$ref": "#/$defs/sha256" },
+    "artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
+    "guarantee_profile": { "enum": ["legacy", "recorded", "strict"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "sequence": { "const": 1 } }, "required": ["sequence"] },
+      "then": { "not": { "required": ["predecessor_id"] } },
+      "else": { "required": ["predecessor_id"] }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$" }
+  }
+}
