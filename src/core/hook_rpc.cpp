@@ -50,6 +50,9 @@ std::vector<ContextArtifact> artifacts_from(const json& value) {
 }
 } // namespace
 
+HookRpcExecutor::HookRpcExecutor(std::shared_ptr<RpcTransport> transport)
+    : HookRpcExecutor(std::move(transport), Limits{}) {}
+
 HookRpcExecutor::HookRpcExecutor(std::shared_ptr<RpcTransport> transport, Limits limits)
     : transport_(std::move(transport)), limits_(limits) {
     if (!transport_ || !limits_.max_response_bytes || !limits_.max_json_nesting) {

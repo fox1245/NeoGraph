@@ -50,7 +50,8 @@ public:
         unsigned max_json_nesting = 16;
     };
 
-    explicit HookRpcExecutor(std::shared_ptr<RpcTransport> transport, Limits limits = {});
+    explicit HookRpcExecutor(std::shared_ptr<RpcTransport> transport);
+    HookRpcExecutor(std::shared_ptr<RpcTransport> transport, Limits limits);
 
     asio::awaitable<HookRpcExecution> execute_async(
         const HookInvocation& invocation, std::uint32_t attempt,
