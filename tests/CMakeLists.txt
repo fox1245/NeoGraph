@@ -177,6 +177,14 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
         test_mcp_stdio_async.cpp
     )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_MCP_CLIENT)
+
+    add_executable(neograph_mcp_hook_rpc_tests
+        test_hook_rpc_mcp.cpp
+    )
+    target_link_libraries(neograph_mcp_hook_rpc_tests PRIVATE
+        neograph::mcp
+        GTest::gtest_main
+    )
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
@@ -376,6 +384,10 @@ endif()
 
 include(GoogleTest)
 
+if(TARGET neograph_mcp_hook_rpc_tests)
+    gtest_discover_tests(neograph_mcp_hook_rpc_tests)
+endif()
+
 # Keep durable runtime-contract verification independent from optional provider
 # transports so canonical identity tests remain runnable in minimal Core builds.
 add_executable(neograph_runtime_context_tests
@@ -386,6 +398,45 @@ target_link_libraries(neograph_runtime_context_tests PRIVATE
     GTest::gtest_main
 )
 gtest_discover_tests(neograph_runtime_context_tests)
+
+# Hook planning is Core-only and intentionally does not depend on providers,
+# model tool calls, or optional transport libraries.
+add_executable(neograph_hook_tests
+    test_hook.cpp
+)
+target_link_libraries(neograph_hook_tests PRIVATE
+    neograph::core
+    GTest::gtest_main
+)
+gtest_discover_tests(neograph_hook_tests)
+
+add_executable(neograph_hook_rpc_tests
+    test_hook_rpc.cpp
+)
+target_link_libraries(neograph_hook_rpc_tests PRIVATE
+    neograph::core
+    GTest::gtest_main
+)
+gtest_discover_tests(neograph_hook_rpc_tests)
+
+add_executable(neograph_context_store_tests
+    test_context_store.cpp
+)
+target_link_libraries(neograph_context_store_tests PRIVATE
+    neograph::core
+    GTest::gtest_main
+)
+gtest_discover_tests(neograph_context_store_tests)
+
+add_executable(neograph_runtime_turn_tests
+    test_runtime_turn_assembler.cpp
+    test_controlled_provider.cpp
+)
+target_link_libraries(neograph_runtime_turn_tests PRIVATE
+    neograph::core
+    GTest::gtest_main
+)
+gtest_discover_tests(neograph_runtime_turn_tests)
 
 # Keep the live safe-point boundary independently runnable from optional
 # backend tests in the aggregate Core binary.

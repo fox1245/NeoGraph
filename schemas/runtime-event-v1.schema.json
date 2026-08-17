@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/runtime-event-v1.schema.json",
+  "title": "NeoGraph RuntimeEvent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "schema_version", "id", "sequence", "phase", "type", "owner_scope", "run_id", "data"],
+  "properties": {
+    "format": {"const": "neograph-runtime-event"},
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "phase": {"enum": ["message_admitted", "before_provider_request", "after_provider_response", "before_tool_execution", "after_tool_execution", "checkpoint_published", "before_terminal_publication", "run_failed", "run_cancelled"]},
+    "type": {"type": "string", "minLength": 1},
+    "owner_scope": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "data": {}
+  }
+}

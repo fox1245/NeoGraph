@@ -3,6 +3,7 @@
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -10,6 +11,7 @@
 #include <asio/post.hpp>
 #include <asio/detached.hpp>
 #include <asio/experimental/channel.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
 #include <asio/read_until.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/streambuf.hpp>
@@ -78,6 +80,31 @@ json extract_rpc_result(const json& response, int expected_id,
                        error.value("data", json(nullptr)));
     }
     return response["result"];
+}
+
+asio::awaitable<void> wait_for_rpc_bound(
+    std::chrono::steady_clock::time_point deadline,
+    const std::shared_ptr<graph::CancelToken>& cancel_token) {
+    while (!cancel_token || !cancel_token->is_cancelled()) {
+        if (deadline <= std::chrono::steady_clock::now()) co_return;
+        asio::steady_timer timer(co_await asio::this_coro::executor);
+        timer.expires_at(std::min(deadline, std::chrono::steady_clock::now()
+                                            + std::chrono::milliseconds(10)));
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+    co_return;
+}
+
+[[noreturn]] void throw_rpc_bound(
+    std::chrono::steady_clock::time_point deadline,
+    const std::shared_ptr<graph::CancelToken>& cancel_token) {
+    if (cancel_token && cancel_token->is_cancelled()) {
+        throw std::runtime_error("MCP RPC cancelled");
+    }
+    if (deadline <= std::chrono::steady_clock::now()) {
+        throw std::runtime_error("MCP RPC deadline elapsed");
+    }
+    throw std::runtime_error("MCP RPC bounds waiter completed unexpectedly");
 }
 } // namespace
 
@@ -175,7 +202,10 @@ public:
     /// NOT be mixed with rpc_call_async on the same session (the two
     /// paths don't know about each other).
     asio::awaitable<json> rpc_call_async(
-        const std::string& method, const json& params);
+        const std::string& method, const json& params,
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
 
     // Send a JSON-RPC notification (no id, no response expected).
     void notify(const std::string& method, const json& params);
@@ -863,8 +893,10 @@ asio::awaitable<void> StdioSession::run_reader() {
 // old precondition — "callers must ensure the io_context outlives the session" —
 // is gone rather than merely documented. It was never a precondition an engine
 // could honour.
-asio::awaitable<json>
-StdioSession::rpc_call_async(const std::string& method, const json& params) {
+asio::awaitable<json> StdioSession::rpc_call_async(
+    const std::string& method, const json& params,
+    std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
     // Lazily start the worker. A session that only ever uses the sync path (or
     // never gets called at all) pays no thread.
     {
@@ -874,12 +906,20 @@ StdioSession::rpc_call_async(const std::string& method, const json& params) {
         }
     }
 
-    co_return co_await asio::co_spawn(
-        io_.get_executor(),
-        // BY VALUE, into the coroutine frame. A reference would dangle: this
-        // function returns as soon as it has handed the awaitable to co_spawn.
-        do_exchange(method, params),
-        asio::use_awaitable);
+    using asio::experimental::awaitable_operators::operator||;
+    if ((cancel_token && cancel_token->is_cancelled())
+        || deadline <= std::chrono::steady_clock::now()) {
+        throw_rpc_bound(deadline, cancel_token);
+    }
+    if (deadline == std::chrono::steady_clock::time_point::max() && !cancel_token) {
+        co_return co_await asio::co_spawn(
+            io_.get_executor(), do_exchange(method, params), asio::use_awaitable);
+    }
+    auto result = co_await (
+        asio::co_spawn(io_.get_executor(), do_exchange(method, params), asio::use_awaitable)
+        || wait_for_rpc_bound(deadline, cancel_token));
+    if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
+    co_return std::get<0>(std::move(result));
 }
 
 asio::awaitable<json>
@@ -1305,9 +1345,17 @@ json MCPClient::rpc_call(const std::string& method, const json& params) {
 }
 
 asio::awaitable<json>
-MCPClient::rpc_call_async(const std::string& method, const json& params) {
+MCPClient::rpc_call_async(const std::string& method, const json& params,
+                          std::chrono::steady_clock::time_point deadline,
+                          std::shared_ptr<graph::CancelToken> cancel_token) {
+    using asio::experimental::awaitable_operators::operator||;
+    if ((cancel_token && cancel_token->is_cancelled())
+        || deadline <= std::chrono::steady_clock::now()) {
+        throw_rpc_bound(deadline, cancel_token);
+    }
     if (stdio_session_) {
-        co_return co_await stdio_session_->rpc_call_async(method, params);
+        co_return co_await stdio_session_->rpc_call_async(method, params, deadline,
+                                                           std::move(cancel_token));
     }
 
     auto session = http_session_;
@@ -1369,19 +1417,29 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
 
     async::RequestOptions opts;
     opts.timeout = session->config.request_timeout;
+    if (deadline != std::chrono::steady_clock::time_point::max()) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) throw_rpc_bound(deadline, cancel_token);
+        if (opts.timeout.count() <= 0 || remaining < opts.timeout) opts.timeout = remaining;
+    }
 
     auto ex = co_await asio::this_coro::executor;
     async::HttpResponse res;
     try {
-        res = co_await async::async_post(
-            ex,
-            session->endpoint.host,
-            session->endpoint.port,
-            session->path,
-            body_str,
-            std::move(headers),
-            session->endpoint.tls,
-            opts);
+        if (deadline == std::chrono::steady_clock::time_point::max() && !cancel_token) {
+            res = co_await async::async_post(
+                ex, session->endpoint.host, session->endpoint.port, session->path,
+                body_str, std::move(headers), session->endpoint.tls, opts);
+        } else {
+            auto result = co_await (
+                async::async_post(ex, session->endpoint.host, session->endpoint.port,
+                                  session->path, body_str, std::move(headers),
+                                  session->endpoint.tls, opts)
+                || wait_for_rpc_bound(deadline, cancel_token));
+            if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
+            res = std::get<0>(std::move(result));
+        }
     } catch (const std::system_error& e) {
         throw std::runtime_error(std::string("MCP request failed: ") + e.what());
     }

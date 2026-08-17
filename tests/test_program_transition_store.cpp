@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <chrono>
 #include <filesystem>
 #include <future>
 #include <stdexcept>
@@ -19,6 +20,15 @@
 #include <string_view>
 namespace {
 using namespace neograph::program;
+using neograph::ContextArtifact;
+using neograph::ContextArtifactData;
+using neograph::ContextArtifactKind;
+using neograph::ContextAssemblyReceipt;
+using neograph::ContextAssemblyReceiptData;
+using neograph::ContextEpoch;
+using neograph::ContextEpochData;
+using neograph::ContextPlacement;
+using neograph::RuntimeGuaranteeProfile;
 std::string digest(char c) {
     return "sha256:" + std::string(64, c);
 }
@@ -124,6 +134,62 @@ ProgramTransitionPublication start_publication() {
             journal,
             {event(1, ProgramEventKind::Started, ProgramStartedEvent{budget()})},
             {}};
+}
+
+ProgramContextPublication context_publication(
+    std::uint64_t sequence,
+    std::optional<std::string> predecessor = std::nullopt,
+    std::vector<ContextArtifact> artifacts = {}, std::string run_id = "run-1") {
+    std::vector<std::string> artifact_ids;
+    artifact_ids.reserve(artifacts.size());
+    for (const auto& artifact : artifacts) artifact_ids.push_back(artifact.id());
+    ContextEpochData epoch_data{std::move(run_id), sequence, std::move(predecessor), {}, 0, 0,
+                                 digest('9'), std::move(artifact_ids),
+                                 RuntimeGuaranteeProfile::Recorded};
+    auto epoch = ContextEpoch::create(std::move(epoch_data));
+    ContextAssemblyReceiptData receipt_data{epoch.id(), digest('a'), digest('b'),
+                                            epoch.artifact_ids(), {}, 0, 0, 1, 0};
+    auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, artifacts);
+    return {std::move(epoch), std::move(artifacts), std::move(receipt)};
+}
+
+neograph::HookOutboxEntry pending_hook_outbox_entry() {
+    const auto runtime = neograph::RuntimeEvent::create(
+        {{}, 1, neograph::HookPhase::BeforeTerminalPublication, "program_terminal",
+         "owner-a", "run-1", json::object()});
+    const auto invocation = neograph::HookInvocation::create(
+        {{}, digest('f'), runtime.id(), "audit",
+         neograph::HookPhase::BeforeTerminalPublication,
+         neograph::HookDelivery::BlockingMandatory, neograph::HookFailureMode::FailClosed,
+         neograph::HookIdempotency::NonIdempotent, neograph::ToolEffectClass::ExternalWrite,
+         {}, {}, json::object()});
+    return neograph::HookOutboxEntry::create(
+        {invocation, runtime, neograph::HookExecutionState::Pending, 0, 2,
+         std::chrono::system_clock::time_point(std::chrono::milliseconds(1000000))});
+}
+
+neograph::HookOutboxEntry hook_outbox_entry_with_state(
+    const neograph::HookOutboxEntry& previous, neograph::HookExecutionState state) {
+    auto data = previous.data();
+    data.state = state;
+    data.attempt_count = 1;
+    data.fencing_token = 1;
+    data.lease_expires_at = {};
+    if (state == neograph::HookExecutionState::Succeeded) {
+        data.receipt = neograph::HookExecutionReceipt::create(
+            {data.invocation.id(), 1, state, {"effect", true, true, {}}, {}});
+    } else {
+        data.receipt.reset();
+    }
+    return neograph::HookOutboxEntry::create(std::move(data));
+}
+
+ContextArtifact hook_output_artifact() {
+    return ContextArtifact::create(ContextArtifactData{ContextArtifactKind::HookOutput,
+                                                        "hook", digest('c'), {}, 0, 0,
+                                                        "application/json",
+                                                        ContextPlacement::BeforeLatestUser,
+                                                        0, false, json{{"hook", true}}});
 }
 
 ProgramExecutionLease execution_lease(
@@ -777,13 +843,15 @@ json publication_reference_body(const ProgramTransitionPublication& publication)
     }
 
     return {{"format", "neograph-program-transition-publication"},
-            {"storage_schema_version", 1},
+             {"storage_schema_version", 5},
             {"run_record", detail::parse_json_strict(publication.run_record.serialize_canonical())},
             {"journal_record",
              detail::parse_json_strict(publication.journal_record.serialize_canonical())},
             {"events", std::move(events)},
             {"effects", std::move(effects)},
-            {"commands", json::array()},
+              {"commands", json::array()},
+              {"context_publication", nullptr},
+              {"hook_outbox_entries", json::array()},
             {"migration_plan",
              publication.migration_plan
                  ? detail::parse_json_strict(publication.migration_plan->serialize_canonical())
@@ -1104,6 +1172,93 @@ TEST(ProgramTransitionStoreTest, PublicationCanonicalWireMatchesReferenceTree) {
 
     EXPECT_EQ(publication.serialize_canonical(),
               detail::canonical_json_bytes(publication_reference_body(publication)));
+}
+
+TEST(ProgramTransitionStoreTest, ContextPublicationV4RoundTripsAndReadsLegacyPublications) {
+    auto publication = start_publication();
+    publication.context_publication = context_publication(1);
+    const auto canonical = publication.serialize_canonical();
+    const auto parsed = ProgramTransitionPublication::parse(canonical);
+    ASSERT_TRUE(parsed.context_publication);
+    EXPECT_EQ(parsed.context_publication->epoch.id(), publication.context_publication->epoch.id());
+    EXPECT_EQ(parsed.context_publication->assembly_receipt.id(),
+              publication.context_publication->assembly_receipt.id());
+
+    const auto legacy_bytes = [](const ProgramTransitionPublication& value,
+                                 std::uint32_t schema_version) {
+        auto bytes = value.serialize_canonical();
+        bytes.replace(bytes.find(",\"context_publication\":null"),
+                       std::string(",\"context_publication\":null").size(), "");
+        bytes.replace(bytes.find(",\"hook_outbox_entries\":[]"),
+                       std::string(",\"hook_outbox_entries\":[]").size(), "");
+        bytes.replace(bytes.find("\"storage_schema_version\":5"),
+                       std::string("\"storage_schema_version\":5").size(),
+                      "\"storage_schema_version\":" + std::to_string(schema_version));
+        return bytes;
+    };
+    const auto parsed_legacy = ProgramTransitionPublication::parse(
+        legacy_bytes(start_publication(), 1));
+    EXPECT_FALSE(parsed_legacy.context_publication);
+    EXPECT_EQ(detail::parse_json_strict(parsed_legacy.serialize_canonical())
+                  .at("storage_schema_version"),
+              5);
+
+    auto v2 = start_publication();
+    attach_initial_lineage(v2);
+    EXPECT_FALSE(ProgramTransitionPublication::parse(legacy_bytes(v2, 2)).context_publication);
+
+    auto source = start_publication();
+    attach_initial_lineage(source);
+    auto interrupted = interrupted_effect_publication(source);
+    attach_same_generation_lineage(interrupted, *source.run_lineage);
+    auto v3 = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(v3);
+    v3.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(v3, *interrupted.run_lineage);
+    EXPECT_FALSE(ProgramTransitionPublication::parse(legacy_bytes(v3, 3)).context_publication);
+}
+
+TEST(ProgramTransitionStoreTest, InMemoryContextPublicationIsAtomicAppendOnlyAndOwnerScoped) {
+    InMemoryProgramTransitionStore store;
+    auto initial = start_publication();
+    initial.context_publication = context_publication(1);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
+              ProgramTransitionPublishResult::AlreadyPresent);
+
+    auto next = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    next.context_publication = context_publication(2, initial.context_publication->epoch.id());
+    ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, next),
+              ProgramTransitionPublishResult::Published);
+    const auto history = store.load_context_publications("owner-a", "run-1");
+    ASSERT_EQ(history.size(), 2U);
+    EXPECT_EQ(store.load_context_publications("owner-a", "run-1", 1).size(), 1U);
+    EXPECT_TRUE(store.load_context_publications("owner-b", "run-1").empty());
+
+    auto out_of_order = javascript_command_publication(next, javascript_command_entry(2, true), 30);
+    out_of_order.context_publication = context_publication(4, next.context_publication->epoch.id());
+    EXPECT_EQ(store.compare_publish("owner-a", next.journal_record.id, out_of_order),
+              ProgramTransitionPublishResult::Conflict);
+
+    auto hook = start_publication_for("run-2", digest('1'), digest('2'), budget(), 10);
+    hook.context_publication =
+        context_publication(1, std::nullopt, {hook_output_artifact()}, "run-2");
+    EXPECT_EQ(store.compare_publish("owner-a", {}, hook), ProgramTransitionPublishResult::Conflict);
+}
+
+TEST(ProgramTransitionStoreTest, ContextPublicationFaultLeavesNoPartialSnapshotAndRetries) {
+    InMemoryProgramTransitionStore store;
+    auto publication = start_publication();
+    publication.context_publication = context_publication(1);
+    store.fail_next_publication_for_testing(ProgramTransitionFaultPoint::AfterContextSnapshot);
+    EXPECT_THROW((void)store.compare_publish("owner-a", {}, publication), std::runtime_error);
+    EXPECT_FALSE(store.load("owner-a", "run-1"));
+    EXPECT_TRUE(store.load_context_publications("owner-a", "run-1").empty());
+    EXPECT_EQ(store.compare_publish("owner-a", {}, publication),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.load_context_publications("owner-a", "run-1").size(), 1U);
 }
 
 TEST(ProgramTransitionStoreTest, InMemoryJavaScriptCommandHistoryIsAppendOnly) {
@@ -2269,6 +2424,60 @@ TEST(ProgramTransitionStoreTest, SQLiteJavaScriptCommandHistorySurvivesReopen) {
     }
     std::filesystem::remove(path);
 }
+TEST(ProgramTransitionStoreTest, SQLiteContextPublicationIsAtomicAcrossReopenAndCorruption) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-context-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    auto initial = start_publication();
+    initial.context_publication = context_publication(1);
+    auto next = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    next.context_publication = context_publication(2, initial.context_publication->epoch.id());
+    {
+        SQLiteProgramTransitionStore store(path);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, initial),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+        ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, next),
+                  ProgramTransitionPublishResult::Published);
+        const auto history = store.load_context_publications("owner-a", "run-1");
+        ASSERT_EQ(history.size(), 2U);
+        EXPECT_EQ(history[1].epoch.predecessor_id(), initial.context_publication->epoch.id());
+        EXPECT_EQ(store.load_context_publications("owner-a", "run-1", 1).size(), 1U);
+        EXPECT_TRUE(store.load_context_publications("owner-b", "run-1").empty());
+
+        auto invalid = javascript_command_publication(next, javascript_command_entry(2, true), 30);
+        invalid.context_publication = context_publication(4, next.context_publication->epoch.id());
+        EXPECT_EQ(store.compare_publish("owner-a", next.journal_record.id, invalid),
+                  ProgramTransitionPublishResult::Conflict);
+    }
+    {
+        TestSqliteDatabase database(path);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_context_log_v1"), 2);
+        database.execute("UPDATE program_transition_context_log_v1 SET canonical_bytes = x'7B7D' "
+                         "WHERE owner_scope = 'owner-a' AND run_id = 'run-1' AND sequence = 2");
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        EXPECT_THROW((void)store.load_context_publications("owner-a", "run-1"),
+                     std::invalid_argument);
+        auto retry = javascript_command_publication(next, javascript_command_entry(2, true), 30);
+        retry.context_publication = context_publication(3, next.context_publication->epoch.id());
+        EXPECT_THROW((void)store.compare_publish("owner-a", next.journal_record.id, retry),
+                     std::invalid_argument);
+    }
+    {
+        TestSqliteDatabase database(path);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_context_log_v1"), 2);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_javascript_command_log_v2"),
+                  1);
+    }
+    std::filesystem::remove(path);
+}
 TEST(ProgramTransitionStoreTest, SQLiteCommandSettlementRefundIsUsageBounded) {
     static std::atomic<unsigned> sequence{0};
     const auto                   path =
@@ -2575,3 +2784,64 @@ TEST(ProgramTransitionStoreTest, SQLiteConcurrentCasAcrossConnectionsHasOneWinne
     std::filesystem::remove(path);
 }
 #endif
+
+TEST(ProgramTransitionStoreTest, HookOutboxHeadsAreAtomicAndReconnectable) {
+    InMemoryProgramTransitionStore store;
+    auto publication = start_publication();
+    publication.hook_outbox_entries.push_back(pending_hook_outbox_entry());
+    store.fail_next_publication_for_testing(ProgramTransitionFaultPoint::AfterHookSnapshot);
+    EXPECT_THROW(store.compare_publish("owner-a", {}, publication), std::runtime_error);
+    EXPECT_TRUE(store.load_hook_outbox_entries("owner-a", "run-1").empty());
+    ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
+              ProgramTransitionPublishResult::Published);
+    const auto hooks = store.load_hook_outbox_entries("owner-a", "run-1");
+    ASSERT_EQ(hooks.size(), 1U);
+    EXPECT_EQ(hooks.front().data().state, neograph::HookExecutionState::Pending);
+}
+
+TEST(ProgramTransitionStoreTest, RejectsSkippedAndContradictoryHookTransitions) {
+    const auto pending = pending_hook_outbox_entry();
+    const auto succeeded = hook_outbox_entry_with_state(pending, neograph::HookExecutionState::Succeeded);
+    const auto run = start_publication().run_record;
+    EXPECT_FALSE(is_valid_program_hook_history_append({pending}, {succeeded}, run));
+
+    InMemoryProgramTransitionStore store;
+    auto initial = start_publication();
+    initial.hook_outbox_entries = {pending};
+    ASSERT_EQ(store.compare_publish("owner-a", {}, initial), ProgramTransitionPublishResult::Published);
+    auto skipped = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    skipped.hook_outbox_entries = {succeeded};
+    EXPECT_EQ(store.compare_publish("owner-a", initial.journal_record.id, skipped),
+              ProgramTransitionPublishResult::Conflict);
+}
+
+TEST(ProgramTransitionStoreTest, TimedOutMandatoryHookBlocksReplacement) {
+    InMemoryProgramTransitionStore store;
+    const auto boundary = publish_replacement_boundary(store);
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation("owner-a", lineage->lineage_id(), 1);
+    ASSERT_TRUE(predecessor);
+
+    auto timed_source = javascript_command_publication(
+        boundary.publication, javascript_command_entry(3, false, 2), 35);
+    timed_source.commands.clear();
+    attach_same_generation_lineage(timed_source, *lineage);
+    const auto pending = pending_hook_outbox_entry();
+    timed_source.hook_outbox_entries = {
+        hook_outbox_entry_with_state(pending, neograph::HookExecutionState::TimedOut)};
+    ASSERT_EQ(store.compare_publish("owner-a", boundary.publication.journal_record.id, timed_source),
+              ProgramTransitionPublishResult::Published);
+
+    const auto current = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(current);
+    const auto input = json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                            {"previous_run_id", "run-1"}};
+    auto successor = start_publication_for(
+        "run-2", digest('7'), digest('8'),
+        program_replacement_remaining_budget(timed_source.run_record, *current, 40), 40, input);
+    attach_replacement_successor(successor, *current, *predecessor, timed_source.run_record,
+                                 boundary.completed_checkpoint);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, successor),
+              ProgramTransitionPublishResult::Conflict);
+}

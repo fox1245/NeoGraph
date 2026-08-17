@@ -44,6 +44,8 @@ enum class SqliteHarnessProgramFaultPoint : std::uint8_t {
     AfterJournalWrite,
     AfterEventWrite,
     AfterEffectWrite,
+    AfterContextWrite,
+    AfterHookWrite,
     BeforeCommit,
 };
 

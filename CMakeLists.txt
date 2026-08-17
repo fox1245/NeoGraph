@@ -525,9 +525,16 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/artifact_provider.cpp
     src/core/tool.cpp
     src/core/tool_execution.cpp
+    src/core/hook.cpp
+    src/core/hook_outbox.cpp
+    src/core/hook_rpc.cpp
     src/core/host_admission.cpp
     src/core/evidence_ledger.cpp
     src/core/runtime_context.cpp
+    src/core/context_store.cpp
+    src/core/runtime_turn_assembler.cpp
+    src/core/controlled_provider.cpp
+    src/core/runtime_interposition_controller.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
     src/core/graph_safe_point.cpp
@@ -895,6 +902,7 @@ endif()
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     add_library(neograph_mcp
         src/mcp/client.cpp
+        src/mcp/hook_rpc.cpp
     )
 
     target_include_directories(neograph_mcp

@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
+namespace neograph { class RuntimeInterpositionController; }
 namespace neograph::llm {
 
 /**
@@ -137,6 +138,9 @@ class NEOGRAPH_API Agent {
         tool_detection_timeout_seconds_ = timeout_seconds;
     }
 
+    /// Opt into assembled, receipt-journaled provider dispatch for this agent.
+    void set_runtime_interposition(std::shared_ptr<::neograph::RuntimeInterpositionController> controller);
+
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
@@ -159,6 +163,7 @@ class NEOGRAPH_API Agent {
     std::shared_ptr<ToolExecutionController> tool_execution_controller_;
 
     int tool_detection_timeout_seconds_ = -1;
+    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
 
     void ensure_system_message(std::vector<ChatMessage>& messages);
     std::vector<ChatTool> get_tool_definitions() const;

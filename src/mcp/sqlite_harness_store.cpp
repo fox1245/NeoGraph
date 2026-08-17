@@ -135,6 +135,14 @@ bool valid_effect_outbox_binding(
     return pending && pending->state() == program::ProgramPendingState::Awaiting &&
            effects.size() == 1 && effects.front().effect() == *pending;
 }
+bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
+    return std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
+        const auto state = entry.data().state;
+        const bool pending = state != HookExecutionState::Succeeded &&
+            state != HookExecutionState::Cancelled;
+        return pending && entry.data().invocation.data().delivery == HookDelivery::BlockingMandatory;
+    });
+}
 bool same_command_coordinate(const program::ProgramJavaScriptCommandJournalEntry& lhs,
                              const program::ProgramJavaScriptCommandJournalEntry& rhs) {
     return lhs.bundle_id() == rhs.bundle_id() && lhs.command_ordinal() == rhs.command_ordinal() &&
@@ -568,7 +576,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_schema (
     version   INTEGER NOT NULL
 );
 INSERT INTO neograph_harness_schema (singleton, version)
-VALUES (1, 7)
+VALUES (1, 9)
 ON CONFLICT(singleton) DO NOTHING;
 CREATE TABLE IF NOT EXISTS neograph_harness_artifacts (
     artifact_id  TEXT PRIMARY KEY,
@@ -708,7 +716,36 @@ UPDATE neograph_harness_schema SET version = 7 WHERE singleton = 1;
 )SQL");
                 schema_version = 7;
             }
-            if (schema_version != 7) {
+            if (schema_version == 7) {
+                exec(R"SQL(
+CREATE TABLE IF NOT EXISTS neograph_harness_program_context_publications (
+    run_id      TEXT    NOT NULL,
+    sequence    INTEGER NOT NULL,
+    owner_scope TEXT    NOT NULL,
+    record_json TEXT    NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
+        ON DELETE RESTRICT
+);
+UPDATE neograph_harness_schema SET version = 8 WHERE singleton = 1;
+)SQL");
+                schema_version = 8;
+            }
+            if (schema_version == 8) {
+                exec(R"SQL(
+CREATE TABLE IF NOT EXISTS neograph_harness_program_hook_outbox (
+    run_id TEXT NOT NULL, sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_scope TEXT NOT NULL, invocation_id TEXT NOT NULL, head_id TEXT NOT NULL,
+    record_json TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES neograph_harness_runs(run_id)
+        ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS neograph_harness_program_hook_outbox_run
+    ON neograph_harness_program_hook_outbox(run_id, sequence);
+UPDATE neograph_harness_schema SET version = 9 WHERE singleton = 1;
+)SQL");
+                schema_version = 9;
+            }
+            if (schema_version != 9) {
                 throw std::runtime_error("SqliteHarnessRecordStore: unsupported schema version");
             }
             exec(R"SQL(
@@ -791,6 +828,23 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_javascript_commands (
     FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
         ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS neograph_harness_program_context_publications (
+    run_id      TEXT    NOT NULL,
+    sequence    INTEGER NOT NULL,
+    owner_scope TEXT    NOT NULL,
+    record_json TEXT    NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
+        ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_hook_outbox (
+    run_id TEXT NOT NULL, sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_scope TEXT NOT NULL, invocation_id TEXT NOT NULL, head_id TEXT NOT NULL,
+    record_json TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES neograph_harness_runs(run_id)
+        ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS neograph_harness_program_hook_outbox_run
+    ON neograph_harness_program_hook_outbox(run_id, sequence);
 CREATE TABLE IF NOT EXISTS neograph_harness_program_lineage_heads (
     owner_scope TEXT NOT NULL,
     lineage_id  TEXT NOT NULL,
@@ -1131,6 +1185,31 @@ public:
         return values;
     }
 
+    std::vector<program::ProgramContextPublication> load_context_publications(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::uint64_t    after_sequence) const override {
+        if (owner_scope.empty() || run_id.empty()) return {};
+        if (after_sequence > static_cast<std::uint64_t>(INT64_MAX)) {
+            throw std::invalid_argument("Program context sequence is out of SQLite range");
+        }
+        std::lock_guard lock(impl_->mutex);
+        return load_context_publications_locked(owner_scope, run_id, after_sequence);
+    }
+
+    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        if (owner_scope.empty() || run_id.empty()) return {};
+        std::lock_guard lock(impl_->mutex);
+        const auto wrapper = load_wrapper_locked(owner_scope, run_id);
+        if (!wrapper) return {};
+        auto entries = load_hook_outbox_entries_locked(owner_scope, run_id);
+        if (!program::is_valid_program_hook_history_append({}, entries,
+                                                            wrapper->run_record()))
+            throw std::invalid_argument("Stored Harness Program hook outbox is corrupt");
+        return entries;
+    }
+
     std::optional<program::MigrationPlan> load_migration_plan(
         std::string_view owner_scope, std::string_view run_id) const override {
         const auto wrapper = load_wrapper(owner_scope, run_id);
@@ -1384,6 +1463,11 @@ public:
                 if (command.sequence() > static_cast<std::uint64_t>(INT64_MAX)) {
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
+            }
+            if (publication.context_publication &&
+                publication.context_publication->epoch.sequence() >
+                    static_cast<std::uint64_t>(INT64_MAX)) {
+                return program::ProgramTransitionPublishResult::Conflict;
             }
         } catch (const std::invalid_argument&) {
             return program::ProgramTransitionPublishResult::Conflict;
@@ -1673,6 +1757,8 @@ public:
                                 checkpoint_query.text(2) == checkpoint.bundle_id() &&
                                 checkpoint_query.text(3) == checkpoint.coordinate_id() &&
                                 checkpoint_query.text(4) == checkpoint.id() &&
+                                !has_blocking_hook_obligation(load_hook_outbox_entries_locked(
+                                    owner_scope, previous_generation.run_id())) &&
                                 program::is_valid_program_replacement_transition(
                                     previous_generation, *current_lineage, source,
                                     checkpoint, *publication.run_generation,
@@ -1799,6 +1885,8 @@ public:
                     }
                 };
                 if (!fork || !checkpoint || source.run_id() == publication.run_record.run_id() ||
+                    has_blocking_hook_obligation(load_hook_outbox_entries_locked(
+                        owner_scope, source_generation.run_id())) ||
                     source.child_depth() != 0 || !source.invocation().parent_run_id.empty() ||
                     publication.run_record.created_at_ms() < source.updated_at_ms() ||
                     source.continuation().state != program::ContinuationState::Interrupted ||
@@ -1838,7 +1926,9 @@ public:
                     publication.events.front().sequence != 1 ||
                     (!publication.effects.empty() && publication.effects.front().sequence() != 1) ||
                     !valid_command_history_append(publication.run_record, {},
-                                                  publication.commands) ||
+                                                   publication.commands) ||
+                    !program::is_valid_program_context_history_append(
+                        {}, publication.context_publication) ||
                     (new_terminal && !publishes_terminal_event) ||
                     (publication.run_record.fork_receipt() && !publication.migration_plan)) {
                     impl_->exec("ROLLBACK;");
@@ -1925,6 +2015,20 @@ public:
                     previous_commands.push_back(
                         program::ProgramJavaScriptCommandJournalEntry::parse(
                             previous_command_rows.text(0)));
+                }
+                const auto previous_context =
+                    load_context_publications_locked(owner_scope, run_id, 0);
+                if (!program::is_valid_program_context_history_append(
+                        previous_context, publication.context_publication)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                const auto previous_hooks = load_hook_outbox_entries_locked(owner_scope, run_id);
+                if (!program::is_valid_program_hook_history_append(
+                        previous_hooks, publication.hook_outbox_entries,
+                        publication.run_record)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
                 }
                 if (!valid_command_history_append(previous_run, previous_commands,
                                                   publication.commands) ||
@@ -2133,6 +2237,14 @@ public:
                 insert_effect(storage_run_id, owner_scope, effect);
             }
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterEffectWrite);
+            if (publication.context_publication) {
+                insert_context_publication(storage_run_id, owner_scope,
+                                           *publication.context_publication);
+            }
+            for (const auto& entry : publication.hook_outbox_entries)
+                insert_hook_outbox_entry(storage_run_id, owner_scope, entry);
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterHookWrite);
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterContextWrite);
             for (const auto& command : publication.commands) {
                 insert_javascript_command(storage_run_id, owner_scope, command);
             }
@@ -2335,6 +2447,13 @@ private:
                     "Stored Program publication JavaScript command is missing");
             }
         }
+        const auto contexts = load_context_publications_locked(run.owner_scope(), run.run_id(), 0);
+        if (publication.context_publication &&
+            std::none_of(contexts.begin(), contexts.end(), [&](const auto& context) {
+                return context.epoch.id() == publication.context_publication->epoch.id();
+            })) {
+            throw std::invalid_argument("Stored Program publication context is missing");
+        }
 
         const auto require_count = [&](const char* table, std::uint64_t expected) {
             const std::string sql =
@@ -2384,9 +2503,119 @@ private:
     }
 
     std::optional<HarnessProgramRunRecord> load_wrapper(std::string_view owner_scope,
-                                                        std::string_view run_id) const {
+                                                         std::string_view run_id) const {
         std::lock_guard lock(impl_->mutex);
         return load_wrapper_locked(owner_scope, run_id);
+    }
+
+    std::vector<program::ProgramContextPublication> load_context_publications_locked(
+        std::string_view owner_scope, std::string_view run_id,
+        std::uint64_t after_sequence) const {
+        const auto wrapper = load_wrapper_locked_without_context(owner_scope, run_id);
+        if (!wrapper) return {};
+        Statement query(impl_->db,
+                        "SELECT sequence, owner_scope, record_json FROM "
+                        "neograph_harness_program_context_publications "
+                        "WHERE run_id=? ORDER BY sequence");
+        query.bind_text(1, program_storage_run_id(owner_scope, run_id));
+        std::vector<program::ProgramContextPublication> values;
+        while (true) {
+            const auto result = query.step();
+            if (result == SQLITE_DONE) break;
+            if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program context read failed");
+            if (query.int64(0) <= 0 || query.text(1) != owner_scope) {
+                throw std::invalid_argument("Stored Program context binding is corrupt");
+            }
+            const auto encoded = program::detail::parse_json_strict(query.text(2));
+            if (!encoded.is_object() || !encoded.contains("epoch") ||
+                !encoded.contains("artifacts") || !encoded.contains("assembly_receipt") ||
+                !encoded.at("artifacts").is_array()) {
+                throw std::invalid_argument("Stored Program context publication is corrupt");
+            }
+            auto epoch = ContextEpoch::parse(
+                program::detail::canonical_json_bytes(encoded.at("epoch")));
+            std::vector<ContextArtifact> artifacts;
+            for (const auto& artifact : encoded.at("artifacts")) {
+                artifacts.push_back(ContextArtifact::parse(
+                    program::detail::canonical_json_bytes(artifact)));
+            }
+            auto receipt = ContextAssemblyReceipt::parse(
+                program::detail::canonical_json_bytes(encoded.at("assembly_receipt")), epoch,
+                artifacts);
+            program::ProgramContextPublication context{
+                std::move(epoch), std::move(artifacts), std::move(receipt)};
+            program::validate_program_context_publication(context, wrapper->run_record());
+            if (context.epoch.sequence() != static_cast<std::uint64_t>(query.int64(0))) {
+                throw std::invalid_argument("Stored Program context sequence is corrupt");
+            }
+            values.push_back(std::move(context));
+        }
+        std::vector<program::ProgramContextPublication> prefix;
+        prefix.reserve(values.size());
+        for (const auto& context : values) {
+            if (!program::is_valid_program_context_history_append(prefix, context)) {
+                throw std::invalid_argument("Stored Program context history is corrupt");
+            }
+            prefix.push_back(context);
+        }
+        if (!after_sequence) return values;
+        std::vector<program::ProgramContextPublication> result;
+        for (const auto& context : values) {
+            if (context.epoch.sequence() > after_sequence) result.push_back(context);
+        }
+        return result;
+    }
+
+    std::vector<HookOutboxEntry> load_hook_outbox_entries_locked(
+        std::string_view owner_scope, std::string_view run_id) const {
+        const auto wrapper = load_wrapper_locked_without_context(owner_scope, run_id);
+        if (!wrapper) return {};
+        Statement query(impl_->db, "SELECT owner_scope, invocation_id, head_id, record_json FROM "
+                                  "neograph_harness_program_hook_outbox WHERE run_id=? ORDER BY sequence");
+        query.bind_text(1, program_storage_run_id(owner_scope, run_id));
+        std::map<std::string, HookOutboxEntry, std::less<>> heads;
+        while (query.step() == SQLITE_ROW) {
+            auto entry = HookOutboxEntry::parse(query.text(3));
+            if (query.text(0) != owner_scope || query.text(1) != entry.data().invocation.id() ||
+                query.text(2) != entry.id())
+                throw std::invalid_argument("Stored Harness Program hook binding is corrupt");
+            std::vector<HookOutboxEntry> current;
+            for (const auto& [_, head] : heads) current.push_back(head);
+            if (!program::is_valid_program_hook_history_append(
+                    current, {entry}, wrapper->run_record()))
+                throw std::invalid_argument("Stored Harness Program hook transition is corrupt");
+            heads.insert_or_assign(entry.data().invocation.id(), std::move(entry));
+        }
+        std::vector<HookOutboxEntry> result;
+        for (auto& [_, entry] : heads) result.push_back(std::move(entry));
+        return result;
+    }
+
+    std::optional<HarnessProgramRunRecord> load_wrapper_locked_without_context(
+        std::string_view owner_scope, std::string_view run_id) const {
+        if (owner_scope.empty() || run_id.empty()) return std::nullopt;
+        Statement query(impl_->db,
+                        "SELECT record_json, artifact_id, owner_scope, bundle_id, "
+                        "program_version_id, program_run_id, journal_head "
+                        "FROM neograph_harness_runs WHERE owner_scope=? AND run_id=? "
+                        "AND program_run_id<>''");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, program_storage_run_id(owner_scope, run_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program run read failed");
+        auto wrapper = HarnessProgramRunRecord::parse(json::parse(query.text(0)));
+        if (wrapper.run_record().run_id() != run_id || wrapper.artifact_id() != query.text(1) ||
+            wrapper.owner_scope() != query.text(2) || wrapper.run_record().bundle_id() != query.text(3) ||
+            wrapper.run_record().program_version_id() != query.text(4) ||
+            wrapper.run_record().id() != query.text(5) ||
+            wrapper.run_record().journal_head() != query.text(6)) {
+            throw std::invalid_argument("Stored Program run alias binding is corrupt");
+        }
+        const auto artifact = load_artifact_locked(wrapper.artifact_id());
+        if (!artifact) throw std::invalid_argument("Stored Program run artifact is missing");
+        wrapper.validate_artifact(*artifact);
+        return wrapper;
     }
 
     void insert_journal(const std::string&                   run_id,
@@ -2445,6 +2674,16 @@ private:
             throw_sqlite_error(impl_->db, "Program effect insert failed");
         }
     }
+    void insert_hook_outbox_entry(const std::string& run_id, std::string_view owner_scope,
+                                  const HookOutboxEntry& entry) {
+        Statement insert(impl_->db, "INSERT INTO neograph_harness_program_hook_outbox "
+                                   "(run_id, owner_scope, invocation_id, head_id, record_json) "
+                                   "VALUES (?, ?, ?, ?, ?)");
+        insert.bind_text(1, run_id); insert.bind_text(2, std::string(owner_scope));
+        insert.bind_text(3, entry.data().invocation.id()); insert.bind_text(4, entry.id());
+        insert.bind_text(5, entry.serialize_canonical());
+        if (insert.step() != SQLITE_DONE) throw_sqlite_error(impl_->db, "Program hook outbox insert failed");
+    }
     void insert_javascript_command(const std::string&                                   run_id,
                                    std::string_view                                     owner_scope,
                                    const program::ProgramJavaScriptCommandJournalEntry& command) {
@@ -2462,6 +2701,29 @@ private:
         insert.bind_text(7, command.serialize_canonical());
         if (insert.step() != SQLITE_DONE) {
             throw_sqlite_error(impl_->db, "Program JavaScript command insert failed");
+        }
+    }
+
+    void insert_context_publication(const std::string& run_id, std::string_view owner_scope,
+                                    const program::ProgramContextPublication& context) {
+        json artifacts = json::array();
+        for (const auto& artifact : context.artifacts) {
+            artifacts.push_back(program::detail::parse_json_strict(artifact.serialize_canonical()));
+        }
+        const auto encoded = program::detail::canonical_json_bytes(json{
+            {"epoch", program::detail::parse_json_strict(context.epoch.serialize_canonical())},
+            {"artifacts", std::move(artifacts)},
+            {"assembly_receipt", program::detail::parse_json_strict(
+                context.assembly_receipt.serialize_canonical())}});
+        Statement insert(impl_->db,
+                         "INSERT INTO neograph_harness_program_context_publications "
+                         "(run_id, sequence, owner_scope, record_json) VALUES (?, ?, ?, ?)");
+        insert.bind_text(1, run_id);
+        insert.bind_int64(2, static_cast<std::int64_t>(context.epoch.sequence()));
+        insert.bind_text(3, std::string(owner_scope));
+        insert.bind_text(4, encoded);
+        if (insert.step() != SQLITE_DONE) {
+            throw_sqlite_error(impl_->db, "Program context insert failed");
         }
     }
 

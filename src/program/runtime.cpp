@@ -5632,6 +5632,16 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         resolved_run_id = active->run_id();
     }
     run_id = resolved_run_id;
+    try {
+        // Recovery must inspect the complete causal histories, not merely the
+        // reduced heads retained by a transition snapshot.
+        (void)impl_->config.transitions->load_context_publications(owner_scope, run_id);
+        (void)impl_->config.transitions->load_hook_outbox_entries(owner_scope, run_id);
+    } catch (const std::exception& error) {
+        throw_runtime_diagnostic("P_DURABLE_HISTORY",
+                                 "Program recovery cannot verify context or hook history",
+                                 json{{"run_id", std::string(run_id)}, {"detail", error.what()}});
+    }
     auto existing_control = impl_->find_control(owner_scope, run_id);
     if (!existing_control) {
         auto process_control = impl_->find_process_control(owner_scope, run_id);

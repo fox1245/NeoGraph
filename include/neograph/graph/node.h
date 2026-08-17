@@ -37,6 +37,7 @@
 
 #include <stdexcept>
 
+namespace neograph { class RuntimeInterpositionController; }
 namespace neograph::graph {
 
 /**
@@ -205,6 +206,7 @@ public:
     /// into ``params.cancel_token`` so cancellation reaches the LLM
     /// HTTP socket without the legacy thread-local smuggling.
     asio::awaitable<NodeOutput> run(NodeInput in) override;
+    void set_runtime_interposition(std::shared_ptr<::neograph::RuntimeInterpositionController> controller);
 
     std::string get_name() const override { return name_; }
 
@@ -214,6 +216,7 @@ private:
     std::vector<Tool*>       tools_;
     std::string              model_;
     std::string              instructions_;
+    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
 
     CompletionParams build_params(const GraphState& state) const;
 };

@@ -19,10 +19,13 @@
 
 #include <asio/awaitable.hpp>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace neograph::graph { class CancelToken; }
 
 namespace neograph::mcp {
 
@@ -201,7 +204,10 @@ class NEOGRAPH_API MCPClient {
      */
     asio::awaitable<json> rpc_call_async(
         const std::string& method,
-        const json& params = json::object());
+        const json& params = json::object(),
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
 
   private:
     friend class MCPTool;

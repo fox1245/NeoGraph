@@ -75,6 +75,116 @@ bool valid_effect_outbox_binding(const ProgramRunRecord& run,
     return true;
 }
 
+void validate_context_publication(const ProgramContextPublication& context,
+                                  const ProgramRunRecord&          run) {
+    if (context.epoch.run_id() != run.run_id()) {
+        throw std::invalid_argument("Program context epoch does not bind the run");
+    }
+    for (const auto& artifact : context.artifacts) {
+        if (artifact.kind() == ContextArtifactKind::HookOutput) {
+            throw std::invalid_argument("Program context publication cannot persist HookOutput");
+        }
+    }
+    validate_context_assembly_receipt(context.assembly_receipt, context.epoch,
+                                      context.artifacts);
+}
+
+bool valid_context_history_append(
+    const std::vector<ProgramContextPublication>& old_context,
+    const std::optional<ProgramContextPublication>& next_context) {
+    if (!next_context) return true;
+    const auto& epoch = next_context->epoch;
+    if (old_context.empty()) return epoch.sequence() == 1 && !epoch.predecessor_id();
+    const auto& previous = old_context.back().epoch;
+    return epoch.sequence() == previous.sequence() + 1 && epoch.predecessor_id() &&
+           *epoch.predecessor_id() == previous.id();
+}
+
+bool hook_is_terminal(HookExecutionState state) noexcept {
+    // ReconciliationRequired is an unresolved external-effect obligation, not
+    // a final state: it may advance only through an explicit known receipt.
+    return state == HookExecutionState::Succeeded || state == HookExecutionState::TimedOut ||
+           state == HookExecutionState::Cancelled;
+}
+
+bool valid_hook_head_update(const HookOutboxEntry& previous,
+                             const HookOutboxEntry& next) noexcept {
+    try {
+        const auto& old_data = previous.data();
+        const auto& new_data = next.data();
+        if (old_data.invocation.id() != new_data.invocation.id() ||
+            old_data.invocation.serialize_canonical() != new_data.invocation.serialize_canonical() ||
+            old_data.event.serialize_canonical() != new_data.event.serialize_canonical() ||
+            old_data.max_attempts != new_data.max_attempts || old_data.deadline != new_data.deadline ||
+            hook_is_terminal(old_data.state) || new_data.attempt_count < old_data.attempt_count ||
+            new_data.fencing_token < old_data.fencing_token) return false;
+        if (previous.id() == next.id()) return false;
+        const auto transition = [&](HookExecutionState from, HookExecutionState to) {
+            if (from == HookExecutionState::Triggered)
+                return to == HookExecutionState::Pending || to == HookExecutionState::TimedOut ||
+                       to == HookExecutionState::Cancelled;
+            if (from == HookExecutionState::Pending)
+                return to == HookExecutionState::Dispatched || to == HookExecutionState::TimedOut ||
+                       to == HookExecutionState::Cancelled;
+            if (from == HookExecutionState::Dispatched)
+                return to == HookExecutionState::Succeeded || to == HookExecutionState::Failed ||
+                       to == HookExecutionState::TimedOut ||
+                       to == HookExecutionState::ReconciliationRequired ||
+                       to == HookExecutionState::Cancelled;
+            if (from == HookExecutionState::Failed)
+                return to == HookExecutionState::Dispatched || to == HookExecutionState::TimedOut ||
+                       to == HookExecutionState::Cancelled;
+            return from == HookExecutionState::ReconciliationRequired &&
+                   (to == HookExecutionState::Succeeded || to == HookExecutionState::Failed);
+        };
+        if (!transition(old_data.state, new_data.state)) return false;
+
+        // A dispatch creates exactly one fenced attempt. Settlement and timeout
+        // preserve that attempt; retry is the only later fence advance.
+        if (new_data.state == HookExecutionState::Dispatched) {
+            if (new_data.attempt_count != old_data.attempt_count + 1 ||
+                new_data.fencing_token != old_data.fencing_token + 1) return false;
+        } else if (new_data.attempt_count != old_data.attempt_count ||
+                   new_data.fencing_token != old_data.fencing_token) {
+            return false;
+        }
+        if (old_data.state == HookExecutionState::ReconciliationRequired &&
+            (!new_data.receipt || !new_data.receipt->data().external_effect.outcome_known))
+            return false;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool valid_hook_history_append(const std::vector<HookOutboxEntry>& old_entries,
+                               const std::vector<HookOutboxEntry>& next_entries,
+                               const ProgramRunRecord& run) {
+    std::map<std::string, HookOutboxEntry, std::less<>> heads;
+    for (const auto& entry : old_entries) {
+        validate_program_hook_outbox_entry(entry, run);
+        const auto [_, inserted] = heads.emplace(entry.data().invocation.id(), entry);
+        if (!inserted) return false;
+    }
+    std::set<std::string, std::less<>> seen;
+    for (const auto& entry : next_entries) {
+        validate_program_hook_outbox_entry(entry, run);
+        if (!seen.emplace(entry.data().invocation.id()).second) return false;
+        const auto old = heads.find(entry.data().invocation.id());
+        if (old != heads.end() && !valid_hook_head_update(old->second, entry)) return false;
+    }
+    return true;
+}
+
+bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
+    return std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
+        const auto state = entry.data().state;
+        const bool pending = state != HookExecutionState::Succeeded &&
+            state != HookExecutionState::Cancelled;
+        return pending && entry.data().invocation.data().delivery == HookDelivery::BlockingMandatory;
+    });
+}
+
 struct ProgramTransitionHistory final {
     ProgramTransitionHistory(std::shared_ptr<const ProgramTransitionHistory> previous_history,
                              std::vector<ProgramEvent>                     appended_events,
@@ -615,6 +725,12 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         run.exact_checkpoint() != journal.core_checkpoint) {
         throw std::invalid_argument("Program snapshot and journal do not match");
     }
+    if (publication.context_publication) {
+        validate_context_publication(*publication.context_publication, run);
+    }
+    if (!valid_hook_history_append({}, publication.hook_outbox_entries, run)) {
+        throw std::invalid_argument("Program hook outbox publication is invalid");
+    }
 
     std::uint64_t previous_sequence = 0;
     for (const auto& event : publication.events) {
@@ -765,7 +881,24 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
         append_publication_bytes(bytes, publication.commands[index].serialize_canonical());
     }
 
-    append_publication_bytes(bytes, "],\"effects\":[");
+    append_publication_bytes(bytes, "],\"context_publication\":");
+    if (publication.context_publication) {
+        const auto& context = *publication.context_publication;
+        append_publication_bytes(bytes, "{\"artifacts\":[");
+        for (std::size_t index = 0; index < context.artifacts.size(); ++index) {
+            if (index != 0) append_publication_bytes(bytes, ",");
+            append_publication_bytes(bytes, context.artifacts[index].serialize_canonical());
+        }
+        append_publication_bytes(bytes, "],\"assembly_receipt\":");
+        append_publication_bytes(bytes, context.assembly_receipt.serialize_canonical());
+        append_publication_bytes(bytes, ",\"epoch\":");
+        append_publication_bytes(bytes, context.epoch.serialize_canonical());
+        append_publication_bytes(bytes, "}");
+    } else {
+        append_publication_bytes(bytes, "null");
+    }
+
+    append_publication_bytes(bytes, ",\"effects\":[");
     for (std::size_t index = 0; index < publication.effects.size(); ++index) {
         if (index != 0) append_publication_bytes(bytes, ",");
         append_publication_bytes(bytes, publication.effects[index].serialize_canonical());
@@ -784,9 +917,14 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
         append_publication_bytes(bytes,
                                  publication.fork_source_lineage->serialize_canonical());
     }
-    append_publication_bytes(bytes,
-                             ",\"format\":\"neograph-program-transition-publication\","
-                             "\"journal_record\":");
+    append_publication_bytes(bytes, ",\"format\":\"neograph-program-transition-publication\"");
+    append_publication_bytes(bytes, ",\"hook_outbox_entries\":[");
+    for (std::size_t index = 0; index < publication.hook_outbox_entries.size(); ++index) {
+        if (index != 0) append_publication_bytes(bytes, ",");
+        append_publication_bytes(bytes,
+                                 publication.hook_outbox_entries[index].serialize_canonical());
+    }
+    append_publication_bytes(bytes, "],\"journal_record\":");
     append_publication_bytes(bytes, publication.journal_record.serialize_canonical());
     append_publication_bytes(bytes, ",\"migration_plan\":");
     if (publication.migration_plan) {
@@ -806,11 +944,7 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     }
     append_publication_bytes(bytes, ",\"run_record\":");
     append_publication_bytes(bytes, publication.run_record.serialize_canonical());
-    append_publication_bytes(bytes, publication.fork_source_lineage
-                                        ? ",\"storage_schema_version\":3}"
-                                    : publication.run_lineage
-                                        ? ",\"storage_schema_version\":2}"
-                                        : ",\"storage_schema_version\":1}");
+    append_publication_bytes(bytes, ",\"storage_schema_version\":5}");
     return bytes;
 }
 }  // namespace
@@ -892,7 +1026,19 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
             v, "Stored Program publication",
             {"format", "storage_schema_version", "run_record", "journal_record", "events",
              "effects", "commands", "migration_plan", "run_generation", "run_lineage",
-             "fork_source_lineage"});
+              "fork_source_lineage"});
+    } else if (schema_version == 4) {
+        detail::reject_unknown_fields(
+            v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan", "run_generation", "run_lineage",
+              "fork_source_lineage", "context_publication"});
+    } else if (schema_version == 5) {
+        detail::reject_unknown_fields(
+            v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan", "run_generation", "run_lineage",
+             "fork_source_lineage", "context_publication", "hook_outbox_entries"});
     } else {
         throw std::invalid_argument("Stored Program publication schema unsupported");
     }
@@ -926,7 +1072,8 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     }
     std::optional<ProgramRunGeneration> run_generation;
     std::optional<ProgramRunLineage>    run_lineage;
-    if (schema_version >= 2) {
+    if (schema_version == 2 || schema_version == 3 ||
+        (schema_version >= 4 && v.contains("run_lineage"))) {
         const auto& encoded_generation = rv(v, "run_generation");
         if (!encoded_generation.is_null()) {
             run_generation = ProgramRunGeneration::parse(
@@ -944,11 +1091,53 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
             throw std::invalid_argument("Stored Program fork publication requires a source debit");
         fork_source_lineage =
             ProgramRunLineage::parse(detail::canonical_json_bytes(encoded_source));
+    } else if (schema_version >= 4 && v.contains("fork_source_lineage")) {
+        const auto& encoded_source = rv(v, "fork_source_lineage");
+        if (encoded_source.is_null()) {
+            throw std::invalid_argument("Stored Program fork source debit must be non-null");
+        }
+        fork_source_lineage =
+            ProgramRunLineage::parse(detail::canonical_json_bytes(encoded_source));
+    }
+    std::optional<ProgramContextPublication> context_publication;
+    if (schema_version >= 4) {
+        const auto& encoded_context = rv(v, "context_publication");
+        if (!encoded_context.is_null()) {
+            if (!encoded_context.is_object()) {
+                throw std::invalid_argument("Program context publication must be object or null");
+            }
+            detail::reject_unknown_fields(encoded_context, "Stored Program context publication",
+                                          {"epoch", "artifacts", "assembly_receipt"});
+            const auto epoch = ContextEpoch::parse(
+                detail::canonical_json_bytes(rv(encoded_context, "epoch")));
+            const auto& encoded_artifacts = rv(encoded_context, "artifacts");
+            if (!encoded_artifacts.is_array()) {
+                throw std::invalid_argument("Program context artifacts must be array");
+            }
+            std::vector<ContextArtifact> artifacts;
+            artifacts.reserve(encoded_artifacts.size());
+            for (const auto& artifact : encoded_artifacts) {
+                artifacts.push_back(ContextArtifact::parse(detail::canonical_json_bytes(artifact)));
+            }
+            auto receipt = ContextAssemblyReceipt::parse(
+                detail::canonical_json_bytes(rv(encoded_context, "assembly_receipt")), epoch,
+                artifacts);
+            context_publication = ProgramContextPublication{
+                epoch, std::move(artifacts), std::move(receipt)};
+        }
+    }
+    std::vector<HookOutboxEntry> hook_outbox_entries;
+    if (schema_version == 5) {
+        const auto& encoded_hooks = rv(v, "hook_outbox_entries");
+        if (!encoded_hooks.is_array()) throw std::invalid_argument("Program hook outbox must be array");
+        for (const auto& entry : encoded_hooks)
+            hook_outbox_entries.push_back(HookOutboxEntry::parse(detail::canonical_json_bytes(entry)));
     }
     ProgramTransitionPublication out{std::move(run), std::move(journal), std::move(events),
-                                       std::move(effects), std::move(migration_plan),
-                                       std::move(commands), std::move(run_generation),
-                                       std::move(run_lineage), std::move(fork_source_lineage)};
+                                        std::move(effects), std::move(migration_plan),
+                                        std::move(commands), std::move(run_generation),
+                                        std::move(run_lineage), std::move(fork_source_lineage),
+                                         std::move(context_publication), std::move(hook_outbox_entries)};
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
@@ -956,6 +1145,47 @@ std::vector<ProgramJavaScriptCommandJournalEntry> ProgramTransitionStore::load_j
     std::string_view, std::string_view, std::uint64_t) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support durable JavaScript command-history reads");
+}
+
+std::vector<ProgramContextPublication> ProgramTransitionStore::load_context_publications(
+    std::string_view, std::string_view, std::uint64_t) const {
+    throw std::runtime_error(
+        "ProgramTransitionStore does not support durable context-publication reads");
+}
+
+std::vector<HookOutboxEntry> ProgramTransitionStore::load_hook_outbox_entries(
+    std::string_view, std::string_view) const {
+    throw std::runtime_error(
+        "ProgramTransitionStore does not support durable hook-outbox reads");
+}
+
+void validate_program_context_publication(const ProgramContextPublication& context,
+                                          const ProgramRunRecord& run) {
+    validate_context_publication(context, run);
+}
+
+bool is_valid_program_context_history_append(
+    const std::vector<ProgramContextPublication>& old_context,
+    const std::optional<ProgramContextPublication>& next_context) {
+    return valid_context_history_append(old_context, next_context);
+}
+
+void validate_program_hook_outbox_entry(const HookOutboxEntry& entry,
+                                        const ProgramRunRecord& run) {
+    if (entry.data().event.owner_scope() != run.owner_scope() ||
+        entry.data().event.run_id() != run.run_id()) {
+        throw std::invalid_argument("Program hook outbox entry does not bind the run");
+    }
+    // Reparse validates the immutable id, embedded invocation, event, and receipt.
+    if (HookOutboxEntry::parse(entry.serialize_canonical()).id() != entry.id()) {
+        throw std::invalid_argument("Program hook outbox entry identity mismatch");
+    }
+}
+
+bool is_valid_program_hook_history_append(const std::vector<HookOutboxEntry>& old_entries,
+                                          const std::vector<HookOutboxEntry>& next_entries,
+                                          const ProgramRunRecord& run) {
+    return valid_hook_history_append(old_entries, next_entries, run);
 }
 
 std::optional<ProgramTransitionPublication>
@@ -972,6 +1202,8 @@ struct InMemoryProgramTransitionStore::Impl {
         std::vector<ProgramEvent>                events;
         std::vector<ProgramEffectOutboxEntry>    effects;
         std::vector<ProgramJavaScriptCommandJournalEntry> commands;
+        std::vector<ProgramContextPublication>             context_publications;
+        std::vector<HookOutboxEntry>                        hook_outbox_entries;
         ProgramTransitionHistoryPtr              history;
         std::optional<MigrationPlan>             migration_plan;
         std::optional<std::string>               lineage_id;
@@ -1068,9 +1300,31 @@ InMemoryProgramTransitionStore::load_javascript_commands(std::string_view o,
         snapshot = found->second;
     }
     return entries_after(snapshot->commands, a,
-                         [](const ProgramJavaScriptCommandJournalEntry& command) {
-                             return command.sequence();
-                         });
+                          [](const ProgramJavaScriptCommandJournalEntry& command) {
+                              return command.sequence();
+                          });
+}
+std::vector<ProgramContextPublication> InMemoryProgramTransitionStore::load_context_publications(
+    std::string_view o, std::string_view r, std::uint64_t after_sequence) const {
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return {};
+        snapshot = found->second;
+    }
+    std::vector<ProgramContextPublication> result;
+    for (const auto& context : snapshot->context_publications) {
+        if (context.epoch.sequence() > after_sequence) result.push_back(context);
+    }
+    return result;
+}
+std::vector<HookOutboxEntry> InMemoryProgramTransitionStore::load_hook_outbox_entries(
+    std::string_view o, std::string_view r) const {
+    std::shared_ptr<const Impl::Stored> snapshot;
+    { std::lock_guard lock(impl_->mutex); const auto found = impl_->runs.find(key(o, r));
+      if (found == impl_->runs.end()) return {}; snapshot = found->second; }
+    return snapshot->hook_outbox_entries;
 }
 std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan(
     std::string_view o, std::string_view r) const {
@@ -1208,6 +1462,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         if (!valid_effect_outbox_binding(publication.run_record, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
         }
+        for (const auto& entry : publication.hook_outbox_entries)
+            validate_program_hook_outbox_entry(entry, publication.run_record);
         if (!expected.empty() && !detail::is_sha256_identity(expected)) {
             return ProgramTransitionPublishResult::Conflict;
         }
@@ -1343,7 +1599,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
                            *publication.migration_plan,
                           *publication.run_generation, *publication.run_lineage,
                           publication.run_record)
-                : !source->second->commands.empty() &&
+                : !has_blocking_hook_obligation(source->second->hook_outbox_entries) &&
+                      !source->second->commands.empty() &&
                       is_valid_program_replacement_transition(
                           active->second, current_lineage->second->head,
                           source->second->run, source->second->commands.back(),
@@ -1376,6 +1633,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             return ProgramTransitionPublishResult::Conflict;
         const auto source = impl_->runs.find(key(owner, active->second.run_id()));
         if (source == impl_->runs.end() ||
+            has_blocking_hook_obligation(source->second->hook_outbox_entries) ||
             !fork_binds_predecessor(publication.run_record, active->second,
                                     found->second->head, source->second->run)) {
             return ProgramTransitionPublishResult::Conflict;
@@ -1442,10 +1700,14 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         }
         const bool command_history_valid =
             valid_command_history_append(old.run, old.commands, publication.commands);
+        const bool context_history_valid = valid_context_history_append(
+             old.context_publications, publication.context_publication);
+        const bool hook_history_valid = valid_hook_history_append(
+            old.hook_outbox_entries, publication.hook_outbox_entries, publication.run_record);
         const bool reservation_valid = valid_command_reservation_transition(
             old.run, old.journal, publication.journal_record, old.commands, publication,
             safe_point_evidence, safe_point_capsule, expected_lease);
-        if (!command_history_valid || !reservation_valid) {
+        if (!command_history_valid || !context_history_valid || !hook_history_valid || !reservation_valid) {
             return ProgramTransitionPublishResult::Conflict;
         }
     }
@@ -1454,6 +1716,13 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         !valid_command_history_append(publication.run_record, {}, publication.commands)) {
         return ProgramTransitionPublishResult::Conflict;
     }
+    if (current == impl_->runs.end() &&
+        !valid_context_history_append({}, publication.context_publication)) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    if (current == impl_->runs.end() &&
+        !valid_hook_history_append({}, publication.hook_outbox_entries, publication.run_record))
+        return ProgramTransitionPublishResult::Conflict;
 
     const auto maybe_fail = [&](ProgramTransitionFaultPoint point) {
         if (impl_->fault && *impl_->fault == point) {
@@ -1471,6 +1740,10 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     auto appended_effects = std::move(publication.effects);
     maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
     auto appended_commands = std::move(publication.commands);
+    auto appended_context = std::move(publication.context_publication);
+    auto appended_hooks = std::move(publication.hook_outbox_entries);
+    maybe_fail(ProgramTransitionFaultPoint::AfterContextSnapshot);
+    maybe_fail(ProgramTransitionFaultPoint::AfterHookSnapshot);
 
     std::shared_ptr<const Impl::StoredLineage> staged_lineage;
     if (publication.run_lineage) {
@@ -1508,11 +1781,15 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
     std::vector<ProgramJavaScriptCommandJournalEntry> commands;
+    std::vector<ProgramContextPublication>             context_publications;
+    std::vector<HookOutboxEntry>                        hook_outbox_entries;
     ProgramTransitionHistoryPtr           history;
     if (current == impl_->runs.end()) {
         events  = std::move(appended_events);
         effects = std::move(appended_effects);
         commands = std::move(appended_commands);
+        if (appended_context) context_publications.push_back(std::move(*appended_context));
+        hook_outbox_entries = std::move(appended_hooks);
     } else {
         const auto& old = *current->second;
         if (old.history) {
@@ -1526,6 +1803,15 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
                                     std::move(appended_effects));
         }
         commands = append_entries(old.commands, std::move(appended_commands));
+        context_publications = old.context_publications;
+        if (appended_context) context_publications.push_back(std::move(*appended_context));
+        hook_outbox_entries = old.hook_outbox_entries;
+        for (auto& entry : appended_hooks) {
+            auto existing = std::find_if(hook_outbox_entries.begin(), hook_outbox_entries.end(),
+                [&](const auto& value) { return value.data().invocation.id() == entry.data().invocation.id(); });
+            if (existing == hook_outbox_entries.end()) hook_outbox_entries.push_back(std::move(entry));
+            else *existing = std::move(entry);
+        }
     }
 
     auto migration_plan = current == impl_->runs.end()
@@ -1533,7 +1819,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
                               : current->second->migration_plan;
     auto candidate = std::make_shared<const Impl::Stored>(
         Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                      std::move(effects), std::move(commands), std::move(history),
+                        std::move(effects), std::move(commands), std::move(context_publications), std::move(hook_outbox_entries),
+                       std::move(history),
                       std::move(migration_plan),
                       publication.run_lineage
                           ? std::optional<std::string>(publication.run_lineage->lineage_id())

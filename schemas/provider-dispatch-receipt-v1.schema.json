@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/provider-dispatch-receipt-v1.schema.json",
+  "title": "NeoGraph ProviderDispatchReceipt stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "dispatch_id", "provider_binding_identity", "assembly_receipt_id", "normalized_request_digest", "model", "mode"],
+  "properties": {
+    "format": { "const": "neograph-provider-dispatch-receipt" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "dispatch_id": { "$ref": "#/$defs/token" },
+    "provider_binding_identity": { "$ref": "#/$defs/sha256" },
+    "assembly_receipt_id": { "$ref": "#/$defs/sha256" },
+    "normalized_request_digest": { "$ref": "#/$defs/sha256" },
+    "model": { "$ref": "#/$defs/token" },
+    "mode": { "enum": ["collect", "stream"] }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$" }
+  }
+}

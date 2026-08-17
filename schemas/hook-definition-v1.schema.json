@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/hook-definition-v1.schema.json",
+  "title": "NeoGraph HookDefinition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "schema_version", "id", "priority", "target_id", "phase", "delivery", "failure_mode", "idempotency", "effect", "required_capabilities", "predicate", "input_mapper"],
+  "properties": {
+    "format": {"const": "neograph-hook-definition"},
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "target_id": {"type": "string", "minLength": 1},
+    "phase": {"enum": ["message_admitted", "before_provider_request", "after_provider_response", "before_tool_execution", "after_tool_execution", "checkpoint_published", "before_terminal_publication", "run_failed", "run_cancelled"]},
+    "delivery": {"enum": ["blocking_mandatory", "durable_observational"]},
+    "failure_mode": {"enum": ["fail_closed", "continue"]},
+    "idempotency": {"enum": ["idempotent", "non_idempotent"]},
+    "effect": {"enum": ["read_only", "external_read", "workspace_write", "external_write"]},
+    "priority": {"type": "integer", "minimum": 0},
+    "required_capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "predicate": {"$ref": "#/$defs/predicate"},
+    "input_mapper": {"$ref": "#/$defs/input_mapper"}
+  },
+  "$defs": {
+    "predicate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "field", "pointer", "value", "children"],
+      "properties": {
+        "kind": {"type": "integer", "minimum": 0, "maximum": 5},
+        "field": {"type": "integer", "minimum": 0, "maximum": 3},
+        "pointer": {"type": "string"}, "value": {},
+        "children": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/predicate"}}
+      }
+    },
+    "input_mapper": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "json_pointer", "value_template", "host_mapper_id"],
+      "properties": {
+        "kind": {"type": "integer", "minimum": 0, "maximum": 2},
+        "json_pointer": {"type": "string"}, "value_template": {}, "host_mapper_id": {"type": "string"}
+      }
+    }
+  }
+}

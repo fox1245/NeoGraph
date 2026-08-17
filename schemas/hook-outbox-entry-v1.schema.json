@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/hook-outbox-entry-v1.schema.json",
+  "title": "NeoGraph HookOutboxEntry v1", "type": "object", "additionalProperties": false,
+  "required": ["format", "schema_version", "id", "invocation", "event", "state", "attempt_count", "max_attempts", "deadline_ms", "fencing_token", "lease_expires_at_ms", "receipt"],
+  "properties": {
+    "format": {"const": "neograph-hook-outbox-entry"}, "schema_version": {"const": 1}, "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "invocation": {"type": "string"}, "event": {"type": "string"},
+    "state": {"enum": ["triggered", "pending", "dispatched", "succeeded", "failed", "timed_out", "reconciliation_required", "cancelled"]},
+    "attempt_count": {"type": "integer", "minimum": 0}, "max_attempts": {"type": "integer", "minimum": 1},
+    "deadline_ms": {"type": "integer"}, "fencing_token": {"type": "integer", "minimum": 0}, "lease_expires_at_ms": {"type": "integer"}, "receipt": {"type": ["object", "null"]}
+  }
+}

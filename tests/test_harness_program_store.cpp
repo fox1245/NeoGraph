@@ -31,6 +31,16 @@ std::string digest(char value) {
     return "sha256:" + std::string(64, value);
 }
 
+ProgramContextPublication context_publication(std::string run_id, std::uint64_t sequence,
+                                              std::optional<std::string> predecessor = std::nullopt) {
+    ContextEpochData epoch_data{std::move(run_id), sequence, std::move(predecessor), {}, 0, 0,
+                                digest('c'), {}, RuntimeGuaranteeProfile::Recorded};
+    auto epoch = ContextEpoch::create(std::move(epoch_data));
+    ContextAssemblyReceiptData receipt_data{epoch.id(), digest('d'), digest('e'), {}, {}, 0, 0, 1, 0};
+    auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, {});
+    return {std::move(epoch), {}, std::move(receipt)};
+}
+
 struct TempDb {
     TempDb() {
         path = std::filesystem::temp_directory_path() /
@@ -696,6 +706,46 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
         ASSERT_TRUE(store->load_run("legacy-run"));
         EXPECT_EQ(store->list_events("legacy-run").size(), 1U);
     }
+}
+
+TEST(HarnessProgramStoreTest, SqliteContextPublicationRollsBackReopensAndRejectsTampering) {
+    TempDb db;
+    Fixture fixture;
+    auto publication = initial_publication(fixture);
+    publication.context_publication = context_publication(publication.run_record.run_id(), 1);
+
+    {
+        auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        store->fail_next_program_transition_for_testing(
+            SqliteHarnessProgramFaultPoint::AfterContextWrite);
+        EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, publication),
+                     std::runtime_error);
+        EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), publication.run_record.run_id()));
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, publication),
+                  ProgramTransitionPublishResult::Published);
+    }
+
+    {
+        auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = require_harness_program_adapter_store(store)
+                               ->bind_program_transitions(fixture.artifact);
+        const auto contexts = transitions->load_context_publications(
+            fixture.artifact.owner_scope(), publication.run_record.run_id());
+        ASSERT_EQ(contexts.size(), 1U);
+        EXPECT_EQ(contexts.front().epoch.id(), publication.context_publication->epoch.id());
+        EXPECT_TRUE(transitions->load_context_publications(
+            fixture.artifact.owner_scope(), publication.run_record.run_id(), 1).empty());
+    }
+
+    sqlite_exec(db.path,
+                "UPDATE neograph_harness_program_context_publications SET sequence=2;");
+    auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto transitions = require_harness_program_adapter_store(store)
+                           ->bind_program_transitions(fixture.artifact);
+    EXPECT_THROW((void)transitions->load_context_publications(
+                     fixture.artifact.owner_scope(), publication.run_record.run_id()),
+                 std::invalid_argument);
 }
 
 TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) {

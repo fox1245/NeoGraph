@@ -19,11 +19,18 @@
 #include <neograph/completion_provider.h>
 #include <neograph/artifact_provider.h>
 #include <neograph/provider.h>
+#include <neograph/context_store.h>
+#include <neograph/runtime_turn_assembler.h>
+#include <neograph/controlled_provider.h>
+#include <neograph/runtime_interposition_controller.h>
 #include <neograph/runtime_context.h>
 #include <neograph/host_admission.h>
 #include <neograph/research/evidence_ledger.h>
 #include <neograph/tool.h>
 #include <neograph/tool_execution.h>
+#include <neograph/hook.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/hook_rpc.h>
 #include <neograph/tool_set.h>
 #include <neograph/types.h>
 

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/hook-execution-receipt-v1.schema.json",
+  "title": "NeoGraph HookExecutionReceipt v1", "type": "object", "additionalProperties": false,
+  "required": ["format", "schema_version", "id", "invocation_id", "attempt", "state", "external_effect", "error"],
+  "properties": {
+    "format": {"const": "neograph-hook-execution-receipt"}, "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "invocation_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "attempt": {"type": "integer", "minimum": 1},
+    "state": {"enum": ["succeeded", "failed", "timed_out", "reconciliation_required", "cancelled"]},
+    "external_effect": {"type": "object", "additionalProperties": false, "required": ["receipt_id", "outcome_known", "succeeded", "detail"], "properties": {"receipt_id": {"type": "string"}, "outcome_known": {"type": "boolean"}, "succeeded": {"type": "boolean"}, "detail": {"type": "string"}}},
+    "error": {"type": "string"}
+  }
+}

@@ -1,5 +1,6 @@
 #include <neograph/llm/agent.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/runtime_interposition_controller.h>
 #include <neograph/tool_dispatch.h>
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
@@ -8,6 +9,11 @@
 #include <stdexcept>
 
 namespace neograph::llm {
+
+void Agent::set_runtime_interposition(
+    std::shared_ptr<::neograph::RuntimeInterpositionController> controller) {
+    runtime_interposition_ = std::move(controller);
+}
 
 std::vector<Tool*> Agent::tool_ptrs() const {
     std::vector<Tool*> ptrs;
@@ -74,7 +80,8 @@ Agent::complete(const std::vector<ChatMessage>& messages)
     // Candidate 6 PR3: dispatch via invoke() so the v1.0 single-
     // dispatch surface is end-to-end. run_sync drives the awaitable
     // synchronously (Agent::complete is the public sync API).
-    auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+    auto completion = runtime_interposition_ ? runtime_interposition_->invoke(params)
+                                             : neograph::async::run_sync(provider_->invoke(params, nullptr));
     usage_->add(completion.usage);   // #88
     return completion;
 }
@@ -91,7 +98,8 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
         params.messages = messages;
         params.tools = tool_defs;
 
-        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+        auto completion = runtime_interposition_ ? runtime_interposition_->invoke(params)
+                                                 : neograph::async::run_sync(provider_->invoke(params, nullptr));
         usage_->add(completion.usage);   // #88
         auto& msg = completion.message;
 
@@ -138,8 +146,8 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
 
         // After tool execution, use streaming for the final response
         if (has_done_tool_calls) {
-            auto completion = neograph::async::run_sync(
-                provider_->invoke(params, on_chunk));
+            auto completion = runtime_interposition_ ? runtime_interposition_->invoke(params, on_chunk)
+                : neograph::async::run_sync(provider_->invoke(params, on_chunk));
             usage_->add(completion.usage);   // #88
             messages.push_back(completion.message);
 
@@ -152,8 +160,8 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
             params.timeout_seconds = tool_detection_timeout_seconds_;
             ChatCompletion completion;
             try {
-                completion = neograph::async::run_sync(
-                    provider_->invoke(params, nullptr));
+                completion = runtime_interposition_ ? runtime_interposition_->invoke(params)
+                    : neograph::async::run_sync(provider_->invoke(params, nullptr));
             } catch (const asio::system_error& error) {
                 if (error.code() != asio::error::timed_out) throw;
                 throw asio::system_error(
@@ -169,8 +177,8 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
                 // Remove the non-streamed message, re-do with streaming
                 messages.pop_back();
                 params.timeout_seconds = -1;
-                auto streamed = neograph::async::run_sync(
-                    provider_->invoke(params, on_chunk));
+                auto streamed = runtime_interposition_ ? runtime_interposition_->invoke(params, on_chunk)
+                    : neograph::async::run_sync(provider_->invoke(params, on_chunk));
                 usage_->add(streamed.usage);   // #88
                 messages.push_back(streamed.message);
                 return streamed.message.content;

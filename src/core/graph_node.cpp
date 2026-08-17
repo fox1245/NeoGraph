@@ -1,4 +1,5 @@
 #include <neograph/graph/node.h>
+#include <neograph/runtime_interposition_controller.h>
 #include <neograph/graph/engine.h>   // RunContext (forward-declared in node.h)
 #include <neograph/async/run_sync.h>
 #include <neograph/tool_dispatch.h>
@@ -76,6 +77,11 @@ LLMCallNode::LLMCallNode(const std::string& name, const NodeContext& ctx)
     , instructions_(ctx.instructions)
 {}
 
+void LLMCallNode::set_runtime_interposition(
+    std::shared_ptr<::neograph::RuntimeInterpositionController> controller) {
+    runtime_interposition_ = std::move(controller);
+}
+
 CompletionParams LLMCallNode::build_params(const GraphState& state) const {
     auto messages = state.get_messages();
 
@@ -142,7 +148,9 @@ asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
                           node_name, json(token)});
         };
     }
-    auto completion = co_await provider_->invoke(params, on_token);
+    auto completion = runtime_interposition_
+                          ? co_await runtime_interposition_->invoke_async(std::move(params), std::move(on_token))
+                          : co_await provider_->invoke(params, on_token);
     record_usage(in.ctx, completion);   // #88
 
     json msg_json;

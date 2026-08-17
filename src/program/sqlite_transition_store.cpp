@@ -297,6 +297,111 @@ std::optional<ProgramJavaScriptCommandJournalEntry> load_latest_javascript_comma
     return entry;
 }
 
+std::string context_publication_bytes(const ProgramContextPublication& context) {
+    json artifacts = json::array();
+    for (const auto& artifact : context.artifacts) {
+        artifacts.push_back(detail::parse_json_strict(artifact.serialize_canonical()));
+    }
+    return detail::canonical_json_bytes(
+        json{{"epoch", detail::parse_json_strict(context.epoch.serialize_canonical())},
+             {"artifacts", std::move(artifacts)},
+             {"assembly_receipt",
+              detail::parse_json_strict(context.assembly_receipt.serialize_canonical())}});
+}
+
+ProgramContextPublication parse_context_publication_bytes(std::string_view bytes,
+                                                           const ProgramRunRecord& run) {
+    const auto encoded = detail::parse_json_strict(bytes);
+    if (!encoded.is_object()) {
+        throw std::invalid_argument("Stored Program context publication must be an object");
+    }
+    detail::reject_unknown_fields(encoded, "Stored Program context publication",
+                                  {"epoch", "artifacts", "assembly_receipt"});
+    if (!encoded.contains("epoch") || !encoded.contains("artifacts") ||
+        !encoded.contains("assembly_receipt") || !encoded.at("artifacts").is_array()) {
+        throw std::invalid_argument("Stored Program context publication is incomplete");
+    }
+    auto epoch = ContextEpoch::parse(detail::canonical_json_bytes(encoded.at("epoch")));
+    std::vector<ContextArtifact> artifacts;
+    artifacts.reserve(encoded.at("artifacts").size());
+    for (const auto& artifact : encoded.at("artifacts")) {
+        artifacts.push_back(ContextArtifact::parse(detail::canonical_json_bytes(artifact)));
+    }
+    auto receipt = ContextAssemblyReceipt::parse(
+        detail::canonical_json_bytes(encoded.at("assembly_receipt")), epoch, artifacts);
+    ProgramContextPublication context{std::move(epoch), std::move(artifacts), std::move(receipt)};
+    validate_program_context_publication(context, run);
+    return context;
+}
+
+std::vector<ProgramContextPublication> load_context_publication_history(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+    std::uint64_t after_sequence = 0) {
+    const auto head = load_head(db, owner_scope, run_id);
+    if (!head) return {};
+    Statement statement(
+        db, "SELECT sequence, canonical_bytes FROM program_transition_context_log_v1 "
+            "WHERE owner_scope = ?1 AND run_id = ?2 AND sequence > ?3 ORDER BY sequence ASC");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    statement.bind_uint64(3, after_sequence);
+    std::vector<ProgramContextPublication> result;
+    while (statement.step_row()) {
+        const auto stored_sequence = sqlite3_column_int64(statement.get(), 0);
+        if (stored_sequence <= 0) {
+            throw std::invalid_argument("Stored Program context sequence is corrupt");
+        }
+        auto context = parse_context_publication_bytes(column_blob(statement.get(), 1), head->run_record);
+        if (context.epoch.sequence() != static_cast<std::uint64_t>(stored_sequence)) {
+            throw std::invalid_argument("Stored Program context sequence column mismatch");
+        }
+        result.push_back(std::move(context));
+    }
+    return result;
+}
+
+bool valid_context_history(const std::vector<ProgramContextPublication>& history) {
+    std::vector<ProgramContextPublication> prefix;
+    prefix.reserve(history.size());
+    for (const auto& context : history) {
+        if (!is_valid_program_context_history_append(prefix, context)) return false;
+        prefix.push_back(context);
+    }
+    return true;
+}
+
+std::vector<HookOutboxEntry> load_hook_outbox_heads(sqlite3* db, std::string_view owner_scope,
+                                                      std::string_view run_id,
+                                                      const ProgramRunRecord& run) {
+    Statement statement(db, "SELECT invocation_id, canonical_bytes FROM "
+                          "program_transition_hook_outbox_log_v1 WHERE owner_scope=?1 AND run_id=?2 "
+                          "ORDER BY sequence ASC");
+    statement.bind_text(1, owner_scope); statement.bind_text(2, run_id);
+    std::map<std::string, HookOutboxEntry, std::less<>> heads;
+    while (statement.step_row()) {
+        auto entry = HookOutboxEntry::parse(column_blob(statement.get(), 1));
+        if (column_text(statement.get(), 0) != entry.data().invocation.id())
+            throw std::invalid_argument("Stored Program hook invocation binding is corrupt");
+        std::vector<HookOutboxEntry> current;
+        for (const auto& [_, head] : heads) current.push_back(head);
+        if (!is_valid_program_hook_history_append(current, {entry}, run))
+            throw std::invalid_argument("Stored Program hook outbox transition is corrupt");
+        heads.insert_or_assign(entry.data().invocation.id(), std::move(entry));
+    }
+    std::vector<HookOutboxEntry> result;
+    for (auto& [_, entry] : heads) result.push_back(std::move(entry));
+    return result;
+}
+
+bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
+    return std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
+        const auto state = entry.data().state;
+        const bool pending = state != HookExecutionState::Succeeded &&
+            state != HookExecutionState::Cancelled;
+        return pending && entry.data().invocation.data().delivery == HookDelivery::BlockingMandatory;
+    });
+}
+
 bool is_final(ContinuationState state) noexcept {
     return state != ContinuationState::Running && state != ContinuationState::Interrupted &&
            state != ContinuationState::AmbiguousEffect;
@@ -671,8 +776,19 @@ void create_v2_schema(sqlite3* db) {
              "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
              "coordinate_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
              "PRIMARY KEY(owner_scope, run_id, sequence), "
-             "FOREIGN KEY(owner_scope, run_id) REFERENCES "
+              "FOREIGN KEY(owner_scope, run_id) REFERENCES "
+               "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_transition_context_log_v1 ("
+              "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+              "canonical_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, run_id, sequence), "
+              "FOREIGN KEY(owner_scope, run_id) REFERENCES "
               "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_transition_hook_outbox_log_v1 ("
+             "sequence INTEGER PRIMARY KEY AUTOINCREMENT, owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, "
+             "invocation_id TEXT NOT NULL, head_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
+             "FOREIGN KEY(owner_scope, run_id) REFERENCES program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE INDEX IF NOT EXISTS program_transition_hook_outbox_log_run_v1 "
+             "ON program_transition_hook_outbox_log_v1(owner_scope, run_id, sequence)");
     exec(db, "CREATE TABLE IF NOT EXISTS program_run_lineage_heads_v1 ("
              "owner_scope TEXT NOT NULL, lineage_id TEXT NOT NULL, head_bytes BLOB NOT NULL, "
              "PRIMARY KEY(owner_scope, lineage_id))");
@@ -1008,6 +1124,33 @@ void append_javascript_commands(
     }
 }
 
+void append_context_publication(sqlite3* db, std::string_view owner_scope,
+                                std::string_view run_id,
+                                const std::optional<ProgramContextPublication>& context) {
+    if (!context) return;
+    Statement statement(
+        db, "INSERT INTO program_transition_context_log_v1"
+            "(owner_scope, run_id, sequence, canonical_bytes) VALUES(?1, ?2, ?3, ?4)");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    statement.bind_uint64(3, context->epoch.sequence());
+    statement.bind_blob(4, context_publication_bytes(*context));
+    statement.step_done();
+}
+
+void append_hook_outbox_entries(sqlite3* db, std::string_view owner_scope,
+                                std::string_view run_id,
+                                const std::vector<HookOutboxEntry>& entries) {
+    Statement statement(db, "INSERT INTO program_transition_hook_outbox_log_v1"
+                          "(owner_scope, run_id, invocation_id, head_id, canonical_bytes) "
+                          "VALUES(?1, ?2, ?3, ?4, ?5)");
+    for (const auto& entry : entries) {
+        statement.bind_text(1, owner_scope); statement.bind_text(2, run_id);
+        statement.bind_text(3, entry.data().invocation.id()); statement.bind_text(4, entry.id());
+        statement.bind_blob(5, entry.serialize_canonical()); statement.step_done(); statement.reset();
+    }
+}
+
 std::string normalize_legacy_snapshot(std::string_view                    owner_scope,
                                       std::string_view                    run_id,
                                       const ProgramTransitionPublication& publication,
@@ -1064,6 +1207,8 @@ void migrate_legacy_schema(sqlite3* db) {
             append_events(db, owner_scope, run_id, publication.events);
             append_effects(db, owner_scope, run_id, publication.effects);
             append_javascript_commands(db, owner_scope, run_id, publication.commands);
+            append_context_publication(db, owner_scope, run_id, publication.context_publication);
+            append_hook_outbox_entries(db, owner_scope, run_id, publication.hook_outbox_entries);
         }
     }
     exec(db, "DROP TABLE program_transition_runs");
@@ -1260,6 +1405,32 @@ SQLiteProgramTransitionStore::load_javascript_commands(std::string_view owner_sc
     return result;
 }
 
+std::vector<ProgramContextPublication> SQLiteProgramTransitionStore::load_context_publications(
+    std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
+    if (owner_scope.empty() || run_id.empty()) return {};
+    std::lock_guard lock(impl_->mutex);
+    const auto all = load_context_publication_history(impl_->db, owner_scope, run_id);
+    if (!valid_context_history(all)) {
+        throw std::invalid_argument("Stored Program context history is not contiguous");
+    }
+    std::vector<ProgramContextPublication> result;
+    for (const auto& context : all) {
+        if (context.epoch.sequence() > after_sequence) result.push_back(context);
+    }
+    return result;
+}
+std::vector<HookOutboxEntry> SQLiteProgramTransitionStore::load_hook_outbox_entries(
+    std::string_view owner_scope, std::string_view run_id) const {
+    if (owner_scope.empty() || run_id.empty()) return {};
+    std::lock_guard lock(impl_->mutex);
+    const auto head = load_head(impl_->db, owner_scope, run_id);
+    if (!head) return {};
+    auto entries = load_hook_outbox_heads(impl_->db, owner_scope, run_id, head->run_record);
+    if (!is_valid_program_hook_history_append({}, entries, head->run_record))
+        throw std::invalid_argument("Stored Program hook outbox history is corrupt");
+    return entries;
+}
+
 std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
@@ -1447,10 +1618,24 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
             return ProgramTransitionPublishResult::Conflict;
         }
     } else if (!valid_increment(impl_->db, owner_scope, *current, publication,
-                                expected_journal_head, safe_point_evidence,
-                                safe_point_capsule, expected_lease)) {
+                                 expected_journal_head, safe_point_evidence,
+                                 safe_point_capsule, expected_lease)) {
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
+    }
+
+    const auto context_history = load_context_publication_history(
+        impl_->db, owner_scope, run_id);
+    if (!valid_context_history(context_history) ||
+        !is_valid_program_context_history_append(context_history, publication.context_publication)) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    const auto hook_heads = load_hook_outbox_heads(impl_->db, owner_scope, run_id,
+                                                   current ? current->run_record : publication.run_record);
+    if (!is_valid_program_hook_history_append(hook_heads, publication.hook_outbox_entries,
+                                              publication.run_record)) {
+        transaction.commit(); return ProgramTransitionPublishResult::Conflict;
     }
 
     const auto run_lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id);
@@ -1533,6 +1718,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
                 const auto checkpoint = load_latest_javascript_command(
                     impl_->db, owner_scope, active->run_id());
                 valid_successor = checkpoint &&
+                    !has_blocking_hook_obligation(load_hook_outbox_heads(
+                        impl_->db, owner_scope, active->run_id(), source->run_record)) &&
                     is_valid_program_replacement_transition(
                         *active, *current_lineage, source->run_record, *checkpoint,
                         *publication.run_generation, *publication.run_lineage,
@@ -1570,6 +1757,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
         const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
                                    : std::nullopt;
         if (!active || !source ||
+            has_blocking_hook_obligation(load_hook_outbox_heads(
+                impl_->db, owner_scope, active->run_id(), source->run_record)) ||
             !fork_binds_predecessor(publication.run_record, *active, *current_fork_source,
                                     source->run_record)) {
             transaction.commit();
@@ -1590,6 +1779,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     append_events(impl_->db, owner_scope, run_id, publication.events);
     append_effects(impl_->db, owner_scope, run_id, publication.effects);
     append_javascript_commands(impl_->db, owner_scope, run_id, publication.commands);
+    append_context_publication(impl_->db, owner_scope, run_id, publication.context_publication);
+    append_hook_outbox_entries(impl_->db, owner_scope, run_id, publication.hook_outbox_entries);
     if (publication.run_lineage) {
         if (current_lineage)
             update_lineage_head(impl_->db, *publication.run_lineage);

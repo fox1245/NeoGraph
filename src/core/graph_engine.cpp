@@ -1,4 +1,5 @@
 #include <neograph/graph/engine.h>
+#include <neograph/graph/node.h>
 
 #include "run_context_runtime.h"
 #include <neograph/graph/loader.h>
@@ -345,6 +346,16 @@ void GraphEngine::set_checkpoint_store(std::shared_ptr<CheckpointStore> store) {
 
 void GraphEngine::set_store(std::shared_ptr<Store> store) {
     store_ = std::move(store);
+}
+
+void GraphEngine::set_runtime_interposition(
+    std::shared_ptr<::neograph::RuntimeInterpositionController> controller) {
+    for (auto& [name, node] : nodes_) {
+        (void)name;
+        if (auto* llm = dynamic_cast<LLMCallNode*>(node.get())) {
+            llm->set_runtime_interposition(controller);
+        }
+    }
 }
 
 void GraphEngine::set_retry_policy(const RetryPolicy& policy) {

@@ -10,6 +10,8 @@
 #include <neograph/program/lineage.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/run_record.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/runtime_context.h>
 
 #include <cstdint>
 #include <memory>
@@ -19,6 +21,31 @@
 #include <vector>
 
 namespace neograph::program {
+
+/** Exact context evidence selected for one Program transition. */
+struct NEOGRAPH_PROGRAM_API ProgramContextPublication {
+    ContextEpoch                 epoch;
+    std::vector<ContextArtifact> artifacts;
+    ContextAssemblyReceipt       assembly_receipt;
+};
+
+NEOGRAPH_PROGRAM_API void validate_program_context_publication(
+    const ProgramContextPublication& context, const ProgramRunRecord& run);
+NEOGRAPH_PROGRAM_API bool is_valid_program_context_history_append(
+    const std::vector<ProgramContextPublication>& old_context,
+    const std::optional<ProgramContextPublication>& next_context);
+
+/** Validates a durable hook outbox head before it is attached to a Program run. */
+NEOGRAPH_PROGRAM_API void validate_program_hook_outbox_entry(
+    const HookOutboxEntry& entry, const ProgramRunRecord& run);
+/**
+ * Validates an append-only hook-head update. Entries not present in `next` retain
+ * their prior logical invocation head; a new entry may only advance its own head.
+ */
+NEOGRAPH_PROGRAM_API bool is_valid_program_hook_history_append(
+    const std::vector<HookOutboxEntry>& old_entries,
+    const std::vector<HookOutboxEntry>& next_entries,
+    const ProgramRunRecord& run);
 
 class NEOGRAPH_PROGRAM_API ProgramEffectOutboxEntry {
 public:
@@ -54,6 +81,10 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     /// On a fork's first publication, atomically debits the still-active source
     /// lineage while the target starts in an independent generation-one lineage.
     std::optional<ProgramRunLineage>         fork_source_lineage;
+    /// Optional append-only provider-context evidence for this transition.
+    std::optional<ProgramContextPublication>  context_publication;
+    /// Immutable hook outbox heads appended atomically with this transition.
+    std::vector<HookOutboxEntry>               hook_outbox_entries;
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
 };
@@ -71,6 +102,8 @@ enum class ProgramTransitionFaultPoint : std::uint8_t {
     AfterJournalSnapshot,
     AfterEventSnapshot,
     AfterEffectSnapshot,
+    AfterContextSnapshot,
+    AfterHookSnapshot,
     AfterLineageSnapshot,
     BeforeCommit,
 };
@@ -105,6 +138,14 @@ public:
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence = 0) const;
+    /** Durable provider-context evidence, ordered by ContextEpoch sequence. */
+    virtual std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::uint64_t    after_sequence = 0) const;
+    /** Current durable heads, including pending and reconciliation-required hooks. */
+    virtual std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const;
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>
     load_migration_plan(std::string_view /*owner_scope*/, std::string_view /*run_id*/) const {
@@ -203,8 +244,14 @@ public:
                  std::uint64_t after_sequence = 0) const override;
     std::vector<ProgramJavaScriptCommandJournalEntry>
     load_javascript_commands(std::string_view owner_scope,
-                             std::string_view run_id,
-                             std::uint64_t after_sequence = 0) const override;
+                              std::string_view run_id,
+                              std::uint64_t after_sequence = 0) const override;
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner_scope,
+        std::string_view run_id,
+                               std::uint64_t    after_sequence = 0) const override;
+    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner_scope,

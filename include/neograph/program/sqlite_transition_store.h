@@ -48,6 +48,12 @@ public:
     load_javascript_commands(std::string_view owner_scope,
                              std::string_view run_id,
                              std::uint64_t after_sequence = 0) const override;
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner_scope,
+        std::string_view run_id,
+         std::uint64_t    after_sequence = 0) const override;
+    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner_scope,

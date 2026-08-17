@@ -18,6 +18,7 @@ void init_state(py::module_& m);
 void init_graph(py::module_& m);
 void init_node(py::module_& m);
 void init_parity(py::module_& m);   // Store + validator (#97)
+void init_runtime_context(py::module_& m);
 #ifdef NEOGRAPH_PYBIND_HAS_A2A
 void init_a2a(py::module_& m);
 #endif
@@ -85,6 +86,7 @@ PYBIND11_MODULE(_neograph, m) {
     neograph::pybind::init_node(m);
     neograph::pybind::init_artifact(m);
     neograph::pybind::init_parity(m);
+    neograph::pybind::init_runtime_context(m);
 #ifdef NEOGRAPH_PYBIND_HAS_A2A
     neograph::pybind::init_a2a(m);
 #endif

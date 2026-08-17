@@ -49,6 +49,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
+#include <neograph/runtime_interposition_controller.h>
 #include <neograph/tool_dispatch.h>
 #include <neograph/tool_execution.h>
 
@@ -884,7 +885,14 @@ void init_graph(py::module_& m) {
              py::arg("controller"),
              "Install the host-owned tool execution controller. Its policies "
              "survive run() and resume(); configure before concurrent use. "
-             "Pass None to restore the conservative process-default policy.")
+              "Pass None to restore the conservative process-default policy.")
+
+        .def("set_runtime_interposition",
+             &GraphEngine::set_runtime_interposition,
+             py::arg("controller"),
+             py::keep_alive<1, 2>(),
+             "Opt into epoch-assembled, receipt-journaled dispatch for built-in "
+             "LLMCallNode instances. Pass None to retain direct provider behavior.")
 
         .def("resume",
             [](GraphEngine& self,

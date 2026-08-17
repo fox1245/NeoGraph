@@ -41,6 +41,7 @@
 #include <string>
 #include <vector>
 
+namespace neograph { class RuntimeInterpositionController; }
 namespace neograph::graph {
 
 class ValidatedTopology;
@@ -830,6 +831,11 @@ public:
         std::shared_ptr<ToolExecutionController> controller) {
         tool_execution_controller_ = std::move(controller);
     }
+
+    /// Opt into controlled LLM dispatch for built-in LLMCallNode instances.
+    /// Custom nodes and direct Provider calls remain explicitly unmanaged.
+    void set_runtime_interposition(
+        std::shared_ptr<::neograph::RuntimeInterpositionController> controller);
 
     /**
      * @brief Get the cross-thread shared memory store.
