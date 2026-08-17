@@ -14,10 +14,68 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::program {
 
 class ProgramRunRecord;
+
+/** Exact durable hook head retained across a runtime-state transfer. */
+struct ProgramRuntimeStateTransferHookReference {
+    std::string invocation_id;
+    std::string head_id;
+    std::string event_id;
+
+    bool operator==(const ProgramRuntimeStateTransferHookReference&) const = default;
+};
+
+struct ProgramRuntimeStateTransferReceiptData {
+    std::string                                            owner_scope;
+    std::string                                            lineage_id;
+    std::string                                            source_generation_id;
+    std::string                                            source_lineage_head_id;
+    std::string                                            source_run_id;
+    std::string                                            source_run_record_id;
+    std::string                                            source_journal_head;
+    std::uint64_t                                          target_generation = 0;
+    std::string                                            target_run_id;
+    std::string                                            target_initial_run_record_id;
+    std::string                                            target_initial_journal_head;
+    std::vector<std::string>                               source_context_epoch_ids;
+    std::optional<std::string>                             target_context_epoch_id;
+    std::vector<ProgramRuntimeStateTransferHookReference> hook_references;
+};
+
+/** Immutable content-addressed runtime-state evidence for a successor generation. */
+class NEOGRAPH_PROGRAM_API ProgramRuntimeStateTransferReceipt final {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    explicit ProgramRuntimeStateTransferReceipt(ProgramRuntimeStateTransferReceiptData data);
+    static ProgramRuntimeStateTransferReceipt parse(std::string_view stored_bytes);
+
+    const std::string& owner_scope() const noexcept;
+    const std::string& lineage_id() const noexcept;
+    const std::string& source_generation_id() const noexcept;
+    const std::string& source_lineage_head_id() const noexcept;
+    const std::string& source_run_id() const noexcept;
+    const std::string& source_run_record_id() const noexcept;
+    const std::string& source_journal_head() const noexcept;
+    std::uint64_t target_generation() const noexcept;
+    const std::string& target_run_id() const noexcept;
+    const std::string& target_initial_run_record_id() const noexcept;
+    const std::string& target_initial_journal_head() const noexcept;
+    const std::vector<std::string>& source_context_epoch_ids() const noexcept;
+    const std::optional<std::string>& target_context_epoch_id() const noexcept;
+    const std::vector<ProgramRuntimeStateTransferHookReference>& hook_references() const noexcept;
+    const std::string& id() const noexcept;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit ProgramRuntimeStateTransferReceipt(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+};
 
 /** Derives the stable owner-scoped lineage identity for a root run. */
 NEOGRAPH_PROGRAM_API std::string program_run_lineage_id(std::string_view owner_scope,
@@ -37,12 +95,13 @@ struct ProgramRunGenerationData {
     std::uint32_t              child_depth   = 0;
     std::optional<ProgramReplacementReceipt> replacement_receipt;
     std::optional<ProgramGraphMigrationReceipt> graph_migration_receipt;
+    std::optional<ProgramRuntimeStateTransferReceipt> runtime_state_transfer_receipt;
 };
 
 /** Immutable identity of one admitted topology generation in a run lineage. */
 class NEOGRAPH_PROGRAM_API ProgramRunGeneration final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 3;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 4;
 
     static ProgramRunGeneration create(ProgramRunGenerationData data);
     static ProgramRunGeneration parse(std::string_view stored_bytes);
@@ -60,6 +119,7 @@ public:
     std::uint32_t                     child_depth() const noexcept;
     std::optional<ProgramReplacementReceipt> replacement_receipt() const;
     std::optional<ProgramGraphMigrationReceipt> graph_migration_receipt() const;
+    std::optional<ProgramRuntimeStateTransferReceipt> runtime_state_transfer_receipt() const;
     const std::string&                id() const noexcept;
     std::string                       serialize_canonical() const;
 

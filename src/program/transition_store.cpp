@@ -835,6 +835,11 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         }
         if (publication.run_generation) {
             const auto& generation = *publication.run_generation;
+            if (generation.generation() > 1 && !generation.replacement_receipt() &&
+                !generation.graph_migration_receipt()) {
+                throw std::invalid_argument(
+                    "Program successor generation requires an admitted transition receipt");
+            }
             if (generation.owner_scope() != owner ||
                 generation.lineage_id() != lineage.lineage_id() ||
                 generation.run_id() != run.run_id() ||
@@ -1186,6 +1191,203 @@ bool is_valid_program_hook_history_append(const std::vector<HookOutboxEntry>& ol
                                           const std::vector<HookOutboxEntry>& next_entries,
                                           const ProgramRunRecord& run) {
     return valid_hook_history_append(old_entries, next_entries, run);
+}
+
+bool is_valid_program_runtime_context_clone(
+    const std::vector<ProgramContextPublication>& source_contexts,
+    const ProgramRunRecord& target_run,
+    const std::optional<ProgramContextPublication>& target_context) noexcept {
+    try {
+        if (source_contexts.empty()) return !target_context;
+        if (!target_context) return false;
+        const auto& source = source_contexts.back();
+        const auto& target = *target_context;
+        if (target.epoch.run_id() != target_run.run_id() || target.epoch.sequence() != 1 ||
+            target.epoch.predecessor_id() || target.epoch.feed_id() != source.epoch.feed_id() ||
+            target.epoch.raw_from_sequence() != source.epoch.raw_from_sequence() ||
+            target.epoch.raw_through_sequence() != source.epoch.raw_through_sequence() ||
+            target.epoch.raw_window_digest() != source.epoch.raw_window_digest() ||
+            target.epoch.artifact_ids() != source.epoch.artifact_ids() ||
+            target.epoch.guarantee_profile() != source.epoch.guarantee_profile() ||
+            target.assembly_receipt.normalized_request_digest() !=
+                source.assembly_receipt.normalized_request_digest() ||
+            target.assembly_receipt.message_window_digest() !=
+                source.assembly_receipt.message_window_digest() ||
+            target.assembly_receipt.artifact_ids() !=
+                source.assembly_receipt.artifact_ids() ||
+            target.assembly_receipt.required_skill_artifact_ids() !=
+                source.assembly_receipt.required_skill_artifact_ids() ||
+            target.assembly_receipt.raw_from_sequence() !=
+                source.assembly_receipt.raw_from_sequence() ||
+            target.assembly_receipt.raw_through_sequence() !=
+                source.assembly_receipt.raw_through_sequence() ||
+            target.assembly_receipt.estimated_input_tokens() !=
+                source.assembly_receipt.estimated_input_tokens() ||
+            target.assembly_receipt.mandatory_input_tokens() !=
+                source.assembly_receipt.mandatory_input_tokens() ||
+            target.artifacts.size() != source.artifacts.size()) {
+            return false;
+        }
+        for (std::size_t index = 0; index < source.artifacts.size(); ++index) {
+            if (source.artifacts[index].serialize_canonical() !=
+                target.artifacts[index].serialize_canonical()) {
+                return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool is_valid_program_runtime_state_transfer(
+    const std::optional<ProgramRuntimeStateTransferReceipt>& receipt,
+    const ProgramRunGeneration& source_generation,
+    const ProgramRunLineage& source_lineage,
+    const ProgramRunRecord& source_run,
+    const std::vector<ProgramContextPublication>& source_contexts,
+    const std::vector<HookOutboxEntry>& source_hooks,
+    const ProgramRunGeneration& target_generation,
+    const ProgramRunRecord& target_run,
+    const std::optional<ProgramContextPublication>& target_context) noexcept {
+    try {
+        std::vector<const HookOutboxEntry*> unresolved;
+        for (const auto& hook : source_hooks) {
+            const auto state = hook.data().state;
+            if (state != HookExecutionState::Succeeded && state != HookExecutionState::Cancelled) {
+                unresolved.push_back(&hook);
+            }
+        }
+        const auto prior_transfer = source_generation.runtime_state_transfer_receipt();
+        if (!receipt) {
+            return source_contexts.empty() && unresolved.empty() && !target_context &&
+                   (!prior_transfer || prior_transfer->hook_references().empty());
+        }
+        const auto& value = *receipt;
+        const auto target_receipt = target_generation.runtime_state_transfer_receipt();
+        if (!target_receipt || target_receipt->id() != value.id() ||
+            value.owner_scope() != source_generation.owner_scope() ||
+            value.owner_scope() != target_generation.owner_scope() ||
+            value.lineage_id() != source_generation.lineage_id() ||
+            value.lineage_id() != target_generation.lineage_id() ||
+            value.source_generation_id() != source_generation.id() ||
+            value.source_lineage_head_id() != source_lineage.id() ||
+            value.source_run_id() != source_run.run_id() ||
+            value.source_run_record_id() != source_run.id() ||
+            value.source_journal_head() != source_run.journal_head() ||
+            value.target_generation() != target_generation.generation() ||
+            value.target_run_id() != target_run.run_id() ||
+            value.target_initial_run_record_id() != target_run.id() ||
+            value.target_initial_journal_head() != target_run.journal_head() ||
+            target_generation.generation() != source_generation.generation() + 1 ||
+            !target_generation.predecessor_generation_id() ||
+            *target_generation.predecessor_generation_id() != source_generation.id() ||
+            source_lineage.active_generation_id() != source_generation.id() ||
+            source_lineage.active_run_record_id() != source_run.id() ||
+            source_lineage.active_journal_head() != source_run.journal_head() ||
+            value.source_context_epoch_ids().size() != source_contexts.size()) {
+            return false;
+        }
+        for (std::size_t index = 0; index < source_contexts.size(); ++index) {
+            if (value.source_context_epoch_ids()[index] != source_contexts[index].epoch.id()) {
+                return false;
+            }
+        }
+        std::vector<ProgramRuntimeStateTransferHookReference> expected_hooks;
+        if (prior_transfer) {
+            expected_hooks = prior_transfer->hook_references();
+        }
+        for (const auto* hook : unresolved) {
+            const auto duplicate = std::find_if(
+                expected_hooks.begin(), expected_hooks.end(), [&](const auto& reference) {
+                    return reference.invocation_id == hook->data().invocation.id();
+                });
+            if (duplicate != expected_hooks.end()) return false;
+            expected_hooks.push_back(
+                {hook->data().invocation.id(), hook->id(), hook->data().event.id()});
+        }
+        if (value.hook_references() != expected_hooks) {
+            return false;
+        }
+        for (const auto* hook : unresolved) {
+            if (hook->data().event.owner_scope() != source_run.owner_scope() ||
+                hook->data().event.run_id() != source_run.run_id()) {
+                return false;
+            }
+        }
+        if (source_contexts.empty()) {
+            return !value.target_context_epoch_id() && !target_context;
+        }
+        return value.target_context_epoch_id() && target_context &&
+               *value.target_context_epoch_id() == target_context->epoch.id() &&
+               is_valid_program_runtime_context_clone(
+                   source_contexts, target_run, target_context);
+    } catch (...) {
+        return false;
+    }
+}
+
+ProgramEffectiveRuntimeState ProgramTransitionStore::load_effective_runtime_state(
+    std::string_view owner_scope, std::string_view run_id) const {
+    ProgramEffectiveRuntimeState result;
+    result.context_publications = load_context_publications(owner_scope, run_id);
+    result.hook_outbox_entries = load_hook_outbox_entries(owner_scope, run_id);
+    const auto target_run = load(owner_scope, run_id);
+    const auto lineage = target_run ? load_run_lineage(owner_scope, run_id) : std::nullopt;
+    std::optional<ProgramRunGeneration> target_generation;
+    if (lineage) {
+        for (auto generation = lineage->active_generation(); generation > 0; --generation) {
+            auto candidate = load_generation(owner_scope, lineage->lineage_id(), generation);
+            if (candidate && candidate->run_id() == run_id) {
+                target_generation = std::move(candidate);
+                break;
+            }
+        }
+    }
+    if (!target_run || !lineage || !target_generation) {
+        return result;
+    }
+    result.transfer_receipt = target_generation->runtime_state_transfer_receipt();
+    if (!result.transfer_receipt) return result;
+    const auto& receipt = *result.transfer_receipt;
+    if (target_generation->generation() <= 1) {
+        throw std::runtime_error("Runtime-state transfer target generation is invalid");
+    }
+    const auto source_generation = load_generation(
+        owner_scope, lineage->lineage_id(), target_generation->generation() - 1);
+    const auto source_lineage = load_lineage_head(
+        owner_scope, lineage->lineage_id(), receipt.source_lineage_head_id());
+    const auto source_run = load(owner_scope, receipt.source_run_id());
+    const auto target_initial = load_generation_initial_publication(
+        owner_scope, lineage->lineage_id(), target_generation->generation());
+    if (!source_generation || !source_lineage || !source_run || !target_initial) {
+        throw std::runtime_error("Runtime-state transfer source evidence is unavailable");
+    }
+    auto source_state = load_effective_runtime_state(owner_scope, receipt.source_run_id());
+    const auto& source_contexts = source_state.context_publications;
+    const auto& source_hooks = source_state.hook_outbox_entries;
+    const auto target_context = target_initial->context_publication;
+    if (!is_valid_program_runtime_state_transfer(
+            result.transfer_receipt, *source_generation, *source_lineage, *source_run,
+            source_contexts, source_hooks, *target_generation, target_initial->run_record,
+            target_context)) {
+        throw std::runtime_error("Runtime-state transfer evidence is invalid");
+    }
+    std::vector<HookOutboxEntry> source_hook_heads = source_state.inherited_hook_outbox_entries;
+    source_hook_heads.insert(source_hook_heads.end(), source_hooks.begin(), source_hooks.end());
+    for (const auto& reference : receipt.hook_references()) {
+        const auto found = std::find_if(
+            source_hook_heads.begin(), source_hook_heads.end(), [&](const auto& hook) {
+                return hook.data().invocation.id() == reference.invocation_id &&
+                       hook.id() == reference.head_id &&
+                       hook.data().event.id() == reference.event_id;
+            });
+        if (found == source_hook_heads.end()) {
+            throw std::runtime_error("Transferred hook head is unavailable");
+        }
+        result.inherited_hook_outbox_entries.push_back(*found);
+    }
+    return result;
 }
 
 std::optional<ProgramTransitionPublication>
@@ -1584,7 +1786,14 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
                       owner, source->second->run.run_id(),
                       current_lineage->second->head.id()))
                 : impl_->graph_migration_capsules.end();
-            const bool valid_successor = graph_migration
+            const bool runtime_state_transfer_valid =
+                is_valid_program_runtime_state_transfer(
+                    publication.run_generation->runtime_state_transfer_receipt(),
+                    active->second, current_lineage->second->head, source->second->run,
+                    source->second->context_publications, source->second->hook_outbox_entries,
+                    *publication.run_generation, publication.run_record,
+                    publication.context_publication);
+            const bool valid_successor = runtime_state_transfer_valid && (graph_migration
                 ? durable_capsule != impl_->graph_migration_capsules.end() &&
                       next_lease &&
                       source->second->commands.empty() && publication.commands.empty() &&
@@ -1598,14 +1807,13 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
                            source->second->run, durable_capsule->second,
                            *publication.migration_plan,
                           *publication.run_generation, *publication.run_lineage,
-                          publication.run_record)
-                : !has_blocking_hook_obligation(source->second->hook_outbox_entries) &&
-                      !source->second->commands.empty() &&
-                      is_valid_program_replacement_transition(
+                           publication.run_record)
+                : !source->second->commands.empty() &&
+                       is_valid_program_replacement_transition(
                           active->second, current_lineage->second->head,
                           source->second->run, source->second->commands.back(),
                           *publication.run_generation, *publication.run_lineage,
-                          publication.run_record);
+                          publication.run_record));
             if (!valid_successor) return ProgramTransitionPublishResult::Conflict;
         }
         if (publication.run_generation && current_lineage != impl_->lineages.end() &&
@@ -1634,6 +1842,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         const auto source = impl_->runs.find(key(owner, active->second.run_id()));
         if (source == impl_->runs.end() ||
             has_blocking_hook_obligation(source->second->hook_outbox_entries) ||
+            !is_valid_program_runtime_context_clone(
+                source->second->context_publications, publication.run_record,
+                publication.context_publication) ||
             !fork_binds_predecessor(publication.run_record, active->second,
                                     found->second->head, source->second->run)) {
             return ProgramTransitionPublishResult::Conflict;

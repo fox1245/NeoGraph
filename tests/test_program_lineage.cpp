@@ -40,6 +40,23 @@ ProgramRunLineage initial_lineage(const ProgramRunGeneration& generation) {
                                                            generation.created_at_ms()});
 }
 
+ProgramReplacementReceipt replacement_receipt(const ProgramRunGeneration& source,
+                                              std::string source_generation_id = {}) {
+    return ProgramReplacementReceipt(ProgramReplacementReceiptData{
+        source.owner_scope(), source.lineage_id(), source.generation(),
+        source_generation_id.empty() ? source.id() : std::move(source_generation_id), digest('a'),
+        source.run_id(), digest('b'), digest('c'), source.program_version_id(), source.bundle_id(),
+        digest('d'), digest('e'), digest('f'), source.generation() + 1, "run-2", digest('7'),
+        digest('8'), digest('9'), digest('a'), digest('b'), digest('9'), digest('b')});
+}
+
+ProgramRuntimeStateTransferReceipt transfer_receipt(const ProgramRunGeneration& source) {
+    return ProgramRuntimeStateTransferReceipt(ProgramRuntimeStateTransferReceiptData{
+        source.owner_scope(), source.lineage_id(), source.id(), digest('a'), source.run_id(), digest('b'),
+        digest('c'), source.generation() + 1, "run-2", digest('9'), digest('b'),
+        {digest('d'), digest('e')}, digest('f'), {{digest('1'), digest('2'), digest('3')}}});
+}
+
 ProgramRunLineage next_head(const ProgramRunLineage& previous,
                             RunBudget                remaining,
                             RunBudget                reserved  = {},
@@ -87,6 +104,36 @@ TEST(ProgramRunLineageTest, LegacyGenerationRoundTripPreservesStoredIdentity) {
               "sha256:78d8f5d67f9b533b2b8370cc464b1d6c12aa321ea53d0ab149c5e4a39c2a2c5d");
     EXPECT_FALSE(parsed.replacement_receipt());
     EXPECT_EQ(parsed.serialize_canonical(), bytes);
+}
+
+TEST(ProgramRunLineageTest, RuntimeStateTransferReceiptRoundTripsAndRejectsTamper) {
+    const auto source = generation_one();
+    const auto receipt = transfer_receipt(source);
+    const auto parsed = ProgramRuntimeStateTransferReceipt::parse(receipt.serialize_canonical());
+    EXPECT_EQ(parsed.id(), receipt.id());
+    EXPECT_EQ(parsed.source_context_epoch_ids(), std::vector<std::string>({digest('d'), digest('e')}));
+    ASSERT_EQ(parsed.hook_references().size(), 1U);
+    EXPECT_EQ(parsed.hook_references().front().event_id, digest('3'));
+
+    auto tampered = receipt.serialize_canonical();
+    tampered.replace(tampered.find(digest('d')), digest('d').size(), digest('9'));
+    EXPECT_THROW((void)ProgramRuntimeStateTransferReceipt::parse(tampered), std::invalid_argument);
+
+    auto duplicate_epochs = ProgramRuntimeStateTransferReceiptData{
+        "owner-a", source.lineage_id(), source.id(), digest('a'), "run-1", digest('b'), digest('c'), 2,
+        "run-2", digest('9'), digest('b'), {digest('d'), digest('d')}, std::nullopt, {}};
+    EXPECT_THROW((void)ProgramRuntimeStateTransferReceipt(duplicate_epochs), std::invalid_argument);
+
+    auto duplicate_hooks = ProgramRuntimeStateTransferReceiptData{
+        "owner-a", source.lineage_id(), source.id(), digest('a'), "run-1", digest('b'), digest('c'), 2,
+        "run-2", digest('9'), digest('b'), {}, std::nullopt,
+        {{digest('1'), digest('2'), digest('3')}, {digest('1'), digest('4'), digest('5')}}};
+    EXPECT_THROW((void)ProgramRuntimeStateTransferReceipt(duplicate_hooks), std::invalid_argument);
+
+    auto oversized_epochs = ProgramRuntimeStateTransferReceiptData{
+        "owner-a", source.lineage_id(), source.id(), digest('a'), "run-1", digest('b'), digest('c'), 2,
+        "run-2", digest('9'), digest('b'), std::vector<std::string>(4097, digest('d')), std::nullopt, {}};
+    EXPECT_THROW((void)ProgramRuntimeStateTransferReceipt(oversized_epochs), std::invalid_argument);
 }
 
 TEST(ProgramRunLineageTest, InitialHeadBindsExactGenerationAndRunHeads) {
@@ -154,7 +201,8 @@ TEST(ProgramRunLineageTest, SuccessorMustBeContiguousAndBindExpectedGeneration) 
     const auto initial   = initial_lineage(first);
     const auto successor = ProgramRunGeneration::create(
         ProgramRunGenerationData{first.owner_scope(), first.lineage_id(), 2, "run-2", digest('7'),
-                                 digest('8'), digest('9'), digest('b'), first.id(), 20});
+                                  digest('8'), digest('9'), digest('b'), first.id(), 20, 0,
+                                  replacement_receipt(first), std::nullopt, transfer_receipt(first)});
     auto remaining = budget();
     remaining.wall_time_ms -= 1;
     const auto next =
@@ -176,7 +224,8 @@ TEST(ProgramRunLineageTest, SuccessorMustBeContiguousAndBindExpectedGeneration) 
 
     const auto unrelated = ProgramRunGeneration::create(
         ProgramRunGenerationData{first.owner_scope(), first.lineage_id(), 2, "run-2", digest('7'),
-                                 digest('8'), digest('9'), digest('b'), digest('c'), 20});
+                                  digest('8'), digest('9'), digest('b'), digest('c'), 20, 0,
+                                  replacement_receipt(first, digest('c'))});
     EXPECT_FALSE(is_valid_program_run_lineage_transition(initial, next, unrelated));
 }
 

@@ -1488,6 +1488,36 @@ ProgramTransitionPublication initial_publication(
     return ProgramTransitionPublication{std::move(run_record), std::move(journal), {started}, {}};
 }
 
+ProgramContextPublication transfer_context_to_run(
+    const ProgramContextPublication& source, std::string target_run_id) {
+    ContextEpochData epoch_data;
+    epoch_data.run_id = std::move(target_run_id);
+    epoch_data.sequence = 1;
+    epoch_data.feed_id = source.epoch.feed_id();
+    epoch_data.raw_from_sequence = source.epoch.raw_from_sequence();
+    epoch_data.raw_through_sequence = source.epoch.raw_through_sequence();
+    epoch_data.raw_window_digest = source.epoch.raw_window_digest();
+    epoch_data.artifact_ids = source.epoch.artifact_ids();
+    epoch_data.guarantee_profile = source.epoch.guarantee_profile();
+    auto epoch = ContextEpoch::create(std::move(epoch_data));
+
+    ContextAssemblyReceiptData receipt_data;
+    receipt_data.context_epoch_id = epoch.id();
+    receipt_data.normalized_request_digest =
+        source.assembly_receipt.normalized_request_digest();
+    receipt_data.message_window_digest = source.assembly_receipt.message_window_digest();
+    receipt_data.artifact_ids = source.assembly_receipt.artifact_ids();
+    receipt_data.required_skill_artifact_ids =
+        source.assembly_receipt.required_skill_artifact_ids();
+    receipt_data.raw_from_sequence = source.assembly_receipt.raw_from_sequence();
+    receipt_data.raw_through_sequence = source.assembly_receipt.raw_through_sequence();
+    receipt_data.estimated_input_tokens = source.assembly_receipt.estimated_input_tokens();
+    receipt_data.mandatory_input_tokens = source.assembly_receipt.mandatory_input_tokens();
+    auto artifacts = source.artifacts;
+    auto assembly = ContextAssemblyReceipt::create(receipt_data, epoch, artifacts);
+    return {std::move(epoch), std::move(artifacts), std::move(assembly)};
+}
+
 ProgramJournalRecord resumed_record(const detail::RunControl&   control,
                                     const ProgramJournalRecord& previous,
                                     RunBudget                   remaining_budget,
@@ -4817,6 +4847,14 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         throw_runtime_diagnostic("P_FORK_STATE",
                                  "Program fork source is not at an admitted durable boundary");
     }
+    const auto source_runtime_state = impl_->config.transitions->load_effective_runtime_state(
+        owner_scope, source_record->run_id());
+    const auto& source_contexts = source_runtime_state.context_publications;
+    if (!source_contexts.empty() && !impl_->config.runtime_recovery_handler) {
+        throw_runtime_diagnostic(
+            "P_RUNTIME_RECOVERY_UNAVAILABLE",
+            "Program fork cannot clone runtime context without a recovery boundary");
+    }
     const auto source_version =
         impl_->config.catalog->resolve_version(owner_scope, source_record->program_version_id());
     if (!source_version) {
@@ -4973,6 +5011,9 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     auto publication =
         initial_publication(*control, started, target_checkpoint, receipt, std::nullopt,
                             std::move(fork_pending_input), std::move(fork_pending_effect));
+    if (!source_contexts.empty()) {
+        publication.context_publication = transfer_context_to_run(source_contexts.back(), run_id);
+    }
     publication.migration_plan = migration_plan;
     publication = attach_run_lineage(*control->transitions, std::move(publication));
     publication.fork_source_lineage = ProgramRunLineage::create(ProgramRunLineageData{
@@ -4986,6 +5027,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         source_lineage->lineage.created_at_ms(),
         std::max(source_lineage->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),
         source_lineage->lineage.committed_descendant_budget()});
+    const auto cloned_context = publication.context_publication;
     const auto execution_lease =
         make_execution_lease(*control->materialized, publication);
     const auto published = execution_lease
@@ -5012,6 +5054,11 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
             json{{"run_id", run_id},
                  {"expected_plan_id", migration_plan.id()},
                  {"stored_plan_id", durable_plan ? durable_plan->id() : std::string{}}});
+    }
+    fork_lock.unlock();
+    if (cloned_context) {
+        impl_->config.runtime_recovery_handler(ProgramRuntimeRecoveryState{
+            std::string(owner_scope), run_id, {*cloned_context}, {}, {}, std::nullopt});
     }
     if (execution_lease) control->set_execution_lease(*execution_lease);
     impl_->register_control(control);
@@ -5214,6 +5261,23 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     }
     const auto commands =
         impl_->config.transitions->load_javascript_commands(owner_scope, source.source_run_id);
+    const auto source_runtime_state = impl_->config.transitions->load_effective_runtime_state(
+        owner_scope, source.source_run_id);
+    const auto& source_contexts = source_runtime_state.context_publications;
+    std::vector<HookOutboxEntry> unresolved_source_hooks =
+        source_runtime_state.inherited_hook_outbox_entries;
+    for (const auto& hook : source_runtime_state.hook_outbox_entries) {
+        const auto state = hook.data().state;
+        if (state != HookExecutionState::Succeeded && state != HookExecutionState::Cancelled) {
+            unresolved_source_hooks.push_back(hook);
+        }
+    }
+    if ((!source_contexts.empty() || !unresolved_source_hooks.empty()) &&
+        !impl_->config.runtime_recovery_handler) {
+        throw_runtime_diagnostic(
+            "P_RUNTIME_RECOVERY_UNAVAILABLE",
+            "Program replacement cannot transfer runtime state without a recovery boundary");
+    }
     if (commands.empty()) {
         throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
                                  "Program replacement checkpoint was not found");
@@ -5281,7 +5345,11 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     auto publication = initial_publication(*control, started, std::nullopt, std::nullopt,
                                            std::nullopt, std::nullopt, std::nullopt,
                                            transition_time);
-    auto receipt = ProgramReplacementReceipt(ProgramReplacementReceiptData{
+    if (!source_contexts.empty()) {
+        publication.context_publication =
+            transfer_context_to_run(source_contexts.back(), run_id);
+    }
+    auto replacement_receipt = ProgramReplacementReceipt(ProgramReplacementReceiptData{
         std::string(owner_scope),
         source_lineage->lineage.lineage_id(),
         source_lineage->generation.generation(),
@@ -5304,12 +5372,35 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         publication.run_record.binding_fingerprint(),
         publication.run_record.id(),
         publication.run_record.journal_head()});
+    std::optional<ProgramRuntimeStateTransferReceipt> transfer_receipt;
+    if (!source_contexts.empty() || !unresolved_source_hooks.empty()) {
+        std::vector<std::string> context_ids;
+        context_ids.reserve(source_contexts.size());
+        for (const auto& context : source_contexts) context_ids.push_back(context.epoch.id());
+        std::vector<ProgramRuntimeStateTransferHookReference> hook_references;
+        hook_references.reserve(unresolved_source_hooks.size());
+        for (const auto& hook : unresolved_source_hooks) {
+            hook_references.push_back({hook.data().invocation.id(), hook.id(),
+                                       hook.data().event.id()});
+        }
+        transfer_receipt.emplace(ProgramRuntimeStateTransferReceiptData{
+            std::string(owner_scope), source_lineage->lineage.lineage_id(),
+            source_lineage->generation.id(), source_lineage->lineage.id(),
+            source_record->run_id(), source_record->id(), source_record->journal_head(),
+            source_lineage->generation.generation() + 1, run_id,
+            publication.run_record.id(), publication.run_record.journal_head(),
+            std::move(context_ids),
+            publication.context_publication
+                ? std::optional<std::string>(publication.context_publication->epoch.id())
+                : std::nullopt,
+            std::move(hook_references)});
+    }
     auto successor = ProgramRunGeneration::create(ProgramRunGenerationData{
         std::string(owner_scope), source_lineage->lineage.lineage_id(),
         source_lineage->generation.generation() + 1, run_id, target.id(), target.bundle_id(),
         publication.run_record.id(), publication.journal_record.id,
         source_lineage->generation.id(), publication.run_record.created_at_ms(), 0,
-        std::move(receipt)});
+        std::move(replacement_receipt), std::nullopt, transfer_receipt});
     publication.run_generation = successor;
     publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
         std::string(owner_scope), source_lineage->lineage.lineage_id(),
@@ -5318,6 +5409,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         source_lineage->lineage.id(), source_lineage->lineage.created_at_ms(),
         std::max(source_lineage->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),
         source_lineage->lineage.committed_descendant_budget()});
+    const auto transferred_context = publication.context_publication;
     const auto execution_lease =
         make_execution_lease(*control->materialized, publication);
 
@@ -5346,15 +5438,24 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         throw_runtime_diagnostic("P_REPLACEMENT_CONFLICT",
                                  "Program lineage already selected another successor");
     }
+    cancel_source_control();
+    reconnect_lock.unlock();
+    transition_lock.unlock();
+    if (transfer_receipt) {
+        ProgramRuntimeRecoveryState recovery{
+            std::string(owner_scope), run_id,
+            transferred_context
+                ? std::vector<ProgramContextPublication>{*transferred_context}
+                : std::vector<ProgramContextPublication>{},
+            {}, unresolved_source_hooks, transfer_receipt};
+        impl_->config.runtime_recovery_handler(recovery);
+    }
     if (execution_lease) control->set_execution_lease(*execution_lease);
     auto registration = impl_->register_control(control, true);
-    cancel_source_control();
     if (!registration.inserted) return ProgramHandle(std::move(registration.control));
     if (!admit_started(control, started, remaining)) {
         return ProgramHandle(std::move(control));
     }
-    reconnect_lock.unlock();
-    transition_lock.unlock();
     try {
         control->deliver_event(started);
     } catch (const std::exception& error) {
@@ -5529,6 +5630,23 @@ ProgramHandle ProgramRuntime::migrate_graph(
             "P_GRAPH_MIGRATION_STALE",
             "Program graph migration capsule is no longer the active source head");
     }
+    const auto source_runtime_state = impl_->config.transitions->load_effective_runtime_state(
+        owner_scope, source_record->run_id());
+    const auto& source_contexts = source_runtime_state.context_publications;
+    std::vector<HookOutboxEntry> unresolved_source_hooks =
+        source_runtime_state.inherited_hook_outbox_entries;
+    for (const auto& hook : source_runtime_state.hook_outbox_entries) {
+        const auto state = hook.data().state;
+        if (state != HookExecutionState::Succeeded && state != HookExecutionState::Cancelled) {
+            unresolved_source_hooks.push_back(hook);
+        }
+    }
+    if ((!source_contexts.empty() || !unresolved_source_hooks.empty()) &&
+        !impl_->config.runtime_recovery_handler) {
+        throw_runtime_diagnostic(
+            "P_RUNTIME_RECOVERY_UNAVAILABLE",
+            "Program graph migration cannot transfer runtime state without a recovery boundary");
+    }
 
     const auto target_run_id = target.requested_run_id.empty()
         ? graph_migration_run_id(capsule, target_version->id())
@@ -5621,6 +5739,10 @@ ProgramHandle ProgramRuntime::migrate_graph(
         *control, started, target_checkpoint, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, transition_time,
         target_checkpoint_content_id);
+    if (!source_contexts.empty()) {
+        publication.context_publication =
+            transfer_context_to_run(source_contexts.back(), target_run_id);
+    }
     auto receipt = ProgramGraphMigrationReceipt(
         ProgramGraphMigrationReceiptData{
             capsule, source_pinned->bundle, source_pinned->version,
@@ -5631,13 +5753,35 @@ ProgramHandle ProgramRuntime::migrate_graph(
             publication.run_record.binding_fingerprint(),
             publication.run_record.id(), publication.run_record.journal_head(),
             target_checkpoint, target_snapshot});
+    std::optional<ProgramRuntimeStateTransferReceipt> transfer_receipt;
+    if (!source_contexts.empty() || !unresolved_source_hooks.empty()) {
+        std::vector<std::string> context_ids;
+        context_ids.reserve(source_contexts.size());
+        for (const auto& context : source_contexts) context_ids.push_back(context.epoch.id());
+        std::vector<ProgramRuntimeStateTransferHookReference> hook_references;
+        hook_references.reserve(unresolved_source_hooks.size());
+        for (const auto& hook : unresolved_source_hooks) {
+            hook_references.push_back({hook.data().invocation.id(), hook.id(),
+                                       hook.data().event.id()});
+        }
+        transfer_receipt.emplace(ProgramRuntimeStateTransferReceiptData{
+            owner_scope, active->lineage.lineage_id(), active->generation.id(),
+            active->lineage.id(), source_record->run_id(), source_record->id(),
+            source_record->journal_head(), active->generation.generation() + 1,
+            target_run_id, publication.run_record.id(), publication.run_record.journal_head(),
+            std::move(context_ids),
+            publication.context_publication
+                ? std::optional<std::string>(publication.context_publication->epoch.id())
+                : std::nullopt,
+            std::move(hook_references)});
+    }
     auto successor = ProgramRunGeneration::create(ProgramRunGenerationData{
         owner_scope, active->lineage.lineage_id(),
         active->generation.generation() + 1, target_run_id,
         target_version->id(), target_version->bundle_id(),
         publication.run_record.id(), publication.run_record.journal_head(),
         active->generation.id(), publication.run_record.created_at_ms(), 0,
-        std::nullopt, receipt});
+        std::nullopt, receipt, transfer_receipt});
     publication.run_generation = successor;
     publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
         owner_scope, active->lineage.lineage_id(), active->lineage.root_run_id(),
@@ -5646,6 +5790,7 @@ ProgramHandle ProgramRuntime::migrate_graph(
         active->lineage.id(), active->lineage.created_at_ms(),
         publication.run_record.updated_at_ms(), RunBudget{}});
     publication.migration_plan = migration_plan;
+    const auto transferred_context = publication.context_publication;
     const auto target_execution_lease =
         make_execution_lease(*control->materialized, publication);
     if (!target_execution_lease) {
@@ -5693,16 +5838,25 @@ ProgramHandle ProgramRuntime::migrate_graph(
             "Program lineage already selected another graph migration successor");
     }
 
+    fence_source();
+    reconnect_lock.unlock();
+    fork_lock.unlock();
+    if (transfer_receipt) {
+        ProgramRuntimeRecoveryState recovery{
+            owner_scope, target_run_id,
+            transferred_context
+                ? std::vector<ProgramContextPublication>{*transferred_context}
+                : std::vector<ProgramContextPublication>{},
+            {}, unresolved_source_hooks, transfer_receipt};
+        impl_->config.runtime_recovery_handler(recovery);
+    }
     control->set_execution_lease(*target_execution_lease);
     auto registration = impl_->register_control(control, true);
     if (!registration.inserted) {
         return ProgramHandle(std::move(registration.control));
     }
     const auto admitted = admit_started(control, started, remaining, target_checkpoint);
-    fence_source();
     if (!admitted) return ProgramHandle(std::move(control));
-    reconnect_lock.unlock();
-    fork_lock.unlock();
     try {
         control->deliver_event(started);
     } catch (const std::exception& error) {
@@ -5812,9 +5966,10 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     try {
         // Recovery must inspect the complete causal histories, not merely the
         // reduced heads retained by a transition snapshot.
-        auto contexts =
-            impl_->config.transitions->load_context_publications(owner_scope, run_id);
-        auto hooks = impl_->config.transitions->load_hook_outbox_entries(owner_scope, run_id);
+        auto runtime_state =
+            impl_->config.transitions->load_effective_runtime_state(owner_scope, run_id);
+        auto& contexts = runtime_state.context_publications;
+        auto& hooks = runtime_state.hook_outbox_entries;
 
         std::vector<ProgramContextPublication> context_prefix;
         context_prefix.reserve(contexts.size());
@@ -5829,18 +5984,22 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             throw std::invalid_argument("Program hook recovery heads are invalid");
         }
 
-        if (!contexts.empty() || !hooks.empty()) {
+        if (!contexts.empty() || !hooks.empty() ||
+            !runtime_state.inherited_hook_outbox_entries.empty()) {
             if (!impl_->config.runtime_recovery_handler) {
                 throw_runtime_diagnostic(
                     "P_RUNTIME_RECOVERY_UNAVAILABLE",
                     "Program recovery has durable context or hook state but no recovery boundary",
                     json{{"run_id", std::string(run_id)},
                          {"context_publications", contexts.size()},
-                         {"hook_outbox_entries", hooks.size()}});
+                         {"hook_outbox_entries", hooks.size()},
+                         {"inherited_hook_outbox_entries",
+                          runtime_state.inherited_hook_outbox_entries.size()}});
             }
             impl_->config.runtime_recovery_handler(ProgramRuntimeRecoveryState{
                 std::string(owner_scope), std::string(run_id), std::move(contexts),
-                std::move(hooks)});
+                std::move(hooks), std::move(runtime_state.inherited_hook_outbox_entries),
+                std::move(runtime_state.transfer_receipt)});
         }
     } catch (const ProgramDiagnosticError&) {
         throw;

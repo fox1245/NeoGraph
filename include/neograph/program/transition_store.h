@@ -47,6 +47,32 @@ NEOGRAPH_PROGRAM_API bool is_valid_program_hook_history_append(
     const std::vector<HookOutboxEntry>& next_entries,
     const ProgramRunRecord& run);
 
+/** Effective runtime state for one generation, preserving source hook provenance. */
+struct NEOGRAPH_PROGRAM_API ProgramEffectiveRuntimeState {
+    std::vector<ProgramContextPublication> context_publications;
+    std::vector<HookOutboxEntry> hook_outbox_entries;
+    std::vector<HookOutboxEntry> inherited_hook_outbox_entries;
+    std::optional<ProgramRuntimeStateTransferReceipt> transfer_receipt;
+};
+
+/** Validates exact context and unresolved-hook transfer into one successor. */
+NEOGRAPH_PROGRAM_API bool is_valid_program_runtime_state_transfer(
+    const std::optional<ProgramRuntimeStateTransferReceipt>& receipt,
+    const ProgramRunGeneration& source_generation,
+    const ProgramRunLineage& source_lineage,
+    const ProgramRunRecord& source_run,
+    const std::vector<ProgramContextPublication>& source_contexts,
+    const std::vector<HookOutboxEntry>& source_hooks,
+    const ProgramRunGeneration& target_generation,
+    const ProgramRunRecord& target_run,
+    const std::optional<ProgramContextPublication>& target_context) noexcept;
+
+/** Validates a source snapshot cloned into an independent fork lineage. */
+NEOGRAPH_PROGRAM_API bool is_valid_program_runtime_context_clone(
+    const std::vector<ProgramContextPublication>& source_contexts,
+    const ProgramRunRecord& target_run,
+    const std::optional<ProgramContextPublication>& target_context) noexcept;
+
 class NEOGRAPH_PROGRAM_API ProgramEffectOutboxEntry {
 public:
     static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
@@ -145,6 +171,9 @@ public:
         std::uint64_t    after_sequence = 0) const;
     /** Current durable heads, including pending and reconciliation-required hooks. */
     virtual std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const;
+    /** Target-local state plus source-origin hook heads authorized by its generation. */
+    virtual ProgramEffectiveRuntimeState load_effective_runtime_state(
         std::string_view owner_scope, std::string_view run_id) const;
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>

@@ -461,6 +461,15 @@ public:
         std::uint64_t    after_sequence) const override {
         return select(run_id).load_javascript_commands(owner_scope, run_id, after_sequence);
     }
+    std::vector<program::ProgramContextPublication> load_context_publications(
+        std::string_view owner_scope, std::string_view run_id,
+        std::uint64_t after_sequence) const override {
+        return select(run_id).load_context_publications(owner_scope, run_id, after_sequence);
+    }
+    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        return select(run_id).load_hook_outbox_entries(owner_scope, run_id);
+    }
     std::optional<program::MigrationPlan> load_migration_plan(
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_migration_plan(owner_scope, run_id);

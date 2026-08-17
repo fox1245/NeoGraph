@@ -1697,8 +1697,16 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
             }
             const auto graph_migration =
                 publication.run_generation->graph_migration_receipt();
-            bool valid_successor = false;
-            if (graph_migration) {
+            const auto source_contexts = load_context_publication_history(
+                impl_->db, owner_scope, active->run_id());
+            const auto source_hooks = load_hook_outbox_heads(
+                impl_->db, owner_scope, active->run_id(), source->run_record);
+            bool valid_successor = is_valid_program_runtime_state_transfer(
+                publication.run_generation->runtime_state_transfer_receipt(), *active,
+                *current_lineage, source->run_record, source_contexts, source_hooks,
+                *publication.run_generation, publication.run_record,
+                publication.context_publication);
+            if (valid_successor && graph_migration) {
                 const auto command = load_latest_javascript_command(
                     impl_->db, owner_scope, active->run_id());
                 const auto durable_capsule = load_graph_migration_capsule_record(
@@ -1714,12 +1722,10 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
                         *active, *current_lineage, source->run_record, *durable_capsule,
                         *publication.migration_plan, *publication.run_generation,
                         *publication.run_lineage, publication.run_record);
-            } else {
+            } else if (valid_successor) {
                 const auto checkpoint = load_latest_javascript_command(
                     impl_->db, owner_scope, active->run_id());
                 valid_successor = checkpoint &&
-                    !has_blocking_hook_obligation(load_hook_outbox_heads(
-                        impl_->db, owner_scope, active->run_id(), source->run_record)) &&
                     is_valid_program_replacement_transition(
                         *active, *current_lineage, source->run_record, *checkpoint,
                         *publication.run_generation, *publication.run_lineage,
@@ -1755,10 +1761,15 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
             impl_->db, owner_scope, current_fork_source->lineage_id(),
             current_fork_source->active_generation());
         const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
-                                   : std::nullopt;
+                                    : std::nullopt;
+        const auto source_contexts = active
+            ? load_context_publication_history(impl_->db, owner_scope, active->run_id())
+            : std::vector<ProgramContextPublication>{};
         if (!active || !source ||
             has_blocking_hook_obligation(load_hook_outbox_heads(
                 impl_->db, owner_scope, active->run_id(), source->run_record)) ||
+            !is_valid_program_runtime_context_clone(
+                source_contexts, publication.run_record, publication.context_publication) ||
             !fork_binds_predecessor(publication.run_record, *active, *current_fork_source,
                                     source->run_record)) {
             transaction.commit();

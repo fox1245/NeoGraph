@@ -4,7 +4,9 @@
 #include "canonical_json.h"
 
 #include <limits>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -13,6 +15,8 @@ namespace {
 
 constexpr std::string_view GENERATION_FORMAT = "neograph-program-run-generation";
 constexpr std::string_view LINEAGE_FORMAT    = "neograph-program-run-lineage";
+constexpr std::string_view TRANSFER_RECEIPT_FORMAT = "neograph-program-runtime-state-transfer-receipt";
+constexpr std::size_t MAX_TRANSFER_REFERENCES = 4096;
 
 std::string require_string(const json& value, std::string_view key) {
     const auto name = std::string(key);
@@ -89,6 +93,87 @@ RunBudget parse_budget(const json& value) {
         require_uint64(value, "max_total_children")};
 }
 
+void require_identity(const std::string& value, std::string_view name) {
+    if (!detail::is_sha256_identity(value))
+        throw std::invalid_argument(std::string(name) + " must be a sha256 identity");
+}
+
+json transfer_receipt_body(const ProgramRuntimeStateTransferReceiptData& data) {
+    json hooks = json::array();
+    for (const auto& hook : data.hook_references) {
+        hooks.push_back({{"invocation_id", hook.invocation_id},
+                         {"head_id", hook.head_id},
+                         {"event_id", hook.event_id}});
+    }
+    return {{"format", std::string(TRANSFER_RECEIPT_FORMAT)},
+            {"storage_schema_version", ProgramRuntimeStateTransferReceipt::STORAGE_SCHEMA_VERSION},
+            {"owner_scope", data.owner_scope},
+            {"lineage_id", data.lineage_id},
+            {"source_generation_id", data.source_generation_id},
+            {"source_lineage_head_id", data.source_lineage_head_id},
+            {"source_run_id", data.source_run_id},
+            {"source_run_record_id", data.source_run_record_id},
+            {"source_journal_head", data.source_journal_head},
+            {"target_generation", data.target_generation},
+            {"target_run_id", data.target_run_id},
+            {"target_initial_run_record_id", data.target_initial_run_record_id},
+            {"target_initial_journal_head", data.target_initial_journal_head},
+            {"source_context_epoch_ids", data.source_context_epoch_ids},
+            {"target_context_epoch_id", data.target_context_epoch_id
+                                            ? json(*data.target_context_epoch_id) : json(nullptr)},
+            {"hook_references", std::move(hooks)}};
+}
+
+void validate_transfer_receipt(const ProgramRuntimeStateTransferReceiptData& data) {
+    if (data.owner_scope.empty())
+        throw std::invalid_argument("Program runtime-state transfer owner scope must not be empty");
+    detail::validate_utf8(data.owner_scope);
+    detail::validate_token(data.source_run_id, "Program runtime-state transfer source run id");
+    detail::validate_token(data.target_run_id, "Program runtime-state transfer target run id");
+    if (data.source_run_id == data.target_run_id || data.target_generation < 2)
+        throw std::invalid_argument("Program runtime-state transfer must target a distinct successor");
+    for (const auto* identity : {&data.lineage_id, &data.source_generation_id,
+                                 &data.source_lineage_head_id, &data.source_run_record_id,
+                                 &data.source_journal_head, &data.target_initial_run_record_id,
+                                 &data.target_initial_journal_head}) {
+        require_identity(*identity, "Program runtime-state transfer identity");
+    }
+    if (data.target_context_epoch_id)
+        require_identity(*data.target_context_epoch_id,
+                         "Program runtime-state transfer target context epoch id");
+    if (data.source_context_epoch_ids.size() > MAX_TRANSFER_REFERENCES ||
+        data.hook_references.size() > MAX_TRANSFER_REFERENCES)
+        throw std::invalid_argument("Program runtime-state transfer references exceed the limit");
+    std::set<std::string> epochs;
+    for (const auto& id : data.source_context_epoch_ids) {
+        require_identity(id, "Program runtime-state transfer source context epoch id");
+        if (!epochs.insert(id).second)
+            throw std::invalid_argument("Program runtime-state transfer context epochs must be unique");
+    }
+    std::set<std::string> invocations;
+    std::set<std::tuple<std::string, std::string, std::string>> hooks;
+    for (const auto& hook : data.hook_references) {
+        require_identity(hook.invocation_id, "Program runtime-state transfer hook invocation id");
+        require_identity(hook.head_id, "Program runtime-state transfer hook head id");
+        require_identity(hook.event_id, "Program runtime-state transfer hook event id");
+        if (!invocations.insert(hook.invocation_id).second ||
+            !hooks.emplace(hook.invocation_id, hook.head_id, hook.event_id).second)
+            throw std::invalid_argument("Program runtime-state transfer hook references must be unique");
+    }
+}
+
+std::vector<std::string> parse_transfer_id_array(const json& value, std::string_view name) {
+    if (!value.is_array() || value.size() > MAX_TRANSFER_REFERENCES)
+        throw std::invalid_argument(std::string(name) + " must be a bounded array");
+    std::vector<std::string> result;
+    result.reserve(value.size());
+    for (const auto& entry : value) {
+        if (!entry.is_string()) throw std::invalid_argument(std::string(name) + " entries must be strings");
+        result.push_back(entry.get<std::string>());
+    }
+    return result;
+}
+
 json generation_body(const ProgramRunGenerationData& data, std::uint32_t schema_version) {
     json value = {
         {"format", std::string(GENERATION_FORMAT)},
@@ -116,6 +201,13 @@ json generation_body(const ProgramRunGenerationData& data, std::uint32_t schema_
             data.graph_migration_receipt
                 ? detail::parse_json_strict(
                       data.graph_migration_receipt->serialize_canonical())
+                : json(nullptr);
+    }
+    if (schema_version >= 4) {
+        value["runtime_state_transfer_receipt"] =
+            data.runtime_state_transfer_receipt
+                ? detail::parse_json_strict(
+                      data.runtime_state_transfer_receipt->serialize_canonical())
                 : json(nullptr);
     }
     return value;
@@ -191,6 +283,19 @@ void validate_generation(const ProgramRunGenerationData& data) {
             capsule.source_generation_id() != *data.predecessor_generation_id) {
             throw std::invalid_argument(
                 "Program Graph migration receipt does not bind its successor generation");
+        }
+    }
+    if (data.runtime_state_transfer_receipt) {
+        const auto& receipt = *data.runtime_state_transfer_receipt;
+        if (data.generation == 1 || receipt.owner_scope() != data.owner_scope ||
+            receipt.lineage_id() != data.lineage_id ||
+            receipt.target_generation() != data.generation ||
+            receipt.target_run_id() != data.run_id ||
+            receipt.target_initial_run_record_id() != data.initial_run_record_id ||
+            receipt.target_initial_journal_head() != data.initial_journal_head ||
+            receipt.source_generation_id() != *data.predecessor_generation_id) {
+            throw std::invalid_argument(
+                "Program runtime-state transfer receipt does not bind its successor generation");
         }
     }
 }
@@ -283,6 +388,99 @@ std::string program_run_lineage_id(std::string_view owner_scope, std::string_vie
     return detail::sha256_identity("program-run-lineage-id/v1", material);
 }
 
+struct ProgramRuntimeStateTransferReceipt::Impl {
+    explicit Impl(ProgramRuntimeStateTransferReceiptData value) : data(std::move(value)) {
+        auto body = transfer_receipt_body(data);
+        id = detail::sha256_identity("program-runtime-state-transfer-receipt/v1",
+                                     detail::canonical_json_bytes(body));
+        body["id"] = id;
+        canonical_bytes = detail::canonical_json_bytes(body);
+    }
+
+    ProgramRuntimeStateTransferReceiptData data;
+    std::string id;
+    std::string canonical_bytes;
+};
+
+ProgramRuntimeStateTransferReceipt::ProgramRuntimeStateTransferReceipt(
+    ProgramRuntimeStateTransferReceiptData data) {
+    validate_transfer_receipt(data);
+    impl_ = std::make_shared<const Impl>(std::move(data));
+}
+
+ProgramRuntimeStateTransferReceipt::ProgramRuntimeStateTransferReceipt(
+    std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
+
+ProgramRuntimeStateTransferReceipt ProgramRuntimeStateTransferReceipt::parse(
+    std::string_view stored_bytes) {
+    const auto value = detail::parse_json_strict(stored_bytes);
+    if (!value.is_object() || require_string(value, "format") != TRANSFER_RECEIPT_FORMAT)
+        throw std::invalid_argument("Stored Program runtime-state transfer receipt has unknown format");
+    detail::reject_unknown_fields(
+        value, "Stored Program runtime-state transfer receipt",
+        {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
+         "source_generation_id", "source_lineage_head_id", "source_run_id",
+         "source_run_record_id", "source_journal_head", "target_generation", "target_run_id",
+         "target_initial_run_record_id", "target_initial_journal_head", "source_context_epoch_ids",
+         "target_context_epoch_id", "hook_references"});
+    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION ||
+        !value.contains("source_context_epoch_ids") || !value.contains("target_context_epoch_id") ||
+        !value.contains("hook_references"))
+        throw std::invalid_argument("Stored Program runtime-state transfer receipt is incomplete");
+    if (!value.at("target_context_epoch_id").is_null() &&
+        !value.at("target_context_epoch_id").is_string())
+        throw std::invalid_argument("Stored Program runtime-state transfer target context epoch is invalid");
+    const auto& hooks = value.at("hook_references");
+    if (!hooks.is_array() || hooks.size() > MAX_TRANSFER_REFERENCES)
+        throw std::invalid_argument("Stored Program runtime-state transfer hook references are invalid");
+    std::vector<ProgramRuntimeStateTransferHookReference> hook_references;
+    hook_references.reserve(hooks.size());
+    for (const auto& hook : hooks) {
+        if (!hook.is_object())
+            throw std::invalid_argument("Stored Program runtime-state transfer hook reference is invalid");
+        detail::reject_unknown_fields(hook, "Stored Program runtime-state transfer hook reference",
+                                      {"invocation_id", "head_id", "event_id"});
+        hook_references.push_back(
+            {require_string(hook, "invocation_id"), require_string(hook, "head_id"),
+             require_string(hook, "event_id")});
+    }
+    ProgramRuntimeStateTransferReceipt result(ProgramRuntimeStateTransferReceiptData{
+        require_string(value, "owner_scope"), require_string(value, "lineage_id"),
+        require_string(value, "source_generation_id"),
+        require_string(value, "source_lineage_head_id"), require_string(value, "source_run_id"),
+        require_string(value, "source_run_record_id"), require_string(value, "source_journal_head"),
+        require_uint64(value, "target_generation"), require_string(value, "target_run_id"),
+        require_string(value, "target_initial_run_record_id"),
+        require_string(value, "target_initial_journal_head"),
+        parse_transfer_id_array(value.at("source_context_epoch_ids"),
+                                "Stored Program runtime-state transfer source context epochs"),
+        value.at("target_context_epoch_id").is_null()
+            ? std::nullopt
+            : std::optional<std::string>(value.at("target_context_epoch_id").get<std::string>()),
+        std::move(hook_references)});
+    if (result.id() != require_string(value, "id"))
+        throw std::invalid_argument(
+            "Stored Program runtime-state transfer receipt identity does not match content");
+    return result;
+}
+
+const std::string& ProgramRuntimeStateTransferReceipt::owner_scope() const noexcept { return impl_->data.owner_scope; }
+const std::string& ProgramRuntimeStateTransferReceipt::lineage_id() const noexcept { return impl_->data.lineage_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::source_generation_id() const noexcept { return impl_->data.source_generation_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::source_lineage_head_id() const noexcept { return impl_->data.source_lineage_head_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::source_run_id() const noexcept { return impl_->data.source_run_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::source_run_record_id() const noexcept { return impl_->data.source_run_record_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::source_journal_head() const noexcept { return impl_->data.source_journal_head; }
+std::uint64_t ProgramRuntimeStateTransferReceipt::target_generation() const noexcept { return impl_->data.target_generation; }
+const std::string& ProgramRuntimeStateTransferReceipt::target_run_id() const noexcept { return impl_->data.target_run_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::target_initial_run_record_id() const noexcept { return impl_->data.target_initial_run_record_id; }
+const std::string& ProgramRuntimeStateTransferReceipt::target_initial_journal_head() const noexcept { return impl_->data.target_initial_journal_head; }
+const std::vector<std::string>& ProgramRuntimeStateTransferReceipt::source_context_epoch_ids() const noexcept { return impl_->data.source_context_epoch_ids; }
+const std::optional<std::string>& ProgramRuntimeStateTransferReceipt::target_context_epoch_id() const noexcept { return impl_->data.target_context_epoch_id; }
+const std::vector<ProgramRuntimeStateTransferHookReference>& ProgramRuntimeStateTransferReceipt::hook_references() const noexcept { return impl_->data.hook_references; }
+const std::string& ProgramRuntimeStateTransferReceipt::id() const noexcept { return impl_->id; }
+std::string ProgramRuntimeStateTransferReceipt::serialize_canonical() const { return impl_->canonical_bytes; }
+
 struct ProgramRunGeneration::Impl {
     explicit Impl(ProgramRunGenerationData value, std::uint32_t version)
         : data(std::move(value)), schema_version(version) {
@@ -327,14 +525,22 @@ ProgramRunGeneration ProgramRunGeneration::parse(std::string_view stored_bytes) 
              "generation", "run_id", "program_version_id", "bundle_id",
              "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
              "created_at_ms", "child_depth", "replacement_receipt"});
+    } else if (schema_version == 3) {
+        detail::reject_unknown_fields(
+            value, "Stored Program run generation",
+            {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
+             "generation", "run_id", "program_version_id", "bundle_id",
+             "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
+              "created_at_ms", "child_depth", "replacement_receipt",
+              "graph_migration_receipt"});
     } else if (schema_version == STORAGE_SCHEMA_VERSION) {
         detail::reject_unknown_fields(
             value, "Stored Program run generation",
             {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
              "generation", "run_id", "program_version_id", "bundle_id",
              "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
-             "created_at_ms", "child_depth", "replacement_receipt",
-             "graph_migration_receipt"});
+             "created_at_ms", "child_depth", "replacement_receipt", "graph_migration_receipt",
+             "runtime_state_transfer_receipt"});
     } else {
         throw std::invalid_argument("Stored Program run generation schema is unsupported");
     }
@@ -359,6 +565,17 @@ ProgramRunGeneration ProgramRunGeneration::parse(std::string_view stored_bytes) 
                 detail::canonical_json_bytes(value.at("graph_migration_receipt")));
         }
     }
+    std::optional<ProgramRuntimeStateTransferReceipt> runtime_state_transfer_receipt;
+    if (schema_version >= 4) {
+        if (!value.contains("runtime_state_transfer_receipt")) {
+            throw std::invalid_argument(
+                "Stored generation requires a runtime-state transfer receipt field");
+        }
+        if (!value.at("runtime_state_transfer_receipt").is_null()) {
+            runtime_state_transfer_receipt = ProgramRuntimeStateTransferReceipt::parse(
+                detail::canonical_json_bytes(value.at("runtime_state_transfer_receipt")));
+        }
+    }
     ProgramRunGenerationData data{
         require_string(value, "owner_scope"), require_string(value, "lineage_id"),
         require_uint64(value, "generation"), require_string(value, "run_id"),
@@ -366,8 +583,9 @@ ProgramRunGeneration ProgramRunGeneration::parse(std::string_view stored_bytes) 
         require_string(value, "initial_run_record_id"),
         require_string(value, "initial_journal_head"),
         require_optional_identity(value, "predecessor_generation_id"),
-        require_int64(value, "created_at_ms"), require_uint32(value, "child_depth"),
-        std::move(replacement_receipt), std::move(graph_migration_receipt)};
+         require_int64(value, "created_at_ms"), require_uint32(value, "child_depth"),
+         std::move(replacement_receipt), std::move(graph_migration_receipt),
+         std::move(runtime_state_transfer_receipt)};
     validate_generation(data);
     ProgramRunGeneration result(
         std::make_shared<const Impl>(std::move(data), schema_version));
@@ -414,6 +632,10 @@ std::optional<ProgramReplacementReceipt> ProgramRunGeneration::replacement_recei
 std::optional<ProgramGraphMigrationReceipt>
 ProgramRunGeneration::graph_migration_receipt() const {
     return impl_->data.graph_migration_receipt;
+}
+std::optional<ProgramRuntimeStateTransferReceipt>
+ProgramRunGeneration::runtime_state_transfer_receipt() const {
+    return impl_->data.runtime_state_transfer_receipt;
 }
 const std::string& ProgramRunGeneration::id() const noexcept {
     return impl_->id;

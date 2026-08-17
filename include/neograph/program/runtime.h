@@ -90,12 +90,16 @@ struct ProgramRuntimeRecoveryState {
     std::string                              run_id;
     std::vector<ProgramContextPublication>   context_publications;
     std::vector<HookOutboxEntry>              hook_outbox_entries;
+    std::vector<HookOutboxEntry>              inherited_hook_outbox_entries;
+    std::optional<ProgramRuntimeStateTransferReceipt> transfer_receipt;
 };
 
 /**
  * Host-owned, idempotent recovery boundary. Implementations bind the latest
  * ContextEpoch to a run-local interposition controller and restore hook heads
- * into their durable journal, rejecting any identity or head conflict.
+ * into their durable journal. An inherited head preserves its source-run
+ * provenance: an equal head or a valid durable descendant is accepted, while
+ * an unrelated identity or head fails closed.
  */
 using ProgramRuntimeRecoveryHandler =
     std::function<void(const ProgramRuntimeRecoveryState&)>;

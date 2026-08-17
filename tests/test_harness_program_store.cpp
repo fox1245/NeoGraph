@@ -965,6 +965,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
     TempDb  db;
     Fixture fixture;
     auto    source_start = initial_lineage_publication(fixture, "fork-source");
+    source_start.context_publication = context_publication("fork-source", 1);
     std::string source_lineage_id;
     std::string debited_source_head_id;
     std::string target_lineage_id;
@@ -975,6 +976,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, source_start),
                   ProgramTransitionPublishResult::Published);
         auto source = publication_with_effect(fixture, source_start);
+        source.context_publication.reset();
         attach_same_generation_lineage(source, *source_start.run_lineage);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(),
                                                source_start.journal_record.id, source),
@@ -1004,6 +1006,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
         EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "fork-dropped-pending"));
 
         auto target = initial_publication(fixture, "fork-target");
+        target.context_publication = context_publication("fork-target", 1);
         attach_fork_receipt(target, source.run_record);
         target.migration_plan = MigrationPlan::create(MigrationPlanData{
             fixture.version_value.id(), fixture.version_value.id(),
@@ -1053,6 +1056,10 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
     EXPECT_NE(source->lineage_id(), target->lineage_id());
     EXPECT_EQ(source->active_generation(), 1U);
     EXPECT_EQ(target->active_generation(), 1U);
+    const auto target_contexts = transitions->load_context_publications(
+        fixture.artifact.owner_scope(), "fork-target");
+    ASSERT_EQ(target_contexts.size(), 1U);
+    EXPECT_EQ(target_contexts.front().epoch.run_id(), "fork-target");
     ASSERT_TRUE(transitions->load_migration_plan(fixture.artifact.owner_scope(), "fork-target"));
 }
 TEST(HarnessProgramStoreTest, SqliteReopenSurvivesNewProcessExec) {

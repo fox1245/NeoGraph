@@ -1711,8 +1711,16 @@ public:
                     const auto& source = source_wrapper->run_record();
                     const auto graph_migration =
                         publication.run_generation->graph_migration_receipt();
-                    bool valid_successor = false;
-                    if (graph_migration) {
+                    const auto source_contexts = load_context_publications_locked(
+                        owner_scope, previous_generation.run_id(), 0);
+                    const auto source_hooks = load_hook_outbox_entries_locked(
+                        owner_scope, previous_generation.run_id());
+                    bool valid_successor = program::is_valid_program_runtime_state_transfer(
+                        publication.run_generation->runtime_state_transfer_receipt(),
+                        previous_generation, *current_lineage, source, source_contexts,
+                        source_hooks, *publication.run_generation, publication.run_record,
+                        publication.context_publication);
+                    if (valid_successor && graph_migration) {
                         Statement command_query(
                             impl_->db,
                             "SELECT 1 FROM neograph_harness_program_javascript_commands "
@@ -1740,7 +1748,7 @@ public:
                                 *durable_capsule, *publication.migration_plan,
                                 *publication.run_generation,
                                 *publication.run_lineage, publication.run_record);
-                    } else {
+                    } else if (valid_successor) {
                         Statement checkpoint_query(
                             impl_->db,
                             "SELECT record_json, owner_scope, bundle_id, coordinate_id, record_id "
@@ -1757,8 +1765,6 @@ public:
                                 checkpoint_query.text(2) == checkpoint.bundle_id() &&
                                 checkpoint_query.text(3) == checkpoint.coordinate_id() &&
                                 checkpoint_query.text(4) == checkpoint.id() &&
-                                !has_blocking_hook_obligation(load_hook_outbox_entries_locked(
-                                    owner_scope, previous_generation.run_id())) &&
                                 program::is_valid_program_replacement_transition(
                                     previous_generation, *current_lineage, source,
                                     checkpoint, *publication.run_generation,
@@ -1836,6 +1842,8 @@ public:
                 }
                 const auto source = HarnessProgramRunRecord::parse(
                     json::parse(source_run_query.text(0))).run_record();
+                const auto source_contexts = load_context_publications_locked(
+                    owner_scope, source_generation.run_id(), 0);
                 const auto fork       = publication.run_record.fork_receipt();
                 const auto checkpoint = source.exact_checkpoint();
                 const auto resume_binds = [&]() noexcept {
@@ -1887,6 +1895,9 @@ public:
                 if (!fork || !checkpoint || source.run_id() == publication.run_record.run_id() ||
                     has_blocking_hook_obligation(load_hook_outbox_entries_locked(
                         owner_scope, source_generation.run_id())) ||
+                    !program::is_valid_program_runtime_context_clone(
+                        source_contexts, publication.run_record,
+                        publication.context_publication) ||
                     source.child_depth() != 0 || !source.invocation().parent_run_id.empty() ||
                     publication.run_record.created_at_ms() < source.updated_at_ms() ||
                     source.continuation().state != program::ContinuationState::Interrupted ||

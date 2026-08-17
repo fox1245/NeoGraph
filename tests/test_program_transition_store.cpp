@@ -153,6 +153,28 @@ ProgramContextPublication context_publication(
     return {std::move(epoch), std::move(artifacts), std::move(receipt)};
 }
 
+ProgramContextPublication transferred_context_publication(
+    const ProgramContextPublication& source, std::string run_id) {
+    ContextEpochData epoch_data{std::move(run_id), 1, std::nullopt, source.epoch.feed_id(),
+                                source.epoch.raw_from_sequence(),
+                                source.epoch.raw_through_sequence(),
+                                source.epoch.raw_window_digest(), source.epoch.artifact_ids(),
+                                source.epoch.guarantee_profile()};
+    auto epoch = ContextEpoch::create(std::move(epoch_data));
+    ContextAssemblyReceiptData receipt_data{
+        epoch.id(), source.assembly_receipt.normalized_request_digest(),
+        source.assembly_receipt.message_window_digest(),
+        source.assembly_receipt.artifact_ids(),
+        source.assembly_receipt.required_skill_artifact_ids(),
+        source.assembly_receipt.raw_from_sequence(),
+        source.assembly_receipt.raw_through_sequence(),
+        source.assembly_receipt.estimated_input_tokens(),
+        source.assembly_receipt.mandatory_input_tokens()};
+    auto artifacts = source.artifacts;
+    auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, artifacts);
+    return {std::move(epoch), std::move(artifacts), std::move(receipt)};
+}
+
 neograph::HookOutboxEntry pending_hook_outbox_entry() {
     const auto runtime = neograph::RuntimeEvent::create(
         {{}, 1, neograph::HookPhase::BeforeTerminalPublication, "program_terminal",
@@ -334,7 +356,9 @@ void attach_replacement_successor(
     const ProgramRunLineage&                      previous,
     const ProgramRunGeneration&                   predecessor,
     const ProgramRunRecord&                       source,
-    const ProgramJavaScriptCommandJournalEntry& checkpoint) {
+    const ProgramJavaScriptCommandJournalEntry& checkpoint,
+    const std::vector<ProgramContextPublication>& source_contexts = {},
+    const std::vector<neograph::HookOutboxEntry>& source_hooks = {}) {
     const auto handoff = checkpoint.command().arguments().at("value");
     auto receipt = ProgramReplacementReceipt(ProgramReplacementReceiptData{
         source.owner_scope(),
@@ -359,13 +383,39 @@ void attach_replacement_successor(
         publication.run_record.binding_fingerprint(),
         publication.run_record.id(),
         publication.run_record.journal_head()});
+    std::optional<ProgramRuntimeStateTransferReceipt> transfer;
+    const auto prior_transfer = predecessor.runtime_state_transfer_receipt();
+    if (!source_contexts.empty() || !source_hooks.empty() ||
+        (prior_transfer && !prior_transfer->hook_references().empty())) {
+        std::vector<std::string> context_ids;
+        for (const auto& context : source_contexts) context_ids.push_back(context.epoch.id());
+        std::vector<ProgramRuntimeStateTransferHookReference> hooks;
+        if (prior_transfer) {
+            hooks = prior_transfer->hook_references();
+        }
+        for (const auto& hook : source_hooks) {
+            const auto state = hook.data().state;
+            if (state == neograph::HookExecutionState::Succeeded ||
+                state == neograph::HookExecutionState::Cancelled) continue;
+            hooks.push_back({hook.data().invocation.id(), hook.id(), hook.data().event.id()});
+        }
+        transfer.emplace(ProgramRuntimeStateTransferReceiptData{
+            source.owner_scope(), previous.lineage_id(), predecessor.id(), previous.id(),
+            source.run_id(), source.id(), source.journal_head(), predecessor.generation() + 1,
+            publication.run_record.run_id(), publication.run_record.id(),
+            publication.run_record.journal_head(), std::move(context_ids),
+            publication.context_publication
+                ? std::optional<std::string>(publication.context_publication->epoch.id())
+                : std::nullopt,
+            std::move(hooks)});
+    }
     auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
         publication.run_record.owner_scope(), previous.lineage_id(),
         predecessor.generation() + 1, publication.run_record.run_id(),
         publication.run_record.program_version_id(), publication.run_record.bundle_id(),
         publication.run_record.id(), publication.run_record.journal_head(), predecessor.id(),
         publication.run_record.created_at_ms(), publication.run_record.child_depth(),
-        std::move(receipt)});
+        std::move(receipt), std::nullopt, std::move(transfer)});
     publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
         previous.owner_scope(), previous.lineage_id(), previous.root_run_id(),
         generation.generation(), generation.id(), publication.run_record.id(),
@@ -460,13 +510,17 @@ struct ReplacementBoundary {
 };
 
 ReplacementBoundary publish_replacement_boundary(ProgramTransitionStore& store,
-                                                  bool recorded_source = false) {
+                                                   bool recorded_source = false,
+                                                   std::optional<ProgramContextPublication> context = {},
+                                                   std::vector<neograph::HookOutboxEntry> hooks = {}) {
     auto source = start_publication();
     if (recorded_source) {
         auto source_data = copy_run_record_data(source.run_record);
         source_data.recorded_binding_set_fingerprint = digest('f');
         source.run_record = ProgramRunRecord::create(std::move(source_data));
     }
+    source.context_publication = std::move(context);
+    source.hook_outbox_entries = std::move(hooks);
     attach_initial_lineage(source);
     if (store.compare_publish("owner-a", {}, source) !=
         ProgramTransitionPublishResult::Published) {
@@ -1329,6 +1383,38 @@ TEST(ProgramTransitionStoreTest, MigrationPublicationIsDurableAndInheritedAcross
     EXPECT_EQ(reparsed.migration_plan->id(), publication.migration_plan->id());
 }
 
+TEST(ProgramTransitionStoreTest, ForkAtomicallyClonesContextButNotSourceHookOwnership) {
+    InMemoryProgramTransitionStore store;
+    const auto source_context = context_publication(1);
+    auto source_start = start_publication();
+    source_start.context_publication = source_context;
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
+              ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+
+    auto omitted = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(omitted);
+    omitted.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(omitted, *source.run_lineage);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, omitted),
+              ProgramTransitionPublishResult::Conflict);
+
+    auto target = omitted;
+    target.context_publication = transferred_context_publication(source_context, "run-2");
+    attach_fork_split(target, *source.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, target),
+              ProgramTransitionPublishResult::Published);
+    const auto contexts = store.load_context_publications("owner-a", "run-2");
+    ASSERT_EQ(contexts.size(), 1U);
+    EXPECT_EQ(contexts.front().epoch.run_id(), "run-2");
+    EXPECT_TRUE(store.load_hook_outbox_entries("owner-a", "run-2").empty());
+}
+
 TEST(ProgramTransitionStoreTest, ForkPublicationRequiresDurableMigrationProof) {
     InMemoryProgramTransitionStore store;
     auto                           source_start = start_publication();
@@ -1849,6 +1935,206 @@ TEST(ProgramTransitionStoreTest, ExactCheckpointReplacementPublishesOneSuccessor
     EXPECT_EQ(parsed.replacement_receipt()->id(), generation->replacement_receipt()->id());
     EXPECT_EQ(store.compare_publish("owner-a", {}, winner),
               ProgramTransitionPublishResult::AlreadyPresent);
+}
+
+TEST(ProgramTransitionStoreTest, ReplacementAtomicallyTransfersContextAndUnresolvedHookOwnership) {
+    InMemoryProgramTransitionStore store;
+    const auto source_context = context_publication(1);
+    const auto source_hook = pending_hook_outbox_entry();
+    const auto boundary = publish_replacement_boundary(
+        store, false, source_context, {source_hook});
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation(
+        "owner-a", lineage->lineage_id(), lineage->active_generation());
+    ASSERT_TRUE(predecessor);
+
+    const auto successor_budget = program_replacement_remaining_budget(
+        boundary.publication.run_record, *lineage, 40);
+    auto successor = start_publication_for(
+        "run-2", digest('7'), digest('8'), successor_budget, 40,
+        json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+             {"previous_run_id", "run-1"}});
+    successor.context_publication =
+        transferred_context_publication(source_context, "run-2");
+    attach_replacement_successor(
+        successor, *lineage, *predecessor, boundary.publication.run_record,
+        boundary.completed_checkpoint, {source_context}, {source_hook});
+
+    ASSERT_EQ(store.compare_publish("owner-a", {}, successor),
+              ProgramTransitionPublishResult::Published);
+    const auto effective = store.load_effective_runtime_state("owner-a", "run-2");
+    ASSERT_TRUE(effective.transfer_receipt);
+    ASSERT_EQ(effective.context_publications.size(), 1U);
+    EXPECT_EQ(effective.context_publications.front().epoch.run_id(), "run-2");
+    ASSERT_EQ(effective.inherited_hook_outbox_entries.size(), 1U);
+    EXPECT_EQ(effective.inherited_hook_outbox_entries.front().id(), source_hook.id());
+    EXPECT_EQ(effective.inherited_hook_outbox_entries.front().data().event.run_id(), "run-1");
+    EXPECT_EQ(store.load_context_publications("owner-a", "run-1").front().epoch.id(),
+              source_context.epoch.id());
+    EXPECT_EQ(store.load_hook_outbox_entries("owner-a", "run-1").front().id(),
+              source_hook.id());
+}
+
+TEST(ProgramTransitionStoreTest, ReplacementRejectsTransferredContextAssemblyProvenanceDrift) {
+    InMemoryProgramTransitionStore store;
+    const auto source_context = context_publication(1);
+    const auto boundary = publish_replacement_boundary(store, false, source_context);
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation(
+        "owner-a", lineage->lineage_id(), lineage->active_generation());
+    ASSERT_TRUE(predecessor);
+
+    auto successor = start_publication_for(
+        "run-2", digest('7'), digest('8'),
+        program_replacement_remaining_budget(boundary.publication.run_record, *lineage, 40),
+        40, json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                 {"previous_run_id", "run-1"}});
+    auto transferred = transferred_context_publication(source_context, "run-2");
+    ContextAssemblyReceiptData altered_receipt{
+        transferred.epoch.id(), digest('c'),
+        transferred.assembly_receipt.message_window_digest(),
+        transferred.assembly_receipt.artifact_ids(),
+        transferred.assembly_receipt.required_skill_artifact_ids(),
+        transferred.assembly_receipt.raw_from_sequence(),
+        transferred.assembly_receipt.raw_through_sequence(),
+        transferred.assembly_receipt.estimated_input_tokens(),
+        transferred.assembly_receipt.mandatory_input_tokens()};
+    transferred.assembly_receipt = ContextAssemblyReceipt::create(
+        std::move(altered_receipt), transferred.epoch, transferred.artifacts);
+    successor.context_publication = std::move(transferred);
+    attach_replacement_successor(
+        successor, *lineage, *predecessor, boundary.publication.run_record,
+        boundary.completed_checkpoint, {source_context});
+
+    EXPECT_EQ(store.compare_publish("owner-a", {}, successor),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+}
+
+TEST(ProgramTransitionStoreTest, ReplacementCarriesInheritedHookAcrossSuccessorChain) {
+    InMemoryProgramTransitionStore store;
+    const auto source_context = context_publication(1);
+    const auto source_hook = pending_hook_outbox_entry();
+    const auto first_boundary = publish_replacement_boundary(
+        store, false, source_context, {source_hook});
+    const auto first_lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(first_lineage);
+    const auto first_generation = store.load_generation(
+        "owner-a", first_lineage->lineage_id(), first_lineage->active_generation());
+    ASSERT_TRUE(first_generation);
+
+    auto second = start_publication_for(
+        "run-2", digest('7'), digest('8'),
+        program_replacement_remaining_budget(
+            first_boundary.publication.run_record, *first_lineage, 40),
+        40, json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                 {"previous_run_id", "run-1"}});
+    second.context_publication = transferred_context_publication(source_context, "run-2");
+    attach_replacement_successor(
+        second, *first_lineage, *first_generation,
+        first_boundary.publication.run_record, first_boundary.completed_checkpoint,
+        {source_context}, {source_hook});
+    ASSERT_EQ(store.compare_publish("owner-a", {}, second),
+              ProgramTransitionPublishResult::Published);
+
+    const json second_handoff{{"cursor", 9}, {"state", "ready"}};
+    auto second_pending = javascript_command_publication(
+        second, replacement_checkpoint_entry(1, false, second_handoff, digest('8')), 50);
+    attach_same_generation_lineage(second_pending, *second.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", second.journal_record.id, second_pending),
+              ProgramTransitionPublishResult::Published);
+    auto second_checkpoint = replacement_checkpoint_entry(2, true, second_handoff, digest('8'));
+    auto second_boundary = javascript_command_publication(
+        second_pending, second_checkpoint, 60);
+    attach_same_generation_lineage(second_boundary, *second_pending.run_lineage);
+    ASSERT_EQ(store.compare_publish(
+                  "owner-a", second_pending.journal_record.id, second_boundary),
+              ProgramTransitionPublishResult::Published);
+
+    const auto second_lineage = store.load_run_lineage("owner-a", "run-2");
+    ASSERT_TRUE(second_lineage);
+    const auto second_generation = store.load_generation(
+        "owner-a", second_lineage->lineage_id(), second_lineage->active_generation());
+    ASSERT_TRUE(second_generation);
+    auto third = start_publication_for(
+        "run-3", digest('9'), digest('a'),
+        program_replacement_remaining_budget(second_boundary.run_record, *second_lineage, 70),
+        70, json{{"handoff", second_handoff}, {"previous_run_id", "run-2"}});
+    third.context_publication = transferred_context_publication(
+        *second.context_publication, "run-3");
+    attach_replacement_successor(
+        third, *second_lineage, *second_generation, second_boundary.run_record,
+        second_checkpoint, {*second.context_publication});
+    ASSERT_EQ(store.compare_publish("owner-a", {}, third),
+              ProgramTransitionPublishResult::Published);
+
+    const auto effective = store.load_effective_runtime_state("owner-a", "run-3");
+    ASSERT_EQ(effective.inherited_hook_outbox_entries.size(), 1U);
+    EXPECT_EQ(effective.inherited_hook_outbox_entries.front().id(), source_hook.id());
+    EXPECT_EQ(effective.inherited_hook_outbox_entries.front().data().event.run_id(), "run-1");
+}
+
+TEST(ProgramTransitionStoreTest, ReplacementCannotOmitRequiredRuntimeStateTransfer) {
+    InMemoryProgramTransitionStore store;
+    const auto source_context = context_publication(1);
+    const auto source_hook = pending_hook_outbox_entry();
+    const auto boundary = publish_replacement_boundary(
+        store, false, source_context, {source_hook});
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+    const auto predecessor = store.load_generation(
+        "owner-a", lineage->lineage_id(), lineage->active_generation());
+    ASSERT_TRUE(predecessor);
+    auto successor = start_publication_for(
+        "run-2", digest('7'), digest('8'),
+        program_replacement_remaining_budget(boundary.publication.run_record, *lineage, 40),
+        40, json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                 {"previous_run_id", "run-1"}});
+    attach_replacement_successor(successor, *lineage, *predecessor,
+                                 boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, successor),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+    EXPECT_EQ(store.load_lineage("owner-a", lineage->lineage_id())->id(), lineage->id());
+}
+
+TEST(ProgramTransitionStoreTest, RuntimeStateTransferFaultLeavesSourceAsOnlyOwner) {
+    for (const auto fault : {ProgramTransitionFaultPoint::AfterContextSnapshot,
+                             ProgramTransitionFaultPoint::AfterLineageSnapshot,
+                             ProgramTransitionFaultPoint::BeforeCommit}) {
+        InMemoryProgramTransitionStore store;
+        const auto source_context = context_publication(1);
+        const auto source_hook = pending_hook_outbox_entry();
+        const auto boundary = publish_replacement_boundary(
+            store, false, source_context, {source_hook});
+        const auto lineage = store.load_run_lineage("owner-a", "run-1");
+        ASSERT_TRUE(lineage);
+        const auto predecessor = store.load_generation(
+            "owner-a", lineage->lineage_id(), lineage->active_generation());
+        ASSERT_TRUE(predecessor);
+        auto successor = start_publication_for(
+            "run-2", digest('7'), digest('8'),
+            program_replacement_remaining_budget(boundary.publication.run_record, *lineage, 40),
+            40, json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                     {"previous_run_id", "run-1"}});
+        successor.context_publication =
+            transferred_context_publication(source_context, "run-2");
+        attach_replacement_successor(
+            successor, *lineage, *predecessor, boundary.publication.run_record,
+            boundary.completed_checkpoint, {source_context}, {source_hook});
+
+        store.fail_next_publication_for_testing(fault);
+        EXPECT_THROW((void)store.compare_publish("owner-a", {}, successor), std::runtime_error);
+        EXPECT_FALSE(store.load("owner-a", "run-2"));
+        EXPECT_EQ(store.load_lineage("owner-a", lineage->lineage_id())->id(), lineage->id());
+        EXPECT_EQ(store.load_context_publications("owner-a", "run-1").front().epoch.id(),
+                  source_context.epoch.id());
+        EXPECT_EQ(store.load_hook_outbox_entries("owner-a", "run-1").front().id(),
+                  source_hook.id());
+    }
 }
 
 TEST(ProgramTransitionStoreTest, HistoricalReplacementInspectionRevalidatesAtoBtoC) {
