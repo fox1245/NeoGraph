@@ -267,7 +267,7 @@ asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
 
     auto      id = cp.id;
     co_await  store_->save_async(cp);
-    co_await publish_checkpoint_async(cp);
+    if (hook_runtime_) co_await publish_checkpoint_async(cp);
     co_return id;
 }
 
@@ -298,7 +298,7 @@ asio::awaitable<Checkpoint> CheckpointCoordinator::commit_super_step_async(
     checkpoint.timestamp       = now_ms();
 
     co_await store_->save_async(checkpoint);
-    co_await publish_checkpoint_async(checkpoint);
+    if (hook_runtime_) co_await publish_checkpoint_async(checkpoint);
     co_await clear_pending_writes_async(parent_id);
     co_return checkpoint;
 }

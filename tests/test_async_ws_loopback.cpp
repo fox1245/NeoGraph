@@ -409,10 +409,13 @@ TEST_F(WsLoopback, DebugLoggingDoesNotExposeUpgradeRequestOrHeaders) {
     auto              result = asio::co_spawn(
         client_ioc,
         [&]() -> asio::awaitable<void> {
-            auto ws = co_await ws_connect(client_ioc.get_executor(), "127.0.0.1", port, "/",
-                                                       {{"Authorization", "Bearer super-secret"}}, false);
-            co_await           ws->send_close();
-            (void)co_await     ws->recv();
+            auto connection = ws_connect(client_ioc.get_executor(), "127.0.0.1", port, "/",
+                                         {{"Authorization", "Bearer super-secret"}}, false);
+            auto ws         = co_await std::move(connection);
+            auto close      = ws->send_close();
+            co_await std::move(close);
+            auto receive = ws->recv();
+            (void)co_await std::move(receive);
         },
         asio::use_future);
     client_ioc.run();

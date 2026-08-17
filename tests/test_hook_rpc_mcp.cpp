@@ -32,9 +32,9 @@ RpcRequest slow_request(std::chrono::steady_clock::time_point deadline) {
 }
 
 RpcRequest immediate_request() {
-    return {json{{"jsonrpc", "2.0"}, {"id", "hook-test"}, {"method", "tools/list"},
-                 {"params", json::object()}}.dump(),
-            std::chrono::steady_clock::now() + std::chrono::seconds(1), {}};
+    return {json{{"jsonrpc", "2.0"}, {"id", "hook-test"}, {"method", "tools/call"},
+                  {"params", {{"name", "echo"}, {"arguments", json::object()}}}}.dump(),
+            std::chrono::steady_clock::now() + std::chrono::seconds(5), {}};
 }
 } // namespace
 
@@ -44,12 +44,13 @@ TEST(McpHookRpcTransport, StdioTransportRetainsClient) {
 
     auto client = std::make_shared<mcp::MCPClient>(
         std::vector<std::string>{python_cmd(), fixture_path().string()});
+    async::run_sync(client->initialize_async("hook-rpc-test"));
     auto transport = std::make_shared<mcp::StdioJsonRpcTransport>(client);
     client.reset(); // The transport, not a borrowed raw pointer, owns the client lifetime.
 
     const auto response = json::parse(async::run_sync(transport->request_async(immediate_request())));
     EXPECT_EQ(response["id"], "hook-test");
-    EXPECT_TRUE(response.contains("error"));
+    EXPECT_TRUE(response.contains("result"));
 }
 
 TEST(McpHookRpcTransport, StdioTransportCancelsRequestAtDeadline) {

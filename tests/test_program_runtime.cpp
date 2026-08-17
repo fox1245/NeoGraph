@@ -4336,6 +4336,7 @@ TEST(ProgramRuntimeTest, JavaScriptCrashRecoveryDoesNotRecoverReservedResourceBu
 
 TEST(ProgramRuntimeTest, JavaScriptAllJoinsActuallyOverlapCoreCommands) {
     blocking_calls.store(0);
+    blocking_peak.store(0);
     AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     const auto      version =
         fixture.admit_javascript(javascript_runtime_source("runtime-short-blocking",
@@ -4347,20 +4348,17 @@ TEST(ProgramRuntimeTest, JavaScriptAllJoinsActuallyOverlapCoreCommands) {
     return result;
 )JS"));
 
-    const auto started = std::chrono::steady_clock::now();
-    const auto result  = fixture.runtime->run(
+    const auto result = fixture.runtime->run(
         "tenant:runtime", version,
         ProgramInvocation{json::object(), javascript_budget(2), "trace-js-overlap", {}});
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - started);
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
         << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
                                    result.failure()->witness.dump()
                              : "no failure detail");
     EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(blocking_peak.load(), 2U);
     EXPECT_EQ(result.usage().peak_concurrency, 2U);
-    EXPECT_LT(elapsed, std::chrono::milliseconds(900));
 }
 
 TEST(ProgramRuntimeTest, JavaScriptAllKeepsFastInitialMembersAliveUntilJoinSetupFinishes) {
