@@ -262,6 +262,12 @@ void validate(const ProgramRunRecordData& d) {
         !detail::is_sha256_identity(d.journal_head)) {
         throw std::invalid_argument("Program run identities must be sha256 identities");
     }
+    if (d.exact_checkpoint_content_id &&
+        (!d.exact_checkpoint ||
+         !detail::is_sha256_identity(*d.exact_checkpoint_content_id))) {
+        throw std::invalid_argument(
+            "Program run checkpoint content identity requires an exact checkpoint");
+    }
     detail::validate_token(d.continuation.operation_id, "Program run operation_id");
     if (!d.continuation.attempt) {
         throw std::invalid_argument("Program run attempt must be positive");
@@ -361,9 +367,9 @@ void validate(const ProgramRunRecordData& d) {
         (void)invocation_body(child.invocation);
     }
 }
-json body(const ProgramRunRecordData& d) {
+json body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
     json value{{"format", std::string(FORMAT)},
-               {"storage_schema_version", ProgramRunRecord::STORAGE_SCHEMA_VERSION},
+               {"storage_schema_version", schema_version},
                {"owner_scope", d.owner_scope},
                {"run_id", d.run_id},
                {"program_version_id", d.program_version_id},
@@ -396,14 +402,18 @@ json body(const ProgramRunRecordData& d) {
                {"effect_sequence", d.effect_sequence},
                {"created_at_ms", d.created_at_ms},
                {"updated_at_ms", d.updated_at_ms}};
+    if (schema_version >= 3) {
+        value["exact_checkpoint_content_id"] = d.exact_checkpoint_content_id
+            ? json(*d.exact_checkpoint_content_id) : json(nullptr);
+    }
     if (!d.children.empty()) {
         value["children"] = json::array();
         for (const auto& child : d.children) value["children"].push_back(child_body(child));
     }
     return value;
 }
-json stored_body(const ProgramRunRecordData& d) {
-    auto value                                = body(d);
+json stored_body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
+    auto value = body(d, schema_version);
     value["recorded_binding_set_fingerprint"] = d.recorded_binding_set_fingerprint
                                                     ? json(*d.recorded_binding_set_fingerprint)
                                                     : json(nullptr);
@@ -418,8 +428,9 @@ ProgramChildState program_child_state_from_string(std::string_view value) {
     return child_state_from_string(value);
 }
 struct ProgramRunRecord::Impl {
-    explicit Impl(ProgramRunRecordData value) : data(std::move(value)) {
-        auto body             = stored_body(data);
+    explicit Impl(ProgramRunRecordData value, std::uint32_t version)
+        : data(std::move(value)), schema_version(version) {
+        auto body             = stored_body(data, schema_version);
         const auto body_bytes = detail::canonical_json_bytes(body);
         id = detail::sha256_identity("program-run-record/v1", body_bytes);
         body["id"] = id;
@@ -427,6 +438,7 @@ struct ProgramRunRecord::Impl {
     }
 
     ProgramRunRecordData data;
+    std::uint32_t        schema_version;
     std::string          id;
     std::string          canonical_bytes;
 };
@@ -450,7 +462,8 @@ ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
         !detail::is_sha256_identity(*d.recorded_binding_set_fingerprint)) {
         throw std::invalid_argument("Recorded binding set fingerprint must be a sha256 identity");
     }
-    return ProgramRunRecord(std::make_shared<const Impl>(std::move(d)));
+    return ProgramRunRecord(
+        std::make_shared<const Impl>(std::move(d), STORAGE_SCHEMA_VERSION));
 }
 ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     json v;
@@ -463,36 +476,32 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     if (!v.is_object() || rs(v, "format") != FORMAT) {
         throw std::invalid_argument("Stored ProgramRunRecord has unknown format");
     }
-    detail::reject_unknown_fields(v, "Stored ProgramRunRecord",
-                                  {"format",
-                                   "storage_schema_version",
-                                   "id",
-                                   "owner_scope",
-                                   "run_id",
-                                   "program_version_id",
-                                   "bundle_id",
-                                   "binding_fingerprint",
-                                   "invocation",
-                                   "child_depth",
-                                   "continuation",
-                                   "remaining_budget",
-                                   "exact_checkpoint",
-                                   "pending_input",
-                                   "pending_effect",
-                                   "terminal_result",
-                                   "fork_receipt",
-                                   "fork_source_run_id",
-                                   "fork_source_program_version_id",
-                                   "fork_source_checkpoint_id",
-                                   "recorded_binding_set_fingerprint",
-                                   "journal_head",
-                                   "event_sequence",
-                                   "effect_sequence",
-                                   "created_at_ms",
-                                   "updated_at_ms",
-                                   "children"});
-    if (r32(v, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
+    const auto schema_version = r32(v, "storage_schema_version");
+    if (schema_version != 2 && schema_version != STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored ProgramRunRecord schema version is unsupported");
+    }
+    if (schema_version == 2) {
+        detail::reject_unknown_fields(
+            v, "Stored ProgramRunRecord",
+            {"format", "storage_schema_version", "id", "owner_scope", "run_id",
+             "program_version_id", "bundle_id", "binding_fingerprint", "invocation",
+             "child_depth", "continuation", "remaining_budget", "exact_checkpoint",
+             "pending_input", "pending_effect", "terminal_result", "fork_receipt",
+             "fork_source_run_id", "fork_source_program_version_id",
+             "fork_source_checkpoint_id", "recorded_binding_set_fingerprint",
+             "journal_head", "event_sequence", "effect_sequence", "created_at_ms",
+             "updated_at_ms", "children"});
+    } else {
+        detail::reject_unknown_fields(
+            v, "Stored ProgramRunRecord",
+            {"format", "storage_schema_version", "id", "owner_scope", "run_id",
+             "program_version_id", "bundle_id", "binding_fingerprint", "invocation",
+             "child_depth", "continuation", "remaining_budget", "exact_checkpoint",
+             "exact_checkpoint_content_id", "pending_input", "pending_effect",
+             "terminal_result", "fork_receipt", "fork_source_run_id",
+             "fork_source_program_version_id", "fork_source_checkpoint_id",
+             "recorded_binding_set_fingerprint", "journal_head", "event_sequence",
+             "effect_sequence", "created_at_ms", "updated_at_ms", "children"});
     }
     ProgramRunRecordData d;
     d.owner_scope         = rs(v, "owner_scope");
@@ -514,6 +523,8 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.remaining_budget     = db(rv(v, "remaining_budget"));
     const auto& checkpoint = rv(v, "exact_checkpoint");
     if (!checkpoint.is_null()) d.exact_checkpoint = dc(checkpoint);
+    if (schema_version >= 3)
+        d.exact_checkpoint_content_id = os(rv(v, "exact_checkpoint_content_id"));
     d.pending_input                    = opt<ProgramPendingInput>(rv(v, "pending_input"));
     d.pending_effect                   = opt<ProgramPendingEffect>(rv(v, "pending_effect"));
     d.terminal_result                  = opt<ProgramResult>(rv(v, "terminal_result"));
@@ -534,7 +545,15 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.effect_sequence                  = ru(v, "effect_sequence");
     d.created_at_ms                    = ri(v, "created_at_ms");
     d.updated_at_ms                    = ri(v, "updated_at_ms");
-    auto out                           = create(std::move(d));
+    validate(d);
+    validate_continuation_state(d);
+    validate_result_state(d);
+    if (d.recorded_binding_set_fingerprint &&
+        !detail::is_sha256_identity(*d.recorded_binding_set_fingerprint)) {
+        throw std::invalid_argument("Recorded binding set fingerprint must be a sha256 identity");
+    }
+    auto out = ProgramRunRecord(
+        std::make_shared<const Impl>(std::move(d), schema_version));
     if (out.id() != rs(v, "id")) {
         throw std::invalid_argument("Stored ProgramRunRecord id does not match canonical body");
     }
@@ -569,6 +588,10 @@ RunBudget ProgramRunRecord::remaining_budget() const noexcept {
 }
 std::optional<CoreCheckpointIdentity> ProgramRunRecord::exact_checkpoint() const {
     return impl_->data.exact_checkpoint;
+}
+const std::optional<std::string>&
+ProgramRunRecord::exact_checkpoint_content_id() const noexcept {
+    return impl_->data.exact_checkpoint_content_id;
 }
 std::optional<ProgramPendingInput> ProgramRunRecord::pending_input() const {
     return impl_->data.pending_input;

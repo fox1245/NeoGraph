@@ -105,10 +105,17 @@ json generation_body(const ProgramRunGenerationData& data, std::uint32_t schema_
           data.predecessor_generation_id ? json(*data.predecessor_generation_id) : json(nullptr)},
         {"created_at_ms", data.created_at_ms},
         {"child_depth", data.child_depth}};
-    if (schema_version >= ProgramRunGeneration::STORAGE_SCHEMA_VERSION) {
+    if (schema_version >= 2) {
         value["replacement_receipt"] =
             data.replacement_receipt
                 ? detail::parse_json_strict(data.replacement_receipt->serialize_canonical())
+                : json(nullptr);
+    }
+    if (schema_version >= 3) {
+        value["graph_migration_receipt"] =
+            data.graph_migration_receipt
+                ? detail::parse_json_strict(
+                      data.graph_migration_receipt->serialize_canonical())
                 : json(nullptr);
     }
     return value;
@@ -155,6 +162,10 @@ void validate_generation(const ProgramRunGenerationData& data) {
         throw std::invalid_argument("Program run generation predecessor must be a sha256 identity");
     if (data.created_at_ms < 0)
         throw std::invalid_argument("Program run generation timestamp must not be negative");
+    if (data.replacement_receipt && data.graph_migration_receipt) {
+        throw std::invalid_argument(
+            "Program run generation cannot carry multiple successor receipts");
+    }
     if (data.replacement_receipt) {
         const auto& receipt = *data.replacement_receipt;
         if (data.generation == 1 || receipt.owner_scope() != data.owner_scope ||
@@ -166,6 +177,20 @@ void validate_generation(const ProgramRunGenerationData& data) {
             receipt.source_generation_id() != *data.predecessor_generation_id) {
             throw std::invalid_argument(
                 "Program replacement receipt does not bind its successor generation");
+        }
+    }
+    if (data.graph_migration_receipt) {
+        const auto& receipt = *data.graph_migration_receipt;
+        const auto& capsule = receipt.capsule();
+        if (data.generation == 1 || capsule.owner_scope() != data.owner_scope ||
+            capsule.lineage_id() != data.lineage_id ||
+            receipt.target_generation() != data.generation ||
+            receipt.target_run_id() != data.run_id ||
+            receipt.target_program_version_id() != data.program_version_id ||
+            receipt.target_bundle_id() != data.bundle_id ||
+            capsule.source_generation_id() != *data.predecessor_generation_id) {
+            throw std::invalid_argument(
+                "Program Graph migration receipt does not bind its successor generation");
         }
     }
 }
@@ -295,24 +320,43 @@ ProgramRunGeneration ProgramRunGeneration::parse(std::string_view stored_bytes) 
              "generation", "run_id", "program_version_id", "bundle_id",
              "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
              "created_at_ms", "child_depth"});
-    } else if (schema_version == STORAGE_SCHEMA_VERSION) {
+    } else if (schema_version == 2) {
         detail::reject_unknown_fields(
             value, "Stored Program run generation",
             {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
              "generation", "run_id", "program_version_id", "bundle_id",
              "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
              "created_at_ms", "child_depth", "replacement_receipt"});
+    } else if (schema_version == STORAGE_SCHEMA_VERSION) {
+        detail::reject_unknown_fields(
+            value, "Stored Program run generation",
+            {"format", "storage_schema_version", "id", "owner_scope", "lineage_id",
+             "generation", "run_id", "program_version_id", "bundle_id",
+             "initial_run_record_id", "initial_journal_head", "predecessor_generation_id",
+             "created_at_ms", "child_depth", "replacement_receipt",
+             "graph_migration_receipt"});
     } else {
         throw std::invalid_argument("Stored Program run generation schema is unsupported");
     }
     std::optional<ProgramReplacementReceipt> replacement_receipt;
-    if (schema_version == STORAGE_SCHEMA_VERSION) {
+    if (schema_version >= 2) {
         if (!value.contains("replacement_receipt")) {
             throw std::invalid_argument("Stored generation requires a replacement receipt field");
         }
         if (!value.at("replacement_receipt").is_null()) {
             replacement_receipt = ProgramReplacementReceipt::parse(
                 detail::canonical_json_bytes(value.at("replacement_receipt")));
+        }
+    }
+    std::optional<ProgramGraphMigrationReceipt> graph_migration_receipt;
+    if (schema_version >= 3) {
+        if (!value.contains("graph_migration_receipt")) {
+            throw std::invalid_argument(
+                "Stored generation requires a Graph migration receipt field");
+        }
+        if (!value.at("graph_migration_receipt").is_null()) {
+            graph_migration_receipt = ProgramGraphMigrationReceipt::parse(
+                detail::canonical_json_bytes(value.at("graph_migration_receipt")));
         }
     }
     ProgramRunGenerationData data{
@@ -323,7 +367,7 @@ ProgramRunGeneration ProgramRunGeneration::parse(std::string_view stored_bytes) 
         require_string(value, "initial_journal_head"),
         require_optional_identity(value, "predecessor_generation_id"),
         require_int64(value, "created_at_ms"), require_uint32(value, "child_depth"),
-        std::move(replacement_receipt)};
+        std::move(replacement_receipt), std::move(graph_migration_receipt)};
     validate_generation(data);
     ProgramRunGeneration result(
         std::make_shared<const Impl>(std::move(data), schema_version));
@@ -366,6 +410,10 @@ std::int64_t ProgramRunGeneration::created_at_ms() const noexcept {
 std::uint32_t ProgramRunGeneration::child_depth() const noexcept { return impl_->data.child_depth; }
 std::optional<ProgramReplacementReceipt> ProgramRunGeneration::replacement_receipt() const {
     return impl_->data.replacement_receipt;
+}
+std::optional<ProgramGraphMigrationReceipt>
+ProgramRunGeneration::graph_migration_receipt() const {
+    return impl_->data.graph_migration_receipt;
 }
 const std::string& ProgramRunGeneration::id() const noexcept {
     return impl_->id;

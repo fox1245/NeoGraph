@@ -151,7 +151,8 @@ struct MigrationPlanData {
  */
 class NEOGRAPH_PROGRAM_API MigrationPlan final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
+    static constexpr std::uint32_t PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
     /**
      * Explicit legacy input marker accepted by parse(). Legacy records are
      * converted to a fail-closed modern plan; aliases and missing evidence are
@@ -183,6 +184,8 @@ public:
     const std::vector<MigrationDiagnostic>& diagnostics() const noexcept;
     const std::vector<MigrationMapping>& mappings() const noexcept;
     bool is_compatible() const noexcept;
+    /** Accepts an exact retry or a verified schema-v1 prefix of a v2 plan. */
+    bool semantically_matches(const MigrationPlan& expected) const noexcept;
     const std::string& id() const noexcept;
     std::string serialize_canonical() const;
 

@@ -99,6 +99,7 @@ ProgramRunRecordData copy_run_record_data(const ProgramRunRecord& run) {
     data.continuation                     = run.continuation();
     data.remaining_budget                 = run.remaining_budget();
     data.exact_checkpoint                 = run.exact_checkpoint();
+    data.exact_checkpoint_content_id      = run.exact_checkpoint_content_id();
     data.pending_input                    = run.pending_input();
     data.pending_effect                   = run.pending_effect();
     data.terminal_result                  = run.terminal_result();
@@ -349,6 +350,7 @@ ProgramTransitionPublication javascript_command_publication(
     data.continuation                     = journal.continuation;
     data.remaining_budget                 = journal.remaining_budget;
     data.exact_checkpoint                 = old_run.exact_checkpoint();
+    data.exact_checkpoint_content_id      = old_run.exact_checkpoint_content_id();
     data.pending_input                    = old_run.pending_input();
     data.pending_effect                   = old_run.pending_effect();
     data.terminal_result                  = old_run.terminal_result();
@@ -713,6 +715,7 @@ void attach_fork_receipt(ProgramTransitionPublication& publication,
     data.continuation                     = run.continuation();
     data.remaining_budget                 = run.remaining_budget();
     data.exact_checkpoint                 = run.exact_checkpoint();
+    data.exact_checkpoint_content_id      = run.exact_checkpoint_content_id();
     data.pending_input                    = run.pending_input();
     data.pending_effect                   = run.pending_effect();
     if (retain_target_pending) {

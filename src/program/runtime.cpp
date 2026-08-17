@@ -1236,6 +1236,7 @@ ChildRecordPublication publish_child_record_unlocked(
         data.continuation                     = journal.continuation;
         data.remaining_budget                 = previous->remaining_budget();
         data.exact_checkpoint                 = previous->exact_checkpoint();
+        data.exact_checkpoint_content_id      = previous->exact_checkpoint_content_id();
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.terminal_result                  = previous->terminal_result();
@@ -1512,6 +1513,10 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             data.continuation        = journal.continuation;
             data.remaining_budget    = result.remaining_budget();
             data.exact_checkpoint    = result.checkpoint();
+            if (result.checkpoint() == previous->exact_checkpoint()) {
+                data.exact_checkpoint_content_id =
+                    previous->exact_checkpoint_content_id();
+            }
             data.pending_input       = previous->pending_input();
             data.pending_effect      = previous->pending_effect();
             if (const auto interrupt = result.interrupt()) {
@@ -1826,6 +1831,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 data.continuation                   = journal.continuation;
                 data.remaining_budget               = previous->remaining_budget();
                 data.exact_checkpoint               = previous->exact_checkpoint();
+                data.exact_checkpoint_content_id    = previous->exact_checkpoint_content_id();
                 data.pending_input                  = std::move(pending_input);
                 data.pending_effect                 = std::move(pending_effect);
                 data.terminal_result                = cancelled_result;
@@ -2485,6 +2491,7 @@ bool RunControl::consume_dynamic_compile() {
         data.continuation                     = journal.continuation;
         data.remaining_budget                 = remaining;
         data.exact_checkpoint                 = previous->exact_checkpoint();
+        data.exact_checkpoint_content_id      = previous->exact_checkpoint_content_id();
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.terminal_result                  = previous->terminal_result();
@@ -2587,6 +2594,9 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         data.continuation                     = journal.continuation;
         data.remaining_budget                 = journal.remaining_budget;
         data.exact_checkpoint                 = latest_command_checkpoint;
+        if (latest_command_checkpoint == previous->exact_checkpoint()) {
+            data.exact_checkpoint_content_id = previous->exact_checkpoint_content_id();
+        }
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.fork_receipt                     = previous->fork_receipt();
@@ -3910,7 +3920,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
             fork->source_checkpoint_id() == source.source_checkpoint_id &&
             fork->target_program_version_id() == target.id() &&
             fork_resume_matches(*fork, *existing, resume_value) && plan && expected_plan &&
-            expected_plan->is_compatible() && plan->id() == expected_plan->id()) {
+            expected_plan->is_compatible() && plan->semantically_matches(*expected_plan)) {
             return reconnect(owner_scope, run_id);
         }
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
@@ -4638,7 +4648,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         }
         const auto expected_plan = impl_->config.catalog->plan_migration(
             owner_scope, source_version->id(), target_version->id());
-        if (!expected_plan.is_compatible() || expected_plan.id() != stored_plan->id()) {
+        if (!expected_plan.is_compatible() ||
+            !stored_plan->semantically_matches(expected_plan)) {
             throw_runtime_diagnostic(
                 "P_FORK_MIGRATION_PROOF",
                 "Durable fork migration proof does not match admitted versions",
@@ -4884,6 +4895,10 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         expired_data.continuation                   = journal.continuation;
         expired_data.remaining_budget               = available_budget;
         expired_data.exact_checkpoint               = checkpoint;
+        if (previous->exact_checkpoint() == checkpoint) {
+            expired_data.exact_checkpoint_content_id =
+                previous->exact_checkpoint_content_id();
+        }
         expired_data.pending_input                  = pending_input;
         expired_data.pending_effect                 = pending_effect;
         expired_data.terminal_result                = terminal_result;
@@ -5069,6 +5084,9 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     data.continuation                     = journal.continuation;
     data.remaining_budget                 = resumed_remaining;
     data.exact_checkpoint                 = checkpoint;
+    if (previous->exact_checkpoint() == checkpoint) {
+        data.exact_checkpoint_content_id = previous->exact_checkpoint_content_id();
+    }
     data.pending_input                    = std::move(pending_input);
     data.pending_effect                   = std::move(pending_effect);
     data.fork_receipt                     = previous->fork_receipt();
@@ -5401,6 +5419,9 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.continuation                     = journal.continuation;
     data.remaining_budget                 = resumed_remaining;
     data.exact_checkpoint                 = checkpoint;
+    if (previous->exact_checkpoint() == checkpoint) {
+        data.exact_checkpoint_content_id = previous->exact_checkpoint_content_id();
+    }
     data.pending_input                    = previous->pending_input();
     data.pending_effect                   = update.value;
     data.terminal_result                  = terminal;

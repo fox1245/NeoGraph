@@ -1296,6 +1296,9 @@ public:
                         }
                         publication.migration_plan = previous_publication.migration_plan;
                         publication_bytes = publication.serialize_canonical();
+                    } else if (publication.migration_plan) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
                     }
                 } catch (const std::invalid_argument&) {
                     impl_->exec("ROLLBACK;");
@@ -1443,28 +1446,57 @@ public:
                         return program::ProgramTransitionPublishResult::Conflict;
                     }
                     const auto& source = source_wrapper->run_record();
-                    Statement checkpoint_query(
-                        impl_->db,
-                        "SELECT record_json, owner_scope, bundle_id, coordinate_id, record_id "
-                        "FROM neograph_harness_program_javascript_commands "
-                        "WHERE run_id=? ORDER BY sequence DESC LIMIT 1");
-                    checkpoint_query.bind_text(
-                        1, program_storage_run_id(owner_scope, previous_generation.run_id()));
-                    if (checkpoint_query.step() != SQLITE_ROW) {
-                        impl_->exec("ROLLBACK;");
-                        return program::ProgramTransitionPublishResult::Conflict;
+                    const auto graph_migration =
+                        publication.run_generation->graph_migration_receipt();
+                    bool valid_successor = false;
+                    if (graph_migration) {
+                        Statement command_query(
+                            impl_->db,
+                            "SELECT 1 FROM neograph_harness_program_javascript_commands "
+                            "WHERE run_id=? LIMIT 1");
+                        command_query.bind_text(
+                            1, program_storage_run_id(owner_scope,
+                                                      previous_generation.run_id()));
+                        const auto command_result = command_query.step();
+                        if (command_result != SQLITE_ROW && command_result != SQLITE_DONE) {
+                            throw_sqlite_error(
+                                impl_->db, "Program migration command read failed");
+                        }
+                        const bool has_command = command_result == SQLITE_ROW;
+                        valid_successor = !has_command && publication.commands.empty() &&
+                            publication.effects.empty() && publication.events.size() == 1 &&
+                            program::does_program_graph_migration_started_event_bind(
+                                publication.events.front(), publication.run_record) &&
+                            publication.run_record.event_sequence() == 1 &&
+                            publication.migration_plan &&
+                            program::is_valid_program_graph_migration_transition(
+                                previous_generation, *current_lineage, source,
+                                *publication.migration_plan, *publication.run_generation,
+                                *publication.run_lineage, publication.run_record);
+                    } else {
+                        Statement checkpoint_query(
+                            impl_->db,
+                            "SELECT record_json, owner_scope, bundle_id, coordinate_id, record_id "
+                            "FROM neograph_harness_program_javascript_commands "
+                            "WHERE run_id=? ORDER BY sequence DESC LIMIT 1");
+                        checkpoint_query.bind_text(
+                            1, program_storage_run_id(owner_scope,
+                                                      previous_generation.run_id()));
+                        if (checkpoint_query.step() == SQLITE_ROW) {
+                            const auto checkpoint =
+                                program::ProgramJavaScriptCommandJournalEntry::parse(
+                                    checkpoint_query.text(0));
+                            valid_successor = checkpoint_query.text(1) == owner_scope &&
+                                checkpoint_query.text(2) == checkpoint.bundle_id() &&
+                                checkpoint_query.text(3) == checkpoint.coordinate_id() &&
+                                checkpoint_query.text(4) == checkpoint.id() &&
+                                program::is_valid_program_replacement_transition(
+                                    previous_generation, *current_lineage, source,
+                                    checkpoint, *publication.run_generation,
+                                    *publication.run_lineage, publication.run_record);
+                        }
                     }
-                    const auto checkpoint =
-                        program::ProgramJavaScriptCommandJournalEntry::parse(
-                            checkpoint_query.text(0));
-                    if (checkpoint_query.text(1) != owner_scope ||
-                        checkpoint_query.text(2) != checkpoint.bundle_id() ||
-                        checkpoint_query.text(3) != checkpoint.coordinate_id() ||
-                        checkpoint_query.text(4) != checkpoint.id() ||
-                        !program::is_valid_program_replacement_transition(
-                            previous_generation, *current_lineage, source, checkpoint,
-                            *publication.run_generation, *publication.run_lineage,
-                            publication.run_record)) {
+                    if (!valid_successor) {
                         impl_->exec("ROLLBACK;");
                         return program::ProgramTransitionPublishResult::Conflict;
                     }
@@ -1655,6 +1687,13 @@ public:
                 if ((old_terminal && old_is_final && !new_terminal) ||
                     (new_terminal && (!old_terminal || old_terminal->id() != new_terminal->id()) &&
                      !publishes_terminal_event)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                if (publication.run_record.exact_checkpoint() ==
+                        previous_run.exact_checkpoint() &&
+                    publication.run_record.exact_checkpoint_content_id() !=
+                        previous_run.exact_checkpoint_content_id()) {
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }

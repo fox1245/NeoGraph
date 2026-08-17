@@ -661,13 +661,28 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
     if (publication.migration_plan) {
         const auto& plan = *publication.migration_plan;
         const auto fork = run.fork_receipt();
-        if (!fork || plan.owner_scope() != owner ||
+        const auto graph_migration = publication.run_generation
+                                         ? publication.run_generation->graph_migration_receipt()
+                                         : std::nullopt;
+        const bool binds_fork = fork &&
+            plan.source_version_id() == fork->source_program_version_id();
+        const bool binds_graph_migration = graph_migration &&
+            plan.id() == graph_migration->migration_plan_id() &&
+            plan.source_version_id() ==
+                graph_migration->capsule().source_program_version_id();
+        const bool inherits_graph_migration = !fork && !graph_migration &&
+            publication.run_lineage && !publication.run_generation;
+        if (plan.owner_scope() != owner ||
             plan.target_version_id() != run.program_version_id() ||
             !plan.is_compatible() ||
-            plan.source_version_id() != fork->source_program_version_id()) {
+            (!binds_fork && !binds_graph_migration && !inherits_graph_migration)) {
             throw std::invalid_argument(
-                "Program migration publication requires a compatible fork receipt");
+                "Program migration publication requires a compatible transition receipt");
         }
+    } else if (publication.run_generation &&
+               publication.run_generation->graph_migration_receipt()) {
+        throw std::invalid_argument(
+            "Program Graph migration publication requires its admitted plan");
     }
     if (publication.run_generation && !publication.run_lineage) {
         throw std::invalid_argument("Program generation publication requires a lineage head");
@@ -1191,13 +1206,30 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                 return ProgramTransitionPublishResult::Conflict;
             }
             const auto source = impl_->runs.find(key(owner, active->second.run_id()));
-            if (source == impl_->runs.end() || source->second->commands.empty() ||
-                !is_valid_program_replacement_transition(
-                    active->second, current_lineage->second->head, source->second->run,
-                    source->second->commands.back(), *publication.run_generation,
-                    *publication.run_lineage, publication.run_record)) {
+            if (source == impl_->runs.end()) {
                 return ProgramTransitionPublishResult::Conflict;
             }
+            const auto graph_migration =
+                publication.run_generation->graph_migration_receipt();
+            const bool valid_successor = graph_migration
+                ? source->second->commands.empty() && publication.commands.empty() &&
+                      publication.effects.empty() && publication.events.size() == 1 &&
+                      does_program_graph_migration_started_event_bind(
+                          publication.events.front(), publication.run_record) &&
+                      publication.run_record.event_sequence() == 1 &&
+                      publication.migration_plan &&
+                      is_valid_program_graph_migration_transition(
+                          active->second, current_lineage->second->head,
+                          source->second->run, *publication.migration_plan,
+                          *publication.run_generation, *publication.run_lineage,
+                          publication.run_record)
+                : !source->second->commands.empty() &&
+                      is_valid_program_replacement_transition(
+                          active->second, current_lineage->second->head,
+                          source->second->run, source->second->commands.back(),
+                          *publication.run_generation, *publication.run_lineage,
+                          publication.run_record);
+            if (!valid_successor) return ProgramTransitionPublishResult::Conflict;
         }
         if (publication.run_generation && current_lineage != impl_->lineages.end() &&
             current_lineage->second->generations.contains(
@@ -1273,6 +1305,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             publication.run_record.recorded_binding_set_fingerprint() !=
                 old.run.recorded_binding_set_fingerprint() ||
             publication.run_record.invocation() != old.run.invocation() ||
+            (publication.run_record.exact_checkpoint() == old.run.exact_checkpoint() &&
+             publication.run_record.exact_checkpoint_content_id() !=
+                 old.run.exact_checkpoint_content_id()) ||
             !valid_children_transition(old.run, publication.run_record) ||
             publication.run_record.event_sequence() !=
                 old.run.event_sequence() + publication.events.size() ||

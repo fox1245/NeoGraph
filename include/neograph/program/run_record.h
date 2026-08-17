@@ -65,6 +65,7 @@ struct ProgramRunRecordData {
     ProgramContinuation                   continuation;
     RunBudget                             remaining_budget;
     std::optional<CoreCheckpointIdentity> exact_checkpoint;
+    std::optional<std::string>             exact_checkpoint_content_id;
     std::optional<ProgramPendingInput>     pending_input;
     std::optional<ProgramPendingEffect>    pending_effect;
     std::optional<ProgramResult>           terminal_result;
@@ -84,7 +85,7 @@ struct ProgramRunRecordData {
 /** Deep-owned, content-addressed run snapshot used for reconnect and CAS publication. */
 class NEOGRAPH_PROGRAM_API ProgramRunRecord {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 3;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
     static ProgramRunRecord parse(std::string_view stored_bytes);
@@ -99,6 +100,7 @@ public:
     ProgramContinuation continuation() const noexcept;
     RunBudget remaining_budget() const noexcept;
     std::optional<CoreCheckpointIdentity> exact_checkpoint() const;
+    const std::optional<std::string>& exact_checkpoint_content_id() const noexcept;
     std::optional<ProgramPendingInput> pending_input() const;
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;

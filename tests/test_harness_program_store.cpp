@@ -285,6 +285,7 @@ void attach_fork_receipt(ProgramTransitionPublication& publication,
     data.continuation                   = run.continuation();
     data.remaining_budget               = run.remaining_budget();
     data.exact_checkpoint               = run.exact_checkpoint();
+    data.exact_checkpoint_content_id    = run.exact_checkpoint_content_id();
     data.pending_input                  = std::move(target_pending_input);
     data.pending_effect                 = std::move(target_pending_effect);
     data.fork_receipt                   = receipt;

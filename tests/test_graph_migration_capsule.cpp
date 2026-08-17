@@ -1,5 +1,8 @@
 #include <neograph/program/program.h>
 #include <neograph/graph/engine.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <neograph/program/sqlite_transition_store.h>
+#endif
 
 #include <gtest/gtest.h>
 
@@ -8,6 +11,7 @@
 #include <asio/use_future.hpp>
 
 #include <climits>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -84,7 +88,15 @@ struct SourceGeneration {
     ProgramRunLineage lineage;
 };
 
-ProgramVersion program_version(std::string core_generation_id = digest('5')) {
+struct AdmittedProgram {
+    ProgramBundle bundle;
+    ProgramVersion version;
+};
+
+AdmittedProgram admitted_program(
+    std::string core_generation_id = digest('5'),
+    bool widen_authority = false,
+    std::optional<BudgetLimits> ceiling = std::nullopt) {
     RegistrySnapshotBuilder registry_builder;
     registry_builder.add_reducer(
         ExecutableManifest{{ExecutableKind::Reducer, "capsule-reducer", "1.0.0", digest('6')},
@@ -107,13 +119,53 @@ ProgramVersion program_version(std::string core_generation_id = digest('5')) {
         .semantic_version("1.0.0")
         .owner_scope("capsule-owner")
         .admission_profile(admission)
-        .budget_ceiling(BudgetLimits{1000, 1000, 1000, 1, 1, 20, 1, 1, 1});
+        .budget_ceiling(ceiling.value_or(
+            BudgetLimits{1000, 1000, 1000, 1, 1, 20, 1, 1, 1}));
+    if (widen_authority) policy_builder.allow_capability("capsule-expanded");
     auto policy = std::move(policy_builder).build();
-    return ProgramVersion(ProgramVersionData{
-        digest('2'), admission, policy, {}, "capsule-owner",
+    const json definition = {
+        {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+        {"nodes", json{{"capture", json{{"type", "graph_migration_capsule_node"}}}}}};
+    ProgramBundleData bundle_data;
+    bundle_data.source_kind = SourceKind::CppBuilder;
+    bundle_data.source_hash = digest('1');
+    bundle_data.canonical_program_hash = digest('2');
+    bundle_data.compiler_build_id = "capsule-tests";
+    bundle_data.program_schema_version = 1;
+    bundle_data.registry_snapshot_fingerprint = registry.fingerprint();
+    bundle_data.module_dependency_merkle_root = digest('3');
+    bundle_data.input_contract = {1, json{{"type", "object"}}};
+    bundle_data.output_contract = {1, json{{"type", "object"}}};
+    bundle_data.orchestration_plan = {
+        1,
+        json{{"root", "root"},
+             {"operations", json::array({
+                 json{{"id", "root"}, {"op", "call_core"},
+                      {"source_pointer", "/root"},
+                      {"core", "graph_migration_capsule"}}})}}};
+    bundle_data.sealed_core_definitions = {{
+        "graph_migration_capsule", sealed_core_definition_hash(definition), definition}};
+    bundle_data.core_plan_identities = {{
+        "graph_migration_capsule", core_generation_id}};
+    bundle_data.executable_registry_identities = registry.identities();
+    bundle_data.declared_budget_requirements = {
+        {"wall_time_ms", 0, 1000}, {"model_tokens", 0, 1000},
+        {"monetary_microunits", 0, 1000}, {"max_concurrency", 1, 1},
+        {"max_program_operations", 1, 1}, {"max_core_steps", 1, 20},
+        {"max_dynamic_compiles", 0, 1}, {"max_child_depth", 0, 1},
+        {"max_total_children", 0, 1}};
+    auto bundle = ProgramBundle(std::move(bundle_data));
+    auto version = ProgramVersion(ProgramVersionData{
+        bundle.id(), admission, policy, {}, "capsule-owner",
         CoreMaterializationReceipt{
             "capsule-tests", registry.fingerprint(),
             {CorePlanIdentity{"graph_migration_capsule", std::move(core_generation_id)}}, {}}});
+    return {std::move(bundle), std::move(version)};
+}
+
+ProgramVersion program_version(std::string core_generation_id = digest('5')) {
+    auto admitted = admitted_program(std::move(core_generation_id));
+    return std::move(admitted.version);
 }
 
 SourceGeneration source_generation(const ProgramVersion& version) {
@@ -165,6 +217,238 @@ GraphMigrationCapsule make_capsule() {
         source.generation, source.lineage, version, safe_point);
 }
 
+RunBudget migration_budget() {
+    return {1000, 1000, 1000, 1, 1, 20, 1, 1, 1};
+}
+
+ProgramEvent started_event(const ProgramRunRecord& run,
+                           const CoreCheckpointIdentity& checkpoint,
+                           std::int64_t timestamp) {
+    ProgramEvent event;
+    event.sequence = 1;
+    event.timestamp_ms = timestamp;
+    event.run_id = run.run_id();
+    event.program_version_id = run.program_version_id();
+    event.bundle_id = run.bundle_id();
+    event.operation_id = "root";
+    event.core_generation_id = checkpoint.core_generation_id;
+    event.core_run_id = checkpoint.core_thread_id;
+    event.trace_id = run.invocation().correlation_id;
+    event.kind = ProgramEventKind::Started;
+    event.payload = ProgramStartedEvent{run.remaining_budget()};
+    event.attempt = run.continuation().attempt;
+    return ProgramEvent::create(std::move(event));
+}
+
+ProgramTransitionPublication initial_publication(
+    const ProgramVersion& version,
+    std::string run_id,
+    RunBudget budget,
+    CoreCheckpointIdentity checkpoint,
+    std::string checkpoint_content_id,
+    std::int64_t timestamp,
+    std::uint64_t attempt = 1) {
+    auto journal = ProgramJournalRecord::create(
+        {{}, run_id, version.id(), version.bundle_id(), 1,
+         {"root", ContinuationState::Running, attempt}, budget, {}, checkpoint,
+         timestamp});
+    RunInvocation invocation;
+    invocation.owner_scope = version.ownership_scope();
+    invocation.agent_id = "capsule-agent";
+    invocation.program_version_id = version.id();
+    invocation.run_id = run_id;
+    invocation.budget = budget;
+    invocation.input = json{{"migration", true}};
+    invocation.message_sequence = 1;
+    invocation.idempotency_key = "capsule-migration";
+    invocation.correlation_id = "trace-capsule-migration";
+
+    ProgramRunRecordData data;
+    data.owner_scope = version.ownership_scope();
+    data.run_id = std::move(run_id);
+    data.program_version_id = version.id();
+    data.bundle_id = version.bundle_id();
+    data.binding_fingerprint = capability_binding_receipt_root(
+        version.core_materialization_receipt().capability_bindings);
+    data.invocation = std::move(invocation);
+    data.continuation = journal.continuation;
+    data.remaining_budget = budget;
+    data.exact_checkpoint = checkpoint;
+    data.exact_checkpoint_content_id = std::move(checkpoint_content_id);
+    data.journal_head = journal.id;
+    data.event_sequence = 1;
+    data.created_at_ms = timestamp;
+    data.updated_at_ms = timestamp;
+    auto run = ProgramRunRecord::create(std::move(data));
+    auto started = started_event(run, checkpoint, timestamp);
+    return {std::move(run), std::move(journal), {std::move(started)}, {}};
+}
+
+struct MigrationSourceFixture {
+    ProgramBundle bundle;
+    ProgramVersion version;
+    std::shared_ptr<InMemoryCheckpointStore> checkpoints;
+    ProgramTransitionPublication publication;
+    GraphMigrationCapsule capsule;
+};
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+struct TempMigrationDb {
+    TempMigrationDb()
+        : path(std::filesystem::temp_directory_path() /
+               ("neograph-graph-migration-" + Checkpoint::generate_id() + ".db")) {
+        std::filesystem::remove(path);
+    }
+    ~TempMigrationDb() { std::filesystem::remove(path); }
+
+    std::filesystem::path path;
+};
+#endif
+
+MigrationSourceFixture migration_source_fixture(bool valid_checkpoint_content = true) {
+    auto checkpoints = std::make_shared<InMemoryCheckpointStore>();
+    auto admitted = admitted_program();
+    const GraphGenerationIdentity core_identity{
+        "graph_migration_capsule", digest('5')};
+    const auto source_thread = program_root_core_thread_id(
+        "capsule-run", core_identity.core_generation_id);
+    const auto safe_point = capture_safe_point(
+        checkpoints, source_thread, core_identity);
+    const CoreCheckpointIdentity checkpoint{
+        core_identity.core_name, core_identity.core_generation_id,
+        source_thread, safe_point.checkpoint().id,
+        safe_point.checkpoint().schema_version};
+    auto publication = initial_publication(
+        admitted.version, "capsule-run", migration_budget(), checkpoint,
+        valid_checkpoint_content
+            ? graph_migration_checkpoint_content_id(safe_point.checkpoint())
+            : digest('f'),
+        safe_point.checkpoint().timestamp);
+    const auto lineage_id = program_run_lineage_id(
+        publication.run_record.owner_scope(), publication.run_record.run_id());
+    auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        publication.run_record.owner_scope(), lineage_id, 1,
+        publication.run_record.run_id(), publication.run_record.program_version_id(),
+        publication.run_record.bundle_id(), publication.run_record.id(),
+        publication.run_record.journal_head(), std::nullopt,
+        publication.run_record.created_at_ms()});
+    auto lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        publication.run_record.owner_scope(), lineage_id,
+        publication.run_record.run_id(), 1, generation.id(),
+        publication.run_record.id(), publication.run_record.journal_head(),
+        publication.journal_record.remaining_budget,
+        publication.journal_record.inflight_reservation, std::nullopt,
+        publication.run_record.created_at_ms(), publication.run_record.updated_at_ms(),
+        RunBudget{}});
+    auto capsule = GraphMigrationCapsule::seal(
+        generation, lineage, admitted.version, safe_point);
+    publication.run_generation = std::move(generation);
+    publication.run_lineage = std::move(lineage);
+    return {std::move(admitted.bundle), std::move(admitted.version),
+            std::move(checkpoints), std::move(publication), std::move(capsule)};
+}
+
+ProgramTransitionPublication migration_target_publication(
+    const MigrationSourceFixture& source,
+    std::string target_run_id,
+    std::int64_t timestamp,
+    std::optional<MigrationPlan> admitted_plan = std::nullopt,
+    const AdmittedProgram* target_artifacts = nullptr,
+    std::uint64_t target_attempt = 1) {
+    const auto& predecessor = *source.publication.run_generation;
+    const auto& previous_lineage = *source.publication.run_lineage;
+    const auto target_timestamp = source.publication.run_record.updated_at_ms() + timestamp;
+    const auto budget = program_replacement_remaining_budget(
+        source.publication.run_record, previous_lineage, target_timestamp);
+    auto cloned = source.capsule.checkpoint();
+    cloned.id = Checkpoint::generate_id();
+    cloned.thread_id = program_root_core_thread_id(
+        target_run_id, source.capsule.core_checkpoint().core_generation_id);
+    cloned.parent_id = source.capsule.core_checkpoint().checkpoint_id;
+    cloned.metadata["migrated_from"] = source.capsule.id();
+    ++cloned.timestamp;
+    source.checkpoints->save(cloned);
+    CoreCheckpointIdentity target_checkpoint{
+        source.capsule.core_checkpoint().core_name,
+        source.capsule.core_checkpoint().core_generation_id,
+        cloned.thread_id, cloned.id, cloned.schema_version};
+    const auto& target_bundle = target_artifacts
+        ? target_artifacts->bundle : source.bundle;
+    const auto& target_version = target_artifacts
+        ? target_artifacts->version : source.version;
+    auto publication = initial_publication(
+        target_version, std::move(target_run_id), budget, target_checkpoint,
+        graph_migration_checkpoint_content_id(cloned),
+        target_timestamp, target_attempt);
+    auto migration_plan = admitted_plan
+        ? std::move(*admitted_plan)
+        : MigrationPlan::between(source.version, source.bundle,
+                                 target_version, target_bundle);
+    auto receipt = ProgramGraphMigrationReceipt(ProgramGraphMigrationReceiptData{
+        source.capsule, source.bundle, source.version, target_bundle, target_version,
+        migration_plan.id(), predecessor.generation() + 1,
+        publication.run_record.run_id(), publication.run_record.program_version_id(),
+        publication.run_record.bundle_id(),
+        publication.run_record.invocation().canonical_identity(),
+        publication.run_record.binding_fingerprint(), publication.run_record.id(),
+        publication.run_record.journal_head(), target_checkpoint, cloned});
+    auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        publication.run_record.owner_scope(), previous_lineage.lineage_id(),
+        predecessor.generation() + 1, publication.run_record.run_id(),
+        publication.run_record.program_version_id(), publication.run_record.bundle_id(),
+        publication.run_record.id(), publication.run_record.journal_head(),
+        predecessor.id(), publication.run_record.created_at_ms(),
+        publication.run_record.child_depth(), std::nullopt, std::move(receipt)});
+    publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        previous_lineage.owner_scope(), previous_lineage.lineage_id(),
+        previous_lineage.root_run_id(), generation.generation(), generation.id(),
+        publication.run_record.id(), publication.run_record.journal_head(), budget,
+        RunBudget{}, previous_lineage.id(), previous_lineage.created_at_ms(),
+        publication.run_record.updated_at_ms(), RunBudget{}});
+    publication.run_generation = std::move(generation);
+    publication.migration_plan = std::move(migration_plan);
+    return publication;
+}
+
+ProgramTransitionPublication migration_same_generation_update(
+    const ProgramTransitionPublication& previous) {
+    const auto& old = previous.run_record;
+    auto journal = ProgramJournalRecord::create(
+        {previous.journal_record.id, old.run_id(), old.program_version_id(),
+         old.bundle_id(), previous.journal_record.sequence + 1, old.continuation(),
+         old.remaining_budget(), {}, old.exact_checkpoint(), old.updated_at_ms() + 1});
+    ProgramRunRecordData data;
+    data.owner_scope = old.owner_scope();
+    data.run_id = old.run_id();
+    data.program_version_id = old.program_version_id();
+    data.bundle_id = old.bundle_id();
+    data.binding_fingerprint = old.binding_fingerprint();
+    data.invocation = old.invocation();
+    data.child_depth = old.child_depth();
+    data.continuation = old.continuation();
+    data.remaining_budget = old.remaining_budget();
+    data.exact_checkpoint = old.exact_checkpoint();
+    data.exact_checkpoint_content_id = old.exact_checkpoint_content_id();
+    data.journal_head = journal.id;
+    data.event_sequence = old.event_sequence();
+    data.effect_sequence = old.effect_sequence();
+    data.created_at_ms = old.created_at_ms();
+    data.updated_at_ms = journal.timestamp_ms;
+    auto run = ProgramRunRecord::create(std::move(data));
+    ProgramTransitionPublication update{std::move(run), std::move(journal), {}, {}};
+    update.migration_plan = previous.migration_plan;
+    update.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        previous.run_lineage->owner_scope(), previous.run_lineage->lineage_id(),
+        previous.run_lineage->root_run_id(),
+        previous.run_lineage->active_generation(),
+        previous.run_lineage->active_generation_id(), update.run_record.id(),
+        update.run_record.journal_head(), update.journal_record.remaining_budget,
+        update.journal_record.inflight_reservation, previous.run_lineage->id(),
+        previous.run_lineage->created_at_ms(), update.run_record.updated_at_ms(),
+        previous.run_lineage->committed_descendant_budget()});
+    return update;
+}
+
 }  // namespace
 
 TEST(GraphMigrationCapsule, CanonicalRoundTripBindsSourceAndCheckpoint) {
@@ -176,7 +460,7 @@ TEST(GraphMigrationCapsule, CanonicalRoundTripBindsSourceAndCheckpoint) {
     EXPECT_EQ(parsed.owner_scope(), "capsule-owner");
     EXPECT_EQ(parsed.source_generation(), 1U);
     EXPECT_EQ(parsed.source_run_id(), "capsule-run");
-    EXPECT_EQ(parsed.source_bundle_id(), digest('2'));
+    EXPECT_EQ(parsed.source_bundle_id(), admitted_program().bundle.id());
     EXPECT_EQ(parsed.core_checkpoint().core_generation_id, digest('5'));
     EXPECT_EQ(parsed.core_checkpoint().checkpoint_id, parsed.checkpoint().id);
     EXPECT_EQ(parsed.checkpoint().interrupt_phase, CheckpointPhase::Completed);
@@ -267,3 +551,238 @@ TEST(GraphMigrationCapsule, RejectsMalformedRuntimeStateAndIntegerOverflow) {
         (void)GraphMigrationCapsule::parse(impossible_version.dump()),
         std::invalid_argument);
 }
+
+TEST(ProgramGraphMigrationReceipt, CanonicalRoundTripBindsPlanAndTargetCheckpoint) {
+    const auto source = migration_source_fixture();
+    const auto target = migration_target_publication(source, "capsule-target", 20);
+    ASSERT_TRUE(target.run_generation);
+    const auto receipt = target.run_generation->graph_migration_receipt();
+    ASSERT_TRUE(receipt);
+
+    const auto parsed = ProgramGraphMigrationReceipt::parse(
+        receipt->serialize_canonical());
+    EXPECT_EQ(parsed.id(), receipt->id());
+    EXPECT_EQ(parsed.capsule().id(), source.capsule.id());
+    EXPECT_EQ(parsed.source_bundle().id(), source.bundle.id());
+    EXPECT_EQ(parsed.source_version().id(), source.version.id());
+    EXPECT_EQ(parsed.target_bundle().id(), source.bundle.id());
+    EXPECT_EQ(parsed.target_version().id(), source.version.id());
+    EXPECT_EQ(parsed.migration_plan_id(), target.migration_plan->id());
+    EXPECT_EQ(parsed.target_generation(), 2U);
+    EXPECT_EQ(parsed.target_run_id(), "capsule-target");
+    EXPECT_EQ(parsed.target_core_checkpoint(), *target.run_record.exact_checkpoint());
+
+    const auto parsed_generation = ProgramRunGeneration::parse(
+        target.run_generation->serialize_canonical());
+    ASSERT_TRUE(parsed_generation.graph_migration_receipt());
+    EXPECT_FALSE(parsed_generation.replacement_receipt());
+    EXPECT_EQ(parsed_generation.graph_migration_receipt()->id(), receipt->id());
+
+    auto tampered = json::parse(receipt->serialize_canonical());
+    tampered["target_binding_fingerprint"] = digest('b');
+    EXPECT_THROW(
+        (void)ProgramGraphMigrationReceipt::parse(tampered.dump()),
+        std::invalid_argument);
+
+    auto source_checkpoint_target = receipt->target_core_checkpoint();
+    source_checkpoint_target.checkpoint_id =
+        source.capsule.core_checkpoint().checkpoint_id;
+    EXPECT_THROW(
+        (void)ProgramGraphMigrationReceipt(ProgramGraphMigrationReceiptData{
+            source.capsule, receipt->source_bundle(), receipt->source_version(),
+            receipt->target_bundle(), receipt->target_version(),
+            receipt->migration_plan_id(), receipt->target_generation(),
+            receipt->target_run_id(), receipt->target_program_version_id(),
+            receipt->target_bundle_id(), receipt->target_invocation_id(),
+            receipt->target_binding_fingerprint(),
+            receipt->target_initial_run_record_id(),
+            receipt->target_initial_journal_head(), source_checkpoint_target,
+            receipt->target_checkpoint()}),
+        std::invalid_argument);
+
+    auto altered_snapshot = receipt->target_checkpoint();
+    altered_snapshot.next_nodes = {"different-frontier"};
+    EXPECT_THROW(
+        (void)ProgramGraphMigrationReceipt(ProgramGraphMigrationReceiptData{
+            source.capsule, receipt->source_bundle(), receipt->source_version(),
+            receipt->target_bundle(), receipt->target_version(),
+            receipt->migration_plan_id(), receipt->target_generation(),
+            receipt->target_run_id(), receipt->target_program_version_id(),
+            receipt->target_bundle_id(), receipt->target_invocation_id(),
+            receipt->target_binding_fingerprint(),
+            receipt->target_initial_run_record_id(),
+            receipt->target_initial_journal_head(),
+            receipt->target_core_checkpoint(), altered_snapshot}),
+        std::invalid_argument);
+
+    const auto widened = admitted_program(digest('5'), true);
+    EXPECT_THROW(
+        (void)migration_target_publication(
+            source, "capsule-expanded-target", 20, std::nullopt, &widened),
+        std::invalid_argument);
+}
+
+TEST(ProgramGraphMigrationReceipt, AtomicPublicationRejectsMissingPlanAndStaleCapsule) {
+    const auto source = migration_source_fixture();
+    auto target = migration_target_publication(source, "capsule-target", 20);
+    const auto incomplete_plan = MigrationPlan::create(MigrationPlanData{
+        source.version.id(), source.version.id(), source.version.ownership_scope(),
+        MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    EXPECT_THROW(
+        (void)migration_target_publication(
+            source, "capsule-incomplete-target", 21, incomplete_plan),
+        std::invalid_argument);
+    auto stale = migration_target_publication(source, "capsule-stale-target", 22);
+    auto with_command = migration_target_publication(
+        source, "capsule-command-target", 21);
+    with_command.commands.push_back(ProgramJavaScriptCommandJournalEntry(
+        ProgramJavaScriptCommandJournalEntryData{
+            1, with_command.run_record.bundle_id(), 1,
+            JavaScriptCommand::call_core(
+                "migration:forbidden", "graph_migration_capsule", json::object()),
+            digest('9'), std::nullopt}));
+    auto wrong_started = migration_target_publication(
+        source, "capsule-started-target", 21);
+    auto started = wrong_started.events.front();
+    started.id.clear();
+    auto wrong_budget = wrong_started.run_record.remaining_budget();
+    --wrong_budget.model_tokens;
+    started.payload = ProgramStartedEvent{wrong_budget};
+    wrong_started.events.front() = ProgramEvent::create(std::move(started));
+    auto wrong_attempt = migration_target_publication(
+        source, "capsule-attempt-target", 21, std::nullopt, nullptr, 2);
+    const auto constrained = admitted_program(
+        digest('5'), false, BudgetLimits{5, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    auto over_budget = migration_target_publication(
+        source, "capsule-budget-target", 21, std::nullopt, &constrained);
+    InMemoryProgramTransitionStore transitions;
+    ASSERT_EQ(transitions.compare_publish(
+                  source.publication.run_record.owner_scope(), {}, source.publication),
+              ProgramTransitionPublishResult::Published);
+
+    auto missing_plan = target;
+    missing_plan.migration_plan.reset();
+    EXPECT_EQ(transitions.compare_publish(
+                  target.run_record.owner_scope(), {}, std::move(missing_plan)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(transitions.load(target.run_record.owner_scope(),
+                                  target.run_record.run_id()));
+    const auto source_head = transitions.load_lineage(
+        source.publication.run_record.owner_scope(),
+        source.publication.run_lineage->lineage_id());
+    ASSERT_TRUE(source_head);
+    EXPECT_EQ(source_head->id(), source.publication.run_lineage->id());
+
+    EXPECT_EQ(transitions.compare_publish(
+                  wrong_attempt.run_record.owner_scope(), {}, wrong_attempt),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions.compare_publish(
+                  over_budget.run_record.owner_scope(), {}, over_budget),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions.compare_publish(
+                  with_command.run_record.owner_scope(), {}, with_command),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions.compare_publish(
+                  wrong_started.run_record.owner_scope(), {}, wrong_started),
+              ProgramTransitionPublishResult::Conflict);
+
+    ASSERT_EQ(transitions.compare_publish(
+                  target.run_record.owner_scope(), {}, target),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(transitions.compare_publish(
+                  target.run_record.owner_scope(), {}, target),
+              ProgramTransitionPublishResult::AlreadyPresent);
+    const auto head = transitions.load_run_lineage(
+        target.run_record.owner_scope(), target.run_record.run_id());
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->active_generation(), 2U);
+    EXPECT_EQ(head->active_generation_id(), target.run_generation->id());
+    EXPECT_EQ(head->remaining_budget(), target.run_record.remaining_budget());
+    const auto stored_generation = transitions.load_generation(
+        head->owner_scope(), head->lineage_id(), 2);
+    ASSERT_TRUE(stored_generation);
+    ASSERT_TRUE(stored_generation->graph_migration_receipt());
+    EXPECT_EQ(stored_generation->graph_migration_receipt()->capsule().id(),
+              source.capsule.id());
+    ASSERT_TRUE(transitions.load_migration_plan(
+        target.run_record.owner_scope(), target.run_record.run_id()));
+    EXPECT_EQ(transitions
+                  .load_migration_plan(target.run_record.owner_scope(),
+                                       target.run_record.run_id())
+                  ->id(),
+              target.migration_plan->id());
+
+    const auto update = migration_same_generation_update(target);
+    ASSERT_EQ(transitions.compare_publish(
+                  update.run_record.owner_scope(), target.journal_record.id, update),
+              ProgramTransitionPublishResult::Published);
+    const auto updated_head = transitions.load_lineage(
+        head->owner_scope(), head->lineage_id());
+    ASSERT_TRUE(updated_head);
+    EXPECT_EQ(updated_head->active_generation(), 2U);
+    EXPECT_EQ(updated_head->active_generation_id(), head->active_generation_id());
+    EXPECT_EQ(updated_head->active_run_record_id(), update.run_record.id());
+
+    EXPECT_EQ(transitions.compare_publish(
+                  stale.run_record.owner_scope(), {}, stale),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(transitions.load(target.run_record.owner_scope(),
+                                  "capsule-stale-target"));
+    EXPECT_EQ(transitions
+                  .load_lineage(head->owner_scope(), head->lineage_id())
+                  ->id(),
+              updated_head->id());
+
+    const auto forged_source = migration_source_fixture(false);
+    const auto forged_target = migration_target_publication(
+        forged_source, "capsule-forged-source-target", 20);
+    InMemoryProgramTransitionStore forged_transitions;
+    ASSERT_EQ(forged_transitions.compare_publish(
+                  forged_source.publication.run_record.owner_scope(), {},
+                  forged_source.publication),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(forged_transitions.compare_publish(
+                  forged_target.run_record.owner_scope(), {}, forged_target),
+              ProgramTransitionPublishResult::Conflict);
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramGraphMigrationReceipt, SQLitePublicationSurvivesReopen) {
+    TempMigrationDb database;
+    const auto source = migration_source_fixture();
+    const auto target = migration_target_publication(source, "capsule-sqlite-target", 20);
+    const auto lineage_id = source.publication.run_lineage->lineage_id();
+    const auto target_generation_id = target.run_generation->id();
+    const auto receipt_id = target.run_generation->graph_migration_receipt()->id();
+
+    {
+        SQLiteProgramTransitionStore transitions(database.path.string());
+        ASSERT_EQ(transitions.compare_publish(
+                      source.publication.run_record.owner_scope(), {}, source.publication),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(transitions.compare_publish(
+                      target.run_record.owner_scope(), {}, target),
+                  ProgramTransitionPublishResult::Published);
+    }
+    {
+        SQLiteProgramTransitionStore transitions(database.path.string());
+        const auto head = transitions.load_lineage("capsule-owner", lineage_id);
+        ASSERT_TRUE(head);
+        EXPECT_EQ(head->active_generation(), 2U);
+        EXPECT_EQ(head->active_generation_id(), target_generation_id);
+        const auto generation = transitions.load_generation(
+            "capsule-owner", lineage_id, 2);
+        ASSERT_TRUE(generation);
+        ASSERT_TRUE(generation->graph_migration_receipt());
+        EXPECT_EQ(generation->graph_migration_receipt()->id(), receipt_id);
+        const auto publication = transitions.load_generation_initial_publication(
+            "capsule-owner", lineage_id, 2);
+        ASSERT_TRUE(publication);
+        ASSERT_TRUE(publication->migration_plan);
+        EXPECT_EQ(publication->migration_plan->id(), target.migration_plan->id());
+        EXPECT_EQ(transitions.compare_publish(
+                      target.run_record.owner_scope(), {}, target),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+    }
+}
+#endif

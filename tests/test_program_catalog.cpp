@@ -15,6 +15,7 @@
 #endif
 #include <cstdlib>
 #include "catalog_access.h"
+#include "canonical_json.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -1162,7 +1163,7 @@ TEST(ProgramCatalogTest, ComposedAdmissionRequiresVerifiedModuleStore) {
                  std::invalid_argument);
 }
 
-TEST(ProgramCatalogTest, MigrationPlanCoversEveryP5DimensionWithNarrowMappings) {
+TEST(ProgramCatalogTest, MigrationPlanCoversEveryDimensionWithNarrowMappings) {
     CatalogFixture fixture(registry());
     const auto     bundle = compile(fixture.snapshot);
     const auto     source = fixture.catalog.admit(bundle, fixture.request());
@@ -1180,8 +1181,8 @@ TEST(ProgramCatalogTest, MigrationPlanCoversEveryP5DimensionWithNarrowMappings) 
     const auto plan = fixture.catalog.plan_migration("tenant:catalog", source.id(), target.id());
     ASSERT_TRUE(plan.is_compatible());
     EXPECT_TRUE(plan.diagnostics().empty());
-    ASSERT_EQ(plan.mappings().size(), 14U);
-    for (std::uint8_t index = 0; index < 14; ++index) {
+    ASSERT_EQ(plan.mappings().size(), 19U);
+    for (std::uint8_t index = 0; index < 19; ++index) {
         EXPECT_EQ(static_cast<std::uint8_t>(plan.mappings()[index].dimension), index);
         EXPECT_FALSE(plan.mappings()[index].rule.empty());
     }
@@ -1190,6 +1191,50 @@ TEST(ProgramCatalogTest, MigrationPlanCoversEveryP5DimensionWithNarrowMappings) 
         EXPECT_EQ(reparsed.mappings()[index].dimension, plan.mappings()[index].dimension);
         EXPECT_EQ(reparsed.mappings()[index].rule, plan.mappings()[index].rule);
     }
+
+    json previous{{"format", "neograph-program-migration-plan"},
+                  {"storage_schema_version",
+                   MigrationPlan::PREVIOUS_STORAGE_SCHEMA_VERSION},
+                  {"source_version_id", plan.source_version_id()},
+                  {"target_version_id", plan.target_version_id()},
+                  {"owner_scope", plan.owner_scope()},
+                  {"compatibility", std::string(to_string(plan.compatibility()))},
+                  {"blockers", plan.blockers()},
+                  {"diagnostics", json::array()},
+                  {"mappings", json::array()}};
+    for (std::size_t index = 0; index < 14; ++index) {
+        const auto& mapping = plan.mappings()[index];
+        auto source = mapping.source;
+        auto target = mapping.target;
+        if (mapping.dimension == MigrationDimension::Authority) {
+            json projected_source = json::object();
+            json projected_target = json::object();
+            for (const auto& [key, field] : source.items()) {
+                if (key != "profile_minimum_execution_guarantee" &&
+                    key != "policy_minimum_execution_guarantee") {
+                    projected_source[key] = field;
+                }
+            }
+            for (const auto& [key, field] : target.items()) {
+                if (key != "profile_minimum_execution_guarantee" &&
+                    key != "policy_minimum_execution_guarantee") {
+                    projected_target[key] = field;
+                }
+            }
+            source = std::move(projected_source);
+            target = std::move(projected_target);
+        }
+        previous["mappings"].push_back(
+            json{{"dimension", std::string(to_string(mapping.dimension))},
+                 {"rule", mapping.rule}, {"source", std::move(source)},
+                 {"target", std::move(target)}});
+    }
+    previous["id"] = neograph::program::detail::sha256_identity(
+        "program-migration-plan/v1",
+        neograph::program::detail::canonical_json_bytes(previous));
+    const auto parsed_previous = MigrationPlan::parse(previous.dump());
+    EXPECT_TRUE(parsed_previous.semantically_matches(plan));
+    EXPECT_FALSE(plan.semantically_matches(parsed_previous));
 }
 
 TEST(ProgramCatalogTest, MigrationPlanFailsClosedForUnknownCompatibilityAndMismatches) {

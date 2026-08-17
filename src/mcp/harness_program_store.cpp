@@ -580,6 +580,10 @@ program::JournalAppendResult HarnessBoundedProgramJournal::compare_append(
     next_data.continuation        = record.continuation;
     next_data.remaining_budget    = record.remaining_budget;
     next_data.exact_checkpoint    = record.core_checkpoint;
+    if (record.core_checkpoint == current->exact_checkpoint()) {
+        next_data.exact_checkpoint_content_id =
+            current->exact_checkpoint_content_id();
+    }
     next_data.pending_input       = current->pending_input();
     next_data.pending_effect      = current->pending_effect();
     next_data.terminal_result     = current->terminal_result();

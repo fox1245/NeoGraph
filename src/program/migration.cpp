@@ -94,9 +94,9 @@ json encode_mappings(const std::vector<MigrationMapping>& values) {
     return result;
 }
 
-json body_for(const MigrationPlanData& data) {
+json body_for(const MigrationPlanData& data, std::uint32_t schema_version) {
     return json{{"format", std::string(FORMAT)},
-                {"storage_schema_version", MigrationPlan::STORAGE_SCHEMA_VERSION},
+                {"storage_schema_version", schema_version},
                 {"source_version_id", data.source_version_id},
                 {"target_version_id", data.target_version_id},
                 {"owner_scope", data.owner_scope},
@@ -185,9 +185,13 @@ json profile_authority_json(const AdmissionProfile& profile, const PolicySnapsho
         {"profile_allowed_source_kinds", std::move(source_kinds)},
         {"profile_allowed_executables", executable_list_json(profile.allowed_executables())},
         {"profile_allowed_effect_modes", std::move(effect_modes)},
+        {"profile_minimum_execution_guarantee",
+         std::string(to_string(profile.minimum_execution_guarantee()))},
         {"policy_fingerprint", policy.fingerprint()},
         {"policy_admission_profile_fingerprint", policy.admission_profile_fingerprint()},
         {"policy_registry_fingerprint", policy.registry_fingerprint()},
+        {"policy_minimum_execution_guarantee",
+         std::string(to_string(policy.minimum_execution_guarantee()))},
         {"capabilities", string_set(policy.allowed_capabilities())},
         {"effects", string_set(policy.allowed_effects())},
         {"modules", string_set(policy.allowed_module_digests())}};
@@ -201,12 +205,28 @@ json authority_closure(const json& value) {
                 {"profile_allowed_source_kinds", value.at("profile_allowed_source_kinds")},
                 {"profile_allowed_executables", value.at("profile_allowed_executables")},
                 {"profile_allowed_effect_modes", value.at("profile_allowed_effect_modes")},
+                {"profile_minimum_execution_guarantee",
+                 value.at("profile_minimum_execution_guarantee")},
                 {"policy_admission_profile_fingerprint",
                  value.at("policy_admission_profile_fingerprint")},
                 {"policy_registry_fingerprint", value.at("policy_registry_fingerprint")},
+                {"policy_minimum_execution_guarantee",
+                 value.at("policy_minimum_execution_guarantee")},
                 {"capabilities", value.at("capabilities")},
                 {"effects", value.at("effects")},
                 {"modules", value.at("modules")}};
+}
+
+json schema_v1_authority_projection(const json& value) {
+    json result = json::object();
+    for (const auto& [key, field] : value.items()) {
+        if (key == "profile_minimum_execution_guarantee" ||
+            key == "policy_minimum_execution_guarantee") {
+            continue;
+        }
+        result[key] = field;
+    }
+    return result;
 }
 
 
@@ -356,8 +376,14 @@ void from_json(const json& value, StoredArtifactClassificationRule& rule) {
 }
 
 struct MigrationPlan::Impl {
-    explicit Impl(MigrationPlanData value) : data(std::move(value)) {}
+    explicit Impl(MigrationPlanData value, std::uint32_t version)
+        : data(std::move(value)), schema_version(version) {
+        id = detail::sha256_identity(
+            "program-migration-plan/v1",
+            detail::canonical_json_bytes(body_for(data, schema_version)));
+    }
     MigrationPlanData data;
+    std::uint32_t      schema_version;
     std::string       id;
 };
 
@@ -412,9 +438,8 @@ MigrationPlan MigrationPlan::create(MigrationPlanData data) {
                 "Migration requires explicit handling", nullptr, nullptr});
     }
 
-    auto impl = std::make_shared<Impl>(std::move(data));
-    impl->id = detail::sha256_identity("program-migration-plan/v1",
-                                       detail::canonical_json_bytes(body_for(impl->data)));
+    auto impl = std::make_shared<Impl>(
+        std::move(data), MigrationPlan::STORAGE_SCHEMA_VERSION);
     return MigrationPlan(std::move(impl));
 }
 namespace {
@@ -435,6 +460,8 @@ MigrationPlan build_migration_plan(const ProgramVersion& source,
     const auto target_policy  = target.policy_snapshot();
     const auto source_auth    = profile_authority_json(source_profile, source_policy);
     const auto target_auth    = profile_authority_json(target_profile, target_policy);
+    const auto& source_receipt = source.core_materialization_receipt();
+    const auto& target_receipt = target.core_materialization_receipt();
     const auto source_material =
         materialization_json(source.core_materialization_receipt());
     const auto target_material =
@@ -487,6 +514,17 @@ MigrationPlan build_migration_plan(const ProgramVersion& source,
                 source_material, target_material);
     add_mapping(data, MigrationDimension::Output, "exact_output_contract",
                 source_facts.runtime_contract, target_facts.runtime_contract);
+    add_mapping(data, MigrationDimension::Compiler, "exact_compiler_build_identity",
+                source_receipt.compiler_build_id, target_receipt.compiler_build_id);
+    add_mapping(data, MigrationDimension::Registry, "exact_registry_snapshot_identity",
+                source_receipt.registry_snapshot_fingerprint,
+                target_receipt.registry_snapshot_fingerprint);
+    add_mapping(data, MigrationDimension::Materialization,
+                "exact_core_materialization_identity", source_material, target_material);
+    add_mapping(data, MigrationDimension::Contract, "exact_runtime_contract",
+                source_facts.runtime_contract, target_facts.runtime_contract);
+    add_mapping(data, MigrationDimension::Recovery, "exact_dependency_receipts",
+                source.id(), target.id());
 
     const auto mismatch = [&](MigrationDimension dimension, std::string code,
                               std::string message, json source_value,
@@ -517,8 +555,6 @@ MigrationPlan build_migration_plan(const ProgramVersion& source,
                  "Migration changes an admitted profile or authority closure",
                  source_auth, target_auth, MigrationCompatibility::Blocked);
 
-    const auto& source_receipt = source.core_materialization_receipt();
-    const auto& target_receipt = target.core_materialization_receipt();
     if (source_receipt.compiler_build_id != target_receipt.compiler_build_id)
         mismatch(MigrationDimension::Compiler, "compiler_build_id",
                  "Pinned Core materialization was built by a different compiler",
@@ -553,7 +589,14 @@ MigrationPlan build_migration_plan(const ProgramVersion& source,
     if (source.dependency_receipts() != target.dependency_receipts())
         mismatch(MigrationDimension::Recovery, "dependency_receipts",
                  "Migration changes dependency identities required for recovery",
-                 source.id(), target.id(), MigrationCompatibility::OperatorReconciliation);
+                  source.id(), target.id(), MigrationCompatibility::OperatorReconciliation);
+
+    if (source.execution_guarantee() != target.execution_guarantee())
+        mismatch(MigrationDimension::Recovery, "execution_guarantee",
+                 "Migration changes the effective execution guarantee",
+                 std::string(to_string(source.execution_guarantee())),
+                 std::string(to_string(target.execution_guarantee())),
+                 MigrationCompatibility::Blocked);
 
     return MigrationPlan::create(std::move(data));
 }
@@ -593,7 +636,8 @@ MigrationPlan MigrationPlan::parse(std::string_view stored_bytes) {
             MigrationPlan::LEGACY_STORAGE_SCHEMA_VERSION;
     const bool legacy = schema_version == MigrationPlan::LEGACY_STORAGE_SCHEMA_VERSION ||
                         explicit_legacy;
-    if (!legacy && schema_version != MigrationPlan::STORAGE_SCHEMA_VERSION)
+    if (!legacy && schema_version != MigrationPlan::PREVIOUS_STORAGE_SCHEMA_VERSION &&
+        schema_version != MigrationPlan::STORAGE_SCHEMA_VERSION)
         throw std::invalid_argument("Stored MigrationPlan schema version is unsupported");
     if (legacy && value.contains("legacy_schema_version") &&
         (!value["legacy_schema_version"].is_number_unsigned() ||
@@ -609,7 +653,7 @@ MigrationPlan MigrationPlan::parse(std::string_view stored_bytes) {
     const bool has_mappings    = value.contains("mappings");
     if (!legacy && (!has_diagnostics || !has_mappings))
         throw std::invalid_argument(
-            "Stored v1 MigrationPlan requires diagnostics and mappings");
+            "Stored MigrationPlan requires diagnostics and mappings");
     if (legacy && (has_diagnostics != has_mappings))
         throw std::invalid_argument(
             "Stored legacy MigrationPlan must omit both diagnostics and mappings");
@@ -641,7 +685,11 @@ MigrationPlan MigrationPlan::parse(std::string_view stored_bytes) {
                            required_string(value, "owner_scope"),
                            compatibility_from_string(stored_compatibility, legacy),
                            std::move(blockers), std::move(diagnostics), std::move(mappings)};
-    auto result = create(data);
+    auto current = create(data);
+    auto result = schema_version == MigrationPlan::STORAGE_SCHEMA_VERSION
+        ? current
+        : MigrationPlan(std::make_shared<const Impl>(
+              current.impl_->data, schema_version));
     if (!value.contains("id") || !value["id"].is_string())
         throw std::invalid_argument("Stored MigrationPlan identity is missing");
 
@@ -667,10 +715,45 @@ const std::vector<std::string>& MigrationPlan::blockers() const noexcept { retur
 const std::vector<MigrationDiagnostic>& MigrationPlan::diagnostics() const noexcept { return impl_->data.diagnostics; }
 const std::vector<MigrationMapping>& MigrationPlan::mappings() const noexcept { return impl_->data.mappings; }
 bool MigrationPlan::is_compatible() const noexcept { return compatibility() == MigrationCompatibility::ForkCompatible; }
+bool MigrationPlan::semantically_matches(const MigrationPlan& expected) const noexcept {
+    if (id() == expected.id()) return true;
+    if (impl_->schema_version != PREVIOUS_STORAGE_SCHEMA_VERSION ||
+        expected.impl_->schema_version != STORAGE_SCHEMA_VERSION ||
+        source_version_id() != expected.source_version_id() ||
+        target_version_id() != expected.target_version_id() ||
+        owner_scope() != expected.owner_scope() ||
+        compatibility() != expected.compatibility() ||
+        blockers() != expected.blockers() || diagnostics() != expected.diagnostics() ||
+        mappings().size() != 14 || expected.mappings().size() < mappings().size()) {
+        return false;
+    }
+    try {
+        for (std::size_t index = 0; index < mappings().size(); ++index) {
+            const auto& stored = mappings()[index];
+            const auto& current = expected.mappings()[index];
+            if (stored.dimension != current.dimension || stored.rule != current.rule) {
+                return false;
+            }
+            const auto expected_source = stored.dimension == MigrationDimension::Authority
+                ? schema_v1_authority_projection(current.source) : current.source;
+            const auto expected_target = stored.dimension == MigrationDimension::Authority
+                ? schema_v1_authority_projection(current.target) : current.target;
+            if (detail::canonical_json_bytes(stored.source) !=
+                    detail::canonical_json_bytes(expected_source) ||
+                detail::canonical_json_bytes(stored.target) !=
+                    detail::canonical_json_bytes(expected_target)) {
+                return false;
+            }
+        }
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
 const std::string& MigrationPlan::id() const noexcept { return impl_->id; }
 
 std::string MigrationPlan::serialize_canonical() const {
-    auto value  = body_for(impl_->data);
+    auto value  = body_for(impl_->data, impl_->schema_version);
     value["id"] = id();
     return detail::canonical_json_bytes(value);
 }

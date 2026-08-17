@@ -560,7 +560,10 @@ bool valid_increment(sqlite3* db, std::string_view owner_scope,
         next_run.binding_fingerprint() != old_run.binding_fingerprint() ||
         !same_fork(old_run, next_run) ||
         next_run.recorded_binding_set_fingerprint() != old_run.recorded_binding_set_fingerprint() ||
-        next_run.invocation() != old_run.invocation() || !valid_children_transition(old_run, next_run) ||
+        next_run.invocation() != old_run.invocation() ||
+        (next_run.exact_checkpoint() == old_run.exact_checkpoint() &&
+         next_run.exact_checkpoint_content_id() != old_run.exact_checkpoint_content_id()) ||
+        !valid_children_transition(old_run, next_run) ||
         next_run.event_sequence() != old_run.event_sequence() + next_publication.events.size() ||
         next_run.effect_sequence() != old_run.effect_sequence() + next_publication.effects.size())
         return false;
@@ -1309,15 +1312,37 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
                 return ProgramTransitionPublishResult::Conflict;
             }
             const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
-                                       : std::nullopt;
-            const auto checkpoint =
-                source ? load_latest_javascript_command(impl_->db, owner_scope, active->run_id())
-                       : std::nullopt;
-            if (!source || !checkpoint ||
-                !is_valid_program_replacement_transition(
-                    *active, *current_lineage, source->run_record, *checkpoint,
-                    *publication.run_generation, *publication.run_lineage,
-                    publication.run_record)) {
+                                        : std::nullopt;
+            if (!source) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+            const auto graph_migration =
+                publication.run_generation->graph_migration_receipt();
+            bool valid_successor = false;
+            if (graph_migration) {
+                const auto command = load_latest_javascript_command(
+                    impl_->db, owner_scope, active->run_id());
+                valid_successor = !command && publication.commands.empty() &&
+                    publication.effects.empty() && publication.events.size() == 1 &&
+                    does_program_graph_migration_started_event_bind(
+                        publication.events.front(), publication.run_record) &&
+                    publication.run_record.event_sequence() == 1 &&
+                    publication.migration_plan &&
+                    is_valid_program_graph_migration_transition(
+                        *active, *current_lineage, source->run_record,
+                        *publication.migration_plan, *publication.run_generation,
+                        *publication.run_lineage, publication.run_record);
+            } else {
+                const auto checkpoint = load_latest_javascript_command(
+                    impl_->db, owner_scope, active->run_id());
+                valid_successor = checkpoint &&
+                    is_valid_program_replacement_transition(
+                        *active, *current_lineage, source->run_record, *checkpoint,
+                        *publication.run_generation, *publication.run_lineage,
+                        publication.run_record);
+            }
+            if (!valid_successor) {
                 transaction.commit();
                 return ProgramTransitionPublishResult::Conflict;
             }
