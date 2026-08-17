@@ -1006,9 +1006,13 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
         throw std::invalid_argument("Cannot resume: thread_id is required");
     }
 
-    CheckpointCoordinator coordinator(checkpoint_store, config.thread_id, hook_runtime_, {
-        metadata.owner_scope, metadata.run_id, metadata.trace_id, config.cancel_token,
-        hook_deadline_for(metadata.deadline)});
+    CheckpointHookContext hook_context;
+    if (hook_runtime_) {
+        hook_context = {metadata.owner_scope, metadata.run_id, metadata.trace_id,
+                        config.cancel_token, hook_deadline_for(metadata.deadline)};
+    }
+    CheckpointCoordinator coordinator(checkpoint_store, config.thread_id, hook_runtime_,
+                                      std::move(hook_context));
     ResumeContext resume_context;
     if (checkpoint_id) {
         resume_context =
@@ -1138,10 +1142,13 @@ GraphEngine::execute_graph_async(
     auto checkpoint_store = resources && resources->checkpoint_store
         ? *resources->checkpoint_store
         : checkpoint_store_;
-    const auto hook_deadline = hook_deadline_for(metadata.deadline);
-    CheckpointCoordinator coord(checkpoint_store, config.thread_id, hook_runtime_, {
-        metadata.owner_scope, metadata.run_id, metadata.trace_id, config.cancel_token,
-        hook_deadline});
+    CheckpointHookContext hook_context;
+    if (hook_runtime_) {
+        hook_context = {metadata.owner_scope, metadata.run_id, metadata.trace_id,
+                        config.cancel_token, hook_deadline_for(metadata.deadline)};
+    }
+    CheckpointCoordinator coord(checkpoint_store, config.thread_id, hook_runtime_,
+                                std::move(hook_context));
     auto safe_point_request = resources ? resources->safe_point_request : nullptr;
     struct SafePointOperationGuard {
         std::shared_ptr<GraphSafePointRequest> request;

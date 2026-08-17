@@ -184,10 +184,11 @@ TEST(RequestOptions, RedirectFollowedWithinLimit) {
         [&]() -> asio::awaitable<void> {
             neograph::async::RequestOptions opts;
             opts.max_redirects = 3;
-            auto resp = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 client_io.get_executor(),
                 "127.0.0.1", std::to_string(srv.port),
                 "/start", "{}", {}, false, opts);
+            auto resp = co_await std::move(request);
             status = resp.status;
             body   = resp.body;
         },
@@ -250,10 +251,11 @@ TEST(RequestOptions, CrossOriginRedirectDoesNotReplayPost) {
             neograph::async::RequestOptions opts;
             opts.max_redirects = 2;
             try {
-                co_await neograph::async::async_post(
+                auto request = neograph::async::async_post(
                     io.get_executor(), "127.0.0.1", std::to_string(source.port),
                     "/start", "sensitive-post",
                     {{"Authorization", "Bearer request-secret"}}, false, opts);
+                co_await std::move(request);
             } catch (const std::exception& ex) {
                 rejected = true;
                 error = ex.what();
@@ -284,10 +286,11 @@ TEST(RequestOptions, RedirectDisabledReturns3xx) {
     asio::co_spawn(client_io,
         [&]() -> asio::awaitable<void> {
             // Default RequestOptions — max_redirects = 0.
-            auto resp = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 client_io.get_executor(),
                 "127.0.0.1", std::to_string(srv.port),
                 "/start", "{}", {}, false, {});
+            auto resp = co_await std::move(request);
             status   = resp.status;
             location = resp.location;
         },
@@ -313,10 +316,11 @@ TEST(RequestOptions, RedirectHopLimitReturnsFinal3xx) {
         [&]() -> asio::awaitable<void> {
             neograph::async::RequestOptions opts;
             opts.max_redirects = 2;
-            auto resp = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 client_io.get_executor(),
                 "127.0.0.1", std::to_string(srv.port),
                 "/loop", "{}", {}, false, opts);
+            auto resp = co_await std::move(request);
             status = resp.status;
         },
         asio::detached);
@@ -339,10 +343,11 @@ TEST(RequestOptions, RetryAfterExtracted) {
     std::string retry_after;
     asio::co_spawn(client_io,
         [&]() -> asio::awaitable<void> {
-            auto resp = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 client_io.get_executor(),
                 "127.0.0.1", std::to_string(srv.port),
                 "/x", "{}", {}, false, {});
+            auto resp = co_await std::move(request);
             status      = resp.status;
             retry_after = resp.retry_after;
         },
@@ -404,10 +409,11 @@ TEST(RequestOptions, TimeoutTriggers) {
             neograph::async::RequestOptions opts;
             opts.timeout = std::chrono::milliseconds(150);
             try {
-                co_await neograph::async::async_post(
+                auto request = neograph::async::async_post(
                     client_io.get_executor(),
                     "127.0.0.1", std::to_string(srv.port),
                     "/x", "{}", {}, false, opts);
+                co_await std::move(request);
             } catch (const asio::system_error& e) {
                 if (e.code() == asio::error::timed_out) {
                     timed_out = true;
@@ -476,9 +482,10 @@ TEST(RequestOptions, PoolTimeoutTriggers) {
             neograph::async::RequestOptions opts;
             opts.timeout = std::chrono::milliseconds(150);
             try {
-                co_await pool.async_post(
+                auto request = pool.async_post(
                     "127.0.0.1", std::to_string(srv.port),
                     "/x", "{}", {}, false, opts);
+                co_await std::move(request);
             } catch (const asio::system_error& e) {
                 if (e.code() == asio::error::timed_out) {
                     timed_out = true;
@@ -505,9 +512,10 @@ TEST(RequestOptions, InterimResponseIsConsumedBeforeFinalResponse) {
     asio::io_context io;
     neograph::async::HttpResponse response;
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-        response = co_await neograph::async::async_post(
+        auto request = neograph::async::async_post(
             io.get_executor(), "127.0.0.1", std::to_string(srv.port),
             "/interim", "{}", {}, false);
+        response = co_await std::move(request);
     }, asio::detached);
     io.run();
 
@@ -530,9 +538,10 @@ TEST(RequestOptions, AmbiguousTransferEncodingAndLengthIsRejected) {
     std::exception_ptr failure;
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
         try {
-            (void)co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 io.get_executor(), "127.0.0.1", std::to_string(srv.port),
                 "/ambiguous", "{}", {}, false);
+            (void)co_await std::move(request);
         } catch (...) {
             failure = std::current_exception();
         }
@@ -556,9 +565,10 @@ TEST(RequestOptions, BodylessStatusIgnoresRepresentationContentLength) {
     std::exception_ptr failure;
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
         try {
-            response = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 io.get_executor(), "127.0.0.1", std::to_string(srv.port),
                 "/not-modified", "{}", {}, false);
+            response = co_await std::move(request);
         } catch (...) {
             failure = std::current_exception();
         }
@@ -582,9 +592,10 @@ TEST(RequestOptions, HeaderLimitReturnsMessageSize) {
             neograph::async::RequestOptions opts;
             opts.max_response_header_bytes = 128;
             try {
-                co_await neograph::async::async_post(
+                auto request = neograph::async::async_post(
                     io.get_executor(), "127.0.0.1", std::to_string(srv.port),
                     "/headers", "{}", {}, false, opts);
+                co_await std::move(request);
             } catch (const asio::system_error& error) {
                 message_size = error.code() == asio::error::message_size;
             }
@@ -610,9 +621,10 @@ TEST(RequestOptions, ContentLengthLimitReturnsMessageSizeBeforeBodyRead) {
             neograph::async::RequestOptions opts;
             opts.max_response_body_bytes = 32;
             try {
-                co_await neograph::async::async_post(
+                auto request = neograph::async::async_post(
                     io.get_executor(), "127.0.0.1", std::to_string(srv.port),
                     "/length", "{}", {}, false, opts);
+                co_await std::move(request);
             } catch (const asio::system_error& error) {
                 message_size = error.code() == asio::error::message_size;
             }
@@ -636,9 +648,10 @@ TEST(RequestOptions, ContentLengthOverflowReturnsMessageSize) {
     asio::co_spawn(io,
         [&]() -> asio::awaitable<void> {
             try {
-                co_await neograph::async::async_post(
+                auto request = neograph::async::async_post(
                     io.get_executor(), "127.0.0.1", std::to_string(srv.port),
                     "/overflow", "{}", {}, false);
+                co_await std::move(request);
             } catch (const asio::system_error& error) {
                 message_size = error.code() == asio::error::message_size;
             }
@@ -662,9 +675,10 @@ TEST(RequestOptions, PoolPropagatesBodyLimitAndDiscardsConnection) {
             neograph::async::RequestOptions opts;
             opts.max_response_body_bytes = 16;
             try {
-                co_await pool.async_post(
+                auto request = pool.async_post(
                     "127.0.0.1", std::to_string(srv.port),
                     "/pool-limit", "{}", {}, false, opts);
+                co_await std::move(request);
             } catch (const asio::system_error& error) {
                 message_size = error.code() == asio::error::message_size;
             }
@@ -696,10 +710,11 @@ TEST(HttpResponseHeaders, PreservesAllHeadersInWireOrder) {
     neograph::async::HttpResponse resp;
     asio::co_spawn(io,
         [&]() -> asio::awaitable<void> {
-            resp = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 io.get_executor(), "127.0.0.1",
                 std::to_string(srv.port), "/any",
                 "body", {}, false);
+            resp = co_await std::move(request);
         },
         asio::detached);
     io.run();
@@ -743,10 +758,11 @@ TEST(HttpResponseHeaders, RetryAfterAndLocationAlsoInHeadersMap) {
     neograph::async::HttpResponse resp;
     asio::co_spawn(io,
         [&]() -> asio::awaitable<void> {
-            resp = co_await neograph::async::async_post(
+            auto request = neograph::async::async_post(
                 io.get_executor(), "127.0.0.1",
                 std::to_string(srv.port), "/any",
                 "body", {}, false);
+            resp = co_await std::move(request);
         },
         asio::detached);
     io.run();
