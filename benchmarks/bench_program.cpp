@@ -34,6 +34,28 @@
 
 namespace {
 
+#define NEOGRAPH_BENCH_STRINGIFY_IMPL(value) #value
+#define NEOGRAPH_BENCH_STRINGIFY(value) NEOGRAPH_BENCH_STRINGIFY_IMPL(value)
+#if defined(_MSC_VER)
+constexpr std::string_view BENCH_COMPILER =
+    "MSVC " NEOGRAPH_BENCH_STRINGIFY(_MSC_FULL_VER);
+#elif defined(__VERSION__)
+constexpr std::string_view BENCH_COMPILER = __VERSION__;
+#else
+constexpr std::string_view BENCH_COMPILER = "unknown";
+#endif
+#if defined(_WIN32)
+constexpr std::string_view BENCH_OS = "Windows";
+#elif defined(__APPLE__)
+constexpr std::string_view BENCH_OS = "macOS";
+#elif defined(__linux__)
+constexpr std::string_view BENCH_OS = "Linux";
+#else
+constexpr std::string_view BENCH_OS = "unknown";
+#endif
+#undef NEOGRAPH_BENCH_STRINGIFY
+#undef NEOGRAPH_BENCH_STRINGIFY_IMPL
+
 using neograph::json;
 using namespace neograph::graph;
 using Clock = std::chrono::steady_clock;
@@ -488,8 +510,8 @@ int main(int argc, char** argv) {
                   << "config\tversion_canonical_bytes\t" << version_canonical_bytes << '\n'
                   << "config\twarmup\t" << warmup << '\n'
                   << "config\tsamples\t" << samples << '\n'
-                  << "runtime\tos\tLinux\n"
-                  << "runtime\tcompiler\t" << __VERSION__ << '\n'
+                  << "runtime\tos\t" << BENCH_OS << '\n'
+                  << "runtime\tcompiler\t" << BENCH_COMPILER << '\n'
 #ifdef NEOGRAPH_BENCH_BUILD_TYPE
                   << "runtime\tbuild_type\t" << NEOGRAPH_BENCH_BUILD_TYPE << '\n'
 #else
