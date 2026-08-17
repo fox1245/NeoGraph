@@ -2,7 +2,9 @@
 
 #include <neograph/hook.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/hook_runtime.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/tool_dispatch.h>
 
 #include <atomic>
 #include <thread>
@@ -14,8 +16,9 @@ class RecordingTool final : public Tool {
 public:
     ChatTool get_definition() const override { return {"audit", "", json::object()}; }
     std::string get_name() const override { return "audit"; }
-    std::string execute(const json& arguments) override { seen = arguments; return "ok"; }
+    std::string execute(const json& arguments) override { seen = arguments; ++calls; return "ok"; }
     json seen;
+    unsigned calls = 0;
 };
 
 class LostSettleJournal final : public HookJournal {
@@ -45,6 +48,37 @@ private:
     InMemoryHookJournal inner;
 };
 
+class CapturingHookJournal final : public HookJournal {
+public:
+    HookOutboxEntry enqueue(HookInvocation invocation, RuntimeEvent event, std::uint32_t attempts,
+                            std::chrono::system_clock::time_point deadline) override {
+        events.push_back(event);
+        return inner.enqueue(std::move(invocation), std::move(event), attempts, deadline);
+    }
+    HookOutboxEntry publish(std::string_view id) override { return inner.publish(id); }
+    std::optional<HookLease> claim(std::string_view id, std::string_view worker,
+                                   std::chrono::system_clock::time_point now,
+                                   std::chrono::milliseconds lease) override {
+        return inner.claim(id, worker, now, lease);
+    }
+    std::optional<HookOutboxEntry> settle(std::string_view id, std::uint64_t fence,
+                                          HookExecutionReceipt receipt,
+                                          std::chrono::system_clock::time_point now) override {
+        return inner.settle(id, fence, std::move(receipt), now);
+    }
+    std::optional<HookOutboxEntry> reconcile(std::string_view id, HookExecutionState state,
+                                             std::string_view head, std::uint64_t fence,
+                                             HookExecutionReceipt receipt) override {
+        return inner.reconcile(id, state, head, fence, std::move(receipt));
+    }
+    std::vector<HookOutboxEntry> pending() const override { return inner.pending(); }
+    std::vector<HookOutboxEntry> reconciliation_required() const override { return inner.reconciliation_required(); }
+    std::optional<HookOutboxEntry> get(std::string_view id) const override { return inner.get(id); }
+    std::vector<RuntimeEvent> events;
+private:
+    InMemoryHookJournal inner;
+};
+
 RuntimeEvent event() {
     return RuntimeEvent::create({{}, 7, HookPhase::BeforeToolExecution, "tool_requested",
                                  "owner", "run", json{{"subject", "report"}, {"allowed", true}}});
@@ -60,6 +94,25 @@ HookDefinition definition(std::uint32_t priority, std::string target = "audit") 
     data.predicate = {HookPredicateKind::Equals, RuntimeEventField::DataPointer, "/allowed", true, {}};
     data.input_mapper = {HookInputMapperKind::Template, {}, json{{"name", json{{"$event", "/subject"}}}}, {}};
     return HookDefinition::create(std::move(data));
+}
+
+std::shared_ptr<HookRuntime> runtime_for(RecordingTool& tool, HookPhase phase,
+                                         std::shared_ptr<InMemoryHookJournal> journal) {
+    HookTargetResolver resolver = [&tool](std::string_view id) -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{&tool, {"audit"}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    auto data = definition(1).data();
+    data.definition_id.clear();
+    data.phase = phase;
+    data.predicate = HookPredicate{};
+    data.input_mapper = {HookInputMapperKind::JsonPointer, "/arguments", json(), {}};
+    registry->admit(HookDefinition::create(std::move(data)));
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(resolver,
+        std::make_shared<ToolExecutionController>());
+    return std::make_shared<HookRuntime>(
+        std::make_shared<MandatoryHookRunner>(std::move(journal), std::move(registry), std::move(adapter)));
 }
 } // namespace
 
@@ -395,4 +448,76 @@ TEST(MandatoryHookRunner, BlocksOnLostSettlementAndExpiredDeadline) {
     MandatoryHookRunner runner(journal, registry, adapter);
     EXPECT_THROW(async::run_sync(runner.run_async(event(), std::chrono::system_clock::now() + std::chrono::minutes(1))), HookBoundaryBlocked);
     EXPECT_THROW(async::run_sync(runner.run_async(event(), std::chrono::system_clock::now())), std::invalid_argument);
+}
+
+TEST(HookRuntime, UsesDeterministicEventsAndClampsExpiredParentDeadline) {
+    RecordingTool tool;
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    auto runtime = runtime_for(tool, HookPhase::BeforeToolExecution, journal);
+    EXPECT_NO_THROW(async::run_sync(runtime->emit_async(
+        HookPhase::BeforeToolExecution, "tool_execution", "owner", "run",
+        json{{"arguments", json{{"value", 7}}}})));
+    ASSERT_EQ(journal->pending().size(), 0u);
+    EXPECT_EQ(tool.seen, (json{{"value", 7}}));
+    EXPECT_THROW(async::run_sync(runtime->emit_async(
+        HookPhase::BeforeToolExecution, "tool_execution", "owner", "run",
+        json{{"arguments", json::object()}}, {}, std::chrono::system_clock::now())), HookBoundaryBlocked);
+}
+
+TEST(HookRuntime, ObservesRewrittenToolArgumentsWithoutRecursingThroughToolHooks) {
+    RecordingTool hook_target;
+    RecordingTool business_tool;
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    auto runtime = runtime_for(hook_target, HookPhase::BeforeToolExecution, journal);
+    ToolExecutionContext execution;
+    execution.hook_runtime = std::move(runtime);
+    execution.identity = {"owner", "run", "thread", "request"};
+    ToolCall call;
+    call.id = "call-1";
+    call.name = "audit";
+    call.arguments = R"({"untrusted":true})";
+    ToolGate gate = [](ToolCall, ToolGateContext) -> asio::awaitable<ToolDecision> {
+        co_return ToolDecision::allow(json{{"tenant", "admitted"}});
+    };
+
+    const auto messages = async::run_sync(dispatch_tool_calls(
+        {call}, {&business_tool}, std::move(gate), {}, std::move(execution)));
+    ASSERT_EQ(messages.size(), 1u);
+    ASSERT_EQ(messages.front().tool_status, "succeeded") << messages.front().content;
+    EXPECT_EQ(business_tool.seen, (json{{"tenant", "admitted"}}));
+    EXPECT_EQ(hook_target.seen, (json{{"tenant", "admitted"}}));
+    EXPECT_EQ(hook_target.calls, 1u);
+}
+
+TEST(HookRuntime, ToolEventsUseHostExecutionIdentityRatherThanModelCallIdentity) {
+    RecordingTool hook_target;
+    RecordingTool business_tool;
+    auto journal = std::make_shared<CapturingHookJournal>();
+    HookTargetResolver resolver = [&hook_target](std::string_view id) -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{&hook_target, {"audit"}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    auto data = definition(1).data();
+    data.definition_id.clear();
+    data.predicate = HookPredicate{};
+    data.input_mapper = {HookInputMapperKind::JsonPointer, "/arguments", json(), {}};
+    registry->admit(HookDefinition::create(std::move(data)));
+    auto runtime = std::make_shared<HookRuntime>(std::make_shared<MandatoryHookRunner>(
+        journal, registry, std::make_shared<NativeHookExecutionAdapter>(resolver,
+        std::make_shared<ToolExecutionController>())));
+    ToolExecutionContext execution;
+    execution.hook_runtime = std::move(runtime);
+    execution.identity = {"tenant-a", "root-run-a", "thread-a", "host-request-a"};
+    ToolCall call{"model-call-a", "audit", R"({"value":7})"};
+    const auto messages = async::run_sync(
+        dispatch_tool_calls({call}, {&business_tool}, {}, {}, std::move(execution)));
+    ASSERT_EQ(messages.size(), 1u);
+    ASSERT_EQ(messages.front().tool_status, "succeeded") << messages.front().content;
+    ASSERT_EQ(journal->events.size(), 1u);
+    EXPECT_EQ(journal->events[0].owner_scope(), "tenant-a");
+    EXPECT_EQ(journal->events[0].run_id(), "root-run-a");
+    EXPECT_NE(journal->events[0].sequence(), 0u);
+    EXPECT_EQ(journal->events[0].data().at("tool_call_id"), "model-call-a");
+    EXPECT_EQ(journal->events[0].data().at("request_id"), "host-request-a");
 }

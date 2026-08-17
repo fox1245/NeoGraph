@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neograph/graph/engine.h>
+#include <neograph/hook_runtime.h>
 #include <neograph/program/event.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/journal.h>
@@ -114,6 +115,10 @@ public:
     std::optional<TaskGraphExpansionPolicy> task_graph_policy(
         std::string_view expansion_operation_id) const;
     void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
+    void set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept;
+    void emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
+                             std::optional<ProgramTerminalStatus> status = {},
+                             bool observe_cancellation = true) const;
 
     const std::string                                owner_scope;
     const std::string                                run_id;
@@ -234,6 +239,7 @@ private:
     std::vector<TerminalCleanup>           terminal_cleanups_;
     ChildLaunchCallback                     child_launch_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;
+    std::shared_ptr<HookRuntime>               hook_runtime_;
     std::shared_ptr<TaskGraphFragmentStore>  task_graph_fragments_;
     TaskGraphExpansionPolicyResolver         task_graph_policy_resolver_;
     std::uint64_t                            next_sequence_ = 1;

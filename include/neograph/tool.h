@@ -24,6 +24,7 @@ class CancelToken;
 }
 
 namespace neograph {
+class HookRuntime;
 
 /**
  * @brief Per-invocation context for a cooperative asynchronous tool.
@@ -39,6 +40,8 @@ struct ToolExecutionContext {
     std::shared_ptr<ToolExecutionController> controller;
     ToolExecutionIdentity identity;
     std::optional<std::chrono::steady_clock::time_point> deadline;
+    /// Optional host-owned lifecycle boundary shared by all tool consumers.
+    std::shared_ptr<HookRuntime> hook_runtime;
     /// Policy-derived priority request; depth never supplies this value.
     std::uint8_t requested_priority = 0;
     /// Bounded critical-path inheritance supplied by the parent policy.

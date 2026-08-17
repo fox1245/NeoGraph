@@ -676,6 +676,15 @@ public:
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
     }
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return inner_.load_context_publications(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_.load_lineage(owner, lineage_id);

@@ -17,6 +17,7 @@ struct RuntimeInterpositionController::Impl {
     std::optional<ContextEpoch> epoch;
     std::uint64_t generation = 0;
     std::uint64_t dispatch_sequence = 0;
+    std::shared_ptr<HookRuntime> hooks;
 
     Impl(std::shared_ptr<ContextStore> store_, std::shared_ptr<Provider> provider,
           std::shared_ptr<ProviderDispatchReceiptStore> receipts, std::string binding,
@@ -66,11 +67,23 @@ bool RuntimeInterpositionController::active() const noexcept {
     std::lock_guard lock(impl_->mutex);
     return impl_->epoch.has_value();
 }
+void RuntimeInterpositionController::set_hook_runtime(std::shared_ptr<HookRuntime> hooks) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->hooks = std::move(hooks);
+}
 
 asio::awaitable<ChatCompletion> RuntimeInterpositionController::invoke_async(
     CompletionParams params, StreamCallback on_chunk) {
+    co_return co_await invoke_async(std::move(params), std::move(on_chunk), {}, {});
+}
+
+asio::awaitable<ChatCompletion> RuntimeInterpositionController::invoke_async(
+    CompletionParams params, StreamCallback on_chunk,
+    std::vector<ChatMessage> host_instructions,
+    std::vector<ChatMessage> trusted_supplemental) {
     std::string owner_id;
     std::uint64_t generation;
+    std::shared_ptr<HookRuntime> hooks;
     ContextEpoch epoch = [&] {
         std::lock_guard lock(impl_->mutex);
         if (!impl_->epoch) {
@@ -78,14 +91,23 @@ asio::awaitable<ChatCompletion> RuntimeInterpositionController::invoke_async(
         }
         owner_id = impl_->owner_id;
         generation = impl_->generation;
+        hooks = impl_->hooks;
         return *impl_->epoch;
     }();
-    // Caller-provided messages are legacy presentation state. The admitted
-    // epoch's feed is the only prompt authority on the controlled path.
+    // Caller conversation is legacy presentation state. The admitted epoch's
+    // feed is authoritative; explicit slots are host-built by consumers.
     params.messages.clear();
+    const auto cancellation = params.cancel_token;
+    const auto hook_deadline = [timeout_seconds = params.timeout_seconds]()
+        -> std::optional<std::chrono::system_clock::time_point> {
+        if (timeout_seconds <= 0) return std::nullopt;
+        return std::chrono::system_clock::now() + std::chrono::seconds(timeout_seconds);
+    };
     CompletionRequest template_request = on_chunk ? CompletionRequest::stream(std::move(params), std::move(on_chunk))
                                                    : CompletionRequest::collect(std::move(params));
-    auto turn = impl_->assembler.assemble(owner_id, epoch, std::move(template_request));
+    auto turn = impl_->assembler.assemble(owner_id, epoch, std::move(template_request),
+                                          std::move(host_instructions),
+                                          std::move(trusted_supplemental));
     std::string dispatch_id;
     {
         std::lock_guard lock(impl_->mutex);
@@ -95,8 +117,20 @@ asio::awaitable<ChatCompletion> RuntimeInterpositionController::invoke_async(
         }
         dispatch_id = epoch.run_id() + "-dispatch-" + std::to_string(++impl_->dispatch_sequence);
     }
-    co_return co_await impl_->controlled.dispatch_async(std::move(dispatch_id), turn.assembly_receipt,
-                                                         std::move(turn.request));
+    if (hooks) {
+        co_await hooks->emit_async(HookPhase::BeforeProviderRequest, "provider_request", owner_id,
+                                    epoch.run_id(), json{{"dispatch_id", dispatch_id}, {"epoch_id", epoch.id()}},
+                                    cancellation, hook_deadline());
+    }
+    auto completion = co_await impl_->controlled.dispatch_async(owner_id, std::move(dispatch_id),
+                                                                  turn.assembly_receipt,
+                                                                  std::move(turn.request));
+    if (hooks) {
+        co_await hooks->emit_async(HookPhase::AfterProviderResponse, "provider_response", owner_id,
+                                    epoch.run_id(), json{{"epoch_id", epoch.id()}, {"tool_call_count", completion.message.tool_calls.size()}},
+                                    cancellation, hook_deadline());
+    }
+    co_return completion;
 }
 
 ChatCompletion RuntimeInterpositionController::invoke(CompletionParams params, StreamCallback on_chunk) {

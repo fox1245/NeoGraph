@@ -1,6 +1,7 @@
 #include <neograph/program/runtime.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/schema.h>
+#include <neograph/async/run_sync.h>
 
 #include "canonical_json.h"
 #include "catalog_access.h"
@@ -1658,6 +1659,38 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
     return TerminalPublicationResult::TransitionConflict;
 }
 
+// Initial publication is durable before the mandatory admission hook can run.
+// A rejected hook must close that published run rather than strand an
+// unregistered Running record that neither callers nor recovery can complete.
+bool admit_started(const std::shared_ptr<detail::RunControl>& control,
+                   const ProgramEvent&                         started,
+                   RunBudget                                   remaining_budget,
+                   std::optional<CoreCheckpointIdentity>       checkpoint = std::nullopt) {
+    try {
+        control->emit_lifecycle_hook(HookPhase::MessageAdmitted, started);
+        return true;
+    } catch (const std::exception& error) {
+        detail::RunOutcome blocked;
+        blocked.status = ProgramTerminalStatus::Failed;
+        blocked.remaining_budget = std::move(remaining_budget);
+        blocked.checkpoint = std::move(checkpoint);
+        blocked.failure = ProgramFailure{
+            "P_HOOK_BLOCKED", error.what(), "root", "", 0, json::object()};
+        control->complete(std::move(blocked));
+        return false;
+    } catch (...) {
+        detail::RunOutcome blocked;
+        blocked.status = ProgramTerminalStatus::Failed;
+        blocked.remaining_budget = std::move(remaining_budget);
+        blocked.checkpoint = std::move(checkpoint);
+        blocked.failure = ProgramFailure{
+            "P_HOOK_BLOCKED", "Message admission hook blocked", "root", "", 0,
+            json::object()};
+        control->complete(std::move(blocked));
+        return false;
+    }
+}
+
 }  // namespace
 
 namespace detail {
@@ -1738,7 +1771,7 @@ RunControl::RunControl(ProgramRunRecord                        record,
       invocation(record.invocation()),
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
-      deadline(started_at),
+      deadline(started_at + std::chrono::milliseconds(record.remaining_budget().wall_time_ms)),
       deadline_executor(asio::system_executor{}),
       waiter_strand(asio::make_strand(asio::system_executor{})),
       core_thread_id(record.exact_checkpoint() ? record.exact_checkpoint()->core_thread_id
@@ -1779,6 +1812,38 @@ void RunControl::set_child_binding_validation_callback(
     ChildBindingValidationCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     child_binding_validation_callback_ = std::move(callback);
+}
+
+void RunControl::set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept {
+    std::lock_guard lock(mutex_);
+    hook_runtime_ = std::move(runtime);
+}
+
+void RunControl::emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
+                                     std::optional<ProgramTerminalStatus> status,
+                                     bool observe_cancellation) const {
+    std::shared_ptr<HookRuntime> runtime;
+    {
+        std::lock_guard lock(mutex_);
+        runtime = hook_runtime_;
+    }
+    if (!runtime) return;
+
+    json data{{"program_version_id", program_version_id},
+              {"bundle_id", bundle_id},
+              {"attempt", attempt},
+              {"program_event_id", event.id},
+              {"program_event_sequence", event.sequence}};
+    if (status) data["terminal_status"] = std::string(to_string(*status));
+    const auto remaining = deadline > std::chrono::steady_clock::now()
+        ? deadline - std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::duration::zero();
+    const auto parent_deadline = std::chrono::system_clock::now() +
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(remaining);
+    async::run_sync(runtime->emit_async(
+        phase, "program_lifecycle", owner_scope, run_id, std::move(data),
+        observe_cancellation ? cancel_token : std::shared_ptr<graph::CancelToken>{},
+        parent_deadline, event.sequence));
 }
 
 void RunControl::validate_child_binding(std::string_view binding_name,
@@ -1968,6 +2033,46 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 data.effect_sequence = previous->effect_sequence();
                 data.created_at_ms   = previous->created_at_ms();
                 data.updated_at_ms   = timestamp;
+                const auto block_cancellation = [&](std::string message) {
+                    journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+                        previous->journal_head(), run_id, program_version_id, bundle_id,
+                        previous_journal->sequence + 1,
+                        ProgramContinuation{"root", ContinuationState::Failed, attempt},
+                        previous->remaining_budget(), RunBudget{}, previous->exact_checkpoint(),
+                        timestamp});
+                    ProgramResultData blocked_data;
+                    blocked_data.status = ProgramTerminalStatus::Failed;
+                    blocked_data.run_id = run_id;
+                    blocked_data.program_version_id = program_version_id;
+                    blocked_data.bundle_id = bundle_id;
+                    blocked_data.operation_id = operation_id;
+                    blocked_data.attempt = attempt;
+                    blocked_data.remaining_budget = previous->remaining_budget();
+                    blocked_data.checkpoint = previous->exact_checkpoint();
+                    blocked_data.failure = ProgramFailure{
+                        "P_HOOK_BLOCKED", std::move(message), "root", "", 0, json::object()};
+                    cancelled_result = ProgramResult::create(std::move(blocked_data));
+                    terminal.id.clear();
+                    terminal.payload = ProgramTerminalEvent{ProgramTerminalStatus::Failed};
+                    terminal = ProgramEvent::create(std::move(terminal));
+                    data.continuation = journal.continuation;
+                    data.terminal_result = cancelled_result;
+                    data.journal_head = journal.id;
+                    try {
+                        emit_lifecycle_hook(HookPhase::BeforeTerminalPublication, terminal,
+                                             ProgramTerminalStatus::Failed, false);
+                    } catch (...) {}
+                };
+                try {
+                    emit_lifecycle_hook(HookPhase::BeforeTerminalPublication, terminal,
+                                         ProgramTerminalStatus::Cancelled, false);
+                } catch (const std::exception& error) {
+                    // Cancellation of an interrupted run is already a durable
+                    // obligation. Do not turn a blocked hook into a no-op.
+                    block_cancellation(error.what());
+                } catch (...) {
+                    block_cancellation("Cancellation terminal hook blocked");
+                }
                 const auto published = compare_publish_with_lineage(
                     *transitions, owner_scope, previous->journal_head(),
                     ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
@@ -1977,6 +2082,15 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 if (published != ProgramTransitionPublishResult::Published) {
                     return false;
                 }
+                try {
+                    if (cancelled_result.status() == ProgramTerminalStatus::Failed) {
+                        emit_lifecycle_hook(HookPhase::RunFailed, terminal,
+                                            ProgramTerminalStatus::Failed, false);
+                    } else {
+                        emit_lifecycle_hook(HookPhase::RunCancelled, terminal,
+                                            ProgramTerminalStatus::Cancelled, false);
+                    }
+                } catch (...) {}
                 ProgramResult            callback_result = cancelled_result;
                 CompletionCallback       callback;
                 std::vector<AsyncWaiter> waiters;
@@ -2238,6 +2352,34 @@ void RunControl::complete(RunOutcome outcome) noexcept {
         terminal_events.push_back(
             stage_event(ProgramEventKind::Terminal, ProgramTerminalEvent{outcome.status}));
 
+        try {
+            // Use the durable Program event sequence so retries reuse one hook
+            // outbox identity rather than creating duplicate lifecycle effects.
+            emit_lifecycle_hook(HookPhase::BeforeTerminalPublication, terminal_events.back(),
+                                outcome.status,
+                                outcome.status != ProgramTerminalStatus::Cancelled);
+        } catch (const std::exception& error) {
+            outcome.status = ProgramTerminalStatus::Failed;
+            outcome.failure = ProgramFailure{"P_HOOK_BLOCKED", error.what(), "root", "", 0,
+                                             json::object()};
+            auto failed_terminal = terminal_events.back();
+            failed_terminal.id.clear();
+            failed_terminal.payload = ProgramTerminalEvent{outcome.status};
+            terminal_events.back() = ProgramEvent::create(std::move(failed_terminal));
+            {
+                std::lock_guard lock(mutex_);
+                events_.back() = terminal_events.back();
+            }
+            // The replacement terminal event has a different status and thus a
+            // different hook input. It needs its own deterministic hook pass.
+            // If that pass also blocks, the already-failed event remains the
+            // fail-closed terminal transition rather than reverting to the
+            // original, unauthorized status.
+            try {
+                emit_lifecycle_hook(HookPhase::BeforeTerminalPublication,
+                                    terminal_events.back(), outcome.status, false);
+            } catch (...) {}
+        }
         auto       result       = make_result(outcome);
         const auto publication  = publish_terminal_record(*this, result);
         const bool is_published = publication == TerminalPublicationResult::Published;
@@ -2274,6 +2416,15 @@ void RunControl::complete(RunOutcome outcome) noexcept {
                 } catch (const EventSinkError&) {
                     break;
                 }
+            }
+            if (result.status() == ProgramTerminalStatus::Failed) {
+                try {
+                    emit_lifecycle_hook(HookPhase::RunFailed, terminal_events.back(), result.status(), false);
+                } catch (...) {}
+            } else if (result.status() == ProgramTerminalStatus::Cancelled) {
+                try {
+                    emit_lifecycle_hook(HookPhase::RunCancelled, terminal_events.back(), result.status(), false);
+                } catch (...) {}
             }
         }
         {
@@ -3627,7 +3778,8 @@ struct ProgramRuntime::Impl {
     };
 
     ControlRegistration register_control(const std::shared_ptr<detail::RunControl>& control,
-                                         bool process_unique = false) {
+                                          bool process_unique = false) {
+        control->set_hook_runtime(config.hook_runtime);
         configure_child_launcher(control);
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
         control->set_handoff_coordination_mutex(
@@ -4154,7 +4306,8 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
         std::string(owner_scope), run_id, 1, pinned, binding_fingerprint,
         std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
-        impl_->config.transitions, execution_lease);
+         impl_->config.transitions, execution_lease);
+    control->set_hook_runtime(impl_->config.hook_runtime);
 
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
@@ -4171,8 +4324,10 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
     if (published != ProgramTransitionPublishResult::Published) {
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }
-
     impl_->register_control(control);
+    if (!admit_started(control, started, invocation.budget)) {
+        return ProgramHandle(std::move(control));
+    }
 
     try {
         control->deliver_event(started);
@@ -4390,7 +4545,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
             std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
-            impl_->config.state_store, impl_->config.transitions);
+             impl_->config.state_store, impl_->config.transitions);
+        control->set_hook_runtime(impl_->config.hook_runtime);
         impl_->commit_active_child(control, global_quota);
         impl_->bind_budgeted_child_completion(control, owner_scope, parent_run_id, run_id);
         ProgramEvent started;
@@ -4456,6 +4612,9 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
 
         parent.control_->attach_child(control);
         impl_->register_control(control);
+        if (!admit_started(control, started, invocation.budget)) {
+            return ProgramHandle(std::move(control));
+        }
         try {
             control->deliver_event(started);
         } catch (const std::exception& error) {
@@ -4528,7 +4687,8 @@ ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
         std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
         std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
-        impl_->config.transitions);
+         impl_->config.transitions);
+    control->set_hook_runtime(impl_->config.hook_runtime);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
     const auto published = compare_publish_with_lineage(
@@ -4538,6 +4698,9 @@ ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }
     impl_->register_control(control);
+    if (!admit_started(control, started, invocation.budget)) {
+        return ProgramHandle(std::move(control));
+    }
     try {
         control->deliver_event(started);
     } catch (const std::exception& error) {
@@ -4803,7 +4966,8 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         std::string(owner_scope), run_id, source_record->continuation().attempt + 1,
         std::move(target_pinned), binding_fingerprint, std::move(persisted), canonical,
         target_thread_id, 0, std::move(invocation.events), impl_->deadline_pool.get_executor(),
-        impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+    control->set_hook_runtime(impl_->config.hook_runtime);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
     auto publication =
@@ -4851,6 +5015,9 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     }
     if (execution_lease) control->set_execution_lease(*execution_lease);
     impl_->register_control(control);
+    if (!admit_started(control, started, invocation.budget, target_checkpoint)) {
+        return ProgramHandle(std::move(control));
+    }
     try {
         control->deliver_event(started);
     } catch (const std::exception& error) {
@@ -5108,6 +5275,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         std::move(persisted), canonical, target_thread_id, 0, std::move(invocation.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
         impl_->config.state_store, impl_->config.transitions);
+    control->set_hook_runtime(impl_->config.hook_runtime);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{remaining});
     auto publication = initial_publication(*control, started, std::nullopt, std::nullopt,
@@ -5178,11 +5346,13 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         throw_runtime_diagnostic("P_REPLACEMENT_CONFLICT",
                                  "Program lineage already selected another successor");
     }
-
     if (execution_lease) control->set_execution_lease(*execution_lease);
     auto registration = impl_->register_control(control, true);
     cancel_source_control();
     if (!registration.inserted) return ProgramHandle(std::move(registration.control));
+    if (!admit_started(control, started, remaining)) {
+        return ProgramHandle(std::move(control));
+    }
     reconnect_lock.unlock();
     transition_lock.unlock();
     try {
@@ -5440,6 +5610,7 @@ ProgramHandle ProgramRuntime::migrate_graph(
         target_invocation, target_snapshot.thread_id, 0, std::move(target.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
         impl_->config.state_store, impl_->config.transitions);
+    control->set_hook_runtime(impl_->config.hook_runtime);
     auto started = control->preview_event(
         1, ProgramEventKind::Started, ProgramStartedEvent{remaining});
     started.id.clear();
@@ -5522,12 +5693,14 @@ ProgramHandle ProgramRuntime::migrate_graph(
             "Program lineage already selected another graph migration successor");
     }
 
-    fence_source();
     control->set_execution_lease(*target_execution_lease);
     auto registration = impl_->register_control(control, true);
     if (!registration.inserted) {
         return ProgramHandle(std::move(registration.control));
     }
+    const auto admitted = admit_started(control, started, remaining, target_checkpoint);
+    fence_source();
+    if (!admitted) return ProgramHandle(std::move(control));
     reconnect_lock.unlock();
     fork_lock.unlock();
     try {
@@ -5632,11 +5805,45 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         resolved_run_id = active->run_id();
     }
     run_id = resolved_run_id;
+    auto record = impl_->config.transitions->load(owner_scope, run_id);
+    if (!record) {
+        throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
+    }
     try {
         // Recovery must inspect the complete causal histories, not merely the
         // reduced heads retained by a transition snapshot.
-        (void)impl_->config.transitions->load_context_publications(owner_scope, run_id);
-        (void)impl_->config.transitions->load_hook_outbox_entries(owner_scope, run_id);
+        auto contexts =
+            impl_->config.transitions->load_context_publications(owner_scope, run_id);
+        auto hooks = impl_->config.transitions->load_hook_outbox_entries(owner_scope, run_id);
+
+        std::vector<ProgramContextPublication> context_prefix;
+        context_prefix.reserve(contexts.size());
+        for (const auto& context : contexts) {
+            validate_program_context_publication(context, *record);
+            if (!is_valid_program_context_history_append(context_prefix, context)) {
+                throw std::invalid_argument("Program context recovery history is not contiguous");
+            }
+            context_prefix.push_back(context);
+        }
+        if (!is_valid_program_hook_history_append({}, hooks, *record)) {
+            throw std::invalid_argument("Program hook recovery heads are invalid");
+        }
+
+        if (!contexts.empty() || !hooks.empty()) {
+            if (!impl_->config.runtime_recovery_handler) {
+                throw_runtime_diagnostic(
+                    "P_RUNTIME_RECOVERY_UNAVAILABLE",
+                    "Program recovery has durable context or hook state but no recovery boundary",
+                    json{{"run_id", std::string(run_id)},
+                         {"context_publications", contexts.size()},
+                         {"hook_outbox_entries", hooks.size()}});
+            }
+            impl_->config.runtime_recovery_handler(ProgramRuntimeRecoveryState{
+                std::string(owner_scope), std::string(run_id), std::move(contexts),
+                std::move(hooks)});
+        }
+    } catch (const ProgramDiagnosticError&) {
+        throw;
     } catch (const std::exception& error) {
         throw_runtime_diagnostic("P_DURABLE_HISTORY",
                                  "Program recovery cannot verify context or hook history",
@@ -5656,10 +5863,6 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         return ProgramHandle(std::move(control));
     }
 
-    auto record = impl_->config.transitions->load(owner_scope, run_id);
-    if (!record) {
-        throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
-    }
     if (graph_migration_receipt) {
         std::optional<MigrationPlan> stored_plan;
         std::optional<ProgramTransitionPublication> initial_publication;
@@ -5989,6 +6192,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
                 impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
                 impl_->config.state_store, impl_->config.transitions, execution_lease);
+            expired_control->set_hook_runtime(impl_->config.hook_runtime);
             detail::RunOutcome timed_out;
             timed_out.status = ProgramTerminalStatus::TimedOut;
             timed_out.remaining_budget = program_replacement_remaining_budget(
@@ -6103,6 +6307,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         throw_runtime_diagnostic("P_RUN_INVALID", "Stored terminal Program run is incomplete");
     }
     auto control = std::make_shared<detail::RunControl>(*record, impl_->config.transitions);
+    control->set_hook_runtime(impl_->config.hook_runtime);
     if (!record->invocation().parent_run_id.empty())
         impl_->bind_budgeted_child_completion(control, owner_scope,
                                               record->invocation().parent_run_id, run_id);

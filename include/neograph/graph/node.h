@@ -32,6 +32,7 @@
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/state.h>
+#include <neograph/runtime_interposition_consumer.h>
 
 #include <asio/awaitable.hpp>
 
@@ -189,7 +190,7 @@ private:
  * calls the LLM provider, and writes the response back to "messages".
  * Mirrors the Agent::run() LLM call logic.
  */
-class NEOGRAPH_API LLMCallNode : public GraphNode {
+class NEOGRAPH_API LLMCallNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     /**
      * @brief Construct an LLM call node.
@@ -206,7 +207,6 @@ public:
     /// into ``params.cancel_token`` so cancellation reaches the LLM
     /// HTTP socket without the legacy thread-local smuggling.
     asio::awaitable<NodeOutput> run(NodeInput in) override;
-    void set_runtime_interposition(std::shared_ptr<::neograph::RuntimeInterpositionController> controller);
 
     std::string get_name() const override { return name_; }
 
@@ -216,7 +216,6 @@ private:
     std::vector<Tool*>       tools_;
     std::string              model_;
     std::string              instructions_;
-    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
 
     CompletionParams build_params(const GraphState& state) const;
 };
@@ -262,7 +261,7 @@ class GraphEngine;
  * to the "__route__" channel. Used with the "route_channel" condition
  * for dynamic routing based on user intent.
  */
-class NEOGRAPH_API IntentClassifierNode : public GraphNode {
+class NEOGRAPH_API IntentClassifierNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     /**
      * @brief Construct an intent classifier node.

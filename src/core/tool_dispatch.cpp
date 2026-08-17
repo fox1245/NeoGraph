@@ -1,4 +1,5 @@
 #include <neograph/tool_dispatch.h>
+#include <neograph/hook_runtime.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>   // NodeInterrupt — the gate's Interrupt verdict
 
@@ -9,10 +10,14 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 #include <utility>
 
 namespace neograph {
+namespace {
+std::atomic<std::uint64_t> next_host_tool_request{0};
+}
 
 asio::awaitable<std::vector<ChatMessage>>
 dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
@@ -66,6 +71,13 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
 
     auto worker = [tools, execution](ToolCall tc, std::optional<ToolDecision> decision)
             -> asio::awaitable<ChatMessage> {
+        const auto hook_deadline = [&execution]()
+            -> std::optional<std::chrono::system_clock::time_point> {
+            if (!execution.deadline) return std::nullopt;
+            const auto remaining = *execution.deadline - std::chrono::steady_clock::now();
+            return std::chrono::system_clock::now() +
+                   std::chrono::duration_cast<std::chrono::system_clock::duration>(remaining);
+        };
         if (execution.cancel_token) {
             execution.cancel_token->throw_if_cancelled("before tool execution");
         }
@@ -108,12 +120,24 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                             ? *decision->args
                             : json::parse(tc.arguments);
             auto call_execution = execution;
-            call_execution.identity.request_id = tc.id;
+            if (call_execution.identity.request_id.empty()) {
+                call_execution.identity.request_id = "tool-request-" + std::to_string(
+                    next_host_tool_request.fetch_add(1, std::memory_order_relaxed) + 1);
+            }
+            if (execution.hook_runtime) {
+                co_await execution.hook_runtime->emit_async(
+                    HookPhase::BeforeToolExecution, "tool_execution",
+                    call_execution.identity.owner_scope, call_execution.identity.root_run_id,
+                    json{{"tool_call_id", tc.id}, {"tool_name", tc.name}, {"arguments", args},
+                         {"thread_id", call_execution.identity.thread_id},
+                         {"request_id", call_execution.identity.request_id}},
+                    execution.cancel_token, hook_deadline());
+            }
             auto controller = call_execution.controller
                             ? call_execution.controller
                             : default_tool_execution_controller();
             const auto result = co_await controller->execute_result_async(
-                **it, std::move(args), std::move(call_execution));
+                **it, std::move(args), call_execution);
             tool_msg.tool_status = std::string(to_string(result.status));
             tool_msg.tool_retryable = result.retryable;
             tool_msg.tool_effect_uncertain = result.effect_uncertain;
@@ -128,9 +152,20 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     {"output", result.output}}
                     .dump();
             }
+            if (execution.hook_runtime) {
+                co_await execution.hook_runtime->emit_async(
+                    HookPhase::AfterToolExecution, "tool_execution",
+                    call_execution.identity.owner_scope, call_execution.identity.root_run_id,
+                    json{{"tool_call_id", tc.id}, {"tool_name", tc.name}, {"status", tool_msg.tool_status},
+                         {"result", tool_msg.content}, {"thread_id", call_execution.identity.thread_id},
+                         {"request_id", call_execution.identity.request_id}},
+                    execution.cancel_token, hook_deadline());
+            }
             if (execution.cancel_token) {
                 execution.cancel_token->throw_if_cancelled("after tool execution");
             }
+        } catch (const HookBoundaryBlocked&) {
+            throw;
         } catch (const graph::CancelledException&) {
             // Cancellation is graph control flow, not a tool result that the
             // model should consume before the run terminates.

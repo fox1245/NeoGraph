@@ -1,5 +1,6 @@
 #include <neograph/graph/coordinator.h>
 #include <neograph/graph/state.h>
+#include <neograph/hook_runtime.h>
 
 #include "channel_write_codec.h"
 
@@ -106,8 +107,35 @@ int resume_start_step(const Checkpoint& checkpoint) {
 // =========================================================================
 
 CheckpointCoordinator::CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
-                                             std::string                      thread_id)
-    : store_(std::move(store)), thread_id_(std::move(thread_id)) {}
+                                              std::string                      thread_id,
+                                              std::shared_ptr<::neograph::HookRuntime> hook_runtime,
+                                              CheckpointHookContext hook_context)
+    : store_(std::move(store)), thread_id_(std::move(thread_id)),
+      hook_runtime_(std::move(hook_runtime)), hook_context_(std::move(hook_context)) {}
+
+asio::awaitable<void> CheckpointCoordinator::publish_checkpoint_async(
+    const Checkpoint& checkpoint) const {
+    if (!hook_runtime_) co_return;
+    json data;
+    data["checkpoint_id"] = checkpoint.id;
+    data["thread_id"] = checkpoint.thread_id;
+    data["run_id"] = hook_context_.run_id;
+    data["checkpoint_parent_id"] = checkpoint.parent_id;
+    data["checkpoint_current_node"] = checkpoint.current_node;
+    data["checkpoint_next_nodes"] = checkpoint.next_nodes;
+    data["checkpoint_phase"] = to_string(checkpoint.interrupt_phase);
+    data["checkpoint_step"] = checkpoint.step;
+    data["checkpoint_timestamp"] = checkpoint.timestamp;
+    data["checkpoint_schema_version"] = checkpoint.schema_version;
+    data["checkpoint_metadata"] = checkpoint.metadata;
+    data["run_metadata"] = json{{"owner_scope", hook_context_.owner_scope},
+                                {"run_id", hook_context_.run_id},
+                                {"trace_id", hook_context_.trace_id}};
+    co_await hook_runtime_->emit_async(
+        HookPhase::CheckpointPublished, "checkpoint_published",
+        hook_context_.owner_scope, hook_context_.run_id, std::move(data),
+        hook_context_.cancellation, hook_context_.parent_deadline);
+}
 
 std::string CheckpointCoordinator::save_super_step(const GraphState&               state,
                                                    const std::string&              current_node,
@@ -237,6 +265,7 @@ asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
 
     auto      id = cp.id;
     co_await  store_->save_async(cp);
+    co_await publish_checkpoint_async(cp);
     co_return id;
 }
 
@@ -267,6 +296,7 @@ asio::awaitable<Checkpoint> CheckpointCoordinator::commit_super_step_async(
     checkpoint.timestamp       = now_ms();
 
     co_await store_->save_async(checkpoint);
+    co_await publish_checkpoint_async(checkpoint);
     co_await clear_pending_writes_async(parent_id);
     co_return checkpoint;
 }

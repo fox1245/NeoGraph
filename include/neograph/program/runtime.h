@@ -8,6 +8,7 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
 #include <neograph/host_admission.h>
+#include <neograph/hook_runtime.h>
 #include <neograph/program/catalog.h>
 #include <neograph/program/fork.h>
 #include <neograph/program/handle.h>
@@ -83,6 +84,22 @@ struct ProgramHostAdmissionContext {
 using ProgramHostAdmissionResolver =
     std::function<HostAdmissionRequest(const ProgramHostAdmissionContext&)>;
 
+/** Exact durable runtime state that must be rebound before recovered work can dispatch. */
+struct ProgramRuntimeRecoveryState {
+    std::string                              owner_scope;
+    std::string                              run_id;
+    std::vector<ProgramContextPublication>   context_publications;
+    std::vector<HookOutboxEntry>              hook_outbox_entries;
+};
+
+/**
+ * Host-owned, idempotent recovery boundary. Implementations bind the latest
+ * ContextEpoch to a run-local interposition controller and restore hook heads
+ * into their durable journal, rejecting any identity or head conflict.
+ */
+using ProgramRuntimeRecoveryHandler =
+    std::function<void(const ProgramRuntimeRecoveryState&)>;
+
 struct ProgramChildQuotaConfig {
     /// Zero disables the corresponding global limit.
     std::uint64_t max_active_children = 0;
@@ -112,8 +129,12 @@ struct ProgramChildQuotaConfig {
      std::shared_ptr<HostAdmissionController> host_admission;
      ProgramHostAdmissionResolver             host_admission_resolver;
      /// Process-wide limits for admitted child publication and dispatch.
-     ProgramChildQuotaConfig                  child_quota;
- };
+      ProgramChildQuotaConfig                  child_quota;
+      /// Optional host-owned lifecycle observer. Programs never receive it.
+      std::shared_ptr<HookRuntime>              hook_runtime;
+      /// Required on reconnect when the run has durable context or hook state.
+      ProgramRuntimeRecoveryHandler             runtime_recovery_handler;
+  };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
     explicit ProgramRuntime(RuntimeConfig config);

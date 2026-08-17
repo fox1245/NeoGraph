@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+namespace neograph { class RuntimeInterpositionController; }
 namespace neograph::history {
 
 /**
@@ -98,6 +99,16 @@ struct CompactedHistory {
 NEOGRAPH_API asio::awaitable<CompactedHistory> compact_history(
     std::vector<ChatMessage> messages,
     Provider& provider,
+    std::string model,
+    int max_tokens = 12000,
+    int recent_keep = 6);
+
+/** Controlled variant: summary instructions and rendered source are explicit
+ * host slots; admitted RAW history remains the authoritative conversation. */
+NEOGRAPH_API asio::awaitable<CompactedHistory> compact_history(
+    std::vector<ChatMessage> messages,
+    Provider& provider,
+    std::shared_ptr<::neograph::RuntimeInterpositionController> controller,
     std::string model,
     int max_tokens = 12000,
     int recent_keep = 6);

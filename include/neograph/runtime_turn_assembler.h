@@ -42,8 +42,13 @@ public:
     RuntimeTurnAssembler& operator=(const RuntimeTurnAssembler&) = delete;
 
     RuntimeTurn assemble(std::string owner_id,
+                          const ContextEpoch& epoch,
+                          CompletionRequest request) const;
+    RuntimeTurn assemble(std::string owner_id,
                          const ContextEpoch& epoch,
-                         CompletionRequest request) const;
+                         CompletionRequest request,
+                         std::vector<ChatMessage> host_instructions,
+                         std::vector<ChatMessage> trusted_supplemental) const;
 
     /** Conservative, provider-neutral estimate: three canonical bytes per token. */
     static std::uint64_t estimate_input_tokens(const CompletionParams& params);

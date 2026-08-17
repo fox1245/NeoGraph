@@ -159,8 +159,15 @@ std::string RuntimeTurnAssembler::normalized_request_digest(const CompletionRequ
 }
 
 RuntimeTurn RuntimeTurnAssembler::assemble(std::string owner_id,
-                                           const ContextEpoch& epoch,
-                                           CompletionRequest request) const {
+                                            const ContextEpoch& epoch,
+                                            CompletionRequest request) const {
+    return assemble(std::move(owner_id), epoch, std::move(request), {}, {});
+}
+
+RuntimeTurn RuntimeTurnAssembler::assemble(
+    std::string owner_id, const ContextEpoch& epoch, CompletionRequest request,
+    std::vector<ChatMessage> host_instructions,
+    std::vector<ChatMessage> trusted_supplemental) const {
     detail::validate_token(owner_id, "Context assembly owner_id");
     auto& params = request.params();
     detail::validate_token(params.model, "Completion model");
@@ -243,7 +250,26 @@ RuntimeTurn RuntimeTurnAssembler::assemble(std::string owner_id,
     } else {
         merged.insert(merged.end(), after.begin(), after.end());
     }
-    params.messages = std::move(merged);
+    // Slots are distinct from caller history: host instructions survive
+    // interposition, and supplemental task input is receipt-bound.
+    std::vector<ChatMessage> assembled;
+    assembled.reserve(host_instructions.size() + merged.size() + trusted_supplemental.size());
+    assembled.insert(assembled.end(), host_instructions.begin(), host_instructions.end());
+    assembled.insert(assembled.end(), merged.begin(), merged.end());
+    for (const auto& message : trusted_supplemental) {
+        // Built-in controlled calls may restate a raw user turn as their task
+        // slot. The admitted RAW window remains authoritative and appears once.
+        const auto duplicate_raw = std::any_of(raw_messages.begin(), raw_messages.end(),
+            [&message](const ChatMessage& raw) {
+                json left;
+                json right;
+                to_json(left, raw);
+                to_json(right, message);
+                return left == right;
+            });
+        if (!duplicate_raw) assembled.push_back(message);
+    }
+    params.messages = std::move(assembled);
 
     const auto normalized_digest = normalized_request_digest(request);
     const auto window_digest = identity("assembled-message-window/v1", messages_json(params.messages));

@@ -52,16 +52,28 @@ enum class ProviderDispatchState : std::uint8_t {
     Unavailable, Missing, AdmittedPending, Succeeded, Failed, ReconciliationRequired,
 };
 
-/** Durable write-ahead journal keyed by dispatch_id; AlreadyPresent requires exact receipt bytes. */
+/** Durable write-ahead journal keyed by owner scope and dispatch_id; AlreadyPresent requires exact receipt bytes. */
 class NEOGRAPH_API ProviderDispatchReceiptStore {
 public:
     virtual ~ProviderDispatchReceiptStore() = default;
     virtual ProviderDispatchReceiptPutResult persist(const ProviderDispatchReceipt& receipt) = 0;
+    /// Scoped operations prevent one owner's dispatch id from colliding with another's.
+    /// Existing stores retain their legacy behavior until they opt into scope handling.
+    virtual ProviderDispatchReceiptPutResult persist(std::string_view owner_scope,
+                                                     const ProviderDispatchReceipt& receipt) {
+        (void)owner_scope;
+        return persist(receipt);
+    }
     /// Returns durable progress for a dispatch id. Unavailable means this store
     /// cannot make a safe post-crash retry decision.
     virtual ProviderDispatchState state(std::string_view dispatch_id) const {
         (void)dispatch_id;
         return ProviderDispatchState::Unavailable;
+    }
+    virtual ProviderDispatchState state(std::string_view owner_scope,
+                                        std::string_view dispatch_id) const {
+        (void)owner_scope;
+        return state(dispatch_id);
     }
 };
 
@@ -81,7 +93,11 @@ public:
     InMemoryProviderDispatchReceiptStore(const InMemoryProviderDispatchReceiptStore&) = delete;
     InMemoryProviderDispatchReceiptStore& operator=(const InMemoryProviderDispatchReceiptStore&) = delete;
     ProviderDispatchReceiptPutResult persist(const ProviderDispatchReceipt& receipt) override;
+    ProviderDispatchReceiptPutResult persist(std::string_view owner_scope,
+                                             const ProviderDispatchReceipt& receipt) override;
     ProviderDispatchState state(std::string_view dispatch_id) const override;
+    ProviderDispatchState state(std::string_view owner_scope,
+                                std::string_view dispatch_id) const override;
 
 private:
     struct Impl;
@@ -106,7 +122,13 @@ public:
     ChatCompletion dispatch(std::string dispatch_id,
                             const ContextAssemblyReceipt& assembly,
                             CompletionRequest request);
+    ChatCompletion dispatch(std::string owner_scope, std::string dispatch_id,
+                            const ContextAssemblyReceipt& assembly,
+                            CompletionRequest request);
     asio::awaitable<ChatCompletion> dispatch_async(std::string dispatch_id,
+                                                    const ContextAssemblyReceipt& assembly,
+                                                    CompletionRequest request);
+    asio::awaitable<ChatCompletion> dispatch_async(std::string owner_scope, std::string dispatch_id,
                                                     const ContextAssemblyReceipt& assembly,
                                                     CompletionRequest request);
 
@@ -114,6 +136,7 @@ private:
     struct Impl;
     static asio::awaitable<ChatCompletion> dispatch_impl(
         std::shared_ptr<Impl> impl,
+        std::string owner_scope,
         std::string dispatch_id,
         ContextAssemblyReceipt assembly,
         CompletionRequest request);

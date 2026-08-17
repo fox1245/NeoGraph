@@ -127,7 +127,7 @@ std::string ProviderDispatchReceipt::serialize_canonical() const { return impl_-
 
 struct InMemoryProviderDispatchReceiptStore::Impl {
     mutable std::mutex mutex;
-    std::map<std::string, std::string> receipts;
+    std::map<std::pair<std::string, std::string>, std::string> receipts;
 };
 
 InMemoryProviderDispatchReceiptStore::InMemoryProviderDispatchReceiptStore()
@@ -140,11 +140,17 @@ InMemoryProviderDispatchReceiptStore& InMemoryProviderDispatchReceiptStore::oper
 
 ProviderDispatchReceiptPutResult InMemoryProviderDispatchReceiptStore::persist(
     const ProviderDispatchReceipt& receipt) {
+    return persist({}, receipt);
+}
+
+ProviderDispatchReceiptPutResult InMemoryProviderDispatchReceiptStore::persist(
+    std::string_view owner_scope, const ProviderDispatchReceipt& receipt) {
     const auto canonical = receipt.serialize_canonical();
     std::lock_guard lock(impl_->mutex);
-    const auto found = impl_->receipts.find(receipt.dispatch_id());
+    const auto key = std::make_pair(std::string(owner_scope), receipt.dispatch_id());
+    const auto found = impl_->receipts.find(key);
     if (found == impl_->receipts.end()) {
-        impl_->receipts.emplace(receipt.dispatch_id(), canonical);
+        impl_->receipts.emplace(std::move(key), canonical);
         return ProviderDispatchReceiptPutResult::Stored;
     }
     return found->second == canonical ? ProviderDispatchReceiptPutResult::AlreadyPresent
@@ -153,8 +159,13 @@ ProviderDispatchReceiptPutResult InMemoryProviderDispatchReceiptStore::persist(
 
 ProviderDispatchState InMemoryProviderDispatchReceiptStore::state(
     std::string_view dispatch_id) const {
+    return state({}, dispatch_id);
+}
+
+ProviderDispatchState InMemoryProviderDispatchReceiptStore::state(
+    std::string_view owner_scope, std::string_view dispatch_id) const {
     std::lock_guard lock(impl_->mutex);
-    return impl_->receipts.contains(std::string(dispatch_id))
+    return impl_->receipts.contains({std::string(owner_scope), std::string(dispatch_id)})
                ? ProviderDispatchState::AdmittedPending
                : ProviderDispatchState::Missing;
 }
@@ -181,11 +192,18 @@ ControlledProvider& ControlledProvider::operator=(ControlledProvider&&) noexcept
 
 asio::awaitable<ChatCompletion> ControlledProvider::dispatch_async(
     std::string dispatch_id, const ContextAssemblyReceipt& assembly, CompletionRequest request) {
-    return dispatch_impl(impl_, std::move(dispatch_id), assembly, std::move(request));
+    return dispatch_impl(impl_, {}, std::move(dispatch_id), assembly, std::move(request));
+}
+
+asio::awaitable<ChatCompletion> ControlledProvider::dispatch_async(
+    std::string owner_scope, std::string dispatch_id, const ContextAssemblyReceipt& assembly,
+    CompletionRequest request) {
+    return dispatch_impl(impl_, std::move(owner_scope), std::move(dispatch_id), assembly,
+                         std::move(request));
 }
 
 asio::awaitable<ChatCompletion> ControlledProvider::dispatch_impl(
-    std::shared_ptr<Impl> impl, std::string dispatch_id,
+    std::shared_ptr<Impl> impl, std::string owner_scope, std::string dispatch_id,
     ContextAssemblyReceipt assembly, CompletionRequest request) {
     detail::validate_token(dispatch_id, "Controlled provider dispatch_id");
     if (request.params().cancel_token && request.params().cancel_token->is_cancelled()) {
@@ -202,12 +220,12 @@ asio::awaitable<ChatCompletion> ControlledProvider::dispatch_impl(
     ProviderDispatchReceipt receipt = ProviderDispatchReceipt::create(
         {std::move(dispatch_id), impl->provider_binding_identity, assembly.id(),
           assembly.normalized_request_digest(), request.params().model, request.mode()});
-    const auto persisted = impl->receipts->persist(receipt);
+    const auto persisted = impl->receipts->persist(owner_scope, receipt);
     if (persisted != ProviderDispatchReceiptPutResult::Stored) {
         if (persisted == ProviderDispatchReceiptPutResult::AlreadyPresent) {
             throw std::runtime_error(
                 "reconciliation_required: provider dispatch is already admitted; durable state is " +
-                std::to_string(static_cast<unsigned>(impl->receipts->state(receipt.dispatch_id()))));
+                std::to_string(static_cast<unsigned>(impl->receipts->state(owner_scope, receipt.dispatch_id()))));
         }
         throw std::runtime_error("Provider dispatch receipt persistence conflicted");
     }
@@ -215,10 +233,18 @@ asio::awaitable<ChatCompletion> ControlledProvider::dispatch_impl(
 }
 
 ChatCompletion ControlledProvider::dispatch(std::string dispatch_id,
+                                              const ContextAssemblyReceipt& assembly,
+                                              CompletionRequest request) {
+    auto* token = request.params().cancel_token ? request.params().cancel_token.get() : nullptr;
+    return async::run_sync(dispatch_async(std::move(dispatch_id), assembly, std::move(request)), token);
+}
+
+ChatCompletion ControlledProvider::dispatch(std::string owner_scope, std::string dispatch_id,
                                              const ContextAssemblyReceipt& assembly,
                                              CompletionRequest request) {
     auto* token = request.params().cancel_token ? request.params().cancel_token.get() : nullptr;
-    return async::run_sync(dispatch_async(std::move(dispatch_id), assembly, std::move(request)), token);
+    return async::run_sync(dispatch_async(std::move(owner_scope), std::move(dispatch_id), assembly,
+                                          std::move(request)), token);
 }
 
 }  // namespace neograph

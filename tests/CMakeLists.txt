@@ -306,7 +306,7 @@ if(NEOGRAPH_BUILD_POSTGRES)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
-    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp test_evidence_ledger.cpp)
+    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp test_evidence_ledger.cpp test_sqlite_runtime_stores.cpp)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
 endif()
 
@@ -376,7 +376,7 @@ if(NEOGRAPH_BUILD_POSTGRES)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
-    target_link_libraries(neograph_tests PRIVATE neograph::sqlite)
+    target_link_libraries(neograph_tests PRIVATE neograph::sqlite SQLite::SQLite3)
     if(TARGET neograph_mcp_sqlite)
         target_link_libraries(neograph_tests PRIVATE neograph::mcp_sqlite SQLite::SQLite3)
     endif()
@@ -403,6 +403,7 @@ gtest_discover_tests(neograph_runtime_context_tests)
 # model tool calls, or optional transport libraries.
 add_executable(neograph_hook_tests
     test_hook.cpp
+    test_checkpoint_hook.cpp
 )
 target_link_libraries(neograph_hook_tests PRIVATE
     neograph::core

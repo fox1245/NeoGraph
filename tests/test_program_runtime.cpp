@@ -1,6 +1,9 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
+#include <neograph/hook.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/hook_runtime.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
@@ -38,6 +41,21 @@ neograph::json orchestration_document(neograph::json root, std::string node_type
 namespace {
 
 using neograph::json;
+using neograph::ChatTool;
+using neograph::HookDefinition;
+using neograph::HookDefinitionData;
+using neograph::HookInputMapperKind;
+using neograph::HookPhase;
+using neograph::HookRegistry;
+using neograph::HookRuntime;
+using neograph::HookTargetContract;
+using neograph::HookTargetResolver;
+using neograph::InMemoryHookJournal;
+using neograph::MandatoryHookRunner;
+using neograph::NativeHookExecutionAdapter;
+using neograph::Tool;
+using neograph::ToolEffectClass;
+using neograph::ToolExecutionController;
 using namespace neograph::graph;
 using namespace neograph::program;
 
@@ -689,6 +707,52 @@ private:
     std::map<Key, ProgramRuntimeChildBinding> bindings;
 };
 
+class LifecycleHookTool final : public Tool {
+public:
+    explicit LifecycleHookTool(std::string value, bool block = false)
+        : name(std::move(value)), block_terminal(block) {}
+    ChatTool get_definition() const override { return {name, "", json::object()}; }
+    std::string get_name() const override { return name; }
+    std::string execute(const json&) override {
+        ++calls;
+        if (block_terminal) throw std::runtime_error("terminal hook blocked");
+        return "ok";
+    }
+    std::string name;
+    std::atomic<unsigned> calls{0};
+    bool block_terminal = false;
+};
+
+std::shared_ptr<HookRuntime> lifecycle_hooks(LifecycleHookTool& admitted,
+                                             LifecycleHookTool& before_terminal,
+                                             LifecycleHookTool& failed) {
+    HookTargetResolver resolver = [&admitted, &before_terminal, &failed](std::string_view target)
+        -> std::optional<HookTargetContract> {
+        LifecycleHookTool* tool = target == admitted.name ? &admitted
+                                : target == before_terminal.name ? &before_terminal
+                                : target == failed.name ? &failed : nullptr;
+        return tool ? std::optional<HookTargetContract>{
+                          HookTargetContract{tool, {}, ToolEffectClass::ReadOnly}}
+                    : std::nullopt;
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    for (const auto& [phase, target] : std::vector<std::pair<HookPhase, std::string>>{
+             {HookPhase::MessageAdmitted, admitted.name},
+             {HookPhase::BeforeTerminalPublication, before_terminal.name},
+             {HookPhase::RunFailed, failed.name}}) {
+        HookDefinitionData definition;
+        definition.phase = phase;
+        definition.target_id = target;
+        definition.effect = ToolEffectClass::ReadOnly;
+        definition.input_mapper = {HookInputMapperKind::Template, {}, json::object(), {}};
+        registry->admit(HookDefinition::create(std::move(definition)));
+    }
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(resolver,
+        std::make_shared<ToolExecutionController>());
+    return std::make_shared<HookRuntime>(std::make_shared<MandatoryHookRunner>(
+        std::make_shared<InMemoryHookJournal>(), std::move(registry), std::move(adapter)));
+}
+
 struct AdmittedRuntime {
     RegistrySnapshot                                registry;
     AdmissionProfile                                profile;
@@ -702,14 +766,16 @@ struct AdmittedRuntime {
     std::shared_ptr<InMemoryTaskGraphFragmentStore> task_graph_fragments;
     ProgramChildQuotaConfig                         child_quota;
     std::size_t                                     scheduler_thread_count;
+    std::shared_ptr<HookRuntime>                    hook_runtime;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
                              std::shared_ptr<CheckpointStore>        checkpoint_backend = {},
                              std::shared_ptr<ProgramTransitionStore> journal_backend    = {},
-                             ProgramChildQuotaConfig                 quota              = {},
-                             ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict,
-                             bool               allow_javascript  = false)
+                              ProgramChildQuotaConfig                 quota              = {},
+                              ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict,
+                              bool               allow_javascript  = false,
+                              std::shared_ptr<HookRuntime> hooks = {})
         : registry(runtime_registry(minimum_guarantee)),
           profile(make_profile(registry, minimum_guarantee, allow_javascript)),
           policy(make_policy(profile, minimum_guarantee, allow_javascript)),
@@ -724,8 +790,9 @@ struct AdmittedRuntime {
           child_bindings(std::make_shared<ChildBindingRegistry>()),
           task_graph_fragments(std::make_shared<InMemoryTaskGraphFragmentStore>()),
           child_quota(quota),
-          scheduler_thread_count(scheduler_threads),
-          runtime(make_runtime()) {}
+           scheduler_thread_count(scheduler_threads),
+           hook_runtime(std::move(hooks)),
+           runtime(make_runtime()) {}
 
     static AdmissionProfile make_profile(
         const RegistrySnapshot& registry,
@@ -763,7 +830,8 @@ struct AdmittedRuntime {
         return std::move(builder).build();
     }
     std::unique_ptr<ProgramRuntime> make_runtime_with_transitions(
-        std::shared_ptr<ProgramTransitionStore> transitions) const {
+        std::shared_ptr<ProgramTransitionStore> transitions,
+        ProgramRuntimeRecoveryHandler recovery_handler = {}) const {
         RuntimeConfig config{catalog,
                               checkpoints,
                               {},
@@ -783,6 +851,8 @@ struct AdmittedRuntime {
             return expansion_policy();
         };
         config.child_quota = child_quota;
+        config.hook_runtime = hook_runtime;
+        config.runtime_recovery_handler = std::move(recovery_handler);
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
     std::unique_ptr<ProgramRuntime> make_runtime() const {
@@ -1103,6 +1173,15 @@ public:
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
     }
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return inner_.load_context_publications(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_.load_lineage(owner, lineage_id);
@@ -1189,6 +1268,23 @@ public:
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
         return target_->load_javascript_commands(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        if (recovery_run_id_ == run_id) {
+            std::vector<ProgramContextPublication> result;
+            for (const auto& context : recovery_contexts_) {
+                if (context.epoch.sequence() > sequence) result.push_back(context);
+            }
+            return result;
+        }
+        return target_->load_context_publications(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner, std::string_view run_id) const override {
+        if (recovery_run_id_ == run_id) return recovery_hooks_;
+        return target_->load_hook_outbox_entries(owner, run_id);
     }
     std::optional<MigrationPlan> load_migration_plan(
         std::string_view owner, std::string_view run_id) const override {
@@ -1279,6 +1375,13 @@ public:
         execution_release_released_ = true;
         execution_release_condition_.notify_all();
     }
+    void set_runtime_recovery_state(
+        std::string run_id, std::vector<ProgramContextPublication> contexts,
+        std::vector<neograph::HookOutboxEntry> hooks) {
+        recovery_run_id_ = std::move(run_id);
+        recovery_contexts_ = std::move(contexts);
+        recovery_hooks_ = std::move(hooks);
+    }
 
 private:
     std::shared_ptr<ProgramTransitionStore> target_;
@@ -1287,7 +1390,40 @@ private:
     bool block_execution_release_ = false;
     bool execution_release_observed_ = false;
     bool execution_release_released_ = false;
+    std::string recovery_run_id_;
+    std::vector<ProgramContextPublication> recovery_contexts_;
+    std::vector<neograph::HookOutboxEntry> recovery_hooks_;
 };
+
+ProgramContextPublication recovery_context(std::string run_id) {
+    neograph::ContextEpochData epoch_data;
+    epoch_data.run_id = std::move(run_id);
+    epoch_data.sequence = 1;
+    epoch_data.raw_window_digest = digest('9');
+    epoch_data.guarantee_profile = neograph::RuntimeGuaranteeProfile::Recorded;
+    auto epoch = neograph::ContextEpoch::create(std::move(epoch_data));
+    neograph::ContextAssemblyReceiptData receipt_data;
+    receipt_data.context_epoch_id = epoch.id();
+    receipt_data.normalized_request_digest = digest('a');
+    receipt_data.message_window_digest = digest('b');
+    auto receipt = neograph::ContextAssemblyReceipt::create(
+        std::move(receipt_data), epoch, {});
+    return {std::move(epoch), {}, std::move(receipt)};
+}
+
+neograph::HookOutboxEntry recovery_hook(std::string run_id) {
+    const auto event = neograph::RuntimeEvent::create(
+        {{}, 1, HookPhase::BeforeToolExecution, "tool_execution",
+         "tenant:runtime", std::move(run_id), json::object()});
+    const auto invocation = neograph::HookInvocation::create(
+        {{}, digest('f'), event.id(), "audit", HookPhase::BeforeToolExecution,
+         neograph::HookDelivery::BlockingMandatory, neograph::HookFailureMode::FailClosed,
+         neograph::HookIdempotency::Idempotent, ToolEffectClass::ReadOnly,
+         {}, {}, json::object()});
+    return neograph::HookOutboxEntry::create(
+        {invocation, event, neograph::HookExecutionState::Pending, 0, 1,
+         std::chrono::system_clock::now() + std::chrono::minutes(1)});
+}
 
 class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
 public:
@@ -1315,6 +1451,15 @@ public:
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return inner_.load_context_publications(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
                                                     std::string_view lineage_id) const override {
@@ -1503,6 +1648,15 @@ public:
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
     }
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return inner_.load_context_publications(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_.load_lineage(owner, lineage_id);
@@ -1577,6 +1731,15 @@ public:
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return inner_.load_context_publications(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
                                                     std::string_view lineage_id) const override {
@@ -1882,6 +2045,164 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
         EXPECT_EQ(events[index].attempt, 1U);
         EXPECT_EQ(events[index].trace_id, "trace-completed");
     }
+}
+
+TEST(ProgramRuntimeTest, ReconnectFailsClosedWithoutDurableRuntimeRecoveryBoundary) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-recovery-required", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+
+    auto overlay = std::make_shared<IsolatedProcessTransitionStore>(fixture.journal);
+    overlay->set_runtime_recovery_state(
+        result.run_id(), {recovery_context(result.run_id())},
+        {recovery_hook(result.run_id())});
+    auto runtime = fixture.make_runtime_with_transitions(overlay);
+
+    try {
+        (void)runtime->reconnect("tenant:runtime", result.run_id());
+        FAIL() << "Expected ProgramDiagnosticError";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_RUNTIME_RECOVERY_UNAVAILABLE");
+    }
+}
+
+TEST(ProgramRuntimeTest, ReconnectRestoresValidatedContextAndHookHeadsBeforeReturning) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-runtime-recovery", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+
+    auto context = recovery_context(result.run_id());
+    auto hook = recovery_hook(result.run_id());
+    const auto context_id = context.epoch.id();
+    const auto hook_id = hook.id();
+    auto overlay = std::make_shared<IsolatedProcessTransitionStore>(fixture.journal);
+    overlay->set_runtime_recovery_state(result.run_id(), {context}, {hook});
+    unsigned restores = 0;
+    auto runtime = fixture.make_runtime_with_transitions(
+        overlay, [&](const ProgramRuntimeRecoveryState& state) {
+            ++restores;
+            EXPECT_EQ(state.owner_scope, "tenant:runtime");
+            EXPECT_EQ(state.run_id, result.run_id());
+            ASSERT_EQ(state.context_publications.size(), 1u);
+            ASSERT_EQ(state.hook_outbox_entries.size(), 1u);
+            EXPECT_EQ(state.context_publications.front().epoch.id(), context_id);
+            EXPECT_EQ(state.hook_outbox_entries.front().id(), hook_id);
+        });
+
+    const auto reconnected = runtime->reconnect("tenant:runtime", result.run_id()).wait();
+    EXPECT_EQ(reconnected.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(restores, 1u);
+}
+
+TEST(ProgramRuntimeTest, LifecycleHooksPublishBeforeSpawnAndFailClosedBeforeTerminalCas) {
+    LifecycleHookTool admitted{"program-admitted"};
+    LifecycleHookTool terminal{"program-before-terminal", true};
+    LifecycleHookTool failed{"program-failed"};
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Strict, false,
+                            lifecycle_hooks(admitted, terminal, failed));
+    const auto version = fixture.admit("runtime-completed");
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-hook-lifecycle", {}});
+
+    EXPECT_EQ(admitted.calls.load(), 1U);
+    // The blocked completed terminal is replaced by P_HOOK_BLOCKED and that
+    // replacement event receives its own deterministic terminal-hook pass.
+    EXPECT_EQ(terminal.calls.load(), 2U);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_HOOK_BLOCKED");
+    // RunFailed is emitted only after the terminal compare-publish wins.
+    EXPECT_EQ(failed.calls.load(), 1U);
+    const auto durable = fixture.journal->load("tenant:runtime", result.run_id());
+    ASSERT_TRUE(durable.has_value());
+    EXPECT_EQ(durable->continuation().state, ContinuationState::Failed);
+}
+
+TEST(ProgramRuntimeTest, LifecycleHookIdentityIsReusedAcrossTerminalCasRetry) {
+    LifecycleHookTool admitted{"program-admitted-retry"};
+    LifecycleHookTool terminal{"program-before-terminal-retry"};
+    LifecycleHookTool failed{"program-failed-retry"};
+    auto journal = std::make_shared<ConflictOnceJournal>();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Strict, false,
+                            lifecycle_hooks(admitted, terminal, failed));
+    const auto version = fixture.admit("runtime-completed");
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-hook-retry", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_TRUE(journal->injected());
+    EXPECT_EQ(admitted.calls.load(), 1U);
+    // The terminal publication was retried, but its Program event sequence and
+    // therefore its durable hook event identity did not change.
+    EXPECT_EQ(terminal.calls.load(), 1U);
+    EXPECT_EQ(failed.calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, BlockedAdmissionHookReturnsRecoverableTerminalHandleAfterReconnect) {
+    completed_calls.store(0);
+    LifecycleHookTool admitted{"program-admitted-blocked", true};
+    LifecycleHookTool terminal{"program-before-terminal-after-admission-block"};
+    LifecycleHookTool failed{"program-failed-after-admission-block"};
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Strict, false,
+                            lifecycle_hooks(admitted, terminal, failed));
+    const auto version = fixture.admit("runtime-completed");
+    ProgramInvocation invocation{json::object(), grant(), "trace-admission-block", {},
+                                 "admission-hook-blocked"};
+
+    // The Started transition is durable before the hook executes. A failure
+    // must return a handle whose terminal state is already recoverable.
+    const auto result = fixture.runtime->start("tenant:runtime", version, invocation).wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_HOOK_BLOCKED");
+    EXPECT_EQ(completed_calls.load(), 0U);
+
+    fixture.recreate_catalog_and_runtime();
+    const auto recovered = fixture.runtime->reconnect("tenant:runtime", "admission-hook-blocked").wait();
+    EXPECT_EQ(recovered.id(), result.id());
+    EXPECT_EQ(recovered.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(recovered.failure());
+    EXPECT_EQ(recovered.failure()->code, "P_HOOK_BLOCKED");
+    const auto durable = fixture.journal->load("tenant:runtime", "admission-hook-blocked");
+    ASSERT_TRUE(durable);
+    EXPECT_EQ(durable->continuation().state, ContinuationState::Failed);
+}
+
+TEST(ProgramRuntimeTest, InterruptedCancellationHookBlockPersistsFailureAfterReconnect) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-interrupt");
+    const auto interrupted = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-interrupted-cancel-hook", {},
+                          "interrupted-cancel-hook"}).wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+
+    LifecycleHookTool admitted{"program-admitted-interrupted-cancel"};
+    LifecycleHookTool terminal{"program-terminal-interrupted-cancel", true};
+    LifecycleHookTool failed{"program-failed-interrupted-cancel"};
+    fixture.hook_runtime = lifecycle_hooks(admitted, terminal, failed);
+    fixture.recreate_catalog_and_runtime();
+    auto handle = fixture.runtime->reconnect("tenant:runtime", interrupted.run_id());
+
+    EXPECT_TRUE(handle.cancel());
+    const auto blocked = handle.wait();
+    EXPECT_EQ(blocked.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(blocked.failure());
+    EXPECT_EQ(blocked.failure()->code, "P_HOOK_BLOCKED");
+    const auto durable = fixture.journal->load("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(durable);
+    EXPECT_EQ(durable->continuation().state, ContinuationState::Failed);
 }
 TEST(ProgramRuntimeTest, RejectsCrossScopeStartBeforePublishingRun) {
     completed_calls.store(0);

@@ -5,6 +5,7 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/coordinator.h>
+#include <neograph/hook_runtime.h>
 
 #include <neograph/async/run_sync.h>
 
@@ -180,6 +181,15 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph   cg,
     return link_impl(std::move(cg), std::move(config), std::move(resources), true);
 }
 
+std::optional<std::chrono::system_clock::time_point> hook_deadline_for(
+    const std::optional<std::chrono::steady_clock::time_point>& deadline) {
+    if (!deadline) return std::nullopt;
+    const auto remaining = std::max(*deadline - std::chrono::steady_clock::now(),
+                                    std::chrono::steady_clock::duration::zero());
+    return std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        std::chrono::system_clock::now() + remaining);
+}
+
 std::unique_ptr<GraphEngine> GraphEngine::link(
     CompiledGraph cg,
     EngineConfig config,
@@ -254,6 +264,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->store_               = std::move(config.store);
     engine->tool_gate_           = std::move(config.tool_gate);
     engine->tool_execution_controller_ = std::move(config.tool_execution_controller);
+    engine->hook_runtime_        = std::move(config.hook_runtime);
     engine->owned_tools_         = std::move(resources.tools).release();
     engine->node_cache_.set_max_entries(config.node_cache_max_entries);
     for (const auto& node_name : config.cached_nodes) {
@@ -350,10 +361,11 @@ void GraphEngine::set_store(std::shared_ptr<Store> store) {
 
 void GraphEngine::set_runtime_interposition(
     std::shared_ptr<::neograph::RuntimeInterpositionController> controller) {
+    runtime_interposition_ = std::move(controller);
     for (auto& [name, node] : nodes_) {
         (void)name;
-        if (auto* llm = dynamic_cast<LLMCallNode*>(node.get())) {
-            llm->set_runtime_interposition(controller);
+        if (auto* consumer = dynamic_cast<::neograph::RuntimeInterpositionConsumer*>(node.get())) {
+            consumer->set_runtime_interposition(runtime_interposition_);
         }
     }
 }
@@ -994,7 +1006,9 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
         throw std::invalid_argument("Cannot resume: thread_id is required");
     }
 
-    CheckpointCoordinator coordinator(checkpoint_store, config.thread_id);
+    CheckpointCoordinator coordinator(checkpoint_store, config.thread_id, hook_runtime_, {
+        metadata.owner_scope, metadata.run_id, metadata.trace_id, config.cancel_token,
+        hook_deadline_for(metadata.deadline)});
     ResumeContext resume_context;
     if (checkpoint_id) {
         resume_context =
@@ -1124,7 +1138,10 @@ GraphEngine::execute_graph_async(
     auto checkpoint_store = resources && resources->checkpoint_store
         ? *resources->checkpoint_store
         : checkpoint_store_;
-    CheckpointCoordinator coord(checkpoint_store, config.thread_id);
+    const auto hook_deadline = hook_deadline_for(metadata.deadline);
+    CheckpointCoordinator coord(checkpoint_store, config.thread_id, hook_runtime_, {
+        metadata.owner_scope, metadata.run_id, metadata.trace_id, config.cancel_token,
+        hook_deadline});
     auto safe_point_request = resources ? resources->safe_point_request : nullptr;
     struct SafePointOperationGuard {
         std::shared_ptr<GraphSafePointRequest> request;

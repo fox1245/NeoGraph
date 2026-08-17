@@ -527,6 +527,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/tool_execution.cpp
     src/core/hook.cpp
     src/core/hook_outbox.cpp
+    src/core/hook_runtime.cpp
     src/core/hook_rpc.cpp
     src/core/host_admission.cpp
     src/core/evidence_ledger.cpp
@@ -832,6 +833,7 @@ if(NEOGRAPH_BUILD_SQLITE)
         src/core/sqlite_checkpoint.cpp
         src/core/sqlite_evidence_ledger.cpp
         src/core/research_task_board.cpp
+        src/core/sqlite_runtime_stores.cpp
     )
 
     target_include_directories(neograph_sqlite

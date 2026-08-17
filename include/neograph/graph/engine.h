@@ -41,7 +41,10 @@
 #include <string>
 #include <vector>
 
-namespace neograph { class RuntimeInterpositionController; }
+namespace neograph {
+class HookRuntime;
+class RuntimeInterpositionController;
+}
 namespace neograph::graph {
 
 class ValidatedTopology;
@@ -81,6 +84,9 @@ struct EngineConfig {
     /// Shared host admission boundary for every tool call made by this engine.
     /// Empty uses the conservative process-default controller.
     std::shared_ptr<ToolExecutionController> tool_execution_controller;
+
+    /// Optional host-owned lifecycle runtime retained across every run and resume.
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime;
 
     /// Fan-out worker count. One preserves the historical no-pool fast path.
     std::size_t worker_count = 1;
@@ -832,6 +838,12 @@ public:
         tool_execution_controller_ = std::move(controller);
     }
 
+    /// Set the host-owned lifecycle runtime used by checkpoint publication.
+    /// Configure before concurrent run() or resume() calls.
+    void set_hook_runtime(std::shared_ptr<::neograph::HookRuntime> runtime) {
+        hook_runtime_ = std::move(runtime);
+    }
+
     /// Opt into controlled LLM dispatch for built-in LLMCallNode instances.
     /// Custom nodes and direct Provider calls remain explicitly unmanaged.
     void set_runtime_interposition(
@@ -975,6 +987,14 @@ private:
     /// Host-shared resource admission for tool calls. Empty defers to the
     /// conservative process default in dispatch_tool_calls().
     std::shared_ptr<ToolExecutionController> tool_execution_controller_;
+
+    /// Host-owned checkpoint lifecycle delivery boundary. Kept on the engine so
+    /// resume paths use the same admitted runtime as their originating runs.
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime_;
+
+    /// Retained so every built-in consumer shares one controller lifetime and
+    /// subsequent assignment can repropagate the exact same instance.
+    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
 
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;

@@ -3,6 +3,7 @@
 #include <neograph/controlled_provider.h>
 #include <neograph/runtime_interposition_controller.h>
 #include <neograph/runtime_turn_assembler.h>
+#include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 
 #include <condition_variable>
@@ -70,6 +71,7 @@ public:
     int calls = 0;
     CompletionMode mode = CompletionMode::COLLECT;
     bool callback = true;
+    std::vector<ChatMessage> messages;
     std::shared_ptr<graph::CancelToken> cancellation;
     const std::string* persisted_receipt = nullptr;
     bool receipt_precedes_call = false;
@@ -79,6 +81,7 @@ protected:
         mode = request.mode();
         callback = static_cast<bool>(request.on_chunk());
         cancellation = request.params().cancel_token;
+        messages = request.params().messages;
         receipt_precedes_call = persisted_receipt && !persisted_receipt->empty();
         ChatCompletion result;
         result.message = {"assistant", "ok"};
@@ -281,6 +284,40 @@ TEST(RuntimeInterpositionController, AssemblesAndDispatchesThroughControlledBoun
     EXPECT_EQ(provider->mode, CompletionMode::STREAM);
     EXPECT_TRUE(provider->callback);
     EXPECT_TRUE(provider->receipt_precedes_call);
+}
+
+TEST(RuntimeInterpositionController, RetainsHostSlotsButReplacesCallerConversation) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto receipts = std::make_shared<RecordingStore>();
+    RuntimeInterpositionController controller(provider, contexts, receipts, sha('f'), 1000);
+    controller.activate("owner", admitted_epoch(*contexts, RuntimeGuaranteeProfile::Strict));
+    CompletionParams params;
+    params.model = "model";
+    params.messages = {{"user", "untrusted caller duplicate"}};
+    EXPECT_EQ(async::run_sync(controller.invoke_async(
+                  std::move(params), {}, {{"system", "host instruction"}},
+                  {{"user", "host task"}})).message.content, "ok");
+    ASSERT_EQ(provider->messages.size(), 3u);
+    EXPECT_EQ(provider->messages[0].content, "host instruction");
+    EXPECT_EQ(provider->messages[1].content, "hello");
+    EXPECT_EQ(provider->messages[2].content, "host task");
+}
+
+TEST(RuntimeInterpositionController, DoesNotDuplicateTrustedTaskThatMatchesAdmittedRawHistory) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto receipts = std::make_shared<RecordingStore>();
+    RuntimeInterpositionController controller(provider, contexts, receipts, sha('f'), 1000);
+    controller.activate("owner", admitted_epoch(*contexts, RuntimeGuaranteeProfile::Strict));
+    CompletionParams params;
+    params.model = "model";
+    EXPECT_EQ(async::run_sync(controller.invoke_async(
+                  std::move(params), {}, {{"system", "host instruction"}},
+                  {{"user", "hello"}})).message.content, "ok");
+    ASSERT_EQ(provider->messages.size(), 2u);
+    EXPECT_EQ(provider->messages[0].content, "host instruction");
+    EXPECT_EQ(provider->messages[1].content, "hello");
 }
 
 TEST(RuntimeInterpositionController, ClearBlocksAnInvocationFromAnOlderGeneration) {

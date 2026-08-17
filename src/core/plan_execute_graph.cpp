@@ -4,6 +4,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/types.h>
+#include <neograph/runtime_interposition_consumer.h>
 #include <neograph/async/run_sync.h>
 
 #include <algorithm>
@@ -88,7 +89,7 @@ std::vector<std::string> extract_plan(const std::string& text) {
 // PlannerNode — one LLM call, parse list. Routes via the `plan_empty`
 // condition on outgoing conditional edges (see factory below).
 // =========================================================================
-class PlannerNode : public GraphNode {
+class PlannerNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     PlannerNode(std::string name, std::shared_ptr<Provider> provider,
                 std::string model, std::string prompt)
@@ -118,10 +119,15 @@ public:
 
         CompletionParams params;
         params.model = model_;
-        params.messages = std::move(prompt_msgs);
+        params.messages = prompt_msgs;
 
         params.cancel_token = in.ctx.cancel_token;
-        auto completion = co_await provider_->invoke(params, nullptr);
+        std::vector<ChatMessage> host;
+        if (!prompt_.empty()) host.push_back({"system", prompt_});
+        std::vector<ChatMessage> supplemental(
+            prompt_msgs.begin() + (prompt_.empty() ? 0 : 1), prompt_msgs.end());
+        auto completion = co_await invoke_provider(provider_, std::move(params), {}, std::move(host),
+                                                    std::move(supplemental));
         record_usage(in.ctx, completion);   // #88
         auto plan_items = extract_plan(completion.message.content);
 
@@ -145,7 +151,7 @@ private:
 // ExecutorNode — pops one step off plan, runs an inner ReAct loop, emits
 // Command to continue (to self) or finalise (to responder).
 // =========================================================================
-class ExecutorNode : public GraphNode {
+class ExecutorNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     ExecutorNode(std::string name, std::shared_ptr<Provider> provider,
                  std::vector<Tool*> tools, std::string model,
@@ -191,7 +197,11 @@ public:
             params.tools = tool_defs;
 
             params.cancel_token = in.ctx.cancel_token;
-            auto completion = co_await provider_->invoke(params, nullptr);
+            std::vector<ChatMessage> host;
+            if (!prompt_.empty()) host.push_back({"system", prompt_});
+            std::vector<ChatMessage> supplemental(convo.begin() + (prompt_.empty() ? 0 : 1), convo.end());
+            auto completion = co_await invoke_provider(provider_, std::move(params), {},
+                                                       std::move(host), std::move(supplemental));
             record_usage(in.ctx, completion);   // #88
             auto& msg = completion.message;
             convo.push_back(msg);
@@ -247,7 +257,7 @@ private:
 // =========================================================================
 // ResponderNode — synthesise final answer from objective + past_steps.
 // =========================================================================
-class ResponderNode : public GraphNode {
+class ResponderNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     ResponderNode(std::string name, std::shared_ptr<Provider> provider,
                   std::string model, std::string prompt)
@@ -295,10 +305,14 @@ public:
 
         CompletionParams params;
         params.model = model_;
-        params.messages = std::move(convo);
+        params.messages = convo;
 
         params.cancel_token = in.ctx.cancel_token;
-        auto completion = co_await provider_->invoke(params, nullptr);
+        std::vector<ChatMessage> host;
+        if (!prompt_.empty()) host.push_back({"system", prompt_});
+        std::vector<ChatMessage> supplemental(convo.begin() + (prompt_.empty() ? 0 : 1), convo.end());
+        auto completion = co_await invoke_provider(provider_, std::move(params), {},
+                                                   std::move(host), std::move(supplemental));
         record_usage(in.ctx, completion);   // #88
 
         json asst_json;

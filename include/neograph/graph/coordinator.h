@@ -35,9 +35,21 @@
 #include <unordered_map>
 #include <vector>
 
+namespace neograph { class HookRuntime; }
+
 namespace neograph::graph {
 
 class GraphState;
+class CancelToken;
+
+/// Per-attempt host identity and control inherited by checkpoint hook delivery.
+struct CheckpointHookContext {
+    std::string owner_scope;
+    std::string run_id;
+    std::string trace_id;
+    std::shared_ptr<CancelToken> cancellation;
+    std::optional<std::chrono::system_clock::time_point> parent_deadline;
+};
 
 /**
  * @brief Context needed to resume execution from the last saved snapshot.
@@ -77,7 +89,9 @@ public:
     /// @param store Checkpoint store (may be nullptr — everything is a no-op).
     /// @param thread_id Per-run thread identifier (may be empty — same effect).
     CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
-                          std::string thread_id);
+                          std::string thread_id,
+                          std::shared_ptr<::neograph::HookRuntime> hook_runtime = {},
+                          CheckpointHookContext hook_context = {});
 
     /// @return True iff a non-null store is wired up AND thread_id is non-empty.
     bool enabled() const noexcept { return store_ != nullptr && !thread_id_.empty(); }
@@ -196,8 +210,12 @@ public:
         const std::string& parent_cp_id) const;
 
 private:
+    asio::awaitable<void> publish_checkpoint_async(const Checkpoint& checkpoint) const;
+
     std::shared_ptr<CheckpointStore> store_;
     std::string thread_id_;
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime_;
+    CheckpointHookContext hook_context_;
 };
 
 } // namespace neograph::graph

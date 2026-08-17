@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 #include <neograph/controlled_provider.h>
 #include <neograph/runtime_turn_assembler.h>
+#include <neograph/hook_runtime.h>
 
 #include <memory>
 #include <optional>
@@ -33,10 +34,18 @@ public:
     void activate(std::string owner_id, ContextEpoch epoch);
     void clear() noexcept;
     bool active() const noexcept;
+    /// Additive host resource; absent preserves legacy dispatch behavior.
+    void set_hook_runtime(std::shared_ptr<HookRuntime> hooks);
 
     /// Assemble, journal, and dispatch. Active epoch history is authoritative.
     asio::awaitable<ChatCompletion> invoke_async(CompletionParams params,
-                                                  StreamCallback on_chunk = {});
+                                                   StreamCallback on_chunk = {});
+    /// Built-in consumers may retain host-owned instructions and add trusted task
+    /// input while replacing caller conversation with admitted epoch RAW history.
+    asio::awaitable<ChatCompletion> invoke_async(CompletionParams params,
+                                                   StreamCallback on_chunk,
+                                                   std::vector<ChatMessage> host_instructions,
+                                                   std::vector<ChatMessage> trusted_supplemental);
     ChatCompletion invoke(CompletionParams params, StreamCallback on_chunk = {});
 
 private:

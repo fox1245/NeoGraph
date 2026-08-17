@@ -77,11 +77,6 @@ LLMCallNode::LLMCallNode(const std::string& name, const NodeContext& ctx)
     , instructions_(ctx.instructions)
 {}
 
-void LLMCallNode::set_runtime_interposition(
-    std::shared_ptr<::neograph::RuntimeInterpositionController> controller) {
-    runtime_interposition_ = std::move(controller);
-}
-
 CompletionParams LLMCallNode::build_params(const GraphState& state) const {
     auto messages = state.get_messages();
 
@@ -148,9 +143,10 @@ asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
                           node_name, json(token)});
         };
     }
-    auto completion = runtime_interposition_
-                          ? co_await runtime_interposition_->invoke_async(std::move(params), std::move(on_token))
-                          : co_await provider_->invoke(params, on_token);
+    std::vector<ChatMessage> host_instructions;
+    if (!instructions_.empty()) host_instructions.push_back({"system", instructions_});
+    auto completion = co_await invoke_provider(provider_, std::move(params), std::move(on_token),
+                                               std::move(host_instructions));
     record_usage(in.ctx, completion);   // #88
 
     json msg_json;
@@ -297,7 +293,11 @@ asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
             cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, node_name, json(token)});
         };
     }
-    auto completion = co_await provider_->invoke(params, on_token);
+    std::vector<ChatMessage> host_instructions;
+    host_instructions.push_back({"system", params.messages.front().content});
+    std::vector<ChatMessage> supplemental{params.messages.back()};
+    auto completion = co_await invoke_provider(provider_, std::move(params), std::move(on_token),
+                                                std::move(host_instructions), std::move(supplemental));
     record_usage(in.ctx, completion);   // #88 — routing costs tokens too
     ChatMessage reply = std::move(completion.message);
 

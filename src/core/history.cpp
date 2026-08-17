@@ -3,6 +3,7 @@
 // compress_history actor; the actor is gone, the core is one coroutine.
 
 #include <neograph/history.h>
+#include <neograph/runtime_interposition_controller.h>
 
 #include <sstream>
 #include <unordered_set>
@@ -142,6 +143,56 @@ asio::awaitable<CompactedHistory> compact_history(
 
     // A recent_keep cut can land between an assistant tool_call and its
     // tool response; repair so the compacted list can't 400 the API.
+    sanitize_tool_calls(result.recent);
+    co_return result;
+}
+
+asio::awaitable<CompactedHistory> compact_history(
+    std::vector<ChatMessage> messages, Provider& provider,
+    std::shared_ptr<::neograph::RuntimeInterpositionController> controller,
+    std::string model, int max_tokens, int recent_keep) {
+    if (!controller) {
+        co_return co_await compact_history(std::move(messages), provider, std::move(model),
+                                           max_tokens, recent_keep);
+    }
+
+    CompactedHistory result;
+    if (estimate_tokens(messages) <= max_tokens) {
+        result.recent = std::move(messages);
+        co_return result;
+    }
+
+    const std::size_t n = messages.size();
+    const std::size_t recent_start = n > static_cast<std::size_t>(recent_keep)
+        ? n - static_cast<std::size_t>(recent_keep) : 0;
+    std::size_t compress_start = 0;
+    if (!messages.empty() && messages[0].role == "system") {
+        compress_start = 1;
+        result.recent.push_back(messages[0]);
+    }
+    std::ostringstream conv;
+    for (std::size_t i = compress_start; i < recent_start; ++i)
+        conv << messages[i].role << ": " << messages[i].content << '\n';
+    const auto conversation = conv.str();
+    if (conversation.empty()) {
+        result.recent = std::move(messages);
+        co_return result;
+    }
+
+    CompletionParams params;
+    params.model = std::move(model);
+    params.temperature = 0.2f;
+    params.max_tokens = 500;
+    ChatMessage sys{"system", "Summarize the following conversation concisely in 3-5 sentences. Preserve key facts, user preferences, and important context. Respond in the same language as the conversation."};
+    ChatMessage usr{"user", conversation};
+    auto completion = co_await controller->invoke_async(
+        std::move(params), {}, {std::move(sys)}, {std::move(usr)});
+    if (!completion.message.content.empty()) {
+        result.summary = completion.message.content;
+        result.compacted = true;
+        result.recent.push_back({"system", "Previous conversation summary:\n" + result.summary});
+    }
+    for (std::size_t i = recent_start; i < n; ++i) result.recent.push_back(std::move(messages[i]));
     sanitize_tool_calls(result.recent);
     co_return result;
 }
