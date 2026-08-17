@@ -27,7 +27,9 @@ RunBudget budget() {
     return {1000, 100, 100, 1, 1, 10, 0, 0, 0};
 }
 CoreCheckpointIdentity checkpoint() {
-    return {"main", digest('4'), "thread-1", "checkpoint-1", 1};
+    return {"main", digest('4'),
+            program_root_core_thread_id("run-1", digest('4')),
+            "checkpoint-1", 1};
 }
 ProgramJournalRecord start_journal() {
     return ProgramJournalRecord::create({{},
@@ -54,7 +56,7 @@ ProgramEvent event(std::uint64_t       sequence,
     value.bundle_id          = digest('2');
     value.operation_id       = "root";
     value.core_generation_id = digest('4');
-    value.core_run_id        = "thread-1";
+    value.core_run_id = program_root_core_thread_id(value.run_id, digest('4'));
     value.trace_id           = "trace-1";
     value.kind               = kind;
     value.payload            = std::move(payload);
@@ -122,6 +124,20 @@ ProgramTransitionPublication start_publication() {
             journal,
             {event(1, ProgramEventKind::Started, ProgramStartedEvent{budget()})},
             {}};
+}
+
+ProgramExecutionLease execution_lease(
+    const ProgramTransitionPublication& publication,
+    std::string holder_id = digest('6')) {
+    const auto& run = publication.run_record;
+    const auto& started = publication.events.front();
+    return ProgramExecutionLease(ProgramExecutionLeaseData{
+        run.owner_scope(), run.run_id(), run.continuation().attempt,
+        run.program_version_id(), run.bundle_id(), "main",
+        started.core_generation_id, started.core_run_id, std::move(holder_id),
+        run.updated_at_ms(),
+        run.updated_at_ms() + static_cast<std::int64_t>(
+                                  run.remaining_budget().wall_time_ms)});
 }
 
 ProgramTransitionPublication start_publication_for(std::string run_id,
@@ -903,6 +919,36 @@ void exercise_initial_reservation_is_rejected(ProgramTransitionStore& store) {
     EXPECT_EQ(store.compare_publish("owner-a", {}, std::move(publication)),
               ProgramTransitionPublishResult::Conflict);
 }
+void exercise_commandless_running_checkpoint_requires_host_evidence(
+    ProgramTransitionStore& store) {
+    auto initial = start_publication();
+    attach_initial_lineage(initial);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
+              ProgramTransitionPublishResult::Published);
+    const auto lineage = store.load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(lineage);
+
+    const auto installed_checkpoint = checkpoint();
+    auto journal = ProgramJournalRecord::create({
+        initial.journal_record.id, "run-1", digest('1'), digest('2'), 2,
+        {"root", ContinuationState::Running, 1}, budget(), {},
+        installed_checkpoint, 20});
+    auto data = copy_run_record_data(initial.run_record);
+    data.exact_checkpoint = installed_checkpoint;
+    data.exact_checkpoint_content_id = digest('7');
+    data.journal_head = journal.id;
+    data.event_sequence = 2;
+    data.updated_at_ms = 20;
+    ProgramTransitionPublication update{
+        ProgramRunRecord::create(std::move(data)), std::move(journal),
+        {event(2, ProgramEventKind::CheckpointPublished,
+               ProgramCheckpointEvent{installed_checkpoint}, 20)}, {}};
+    attach_same_generation_lineage(update, *lineage);
+
+    EXPECT_EQ(store.compare_publish("owner-a", initial.journal_record.id,
+                                    std::move(update)),
+              ProgramTransitionPublishResult::Conflict);
+}
 void exercise_cross_thread_call_core_settlement(ProgramTransitionStore& store,
                                                 bool                    exact_command_coordinate) {
     const auto start = start_publication();
@@ -1000,6 +1046,37 @@ void exercise_cross_thread_call_core_settlement(ProgramTransitionStore& store,
               exact_command_coordinate ? ProgramTransitionPublishResult::Published
                                        : ProgramTransitionPublishResult::Conflict);
 }
+
+void exercise_execution_lease_fences_ordinary_publication(
+    ProgramTransitionStore& store) {
+    auto start = start_publication();
+    attach_initial_lineage(start);
+    const auto lease = execution_lease(start);
+    ASSERT_EQ(store.compare_publish_execution(
+                  "owner-a", "", start, std::nullopt, lease),
+              ProgramTransitionPublishResult::Published);
+    const auto durable_lease = store.load_execution_lease("owner-a", "run-1");
+    ASSERT_TRUE(durable_lease);
+    EXPECT_EQ(durable_lease->id(), lease.id());
+
+    auto terminal = terminal_publication(
+        start, ProgramTerminalStatus::Completed, ContinuationState::Completed);
+    attach_same_generation_lineage(terminal, *start.run_lineage);
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, terminal),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.load("owner-a", "run-1")->id(), start.run_record.id());
+
+    const auto wrong_lease = execution_lease(start, digest('7'));
+    EXPECT_EQ(store.compare_publish_execution(
+                  "owner-a", start.journal_record.id, terminal, wrong_lease,
+                  std::nullopt),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.compare_publish_execution(
+                  "owner-a", start.journal_record.id, terminal, lease,
+                  std::nullopt),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(store.load_execution_lease("owner-a", "run-1"));
+}
 }  // namespace
 
 TEST(ProgramTransitionStoreTest, MissingJavaScriptCommandReadSupportFailsClosed) {
@@ -1036,6 +1113,14 @@ TEST(ProgramTransitionStoreTest, InMemoryJavaScriptCommandHistoryIsAppendOnly) {
 TEST(ProgramTransitionStoreTest, InMemoryCommandSettlementRefundIsUsageBounded) {
     InMemoryProgramTransitionStore store;
     exercise_javascript_command_reservation_settlement(store);
+}
+TEST(ProgramTransitionStoreTest, InMemoryCommandlessRunningCheckpointRequiresHostEvidence) {
+    InMemoryProgramTransitionStore store;
+    exercise_commandless_running_checkpoint_requires_host_evidence(store);
+}
+TEST(ProgramTransitionStoreTest, InMemoryExecutionLeaseFencesOrdinaryPublication) {
+    InMemoryProgramTransitionStore store;
+    exercise_execution_lease_fences_ordinary_publication(store);
 }
 
 TEST(ProgramTransitionStoreTest, InMemoryBindsEveryReservationToItsExactCoordinate) {
@@ -1913,6 +1998,15 @@ TEST(ProgramTransitionStoreTest, TerminalChildResultSurvivesRecordRoundTrip) {
     EXPECT_EQ(parsed.children().front().terminal_result->run_id(), child_id);
 }
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramTransitionStoreTest, SQLiteCommandlessRunningCheckpointRequiresHostEvidence) {
+    SQLiteProgramTransitionStore store(":memory:");
+    exercise_commandless_running_checkpoint_requires_host_evidence(store);
+}
+TEST(ProgramTransitionStoreTest, SQLiteExecutionLeaseFencesOrdinaryPublication) {
+    SQLiteProgramTransitionStore store(":memory:");
+    exercise_execution_lease_fences_ordinary_publication(store);
+}
+
 TEST(ProgramTransitionStoreTest, SQLiteRejectsReceiptlessSuccessorAcrossReopen) {
     static std::atomic<unsigned> sequence{0};
     const auto path =

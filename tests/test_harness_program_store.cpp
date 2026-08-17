@@ -158,7 +158,7 @@ ProgramEvent event(const Fixture&      fixture,
     value.bundle_id          = fixture.bundle_value.id();
     value.operation_id       = "root";
     value.core_generation_id = digest('5');
-    value.core_run_id        = "core-run";
+    value.core_run_id = program_root_core_thread_id(value.run_id, digest('5'));
     value.trace_id           = "trace-one";
     value.attempt            = 1;
     value.kind               = kind;
@@ -205,6 +205,20 @@ ProgramTransitionPublication initial_publication(const Fixture& fixture,
         {}};
 }
 
+ProgramExecutionLease execution_lease(
+    const ProgramTransitionPublication& publication,
+    std::string holder_id = digest('9')) {
+    const auto& run = publication.run_record;
+    const auto& started = publication.events.front();
+    return ProgramExecutionLease(ProgramExecutionLeaseData{
+        run.owner_scope(), run.run_id(), run.continuation().attempt,
+        run.program_version_id(), run.bundle_id(), "main",
+        started.core_generation_id, started.core_run_id, std::move(holder_id),
+        run.updated_at_ms(),
+        run.updated_at_ms() + static_cast<std::int64_t>(
+                                  run.remaining_budget().wall_time_ms)});
+}
+
 void attach_initial_lineage(ProgramTransitionPublication& publication) {
     const auto& run         = publication.run_record;
     const auto  lineage_id  = program_run_lineage_id(run.owner_scope(), run.run_id());
@@ -237,6 +251,42 @@ void attach_same_generation_lineage(ProgramTransitionPublication& publication,
         run.journal_head(), publication.journal_record.remaining_budget,
         publication.journal_record.inflight_reservation, previous.id(), previous.created_at_ms(),
         run.updated_at_ms(), previous.committed_descendant_budget()});
+}
+
+ProgramTransitionPublication commandless_running_checkpoint_publication(
+    const Fixture& fixture, const ProgramTransitionPublication& initial,
+    const ProgramRunLineage& previous_lineage) {
+    const CoreCheckpointIdentity checkpoint{
+        "main", digest('5'),
+        program_root_core_thread_id(initial.run_record.run_id(), digest('5')),
+                                            "safe-point-checkpoint",
+                                            graph::CHECKPOINT_SCHEMA_VERSION};
+    auto journal = ProgramJournalRecord::create({
+        initial.journal_record.id, initial.run_record.run_id(), fixture.version_value.id(),
+        fixture.bundle_value.id(), 2, {"root", ContinuationState::Running, 1}, budget(), {},
+        checkpoint, 20});
+    ProgramRunRecordData data;
+    data.owner_scope = initial.run_record.owner_scope();
+    data.run_id = initial.run_record.run_id();
+    data.program_version_id = initial.run_record.program_version_id();
+    data.bundle_id = initial.run_record.bundle_id();
+    data.binding_fingerprint = initial.run_record.binding_fingerprint();
+    data.invocation = initial.run_record.invocation();
+    data.continuation = journal.continuation;
+    data.remaining_budget = journal.remaining_budget;
+    data.exact_checkpoint = checkpoint;
+    data.exact_checkpoint_content_id = digest('7');
+    data.journal_head = journal.id;
+    data.event_sequence = 2;
+    data.created_at_ms = initial.run_record.created_at_ms();
+    data.updated_at_ms = 20;
+    ProgramTransitionPublication publication{
+        ProgramRunRecord::create(std::move(data)), std::move(journal),
+        {event(fixture, initial.run_record.run_id(), 2,
+               ProgramEventKind::CheckpointPublished,
+               ProgramCheckpointEvent{checkpoint}, 20)}, {}};
+    attach_same_generation_lineage(publication, previous_lineage);
+    return publication;
 }
 
 void attach_fork_receipt(ProgramTransitionPublication& publication,
@@ -400,8 +450,10 @@ ProgramPendingEffect pending_effect() {
 ProgramTransitionPublication publication_with_effect(
     const Fixture& fixture, const ProgramTransitionPublication& initial) {
     auto pending = pending_effect();
-    const CoreCheckpointIdentity checkpoint{"main", digest('5'), "core-thread", "checkpoint-one",
-                                            graph::CHECKPOINT_SCHEMA_VERSION};
+    const CoreCheckpointIdentity checkpoint{
+        "main", digest('5'),
+        program_root_core_thread_id(initial.run_record.run_id(), digest('5')),
+        "checkpoint-one", graph::CHECKPOINT_SCHEMA_VERSION};
     auto journal = ProgramJournalRecord::create({initial.journal_record.id,
                                                  initial.run_record.run_id(),
                                                  fixture.version_value.id(),
@@ -458,8 +510,10 @@ ProgramTransitionPublication terminal_publication(const Fixture&                
                                                   ProgramTerminalStatus               status,
                                                   ContinuationState                   state,
                                                   std::int64_t                        timestamp) {
-    const CoreCheckpointIdentity checkpoint{"main", digest('5'), "core-thread", "checkpoint-one",
-                                            graph::CHECKPOINT_SCHEMA_VERSION};
+    const CoreCheckpointIdentity checkpoint{
+        "main", digest('5'),
+        program_root_core_thread_id(initial.run_record.run_id(), digest('5')),
+        "checkpoint-one", graph::CHECKPOINT_SCHEMA_VERSION};
     auto                         journal = ProgramJournalRecord::create({initial.journal_record.id,
                                                                          initial.run_record.run_id(),
                                                                          fixture.version_value.id(),
@@ -1088,6 +1142,64 @@ TEST(HarnessProgramStoreTest, SqliteProgramTransitionsEnforceOwnerScope) {
     EXPECT_TRUE(transitions->load_effects("tenant-other", "run-one").empty());
     EXPECT_EQ(transitions->compare_publish("tenant-other", {}, initial),
               ProgramTransitionPublishResult::Conflict);
+}
+
+TEST(HarnessProgramStoreTest, SqliteCommandlessRunningCheckpointRequiresHostEvidence) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto    transitions = persist_and_bind(store, fixture);
+    auto    initial     = initial_lineage_publication(fixture);
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+              ProgramTransitionPublishResult::Published);
+    const auto lineage = transitions->load_run_lineage(
+        fixture.artifact.owner_scope(), initial.run_record.run_id());
+    ASSERT_TRUE(lineage);
+
+    EXPECT_EQ(transitions->compare_publish(
+                  fixture.artifact.owner_scope(), initial.journal_record.id,
+                  commandless_running_checkpoint_publication(fixture, initial, *lineage)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->latest(fixture.artifact.owner_scope(),
+                                  initial.run_record.run_id())
+                  ->id,
+              initial.journal_record.id);
+}
+
+TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPublication) {
+    TempDb db;
+    Fixture fixture;
+    auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto transitions = persist_and_bind(store, fixture);
+    auto initial = initial_lineage_publication(fixture);
+    const auto lease = execution_lease(initial);
+    ASSERT_EQ(transitions->compare_publish_execution(
+                  fixture.artifact.owner_scope(), {}, initial, std::nullopt, lease),
+              ProgramTransitionPublishResult::Published);
+
+    transitions.reset();
+    store.reset();
+    auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    transitions = require_harness_program_adapter_store(reopened)
+                      ->bind_program_transitions(fixture.artifact);
+    const auto durable_lease = transitions->load_execution_lease(
+        fixture.artifact.owner_scope(), initial.run_record.run_id());
+    ASSERT_TRUE(durable_lease);
+    EXPECT_EQ(durable_lease->id(), lease.id());
+
+    auto terminal = terminal_publication(
+        fixture, initial, ProgramTerminalStatus::Completed,
+        ContinuationState::Completed, 20);
+    attach_same_generation_lineage(terminal, *initial.run_lineage);
+    EXPECT_EQ(transitions->compare_publish(
+                  fixture.artifact.owner_scope(), initial.journal_record.id, terminal),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish_execution(
+                  fixture.artifact.owner_scope(), initial.journal_record.id, terminal,
+                  lease, std::nullopt),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(transitions->load_execution_lease(
+        fixture.artifact.owner_scope(), initial.run_record.run_id()));
 }
 
 

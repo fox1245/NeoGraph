@@ -128,6 +128,14 @@ if(NEOGRAPH_BUILD_PROGRAM)
             neograph::program_sqlite
             SQLite::SQLite3
         )
+        if(TARGET neograph_sqlite)
+            target_compile_definitions(neograph_program_tests PRIVATE
+                NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
+            )
+            target_link_libraries(neograph_program_tests PRIVATE
+                neograph::sqlite
+            )
+        endif()
     endif()
     if(TARGET neograph_program_postgres)
         target_compile_definitions(neograph_program_tests PRIVATE

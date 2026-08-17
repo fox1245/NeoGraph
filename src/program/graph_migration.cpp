@@ -5,6 +5,7 @@
 #include <neograph/program/event.h>
 #include <neograph/program/replacement.h>
 #include <neograph/program/run_record.h>
+#include <neograph/program/transition_store.h>
 #include <neograph/program/version.h>
 
 #include "canonical_json.h"
@@ -21,6 +22,7 @@ namespace {
 
 constexpr std::string_view CAPSULE_FORMAT = "neograph-graph-migration-capsule";
 constexpr std::string_view RECEIPT_FORMAT = "neograph-program-graph-migration-receipt";
+constexpr std::string_view EXECUTION_LEASE_FORMAT = "neograph-program-execution-lease";
 
 struct CapsuleData {
     std::string            owner_scope;
@@ -502,6 +504,39 @@ bool same_migration_invocation(const RunInvocation& source,
            source.artifact == target.artifact;
 }
 
+void validate_execution_lease(const ProgramExecutionLeaseData& data) {
+    detail::validate_token(data.owner_scope, "Program execution lease owner scope");
+    detail::validate_token(data.run_id, "Program execution lease run id");
+    detail::validate_token(data.core_name, "Program execution lease Core name");
+    detail::validate_token(data.holder_id, "Program execution lease holder id");
+    require_identity(data.program_version_id, "Program execution lease ProgramVersion id");
+    require_identity(data.bundle_id, "Program execution lease bundle id");
+    require_identity(data.core_generation_id, "Program execution lease Core generation id");
+    require_identity(data.core_thread_id, "Program execution lease Core thread id");
+    if (!data.attempt || data.acquired_at_ms < 0 ||
+        data.expires_at_ms <= data.acquired_at_ms ||
+        data.core_thread_id !=
+            program_root_core_thread_id(data.run_id, data.core_generation_id)) {
+        throw std::invalid_argument("Program execution lease identity or lifetime is invalid");
+    }
+}
+
+json execution_lease_body(const ProgramExecutionLeaseData& data) {
+    return {{"format", std::string(EXECUTION_LEASE_FORMAT)},
+            {"storage_schema_version", ProgramExecutionLease::STORAGE_SCHEMA_VERSION},
+            {"owner_scope", data.owner_scope},
+            {"run_id", data.run_id},
+            {"attempt", data.attempt},
+            {"program_version_id", data.program_version_id},
+            {"bundle_id", data.bundle_id},
+            {"core_name", data.core_name},
+            {"core_generation_id", data.core_generation_id},
+            {"core_thread_id", data.core_thread_id},
+            {"holder_id", data.holder_id},
+            {"acquired_at_ms", data.acquired_at_ms},
+            {"expires_at_ms", data.expires_at_ms}};
+}
+
 }  // namespace
 
 std::string program_root_core_thread_id(
@@ -523,6 +558,158 @@ std::string graph_migration_checkpoint_content_id(
     return detail::sha256_identity(
         "graph-migration-checkpoint-content/v1",
         detail::canonical_json_bytes(encode_checkpoint(checkpoint)));
+}
+
+struct ProgramExecutionLease::Impl {
+    explicit Impl(ProgramExecutionLeaseData value) : data(std::move(value)) {
+        auto encoded = execution_lease_body(data);
+        id = detail::sha256_identity(
+            "program-execution-lease/v1", detail::canonical_json_bytes(encoded));
+        encoded["id"] = id;
+        canonical_bytes = detail::canonical_json_bytes(encoded);
+    }
+
+    ProgramExecutionLeaseData data;
+    std::string id;
+    std::string canonical_bytes;
+};
+
+ProgramExecutionLease::ProgramExecutionLease(ProgramExecutionLeaseData data) {
+    validate_execution_lease(data);
+    impl_ = std::make_shared<const Impl>(std::move(data));
+}
+ProgramExecutionLease::ProgramExecutionLease(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+ProgramExecutionLease ProgramExecutionLease::parse(std::string_view stored_bytes) {
+    const auto value = detail::parse_json_strict(stored_bytes);
+    if (!value.is_object() || require_string(value, "format") != EXECUTION_LEASE_FORMAT) {
+        throw std::invalid_argument("Stored Program execution lease has unknown format");
+    }
+    detail::reject_unknown_fields(
+        value, "Stored Program execution lease",
+        {"format", "storage_schema_version", "id", "owner_scope", "run_id", "attempt",
+         "program_version_id", "bundle_id", "core_name", "core_generation_id",
+         "core_thread_id", "holder_id", "acquired_at_ms", "expires_at_ms"});
+    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
+        throw std::invalid_argument("Stored Program execution lease schema is unsupported");
+    }
+    ProgramExecutionLease lease(ProgramExecutionLeaseData{
+        require_string(value, "owner_scope"), require_string(value, "run_id"),
+        require_uint64(value, "attempt"), require_string(value, "program_version_id"),
+        require_string(value, "bundle_id"), require_string(value, "core_name"),
+        require_string(value, "core_generation_id"), require_string(value, "core_thread_id"),
+        require_string(value, "holder_id"), require_int64(value, "acquired_at_ms"),
+        require_int64(value, "expires_at_ms")});
+    if (lease.id() != require_string(value, "id")) {
+        throw std::invalid_argument("Stored Program execution lease identity is invalid");
+    }
+    return lease;
+}
+
+#define NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(name) \
+    const std::string& ProgramExecutionLease::name() const noexcept { return impl_->data.name; }
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(owner_scope)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(run_id)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(program_version_id)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(bundle_id)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(core_name)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(core_generation_id)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(core_thread_id)
+NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR(holder_id)
+#undef NEOGRAPH_EXECUTION_LEASE_STRING_ACCESSOR
+const std::string& ProgramExecutionLease::id() const noexcept { return impl_->id; }
+std::uint64_t ProgramExecutionLease::attempt() const noexcept { return impl_->data.attempt; }
+std::int64_t ProgramExecutionLease::acquired_at_ms() const noexcept {
+    return impl_->data.acquired_at_ms;
+}
+std::int64_t ProgramExecutionLease::expires_at_ms() const noexcept {
+    return impl_->data.expires_at_ms;
+}
+std::string ProgramExecutionLease::serialize_canonical() const {
+    return impl_->canonical_bytes;
+}
+
+bool does_program_execution_lease_bind(
+    const ProgramExecutionLease& lease,
+    const ProgramTransitionPublication& publication) noexcept {
+    try {
+        const auto& run = publication.run_record;
+        if (lease.owner_scope() != run.owner_scope() ||
+            lease.run_id() != run.run_id() || lease.attempt() != run.continuation().attempt ||
+            lease.program_version_id() != run.program_version_id() ||
+            lease.bundle_id() != run.bundle_id() ||
+            run.continuation().state != ContinuationState::Running ||
+            lease.acquired_at_ms() != run.updated_at_ms() ||
+            lease.expires_at_ms() - lease.acquired_at_ms() < 0 ||
+            static_cast<std::uint64_t>(
+                lease.expires_at_ms() - lease.acquired_at_ms()) !=
+                run.remaining_budget().wall_time_ms) {
+            return false;
+        }
+        if (const auto checkpoint = run.exact_checkpoint()) {
+            return lease.core_name() == checkpoint->core_name &&
+                   lease.core_generation_id() == checkpoint->core_generation_id &&
+                   lease.core_thread_id() == checkpoint->core_thread_id;
+        }
+        return std::any_of(publication.events.begin(), publication.events.end(),
+                           [&](const auto& event) {
+                               return event.kind == ProgramEventKind::Started &&
+                                      event.attempt == lease.attempt() &&
+                                      event.core_generation_id ==
+                                          lease.core_generation_id() &&
+                                      event.core_run_id == lease.core_thread_id();
+                           });
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+struct ProgramGraphSafePointEvidence::Impl {
+    Impl(ProgramBundle bundle_value,
+         ProgramVersion version_value,
+         graph::GraphSafePoint safe_point_value)
+        : bundle(std::move(bundle_value)),
+          version(std::move(version_value)),
+          safe_point(std::move(safe_point_value)) {}
+
+    ProgramBundle bundle;
+    ProgramVersion version;
+    graph::GraphSafePoint safe_point;
+};
+
+ProgramGraphSafePointEvidence::ProgramGraphSafePointEvidence(
+    ProgramBundle bundle,
+    ProgramVersion version,
+    graph::GraphSafePoint safe_point) {
+    const auto& plan = bundle.typed_orchestration_plan();
+    const auto& generation = safe_point.generation();
+    const auto materialization = std::find_if(
+        version.core_materialization_receipt().plans.begin(),
+        version.core_materialization_receipt().plans.end(),
+        [&](const CorePlanIdentity& candidate) {
+            return candidate.name == generation.core_name &&
+                   candidate.compiled_plan_identity == generation.core_generation_id;
+        });
+    if (bundle.id() != version.bundle_id() || bundle.control_source() ||
+        plan.nodes().size() != 1 ||
+        plan.root().operation() != ProgramOperationKind::CallCore ||
+        !plan.root().core() || *plan.root().core() != generation.core_name ||
+        materialization == version.core_materialization_receipt().plans.end()) {
+        throw std::invalid_argument(
+            "Program graph safe point does not bind an admitted native root Core");
+    }
+    impl_ = std::make_shared<const Impl>(
+        std::move(bundle), std::move(version), std::move(safe_point));
+}
+
+const ProgramBundle& ProgramGraphSafePointEvidence::bundle() const noexcept {
+    return impl_->bundle;
+}
+const ProgramVersion& ProgramGraphSafePointEvidence::version() const noexcept {
+    return impl_->version;
+}
+const graph::GraphSafePoint& ProgramGraphSafePointEvidence::safe_point() const noexcept {
+    return impl_->safe_point;
 }
 
 struct GraphMigrationCapsule::Impl {
@@ -816,6 +1003,7 @@ bool is_valid_program_graph_migration_transition(
     const ProgramRunGeneration& predecessor,
     const ProgramRunLineage& previous_lineage,
     const ProgramRunRecord& source,
+    const GraphMigrationCapsule& durable_capsule,
     const MigrationPlan& migration_plan,
     const ProgramRunGeneration& successor,
     const ProgramRunLineage& next_lineage,
@@ -826,12 +1014,17 @@ bool is_valid_program_graph_migration_transition(
         const auto& capsule = receipt->capsule();
         const auto source_checkpoint = source.exact_checkpoint();
         const auto target_checkpoint = target.exact_checkpoint();
+        const auto migration_elapsed = target.created_at_ms() >= source.updated_at_ms()
+            ? static_cast<std::uint64_t>(target.created_at_ms() - source.updated_at_ms())
+            : std::numeric_limits<std::uint64_t>::max();
         const auto expected_budget = program_replacement_remaining_budget(
             source, previous_lineage, target.created_at_ms());
         const auto expected_plan = MigrationPlan::between(
             receipt->source_version(), receipt->source_bundle(),
             receipt->target_version(), receipt->target_bundle());
-        return migration_plan.is_compatible() &&
+        return durable_capsule.id() == capsule.id() &&
+               durable_capsule.serialize_canonical() == capsule.serialize_canonical() &&
+               migration_plan.is_compatible() &&
                expected_plan.is_compatible() &&
                migration_plan.id() == expected_plan.id() &&
                migration_plan.id() == receipt->migration_plan_id() &&
@@ -907,8 +1100,9 @@ bool is_valid_program_graph_migration_transition(
                !target.terminal_result() && !target.fork_receipt() &&
                !target.recorded_binding_set_fingerprint() &&
                target.children().empty() && target.effect_sequence() == 0 &&
-               target.created_at_ms() >= source.updated_at_ms() &&
-               target.created_at_ms() >= capsule.checkpoint().timestamp &&
+                target.created_at_ms() >= source.updated_at_ms() &&
+                migration_elapsed <= source.remaining_budget().wall_time_ms &&
+                target.created_at_ms() >= capsule.checkpoint().timestamp &&
                successor.child_depth() == predecessor.child_depth() &&
                next_lineage.remaining_budget() == expected_budget &&
                next_lineage.inflight_reservation() == RunBudget{} &&
@@ -942,6 +1136,120 @@ bool does_program_graph_migration_started_event_bind(
                event.trace_id == target.invocation().correlation_id &&
                event.attempt == target.continuation().attempt &&
                started->budget == target.remaining_budget();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool is_valid_program_graph_safe_point_transition(
+    const ProgramRunRecord& previous,
+    const ProgramJournalRecord& previous_journal,
+    const ProgramTransitionPublication& publication,
+    const ProgramGraphSafePointEvidence& evidence,
+    const GraphMigrationCapsule& capsule,
+    const ProgramExecutionLease& execution_lease) noexcept {
+    try {
+        const auto& next = publication.run_record;
+        const auto& next_journal = publication.journal_record;
+        const auto checkpoint = next.exact_checkpoint();
+        if (!checkpoint || !next.exact_checkpoint_content_id() ||
+            publication.events.empty() || !publication.commands.empty() ||
+            !publication.effects.empty() ||
+            publication.run_generation || !publication.run_lineage ||
+            publication.fork_source_lineage ||
+            previous.continuation().state != ContinuationState::Running ||
+            next.continuation().state != ContinuationState::Running ||
+            previous.continuation() != next.continuation() ||
+            previous.owner_scope() != next.owner_scope() ||
+            previous.run_id() != next.run_id() ||
+            previous.program_version_id() != next.program_version_id() ||
+            previous.bundle_id() != next.bundle_id() ||
+            previous.binding_fingerprint() != next.binding_fingerprint() ||
+            previous.invocation() != next.invocation() ||
+            previous.child_depth() != 0 || next.child_depth() != 0 ||
+            !previous.invocation().parent_run_id.empty() ||
+            previous.pending_input() || previous.pending_effect() ||
+            previous.terminal_result() || !previous.children().empty() ||
+            previous.effect_sequence() != 0 || next.pending_input() ||
+            next.pending_effect() || next.terminal_result() ||
+            !next.children().empty() || next.effect_sequence() != 0 ||
+            previous.recorded_binding_set_fingerprint() ||
+            next.recorded_binding_set_fingerprint() ||
+            previous_journal.id != previous.journal_head() ||
+            next_journal.previous_id != previous_journal.id ||
+            previous_journal.sequence == std::numeric_limits<std::uint64_t>::max() ||
+            next_journal.sequence != previous_journal.sequence + 1 ||
+            next_journal.core_checkpoint != checkpoint ||
+            previous_journal.inflight_reservation != RunBudget{} ||
+            next_journal.inflight_reservation != RunBudget{} ||
+            next.remaining_budget() != next_journal.remaining_budget ||
+            !budget_at_most(next.remaining_budget(), previous.remaining_budget()) ||
+            next.created_at_ms() != previous.created_at_ms() ||
+            next.updated_at_ms() < previous.updated_at_ms() ||
+            next.updated_at_ms() < publication.events.back().timestamp_ms ||
+            publication.events.back().kind != ProgramEventKind::CheckpointPublished) {
+            return false;
+        }
+        const auto& checkpoint_event = publication.events.back();
+        if (checkpoint_event.operation_id != next.continuation().operation_id ||
+            checkpoint_event.core_generation_id != checkpoint->core_generation_id ||
+            checkpoint_event.core_run_id != checkpoint->core_thread_id ||
+            checkpoint_event.trace_id != next.invocation().correlation_id ||
+            checkpoint_event.attempt != next.continuation().attempt ||
+            std::get<ProgramCheckpointEvent>(checkpoint_event.payload).checkpoint !=
+                *checkpoint) {
+            return false;
+        }
+        if (previous.exact_checkpoint()) {
+            const auto& old = *previous.exact_checkpoint();
+            if (old.core_name != checkpoint->core_name ||
+                old.core_generation_id != checkpoint->core_generation_id ||
+                old.core_thread_id != checkpoint->core_thread_id ||
+                old.checkpoint_id == checkpoint->checkpoint_id) {
+                return false;
+            }
+        }
+        const auto& snapshot = evidence.safe_point().checkpoint();
+        const auto& generation = evidence.safe_point().generation();
+        return execution_lease.owner_scope() == previous.owner_scope() &&
+               execution_lease.run_id() == previous.run_id() &&
+               execution_lease.attempt() == previous.continuation().attempt &&
+               execution_lease.program_version_id() == previous.program_version_id() &&
+               execution_lease.bundle_id() == previous.bundle_id() &&
+               execution_lease.core_name() == checkpoint->core_name &&
+               execution_lease.core_generation_id() == checkpoint->core_generation_id &&
+               execution_lease.core_thread_id() == checkpoint->core_thread_id &&
+               execution_lease.expires_at_ms() > next.updated_at_ms() &&
+               capsule.owner_scope() == next.owner_scope() &&
+               capsule.lineage_id() == publication.run_lineage->lineage_id() &&
+               capsule.source_generation() ==
+                   publication.run_lineage->active_generation() &&
+               capsule.source_generation_id() ==
+                   publication.run_lineage->active_generation_id() &&
+               capsule.source_lineage_head_id() == publication.run_lineage->id() &&
+               capsule.source_run_id() == next.run_id() &&
+               capsule.source_program_version_id() == next.program_version_id() &&
+               capsule.source_bundle_id() == next.bundle_id() &&
+               capsule.core_checkpoint() == *checkpoint &&
+               graph_migration_checkpoint_content_id(capsule.checkpoint()) ==
+                   graph_migration_checkpoint_content_id(snapshot) &&
+               snapshot.id == checkpoint->checkpoint_id &&
+               snapshot.thread_id == checkpoint->core_thread_id &&
+               snapshot.schema_version == checkpoint->checkpoint_schema_version &&
+               snapshot.schema_version == graph::CHECKPOINT_SCHEMA_VERSION &&
+               snapshot.interrupt_phase == graph::CheckpointPhase::Completed &&
+               !snapshot.next_nodes.empty() && snapshot.step >= 0 &&
+               snapshot.timestamp >= 0 && snapshot.timestamp <= next.updated_at_ms() &&
+               generation.core_name == checkpoint->core_name &&
+               generation.core_generation_id == checkpoint->core_generation_id &&
+               evidence.version().ownership_scope() == next.owner_scope() &&
+               evidence.version().id() == next.program_version_id() &&
+               evidence.version().bundle_id() == next.bundle_id() &&
+               evidence.bundle().id() == next.bundle_id() &&
+               checkpoint->core_thread_id == program_root_core_thread_id(
+                   next.run_id(), checkpoint->core_generation_id) &&
+               *next.exact_checkpoint_content_id() ==
+                   graph_migration_checkpoint_content_id(snapshot);
     } catch (const std::exception&) {
         return false;
     }

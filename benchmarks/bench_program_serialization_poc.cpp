@@ -78,6 +78,10 @@ public:
         std::uint64_t generation) const override {
         return inner_->load_generation(owner_scope, lineage_id, generation);
     }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        return inner_->load_execution_lease(owner_scope, run_id);
+    }
 
     ProgramTransitionPublishResult compare_publish(
         std::string_view owner_scope,
@@ -89,6 +93,19 @@ public:
         }
         return inner_->compare_publish(
             owner_scope, expected_journal_head, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner_scope, std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        {
+            std::lock_guard lock(mutex_);
+            publications_.push_back(publication);
+        }
+        return inner_->compare_publish_execution(
+            owner_scope, expected_journal_head, std::move(publication),
+            std::move(expected_lease), std::move(next_lease));
     }
 
     std::vector<ProgramTransitionPublication> snapshot() const {

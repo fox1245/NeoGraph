@@ -12,16 +12,23 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace neograph::program {
 
+namespace detail {
+class RunControl;
+}
+
 class MigrationPlan;
 struct ProgramEvent;
+struct ProgramJournalRecord;
 class ProgramRunGeneration;
 class ProgramRunLineage;
 class ProgramRunRecord;
+struct ProgramTransitionPublication;
 
 /** Exact root Core thread identity used by ProgramRuntime. */
 NEOGRAPH_PROGRAM_API std::string program_root_core_thread_id(
@@ -31,6 +38,70 @@ NEOGRAPH_PROGRAM_API std::string program_root_core_thread_id(
 /** Content identity of exact checkpoint bytes published under a source head. */
 NEOGRAPH_PROGRAM_API std::string graph_migration_checkpoint_content_id(
     const graph::Checkpoint& checkpoint);
+
+struct ProgramExecutionLeaseData {
+    std::string owner_scope;
+    std::string run_id;
+    std::uint64_t attempt = 0;
+    std::string program_version_id;
+    std::string bundle_id;
+    std::string core_name;
+    std::string core_generation_id;
+    std::string core_thread_id;
+    std::string holder_id;
+    std::int64_t acquired_at_ms = 0;
+    std::int64_t expires_at_ms = 0;
+};
+
+/** Backend-global ownership of one migration-capable root Core dispatch. */
+class NEOGRAPH_PROGRAM_API ProgramExecutionLease final {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    explicit ProgramExecutionLease(ProgramExecutionLeaseData data);
+    static ProgramExecutionLease parse(std::string_view stored_bytes);
+
+    const std::string& id() const noexcept;
+    const std::string& owner_scope() const noexcept;
+    const std::string& run_id() const noexcept;
+    std::uint64_t attempt() const noexcept;
+    const std::string& program_version_id() const noexcept;
+    const std::string& bundle_id() const noexcept;
+    const std::string& core_name() const noexcept;
+    const std::string& core_generation_id() const noexcept;
+    const std::string& core_thread_id() const noexcept;
+    const std::string& holder_id() const noexcept;
+    std::int64_t acquired_at_ms() const noexcept;
+    std::int64_t expires_at_ms() const noexcept;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit ProgramExecutionLease(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+};
+
+/** Exact publication binding required before a root Core dispatch can start. */
+NEOGRAPH_PROGRAM_API bool does_program_execution_lease_bind(
+    const ProgramExecutionLease& lease,
+    const ProgramTransitionPublication& publication) noexcept;
+
+/** Host-only, non-serializable evidence for one running safe-point publication. */
+class NEOGRAPH_PROGRAM_API ProgramGraphSafePointEvidence final {
+public:
+    const ProgramBundle& bundle() const noexcept;
+    const ProgramVersion& version() const noexcept;
+    const graph::GraphSafePoint& safe_point() const noexcept;
+
+private:
+    ProgramGraphSafePointEvidence(ProgramBundle bundle,
+                                  ProgramVersion version,
+                                  graph::GraphSafePoint safe_point);
+    struct Impl;
+    std::shared_ptr<const Impl> impl_;
+
+    friend class detail::RunControl;
+};
 
 /**
  * Exact, content-addressed source evidence captured at a durable Core boundary.
@@ -125,6 +196,7 @@ NEOGRAPH_PROGRAM_API bool is_valid_program_graph_migration_transition(
     const ProgramRunGeneration& predecessor,
     const ProgramRunLineage& previous_lineage,
     const ProgramRunRecord& source,
+    const GraphMigrationCapsule& durable_capsule,
     const MigrationPlan& migration_plan,
     const ProgramRunGeneration& successor,
     const ProgramRunLineage& next_lineage,
@@ -134,5 +206,14 @@ NEOGRAPH_PROGRAM_API bool is_valid_program_graph_migration_transition(
 NEOGRAPH_PROGRAM_API bool does_program_graph_migration_started_event_bind(
     const ProgramEvent& event,
     const ProgramRunRecord& target) noexcept;
+
+/** Restricted same-generation publication of one host-captured Core safe point. */
+NEOGRAPH_PROGRAM_API bool is_valid_program_graph_safe_point_transition(
+    const ProgramRunRecord& previous,
+    const ProgramJournalRecord& previous_journal,
+    const ProgramTransitionPublication& publication,
+    const ProgramGraphSafePointEvidence& evidence,
+    const GraphMigrationCapsule& capsule,
+    const ProgramExecutionLease& execution_lease) noexcept;
 
 }  // namespace neograph::program

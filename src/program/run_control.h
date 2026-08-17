@@ -2,6 +2,7 @@
 
 #include <neograph/graph/engine.h>
 #include <neograph/program/event.h>
+#include <neograph/program/graph_migration.h>
 #include <neograph/program/journal.h>
 #include <neograph/program/module.h>
 #include <neograph/program/result.h>
@@ -86,7 +87,8 @@ public:
                asio::any_io_executor                      deadline_executor,
                std::shared_ptr<graph::CheckpointStore>    checkpoints,
                std::shared_ptr<graph::Store>              state_store,
-               std::shared_ptr<ProgramTransitionStore>    transitions);
+               std::shared_ptr<ProgramTransitionStore>    transitions,
+               std::optional<ProgramExecutionLease>       execution_lease = std::nullopt);
     RunControl(ProgramRunRecord record,
                std::shared_ptr<ProgramTransitionStore> transitions);
 
@@ -197,6 +199,19 @@ public:
     void                                  reach_latest_handoff_if_requested();
     asio::awaitable<void>                 hold_latest_handoff_if_requested();
     void                                  release_handoff(std::uint64_t request_id) noexcept;
+    std::shared_ptr<graph::GraphSafePointRequest> graph_safe_point_request() const;
+    std::uint64_t request_graph_migration();
+    GraphMigrationCapsule wait_graph_migration(std::uint64_t request_id);
+    asio::awaitable<void> hold_graph_migration(
+        const graph::GraphSafePoint& safe_point,
+        RunBudget remaining_budget);
+    bool has_active_graph_migration_request() const noexcept;
+    bool graph_migration_matches(std::uint64_t request_id,
+                                  std::string_view capsule_id) const noexcept;
+    std::optional<ProgramExecutionLease> execution_lease() const;
+    void set_execution_lease(ProgramExecutionLease lease);
+    void clear_execution_lease(std::string_view lease_id) const noexcept;
+    void release_graph_migration(std::uint64_t request_id) noexcept;
     ProgramRunRecord                      snapshot() const;
     void              cancel_children(CancellationCause cause) noexcept;
 
@@ -234,8 +249,19 @@ private:
     std::optional<ExactProgramHandoff>       held_handoff_;
     std::weak_ptr<asio::steady_timer>        handoff_release_waiter_;
     mutable std::vector<AsyncWaiter>         handoff_waiters_;
+    mutable std::condition_variable          graph_migration_cv_;
+    std::shared_ptr<graph::GraphSafePointRequest> graph_safe_point_request_;
+    std::uint64_t                            next_graph_migration_request_id_ = 1;
+    std::uint64_t                            graph_migration_request_id_ = 0;
+    std::uint64_t                            finished_graph_migration_request_id_ = 0;
+    std::optional<GraphMigrationCapsule>      held_graph_migration_;
+    mutable std::optional<ProgramExecutionLease> execution_lease_;
+    std::string                              graph_migration_error_;
+    std::weak_ptr<asio::steady_timer>         graph_migration_release_waiter_;
 
     void abort_handoff() noexcept;
+    void abort_graph_migration() noexcept;
+    void renew_graph_safe_point_request_locked();
 };
 struct CommandBudgetReservation {
     RunBudget remaining;

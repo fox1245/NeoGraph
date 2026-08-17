@@ -86,6 +86,94 @@ std::string replacement_run_id(const ExactProgramHandoffReference& source,
                  {"target_input_identity", program_replacement_input_identity(target_input)}}));
 }
 
+std::string graph_migration_run_id(const GraphMigrationCapsule& capsule,
+                                   std::string_view              target_version_id) {
+    return detail::sha256_identity(
+        "program-graph-migration-run/v1",
+        detail::canonical_json_bytes(
+            json{{"capsule_id", capsule.id()},
+                 {"target_program_version_id", std::string(target_version_id)}}));
+}
+
+bool supports_live_graph_migration(const detail::MaterializedProgram& materialized) {
+    const auto& plan = materialized.bundle.typed_orchestration_plan();
+    return !materialized.bundle.control_source() && plan.nodes().size() == 1 &&
+           plan.root().operation() == ProgramOperationKind::CallCore && plan.root().core() &&
+           *plan.root().core() == materialized.root->core_name;
+}
+
+bool supports_root_execution_lease(
+    const detail::MaterializedProgram& materialized,
+    const RunBudget& budget) {
+    return supports_live_graph_migration(materialized) &&
+           budget.max_child_depth == 0 && budget.max_total_children == 0;
+}
+
+std::optional<ProgramExecutionLease> make_execution_lease(
+    const detail::MaterializedProgram& materialized,
+    const ProgramTransitionPublication& publication) {
+    const auto& run = publication.run_record;
+    if (!supports_root_execution_lease(materialized, run.remaining_budget()) ||
+        run.child_depth() != 0 ||
+        !run.invocation().parent_run_id.empty()) {
+        return std::nullopt;
+    }
+    const auto acquired = run.updated_at_ms();
+    const auto wall = run.remaining_budget().wall_time_ms;
+    if (!wall || wall > static_cast<std::uint64_t>(
+                            std::numeric_limits<std::int64_t>::max() - acquired)) {
+        throw_runtime_diagnostic(
+            "P_RUN_LEASE", "Program execution lease lifetime exceeds the supported range");
+    }
+    return ProgramExecutionLease(ProgramExecutionLeaseData{
+        run.owner_scope(), run.run_id(), run.continuation().attempt,
+        run.program_version_id(), run.bundle_id(), materialized.root->core_name,
+        materialized.root->compiled_plan_identity,
+        program_root_core_thread_id(run.run_id(),
+                                    materialized.root->compiled_plan_identity),
+        graph::Checkpoint::generate_id(), acquired,
+        acquired + static_cast<std::int64_t>(wall)});
+}
+
+ProgramTransitionPublication continuing_running_publication(
+    const ProgramRunRecord& previous,
+    const ProgramJournalRecord& previous_journal,
+    RunBudget remaining,
+    std::int64_t timestamp) {
+    auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+        previous.journal_head(), previous.run_id(), previous.program_version_id(),
+        previous.bundle_id(), previous_journal.sequence + 1, previous.continuation(),
+        remaining, RunBudget{}, previous.exact_checkpoint(), timestamp});
+    ProgramRunRecordData data;
+    data.owner_scope = previous.owner_scope();
+    data.run_id = previous.run_id();
+    data.program_version_id = previous.program_version_id();
+    data.bundle_id = previous.bundle_id();
+    data.binding_fingerprint = previous.binding_fingerprint();
+    data.invocation = previous.invocation();
+    data.child_depth = previous.child_depth();
+    data.children = previous.children();
+    data.continuation = journal.continuation;
+    data.remaining_budget = remaining;
+    data.exact_checkpoint = previous.exact_checkpoint();
+    data.exact_checkpoint_content_id = previous.exact_checkpoint_content_id();
+    data.pending_input = previous.pending_input();
+    data.pending_effect = previous.pending_effect();
+    data.terminal_result = previous.terminal_result();
+    data.fork_receipt = previous.fork_receipt();
+    data.fork_source_run_id = previous.fork_source_run_id();
+    data.fork_source_program_version_id = previous.fork_source_program_version_id();
+    data.fork_source_checkpoint_id = previous.fork_source_checkpoint_id();
+    data.recorded_binding_set_fingerprint = previous.recorded_binding_set_fingerprint();
+    data.journal_head = journal.id;
+    data.event_sequence = previous.event_sequence();
+    data.effect_sequence = previous.effect_sequence();
+    data.created_at_ms = previous.created_at_ms();
+    data.updated_at_ms = timestamp;
+    return ProgramTransitionPublication{
+        ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
+}
+
 RunBudget lineage_descendant_budget(const ProgramRunRecord& run) {
     RunBudget committed;
     const auto add = [](auto& target, auto value) {
@@ -1367,7 +1455,8 @@ ProgramTransitionPublication initial_publication(
     std::optional<std::string>              recorded_binding_set = std::nullopt,
     std::optional<ProgramPendingInput>      pending_input        = std::nullopt,
     std::optional<ProgramPendingEffect>     pending_effect       = std::nullopt,
-    std::optional<std::int64_t>             timestamp            = std::nullopt) {
+    std::optional<std::int64_t>             timestamp            = std::nullopt,
+    std::optional<std::string>              checkpoint_content_id = std::nullopt) {
     auto journal = initial_record(control, checkpoint, timestamp);
     ProgramRunRecordData data;
     data.owner_scope         = control.owner_scope;
@@ -1380,6 +1469,7 @@ ProgramTransitionPublication initial_publication(
     data.continuation        = journal.continuation;
     data.remaining_budget    = control.granted_budget;
     data.exact_checkpoint    = std::move(checkpoint);
+    data.exact_checkpoint_content_id = std::move(checkpoint_content_id);
     data.pending_input       = std::move(pending_input);
     data.pending_effect      = std::move(pending_effect);
     if (fork_receipt) {
@@ -1543,11 +1633,17 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             auto publication   = ProgramTransitionPublication{
                 ProgramRunRecord::create(std::move(data)), std::move(journal), std::move(events),
                 std::move(effects)};
-            const auto published = compare_publish_with_lineage(
-                *control.transitions, control.owner_scope, previous->journal_head(),
-                std::move(publication));
+            publication = attach_run_lineage(*control.transitions, std::move(publication));
+            const auto execution_lease = control.execution_lease();
+            const auto published = execution_lease
+                ? control.transitions->compare_publish_execution(
+                      control.owner_scope, previous->journal_head(), std::move(publication),
+                      execution_lease, std::nullopt)
+                : control.transitions->compare_publish(
+                      control.owner_scope, previous->journal_head(), std::move(publication));
             if (published == ProgramTransitionPublishResult::Published ||
                 published == ProgramTransitionPublishResult::AlreadyPresent) {
+                if (execution_lease) control.clear_execution_lease(execution_lease->id());
                 return TerminalPublicationResult::Published;
             }
         } catch (const std::exception& error) {
@@ -1579,7 +1675,8 @@ RunControl::RunControl(std::string                                owner,
                        asio::any_io_executor                      deadline_executor_value,
                        std::shared_ptr<graph::CheckpointStore>    checkpoint_store,
                        std::shared_ptr<graph::Store>              store,
-                       std::shared_ptr<ProgramTransitionStore>    transition_store)
+                       std::shared_ptr<ProgramTransitionStore>    transition_store,
+                       std::optional<ProgramExecutionLease>       execution_lease)
     : owner_scope(std::move(owner)),
       run_id(std::move(run)),
       program_version_id(pinned->version.id()),
@@ -1601,13 +1698,28 @@ RunControl::RunControl(std::string                                owner,
       transitions(std::move(transition_store)),
       cancel_token(std::make_shared<graph::CancelToken>()),
       sink_(std::move(sink)),
-      next_sequence_(event_sequence + 1) {
+      next_sequence_(event_sequence + 1),
+      execution_lease_(std::move(execution_lease)) {
     if (invocation.owner_scope != owner_scope || invocation.run_id != run_id ||
         invocation.program_version_id != program_version_id ||
         invocation.input != persisted_invocation.input ||
         invocation.correlation_id != persisted_invocation.trace_id ||
         invocation.parent_run_id != persisted_invocation.parent_run_id) {
         throw std::invalid_argument("Program runtime projection does not match RunInvocation");
+    }
+    if (execution_lease_ &&
+        (execution_lease_->owner_scope() != owner_scope ||
+         execution_lease_->run_id() != run_id || execution_lease_->attempt() != attempt ||
+         execution_lease_->program_version_id() != program_version_id ||
+         execution_lease_->bundle_id() != bundle_id ||
+         execution_lease_->core_name() != materialized->root->core_name ||
+         execution_lease_->core_generation_id() !=
+             materialized->root->compiled_plan_identity ||
+         execution_lease_->core_thread_id() != core_thread_id)) {
+        throw std::invalid_argument("Program execution lease does not bind RunControl");
+    }
+    if (execution_lease_ && supports_live_graph_migration(*materialized)) {
+        renew_graph_safe_point_request_locked();
     }
 }
 
@@ -1774,6 +1886,16 @@ void RunControl::attach_child(const std::shared_ptr<RunControl>& child) noexcept
 }
 bool RunControl::cancel(CancellationCause cause) noexcept {
     try {
+        std::shared_ptr<std::recursive_mutex> coordination_mutex;
+        {
+            std::lock_guard lock(mutex_);
+            coordination_mutex = handoff_coordination_mutex_;
+        }
+        std::unique_lock<std::recursive_mutex> coordination_lock;
+        if (coordination_mutex) {
+            coordination_lock = std::unique_lock<std::recursive_mutex>(
+                *coordination_mutex);
+        }
         const auto previous = transitions->load(owner_scope, run_id);
         if (previous && previous->continuation().state == ContinuationState::Interrupted) {
             auto                      pending_input  = previous->pending_input();
@@ -1868,6 +1990,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 }
                 cancel_token->cancel();
                 abort_handoff();
+                abort_graph_migration();
                 cancel_children(cause);
                 if (callback) {
                     try {
@@ -1896,6 +2019,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
         }
         cancel_token->cancel();
         abort_handoff();
+        abort_graph_migration();
         cancel_children(cause);
         return true;
     } catch (...) {
@@ -1910,6 +2034,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
         }
         cancel_token->cancel();
         abort_handoff();
+        abort_graph_migration();
         if (applied) cancel_children(cause);
         return applied;
     }
@@ -2077,6 +2202,7 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             terminal_cleanups.swap(terminal_cleanups_);
         }
         abort_handoff();
+        abort_graph_migration();
         for (auto& cleanup : terminal_cleanups) {
             if (cleanup) cleanup();
         }
@@ -2451,6 +2577,562 @@ void RunControl::abort_handoff() noexcept {
             request_id = handoff_request_id_;
         }
         if (request_id != 0) release_handoff(request_id);
+    } catch (...) {}
+}
+
+void RunControl::renew_graph_safe_point_request_locked() {
+    if (!materialized || !supports_live_graph_migration(*materialized)) {
+        graph_safe_point_request_.reset();
+        return;
+    }
+    graph_safe_point_request_ = std::make_shared<graph::GraphSafePointRequest>(
+        graph::GraphGenerationIdentity{materialized->root->core_name,
+                                       materialized->root->compiled_plan_identity});
+}
+
+std::shared_ptr<graph::GraphSafePointRequest>
+RunControl::graph_safe_point_request() const {
+    std::lock_guard lock(mutex_);
+    return graph_safe_point_request_;
+}
+
+std::uint64_t RunControl::request_graph_migration() {
+    std::shared_ptr<std::recursive_mutex> coordination_mutex;
+    std::function<bool(const RunControl*)> admission;
+    {
+        std::lock_guard lock(mutex_);
+        coordination_mutex = handoff_coordination_mutex_;
+        admission = handoff_admission_;
+    }
+    if (!coordination_mutex || !admission) {
+        throw std::logic_error("Program graph migration coordination is not configured");
+    }
+    std::unique_lock coordination_lock(*coordination_mutex);
+    if (!admission(this)) {
+        throw std::runtime_error(
+            "Program graph migration requires one process-local execution control");
+    }
+
+    std::lock_guard lock(mutex_);
+    if (result_ || terminal_decided_ || cancellation_cause_ != CancellationCause::None) {
+        throw std::runtime_error(
+            "Program cannot arm graph migration after termination or cancellation");
+    }
+    if (handoff_request_id_ != 0 || graph_migration_request_id_ != 0) {
+        throw std::logic_error("Program already has an outstanding migration request");
+    }
+    if (!graph_safe_point_request_) {
+        throw std::runtime_error(
+            "Program topology does not support live graph migration");
+    }
+    if (next_graph_migration_request_id_ == 0) {
+        throw std::overflow_error("Program graph migration request identity overflowed");
+    }
+    if (!graph_safe_point_request_->request()) {
+        throw std::runtime_error(
+            "Program root Core call can no longer reach a graph migration safe point");
+    }
+    graph_migration_request_id_ = next_graph_migration_request_id_++;
+    finished_graph_migration_request_id_ = 0;
+    held_graph_migration_.reset();
+    graph_migration_error_.clear();
+    return graph_migration_request_id_;
+}
+
+GraphMigrationCapsule RunControl::wait_graph_migration(std::uint64_t request_id) {
+    std::unique_lock lock(mutex_);
+    graph_migration_cv_.wait(lock, [&] {
+        return graph_migration_request_id_ != request_id || held_graph_migration_ ||
+               finished_graph_migration_request_id_ == request_id || result_ ||
+               cancellation_cause_ != CancellationCause::None;
+    });
+    if (graph_migration_request_id_ == request_id && held_graph_migration_) {
+        return *held_graph_migration_;
+    }
+    if (finished_graph_migration_request_id_ == request_id &&
+        !graph_migration_error_.empty()) {
+        throw std::runtime_error(graph_migration_error_);
+    }
+    throw std::runtime_error(
+        "Program graph migration ended before reaching a durable safe point");
+}
+
+asio::awaitable<void> RunControl::hold_graph_migration(
+    const graph::GraphSafePoint& safe_point,
+    RunBudget remaining_budget) {
+    std::uint64_t request_id = 0;
+    {
+        std::lock_guard lock(mutex_);
+        if (graph_migration_request_id_ == 0 || !graph_safe_point_request_ ||
+            !graph_safe_point_request_->captured()) {
+            co_return;
+        }
+        request_id = graph_migration_request_id_;
+    }
+
+    const auto fail_request = [&](std::string message) {
+        std::lock_guard lock(mutex_);
+        if (graph_migration_request_id_ != request_id) return;
+        graph_migration_request_id_ = 0;
+        finished_graph_migration_request_id_ = request_id;
+        held_graph_migration_.reset();
+        graph_migration_error_ = std::move(message);
+        renew_graph_safe_point_request_locked();
+        graph_migration_cv_.notify_all();
+    };
+    const auto fence_request = [&](std::string message) {
+        if (const auto local_lease = execution_lease()) {
+            try {
+                if (!transitions->load_execution_lease(owner_scope, run_id)) {
+                    clear_execution_lease(local_lease->id());
+                }
+            } catch (...) {}
+        }
+        {
+            std::lock_guard lock(mutex_);
+            if (graph_migration_request_id_ == request_id) {
+                graph_migration_request_id_ = 0;
+                finished_graph_migration_request_id_ = request_id;
+                held_graph_migration_.reset();
+                graph_migration_error_ = std::move(message);
+                graph_migration_cv_.notify_all();
+            }
+        }
+        (void)cancel(CancellationCause::ParentTerminal);
+        RunOutcome cancelled;
+        cancelled.status = ProgramTerminalStatus::Cancelled;
+        cancelled.remaining_budget = remaining_budget;
+        cancelled.usage.wall_time_ms =
+            granted_budget.wall_time_ms - remaining_budget.wall_time_ms;
+        cancelled.usage.model_tokens =
+            granted_budget.model_tokens - remaining_budget.model_tokens;
+        cancelled.usage.monetary_microunits =
+            granted_budget.monetary_microunits - remaining_budget.monetary_microunits;
+        cancelled.usage.program_operations =
+            granted_budget.max_program_operations -
+            remaining_budget.max_program_operations;
+        cancelled.usage.core_steps =
+            granted_budget.max_core_steps - remaining_budget.max_core_steps;
+        cancelled.checkpoint = CoreCheckpointIdentity{
+            safe_point.generation().core_name,
+            safe_point.generation().core_generation_id,
+            safe_point.checkpoint().thread_id,
+            safe_point.checkpoint().id,
+            safe_point.checkpoint().schema_version};
+        complete(std::move(cancelled));
+    };
+
+    bool source_checkpoint_committed = false;
+    bool uncertain_publication = false;
+    bool checkpoint_event_adopted = false;
+    std::optional<ProgramEvent> safe_point_event;
+    try {
+        const auto& checkpoint = safe_point.checkpoint();
+        const CoreCheckpointIdentity checkpoint_identity{
+            safe_point.generation().core_name,
+            safe_point.generation().core_generation_id,
+            checkpoint.thread_id,
+            checkpoint.id,
+            checkpoint.schema_version};
+        const auto checkpoint_content_id =
+            graph_migration_checkpoint_content_id(checkpoint);
+        const auto previous = transitions->load(owner_scope, run_id);
+        const auto previous_journal = transitions->latest(owner_scope, run_id);
+        const auto active = previous ? load_active_run_lineage(*transitions, *previous)
+                                     : std::nullopt;
+        const auto expected_execution_lease = execution_lease();
+        if (!previous || !previous_journal || !active ||
+            !expected_execution_lease ||
+            previous->journal_head() != previous_journal->id ||
+            previous->continuation().state != ContinuationState::Running ||
+            previous->continuation().attempt != attempt || previous->child_depth() != 0 ||
+            !previous->invocation().parent_run_id.empty() || previous->pending_input() ||
+            previous->pending_effect() || previous->terminal_result() ||
+            !previous->children().empty() || previous->effect_sequence() != 0 ||
+            active->lineage.inflight_reservation() != RunBudget{} ||
+            active->lineage.committed_descendant_budget() != RunBudget{} ||
+            checkpoint_identity.core_name != materialized->root->core_name ||
+            checkpoint_identity.core_generation_id !=
+                materialized->root->compiled_plan_identity ||
+            checkpoint_identity.core_thread_id != core_thread_id) {
+            throw std::runtime_error(
+                "Program source is not at an admitted graph migration boundary");
+        }
+
+        auto events = events_after(previous->event_sequence());
+        std::uint64_t event_sequence = previous->event_sequence();
+        for (const auto& event : events) {
+            if (event.sequence != ++event_sequence) {
+                throw std::runtime_error(
+                    "Program graph migration events are not contiguous");
+            }
+        }
+        auto checkpoint_event = preview_event(
+            event_sequence + 1, ProgramEventKind::CheckpointPublished,
+            ProgramCheckpointEvent{checkpoint_identity});
+        safe_point_event = checkpoint_event;
+        events.push_back(checkpoint_event);
+
+        const auto timestamp = std::max(
+            {now_ms(), previous->updated_at_ms(), checkpoint.timestamp});
+        auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+            previous->journal_head(), run_id, program_version_id, bundle_id,
+            previous_journal->sequence + 1, previous->continuation(), remaining_budget,
+            RunBudget{}, checkpoint_identity, timestamp});
+        ProgramRunRecordData data;
+        data.owner_scope = previous->owner_scope();
+        data.run_id = previous->run_id();
+        data.program_version_id = previous->program_version_id();
+        data.bundle_id = previous->bundle_id();
+        data.binding_fingerprint = previous->binding_fingerprint();
+        data.invocation = previous->invocation();
+        data.child_depth = previous->child_depth();
+        data.continuation = previous->continuation();
+        data.remaining_budget = remaining_budget;
+        data.exact_checkpoint = checkpoint_identity;
+        data.exact_checkpoint_content_id = checkpoint_content_id;
+        data.pending_input = previous->pending_input();
+        data.pending_effect = previous->pending_effect();
+        data.terminal_result = previous->terminal_result();
+        data.fork_receipt = previous->fork_receipt();
+        data.children = previous->children();
+        data.journal_head = journal.id;
+        data.fork_source_run_id = previous->fork_source_run_id();
+        data.fork_source_program_version_id =
+            previous->fork_source_program_version_id();
+        data.fork_source_checkpoint_id = previous->fork_source_checkpoint_id();
+        data.recorded_binding_set_fingerprint =
+            previous->recorded_binding_set_fingerprint();
+        data.event_sequence = checkpoint_event.sequence;
+        data.effect_sequence = previous->effect_sequence();
+        data.created_at_ms = previous->created_at_ms();
+        data.updated_at_ms = timestamp;
+        auto publication = ProgramTransitionPublication{
+            ProgramRunRecord::create(std::move(data)), std::move(journal),
+            std::move(events), {}};
+        const auto safe_point_evidence = ProgramGraphSafePointEvidence(
+            materialized->bundle, materialized->version, safe_point);
+        publication = attach_run_lineage(*transitions, std::move(publication));
+        const auto candidate_run = publication.run_record;
+        const auto candidate_journal = publication.journal_record;
+        const auto candidate_lineage = publication.run_lineage;
+        if (!candidate_lineage) {
+            throw std::runtime_error(
+                "Program graph migration source has no durable lineage head");
+        }
+        const auto candidate_capsule = GraphMigrationCapsule::seal(
+            active->generation, *candidate_lineage, materialized->version, safe_point);
+        const auto publication_state = [&] {
+            try {
+                const auto durable = transitions->load(owner_scope, run_id);
+                const auto durable_journal = transitions->latest(owner_scope, run_id);
+                const auto durable_lineage = transitions->load_run_lineage(owner_scope, run_id);
+                if (durable && durable_journal && durable_lineage && candidate_lineage &&
+                    durable->id() == candidate_run.id() &&
+                    durable_journal->id == candidate_journal.id &&
+                    durable_lineage->id() == candidate_lineage->id()) {
+                    return 1;
+                }
+                if (durable && durable_journal && durable_lineage &&
+                    durable->id() == previous->id() &&
+                    durable_journal->id == previous_journal->id &&
+                    durable_lineage->id() == active->lineage.id()) {
+                    return 0;
+                }
+            } catch (...) {}
+            return -1;
+        };
+        ProgramTransitionPublishResult published;
+        try {
+            published = transitions->compare_publish_graph_safe_point(
+                owner_scope, previous->journal_head(), std::move(publication),
+                safe_point_evidence, candidate_capsule, *expected_execution_lease);
+        } catch (...) {
+            const auto state = publication_state();
+            if (state == 1) {
+                published = ProgramTransitionPublishResult::AlreadyPresent;
+            } else {
+                uncertain_publication = state != 0;
+                throw;
+            }
+        }
+        if (published != ProgramTransitionPublishResult::Published &&
+            published != ProgramTransitionPublishResult::AlreadyPresent) {
+            const auto state = publication_state();
+            if (state == 1) {
+                published = ProgramTransitionPublishResult::AlreadyPresent;
+            } else {
+                uncertain_publication = state != 0;
+            }
+        }
+        if (published != ProgramTransitionPublishResult::Published &&
+            published != ProgramTransitionPublishResult::AlreadyPresent) {
+            throw std::runtime_error(
+                "Program graph migration source checkpoint lost its transition CAS");
+        }
+        source_checkpoint_committed = true;
+        clear_execution_lease(expected_execution_lease->id());
+        adopt_published_event(checkpoint_event);
+        checkpoint_event_adopted = true;
+        {
+            std::lock_guard lock(mutex_);
+            latest_checkpoint_ = checkpoint_identity;
+        }
+
+        const auto durable = transitions->load(owner_scope, run_id);
+        const auto durable_active = durable
+            ? load_active_run_lineage(*transitions, *durable)
+            : std::nullopt;
+        if (!durable || !durable_active ||
+            durable->exact_checkpoint() != std::optional{checkpoint_identity} ||
+            durable->exact_checkpoint_content_id() !=
+                std::optional{checkpoint_content_id}) {
+            throw std::runtime_error(
+                "Program graph migration source checkpoint was not durable");
+        }
+        const auto durable_capsule = transitions->load_graph_migration_capsule(
+            owner_scope, run_id, durable_active->lineage.id());
+        if (!durable_capsule || durable_capsule->id() != candidate_capsule.id()) {
+            throw std::runtime_error(
+                "Program graph migration source hold was not durable");
+        }
+
+        deliver_event(checkpoint_event);
+
+        {
+            std::lock_guard lock(mutex_);
+            if (graph_migration_request_id_ != request_id || result_ || terminal_decided_ ||
+                cancellation_cause_ != CancellationCause::None) {
+                throw std::runtime_error(
+                    "Program graph migration source stopped before it could be held");
+            }
+            held_graph_migration_ = *durable_capsule;
+            latest_checkpoint_ = checkpoint_identity;
+            graph_migration_cv_.notify_all();
+        }
+    } catch (const std::exception& error) {
+        if (source_checkpoint_committed || uncertain_publication) {
+            if (!checkpoint_event_adopted && safe_point_event) {
+                try {
+                    adopt_published_event(*safe_point_event);
+                    checkpoint_event_adopted = true;
+                    std::lock_guard lock(mutex_);
+                    latest_checkpoint_ =
+                        std::get<ProgramCheckpointEvent>(safe_point_event->payload).checkpoint;
+                } catch (...) {}
+            }
+            fence_request(error.what());
+        } else {
+            fail_request(error.what());
+        }
+        co_return;
+    } catch (...) {
+        if (source_checkpoint_committed || uncertain_publication) {
+            if (!checkpoint_event_adopted && safe_point_event) {
+                try {
+                    adopt_published_event(*safe_point_event);
+                    checkpoint_event_adopted = true;
+                    std::lock_guard lock(mutex_);
+                    latest_checkpoint_ =
+                        std::get<ProgramCheckpointEvent>(safe_point_event->payload).checkpoint;
+                } catch (...) {}
+            }
+            fence_request("Program graph migration source publication failed");
+        } else {
+            fail_request("Program graph migration source publication failed");
+        }
+        co_return;
+    }
+
+    const auto executor = co_await asio::this_coro::executor;
+    auto timer = std::make_shared<asio::steady_timer>(executor);
+    timer->expires_at((asio::steady_timer::time_point::max)());
+    {
+        std::lock_guard lock(mutex_);
+        if (graph_migration_request_id_ != request_id || !held_graph_migration_ || result_ ||
+            terminal_decided_ || cancellation_cause_ != CancellationCause::None) {
+            co_return;
+        }
+        graph_migration_release_waiter_ = timer;
+    }
+    asio::error_code error;
+    co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+}
+
+bool RunControl::has_active_graph_migration_request() const noexcept {
+    std::lock_guard lock(mutex_);
+    return graph_migration_request_id_ != 0;
+}
+
+bool RunControl::graph_migration_matches(
+    std::uint64_t request_id,
+    std::string_view capsule_id) const noexcept {
+    std::lock_guard lock(mutex_);
+    return graph_migration_request_id_ == request_id && held_graph_migration_ &&
+           held_graph_migration_->id() == capsule_id && !result_ && !terminal_decided_ &&
+           cancellation_cause_ == CancellationCause::None;
+}
+
+std::optional<ProgramExecutionLease> RunControl::execution_lease() const {
+    std::lock_guard lock(mutex_);
+    return execution_lease_;
+}
+
+void RunControl::set_execution_lease(ProgramExecutionLease lease) {
+    std::lock_guard lock(mutex_);
+    execution_lease_ = std::move(lease);
+    renew_graph_safe_point_request_locked();
+}
+
+void RunControl::clear_execution_lease(std::string_view lease_id) const noexcept {
+    std::lock_guard lock(mutex_);
+    if (execution_lease_ && execution_lease_->id() == lease_id) {
+        execution_lease_.reset();
+    }
+}
+
+void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
+    try {
+        std::optional<GraphMigrationCapsule> held_capsule;
+        {
+            std::lock_guard lock(mutex_);
+            if (graph_migration_request_id_ == request_id && held_graph_migration_) {
+                held_capsule = held_graph_migration_;
+            }
+        }
+
+        bool durable_release = !held_capsule;
+        if (held_capsule) {
+            try {
+                const auto previous = transitions->load(owner_scope, run_id);
+                const auto previous_journal = transitions->latest(owner_scope, run_id);
+                const auto active = previous
+                    ? load_active_run_lineage(*transitions, *previous)
+                    : std::nullopt;
+                const auto durable_capsule = active
+                    ? transitions->load_graph_migration_capsule(
+                          owner_scope, run_id, active->lineage.id())
+                    : std::nullopt;
+                if (previous && previous_journal && active && durable_capsule &&
+                    durable_capsule->id() == held_capsule->id() &&
+                    active->lineage.id() == held_capsule->source_lineage_head_id() &&
+                    previous->journal_head() == previous_journal->id) {
+                    const auto timestamp = std::max(now_ms(), previous->updated_at_ms());
+                    const auto remaining = program_replacement_remaining_budget(
+                        *previous, active->lineage, timestamp);
+                    auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+                        previous->journal_head(), run_id, previous->program_version_id(),
+                        previous->bundle_id(), previous_journal->sequence + 1,
+                        previous->continuation(), remaining, RunBudget{},
+                        previous->exact_checkpoint(), timestamp});
+                    ProgramRunRecordData data;
+                    data.owner_scope = previous->owner_scope();
+                    data.run_id = previous->run_id();
+                    data.program_version_id = previous->program_version_id();
+                    data.bundle_id = previous->bundle_id();
+                    data.binding_fingerprint = previous->binding_fingerprint();
+                    data.invocation = previous->invocation();
+                    data.child_depth = previous->child_depth();
+                    data.continuation = journal.continuation;
+                    data.remaining_budget = remaining;
+                    data.exact_checkpoint = previous->exact_checkpoint();
+                    data.exact_checkpoint_content_id =
+                        previous->exact_checkpoint_content_id();
+                    data.pending_input = previous->pending_input();
+                    data.pending_effect = previous->pending_effect();
+                    data.terminal_result = previous->terminal_result();
+                    data.fork_receipt = previous->fork_receipt();
+                    data.children = previous->children();
+                    data.journal_head = journal.id;
+                    data.fork_source_run_id = previous->fork_source_run_id();
+                    data.fork_source_program_version_id =
+                        previous->fork_source_program_version_id();
+                    data.fork_source_checkpoint_id = previous->fork_source_checkpoint_id();
+                    data.recorded_binding_set_fingerprint =
+                        previous->recorded_binding_set_fingerprint();
+                    data.event_sequence = previous->event_sequence();
+                    data.effect_sequence = previous->effect_sequence();
+                    data.created_at_ms = previous->created_at_ms();
+                    data.updated_at_ms = timestamp;
+                    auto publication = attach_run_lineage(
+                        *transitions,
+                        ProgramTransitionPublication{
+                            ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}});
+                    const auto next_execution_lease =
+                        make_execution_lease(*materialized, publication);
+                    const auto candidate_run = publication.run_record;
+                    const auto candidate_lineage = publication.run_lineage;
+                    ProgramTransitionPublishResult published;
+                    try {
+                        published = next_execution_lease
+                            ? transitions->compare_publish_execution(
+                                  owner_scope, previous->journal_head(),
+                                  std::move(publication), std::nullopt,
+                                  next_execution_lease)
+                            : ProgramTransitionPublishResult::Conflict;
+                    } catch (...) {
+                        const auto stored = transitions->load(owner_scope, run_id);
+                        const auto lineage = transitions->load_run_lineage(owner_scope, run_id);
+                        if (stored && lineage && candidate_lineage &&
+                            stored->id() == candidate_run.id() &&
+                            lineage->id() == candidate_lineage->id()) {
+                            published = ProgramTransitionPublishResult::AlreadyPresent;
+                        } else {
+                            throw;
+                        }
+                    }
+                    durable_release =
+                        published == ProgramTransitionPublishResult::Published ||
+                        published == ProgramTransitionPublishResult::AlreadyPresent;
+                    if (durable_release && next_execution_lease) {
+                        set_execution_lease(*next_execution_lease);
+                    }
+                }
+            } catch (...) {
+                durable_release = false;
+            }
+        }
+
+        std::shared_ptr<asio::steady_timer> release_waiter;
+        {
+            std::lock_guard lock(mutex_);
+            const bool cancelled = cancellation_cause_ != CancellationCause::None ||
+                                   result_ || terminal_decided_;
+            if (!durable_release && !cancelled) return;
+            if (graph_migration_request_id_ == request_id) {
+                graph_migration_request_id_ = 0;
+                held_graph_migration_.reset();
+                graph_migration_error_.clear();
+                release_waiter = graph_migration_release_waiter_.lock();
+                graph_migration_release_waiter_.reset();
+                renew_graph_safe_point_request_locked();
+            } else if (finished_graph_migration_request_id_ == request_id) {
+                finished_graph_migration_request_id_ = 0;
+                graph_migration_error_.clear();
+            } else {
+                return;
+            }
+            graph_migration_cv_.notify_all();
+        }
+        if (release_waiter) {
+            asio::dispatch(release_waiter->get_executor(), [release_waiter] {
+                try {
+                    release_waiter->expires_at(
+                        (asio::steady_timer::time_point::min)());
+                } catch (...) {}
+            });
+        }
+    } catch (...) {}
+}
+
+void RunControl::abort_graph_migration() noexcept {
+    try {
+        std::uint64_t request_id = 0;
+        {
+            std::lock_guard lock(mutex_);
+            request_id = graph_migration_request_id_;
+        }
+        if (request_id != 0) release_graph_migration(request_id);
     } catch (...) {}
 }
 
@@ -3450,18 +4132,42 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
     const auto binding_fingerprint = capability_binding_receipt_root(
         pinned->version.core_materialization_receipt().capability_bindings);
     ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
-                                         canonical.correlation_id, canonical.parent_run_id,
-                                         invocation.child_depth};
+                                          canonical.correlation_id, canonical.parent_run_id,
+                                          invocation.child_depth};
+    const auto transition_time = now_ms();
+    std::optional<ProgramExecutionLease> execution_lease;
+    if (supports_root_execution_lease(*pinned, canonical.budget) &&
+        invocation.child_depth == 0) {
+        if (!canonical.budget.wall_time_ms ||
+            canonical.budget.wall_time_ms > static_cast<std::uint64_t>(
+                std::numeric_limits<std::int64_t>::max() - transition_time)) {
+            throw_runtime_diagnostic(
+                "P_RUN_LEASE", "Program execution lease lifetime exceeds the supported range");
+        }
+        execution_lease.emplace(ProgramExecutionLeaseData{
+            std::string(owner_scope), run_id, 1, version.id(), pinned->bundle.id(),
+            pinned->root->core_name, pinned->root->compiled_plan_identity, core_thread_id,
+            graph::Checkpoint::generate_id(), transition_time,
+            transition_time + static_cast<std::int64_t>(canonical.budget.wall_time_ms)});
+    }
     auto                       control = std::make_shared<detail::RunControl>(
-        std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
+        std::string(owner_scope), run_id, 1, pinned, binding_fingerprint,
         std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
-        impl_->config.transitions);
+        impl_->config.transitions, execution_lease);
 
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
-    const auto published = compare_publish_with_lineage(
-        *control->transitions, owner_scope, "", initial_publication(*control, started));
+    auto publication = attach_run_lineage(
+        *control->transitions,
+        initial_publication(*control, started, std::nullopt, std::nullopt,
+                            std::nullopt, std::nullopt, std::nullopt,
+                            transition_time));
+    const auto published = execution_lease
+        ? control->transitions->compare_publish_execution(
+              owner_scope, "", std::move(publication), std::nullopt, execution_lease)
+        : control->transitions->compare_publish(
+              owner_scope, "", std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }
@@ -4116,8 +4822,14 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         source_lineage->lineage.created_at_ms(),
         std::max(source_lineage->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),
         source_lineage->lineage.committed_descendant_budget()});
-    const auto published = control->transitions->compare_publish(
-        owner_scope, "", std::move(publication));
+    const auto execution_lease =
+        make_execution_lease(*control->materialized, publication);
+    const auto published = execution_lease
+        ? control->transitions->compare_publish_execution(
+              owner_scope, "", std::move(publication), std::nullopt,
+              execution_lease)
+        : control->transitions->compare_publish(
+              owner_scope, "", std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
         if (auto existing = reconnect_existing()) return std::move(*existing);
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
@@ -4137,6 +4849,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                  {"expected_plan_id", migration_plan.id()},
                  {"stored_plan_id", durable_plan ? durable_plan->id() : std::string{}}});
     }
+    if (execution_lease) control->set_execution_lease(*execution_lease);
     impl_->register_control(control);
     try {
         control->deliver_event(started);
@@ -4437,25 +5150,36 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         source_lineage->lineage.id(), source_lineage->lineage.created_at_ms(),
         std::max(source_lineage->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),
         source_lineage->lineage.committed_descendant_budget()});
+    const auto execution_lease =
+        make_execution_lease(*control->materialized, publication);
 
     ProgramTransitionPublishResult published;
     try {
-        published =
-            control->transitions->compare_publish(owner_scope, "", std::move(publication));
+        published = execution_lease
+            ? control->transitions->compare_publish_execution(
+                  owner_scope, "", std::move(publication), std::nullopt,
+                  execution_lease)
+            : control->transitions->compare_publish(
+                  owner_scope, "", std::move(publication));
     } catch (...) {
+        bool committed = false;
         try {
             const auto durable = control->transitions->load_generation(
                 owner_scope, successor.lineage_id(), successor.generation());
-            if (durable && durable->id() == successor.id()) cancel_source_control();
+            committed = durable && durable->id() == successor.id();
+            if (committed) cancel_source_control();
         } catch (...) {}
-        throw;
+        if (!committed || !execution_lease) throw;
+        published = ProgramTransitionPublishResult::AlreadyPresent;
     }
-    if (published != ProgramTransitionPublishResult::Published) {
+    if (published != ProgramTransitionPublishResult::Published &&
+        published != ProgramTransitionPublishResult::AlreadyPresent) {
         if (auto existing = reconnect_existing()) return std::move(*existing);
         throw_runtime_diagnostic("P_REPLACEMENT_CONFLICT",
                                  "Program lineage already selected another successor");
     }
 
+    if (execution_lease) control->set_execution_lease(*execution_lease);
     auto registration = impl_->register_control(control, true);
     cancel_source_control();
     if (!registration.inserted) return ProgramHandle(std::move(registration.control));
@@ -4513,6 +5237,316 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
         }
         throw;
     }
+}
+
+ProgramHandle ProgramRuntime::migrate_graph(
+    const ProgramHandle& source,
+    ProgramGraphMigrationTarget target) {
+    if (!source.control_ || !source.control_->materialized) {
+        throw std::invalid_argument(
+            "Program graph migration requires a live source handle");
+    }
+    if (target.target_program_version_id.empty()) {
+        throw std::invalid_argument(
+            "Program graph migration requires a target ProgramVersion id");
+    }
+    if (!same_process_coordination_backend(*source.control_->transitions,
+                                           *impl_->config.transitions)) {
+        throw std::invalid_argument(
+            "Program graph migration source and target use different transition stores");
+    }
+
+    std::unique_lock fork_lock(impl_->fork_mutex);
+    const auto owner_scope = source.control_->owner_scope;
+    const auto source_record_before = impl_->config.transitions->load(
+        owner_scope, source.control_->run_id);
+    if (!source_record_before ||
+        source_record_before->recorded_binding_set_fingerprint()) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_SOURCE",
+            "Program graph migration source is absent or replay-bound");
+    }
+    const auto source_version = impl_->config.catalog->resolve_version(
+        owner_scope, source_record_before->program_version_id());
+    const auto target_version = impl_->config.catalog->resolve_version(
+        owner_scope, target.target_program_version_id);
+    if (!source_version || !target_version) {
+        throw_runtime_diagnostic(
+            "P_VERSION_NOT_FOUND",
+            "Program graph migration requires exact owner-scoped admitted versions");
+    }
+    auto source_pinned = detail::CatalogRuntimeAccess::pin(
+        *impl_->config.catalog, *source_version);
+    auto target_pinned = detail::CatalogRuntimeAccess::pin(
+        *impl_->config.catalog, *target_version);
+    const auto migration_plan = impl_->config.catalog->plan_migration(
+        owner_scope, source_version->id(), target_version->id());
+    if (!supports_live_graph_migration(*source_pinned) ||
+        !supports_live_graph_migration(*target_pinned) ||
+        source_pinned->root->core_name != target_pinned->root->core_name ||
+        source_pinned->root->compiled_plan_identity !=
+            target_pinned->root->compiled_plan_identity ||
+        !migration_plan.is_compatible()) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_INCOMPATIBLE",
+            "Program graph migration target is not an admitted compatible root Core");
+    }
+    if (!target.requested_run_id.empty() &&
+        target.requested_run_id == source.control_->run_id) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_SAME_RUN",
+            "Program graph migration target run must differ from its source");
+    }
+
+    if (const auto lineage = impl_->config.transitions->load_run_lineage(
+            owner_scope, source.control_->run_id);
+        lineage && lineage->active_run_record_id() != source_record_before->id()) {
+        const auto generation = impl_->config.transitions->load_generation(
+            owner_scope, lineage->lineage_id(), lineage->active_generation());
+        const auto receipt = generation
+            ? generation->graph_migration_receipt()
+            : std::nullopt;
+        const auto expected_target_run_id = receipt
+            ? (target.requested_run_id.empty()
+                   ? graph_migration_run_id(receipt->capsule(), target_version->id())
+                   : target.requested_run_id)
+            : std::string{};
+        if (generation && receipt && generation->id() == lineage->active_generation_id() &&
+            receipt->capsule().source_run_id() == source.control_->run_id &&
+            receipt->source_version().id() == source_version->id() &&
+            receipt->target_version().id() == target_version->id() &&
+            generation->run_id() == receipt->target_run_id() &&
+            receipt->target_run_id() == expected_target_run_id) {
+            return reconnect(owner_scope, source.control_->run_id);
+        }
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_STALE",
+            "Program graph migration source already selected another successor");
+    }
+
+    const auto request_id = source.control_->request_graph_migration();
+    struct SourceReleaseGuard {
+        std::shared_ptr<detail::RunControl> control;
+        std::uint64_t request_id = 0;
+        bool consumed = false;
+        ~SourceReleaseGuard() {
+            if (!consumed && control) control->release_graph_migration(request_id);
+        }
+    } source_guard{source.control_, request_id};
+    const auto capsule = source.control_->wait_graph_migration(request_id);
+
+    std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
+    if (!source.control_->graph_migration_matches(request_id, capsule.id())) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_SOURCE",
+            "Program graph migration source hold was cancelled before publication");
+    }
+    const auto source_record = impl_->config.transitions->load(
+        owner_scope, capsule.source_run_id());
+    const auto active = source_record
+        ? load_active_run_lineage(*impl_->config.transitions, *source_record)
+        : std::nullopt;
+    if (!source_record || !active ||
+        source_record->id() != active->lineage.active_run_record_id() ||
+        active->generation.id() != capsule.source_generation_id() ||
+        active->lineage.id() != capsule.source_lineage_head_id() ||
+        source_record->exact_checkpoint() !=
+            std::optional{capsule.core_checkpoint()} ||
+        source_record->exact_checkpoint_content_id() !=
+            std::optional{graph_migration_checkpoint_content_id(
+                capsule.checkpoint())}) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_STALE",
+            "Program graph migration capsule is no longer the active source head");
+    }
+
+    const auto target_run_id = target.requested_run_id.empty()
+        ? graph_migration_run_id(capsule, target_version->id())
+        : target.requested_run_id;
+    if (target_run_id == source_record->run_id()) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_SAME_RUN",
+            "Program graph migration target run must differ from its source");
+    }
+    if (impl_->config.transitions->load(owner_scope, target_run_id)) {
+        throw_runtime_diagnostic(
+            "P_RUN_CONFLICT",
+            "Requested Program graph migration target run id is unavailable");
+    }
+    if (capsule.checkpoint().timestamp ==
+        std::numeric_limits<std::int64_t>::max()) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_CHECKPOINT",
+            "Program graph migration checkpoint timestamp is exhausted");
+    }
+
+    const auto snapshot_time = std::max(
+        {now_ms(), source_record->updated_at_ms(),
+         capsule.checkpoint().timestamp + 1});
+    if (program_replacement_remaining_budget(
+            *source_record, active->lineage, snapshot_time).wall_time_ms == 0) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_EXPIRED",
+            "Program graph migration exhausted its wall-time budget before target preparation");
+    }
+    auto target_snapshot = capsule.checkpoint();
+    target_snapshot.id = graph::Checkpoint::generate_id();
+    target_snapshot.thread_id = program_root_core_thread_id(
+        target_run_id, target_pinned->root->compiled_plan_identity);
+    target_snapshot.parent_id = capsule.core_checkpoint().checkpoint_id;
+    target_snapshot.metadata["migrated_from"] = capsule.id();
+    target_snapshot.timestamp = snapshot_time;
+    impl_->config.checkpoints->save(target_snapshot);
+    const auto durable_target_checkpoint =
+        impl_->config.checkpoints->load_by_id(target_snapshot.id);
+    const auto target_checkpoint_content_id =
+        graph_migration_checkpoint_content_id(target_snapshot);
+    if (!durable_target_checkpoint ||
+        graph_migration_checkpoint_content_id(*durable_target_checkpoint) !=
+            target_checkpoint_content_id) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_CHECKPOINT",
+            "Program graph migration target checkpoint did not survive exact read-back");
+    }
+    const auto transition_time = std::max(
+        {now_ms(), source_record->updated_at_ms(), target_snapshot.timestamp});
+    const auto remaining = program_replacement_remaining_budget(
+        *source_record, active->lineage, transition_time);
+    if (remaining.wall_time_ms == 0) {
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_EXPIRED",
+            "Program graph migration exhausted its wall-time budget during target preparation");
+    }
+    auto target_invocation = source_record->invocation();
+    target_invocation.program_version_id = target_version->id();
+    target_invocation.run_id = target_run_id;
+    target_invocation.budget = remaining;
+    target_invocation.validate();
+    const CoreCheckpointIdentity target_checkpoint{
+        target_pinned->root->core_name,
+        target_pinned->root->compiled_plan_identity,
+        target_snapshot.thread_id,
+        target_snapshot.id,
+        target_snapshot.schema_version};
+
+    ProgramPersistedInvocation persisted{
+        target_invocation.input, remaining, target_invocation.correlation_id,
+        target_invocation.parent_run_id, 0};
+    const auto binding_fingerprint = capability_binding_receipt_root(
+        target_version->core_materialization_receipt().capability_bindings);
+    auto control = std::make_shared<detail::RunControl>(
+        owner_scope, target_run_id, source_record->continuation().attempt,
+        std::move(target_pinned), binding_fingerprint, std::move(persisted),
+        target_invocation, target_snapshot.thread_id, 0, std::move(target.events),
+        impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+        impl_->config.state_store, impl_->config.transitions);
+    auto started = control->preview_event(
+        1, ProgramEventKind::Started, ProgramStartedEvent{remaining});
+    started.id.clear();
+    started.timestamp_ms = transition_time;
+    started = ProgramEvent::create(std::move(started));
+    control->adopt_published_event(started);
+    auto publication = initial_publication(
+        *control, started, target_checkpoint, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, transition_time,
+        target_checkpoint_content_id);
+    auto receipt = ProgramGraphMigrationReceipt(
+        ProgramGraphMigrationReceiptData{
+            capsule, source_pinned->bundle, source_pinned->version,
+            control->materialized->bundle, control->materialized->version,
+            migration_plan.id(), active->generation.generation() + 1,
+            target_run_id, target_version->id(), target_version->bundle_id(),
+            publication.run_record.invocation().canonical_identity(),
+            publication.run_record.binding_fingerprint(),
+            publication.run_record.id(), publication.run_record.journal_head(),
+            target_checkpoint, target_snapshot});
+    auto successor = ProgramRunGeneration::create(ProgramRunGenerationData{
+        owner_scope, active->lineage.lineage_id(),
+        active->generation.generation() + 1, target_run_id,
+        target_version->id(), target_version->bundle_id(),
+        publication.run_record.id(), publication.run_record.journal_head(),
+        active->generation.id(), publication.run_record.created_at_ms(), 0,
+        std::nullopt, receipt});
+    publication.run_generation = successor;
+    publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        owner_scope, active->lineage.lineage_id(), active->lineage.root_run_id(),
+        successor.generation(), successor.id(), publication.run_record.id(),
+        publication.run_record.journal_head(), remaining, RunBudget{},
+        active->lineage.id(), active->lineage.created_at_ms(),
+        publication.run_record.updated_at_ms(), RunBudget{}});
+    publication.migration_plan = migration_plan;
+    const auto target_execution_lease =
+        make_execution_lease(*control->materialized, publication);
+    if (!target_execution_lease) {
+        throw_runtime_diagnostic(
+            "P_RUN_LEASE", "Program graph migration target cannot acquire execution ownership");
+    }
+
+    const auto fence_source = [&] {
+        source_guard.consumed = true;
+        impl_->cancel_process_controls(owner_scope, capsule.source_run_id());
+    };
+    ProgramTransitionPublishResult published;
+    try {
+        published = impl_->config.transitions->compare_publish_execution(
+            owner_scope, "", std::move(publication), std::nullopt,
+            target_execution_lease);
+    } catch (...) {
+        bool committed = false;
+        bool definitely_uncommitted = false;
+        try {
+            const auto durable = impl_->config.transitions->load_generation(
+                owner_scope, successor.lineage_id(), successor.generation());
+            committed = durable && durable->id() == successor.id();
+            const auto lineage = impl_->config.transitions->load_lineage(
+                owner_scope, successor.lineage_id());
+            definitely_uncommitted = lineage &&
+                lineage->id() == capsule.source_lineage_head_id();
+        } catch (...) {}
+        if (committed || !definitely_uncommitted) fence_source();
+        if (!committed) throw;
+        published = ProgramTransitionPublishResult::AlreadyPresent;
+    }
+    if (published != ProgramTransitionPublishResult::Published &&
+        published != ProgramTransitionPublishResult::AlreadyPresent) {
+        bool definitely_uncommitted = false;
+        try {
+            const auto lineage = impl_->config.transitions->load_lineage(
+                owner_scope, successor.lineage_id());
+            definitely_uncommitted = lineage &&
+                lineage->id() == capsule.source_lineage_head_id();
+        } catch (...) {}
+        if (!definitely_uncommitted) fence_source();
+        throw_runtime_diagnostic(
+            "P_GRAPH_MIGRATION_CONFLICT",
+            "Program lineage already selected another graph migration successor");
+    }
+
+    fence_source();
+    control->set_execution_lease(*target_execution_lease);
+    auto registration = impl_->register_control(control, true);
+    if (!registration.inserted) {
+        return ProgramHandle(std::move(registration.control));
+    }
+    reconnect_lock.unlock();
+    fork_lock.unlock();
+    try {
+        control->deliver_event(started);
+    } catch (const std::exception& error) {
+        detail::RunOutcome failed;
+        failed.status = ProgramTerminalStatus::Failed;
+        failed.remaining_budget = remaining;
+        failed.checkpoint = target_checkpoint;
+        failed.failure = ProgramFailure{
+            "P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        control->complete(std::move(failed));
+        return ProgramHandle(std::move(control));
+    }
+    spawn_run_attempt(impl_->pool, control, target_invocation.input,
+                      target_checkpoint.checkpoint_id,
+                      impl_->config.host_admission,
+                      impl_->config.host_admission_resolver);
+    return ProgramHandle(std::move(control));
 }
 
 std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view owner_scope,
@@ -4578,7 +5612,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");
     std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
     std::string resolved_run_id(run_id);
-    bool        replacement_generation = false;
+    bool        successor_generation = false;
+    std::optional<ProgramGraphMigrationReceipt> graph_migration_receipt;
     const auto  requested_record = impl_->config.transitions->load(owner_scope, run_id);
     if (!requested_record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
@@ -4591,7 +5626,9 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             throw_runtime_diagnostic("P_RUN_LINEAGE",
                                      "Program run lineage has no valid active generation");
         }
-        replacement_generation = active->replacement_receipt().has_value();
+        successor_generation = active->replacement_receipt().has_value() ||
+                               active->graph_migration_receipt().has_value();
+        graph_migration_receipt = active->graph_migration_receipt();
         resolved_run_id = active->run_id();
     }
     run_id = resolved_run_id;
@@ -4599,7 +5636,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (!existing_control) {
         auto process_control = impl_->find_process_control(owner_scope, run_id);
         if (process_control &&
-            (replacement_generation || process_control->has_active_handoff_request())) {
+            (successor_generation || process_control->has_active_handoff_request() ||
+             process_control->has_active_graph_migration_request())) {
             existing_control = std::move(process_control);
         }
     }
@@ -4608,9 +5646,84 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         return ProgramHandle(std::move(control));
     }
 
-    const auto record = impl_->config.transitions->load(owner_scope, run_id);
+    auto record = impl_->config.transitions->load(owner_scope, run_id);
     if (!record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
+    }
+    if (graph_migration_receipt) {
+        std::optional<MigrationPlan> stored_plan;
+        std::optional<ProgramTransitionPublication> initial_publication;
+        try {
+            stored_plan = impl_->config.transitions->load_migration_plan(owner_scope, run_id);
+            initial_publication =
+                impl_->config.transitions->load_generation_initial_publication(
+                    owner_scope, graph_migration_receipt->capsule().lineage_id(),
+                    graph_migration_receipt->target_generation());
+        } catch (const std::exception& error) {
+            throw_runtime_diagnostic(
+                "P_GRAPH_MIGRATION_PROOF",
+                "Graph migration recovery proof is unreadable",
+                json{{"run_id", std::string(run_id)}, {"detail", error.what()}});
+        }
+        const auto source_version = impl_->config.catalog->resolve_version(
+            owner_scope, graph_migration_receipt->source_version().id());
+        const auto target_version = impl_->config.catalog->resolve_version(
+            owner_scope, graph_migration_receipt->target_version().id());
+        const auto source_materialized = source_version
+            ? detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *source_version)
+            : std::shared_ptr<const detail::MaterializedProgram>{};
+        const auto target_materialized = target_version
+            ? detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *target_version)
+            : std::shared_ptr<const detail::MaterializedProgram>{};
+        const auto* initial = initial_publication
+            ? &initial_publication->run_record
+            : nullptr;
+        if (!stored_plan || !initial || !source_version || !target_version || !source_materialized ||
+            !target_materialized ||
+            stored_plan->id() != graph_migration_receipt->migration_plan_id() ||
+            source_version->serialize_canonical() !=
+                graph_migration_receipt->source_version().serialize_canonical() ||
+            target_version->serialize_canonical() !=
+                graph_migration_receipt->target_version().serialize_canonical() ||
+            source_materialized->bundle.serialize_canonical() !=
+                graph_migration_receipt->source_bundle().serialize_canonical() ||
+            target_materialized->bundle.serialize_canonical() !=
+                graph_migration_receipt->target_bundle().serialize_canonical() ||
+            graph_migration_receipt->target_run_id() != initial->run_id() ||
+            graph_migration_receipt->target_program_version_id() !=
+                initial->program_version_id() ||
+            graph_migration_receipt->target_bundle_id() != initial->bundle_id() ||
+            graph_migration_receipt->target_invocation_id() !=
+                initial->invocation().canonical_identity() ||
+            graph_migration_receipt->target_binding_fingerprint() !=
+                initial->binding_fingerprint() ||
+            graph_migration_receipt->target_initial_run_record_id() != initial->id() ||
+            graph_migration_receipt->target_initial_journal_head() !=
+                initial->journal_head() ||
+            !initial->exact_checkpoint() ||
+            graph_migration_receipt->target_core_checkpoint() !=
+                *initial->exact_checkpoint() ||
+            !initial->exact_checkpoint_content_id() ||
+            *initial->exact_checkpoint_content_id() !=
+                graph_migration_checkpoint_content_id(
+                    graph_migration_receipt->target_checkpoint()) ||
+            record->run_id() != initial->run_id() ||
+            record->program_version_id() != initial->program_version_id() ||
+            record->bundle_id() != initial->bundle_id() ||
+            record->binding_fingerprint() != initial->binding_fingerprint() ||
+            record->invocation() != initial->invocation()) {
+            throw_runtime_diagnostic(
+                "P_GRAPH_MIGRATION_PROOF",
+                "Graph migration recovery does not match its exact admitted artifacts");
+        }
+        const auto expected_plan = impl_->config.catalog->plan_migration(
+            owner_scope, source_version->id(), target_version->id());
+        if (!expected_plan.is_compatible() ||
+            stored_plan->id() != expected_plan.id()) {
+            throw_runtime_diagnostic(
+                "P_GRAPH_MIGRATION_PROOF",
+                "Graph migration recovery plan does not match the admitted versions");
+        }
     }
     if (const auto fork = record->fork_receipt()) {
         // A fork is recoverable only when the exact migration proof survived
@@ -4660,7 +5773,132 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     }
     const auto state = record->continuation().state;
     if (state == ContinuationState::Running) {
-        (void)load_active_run_lineage(*impl_->config.transitions, *record);
+        const auto active_lineage =
+            load_active_run_lineage(*impl_->config.transitions, *record);
+        if (!active_lineage) {
+            throw_runtime_diagnostic(
+                "P_RUN_LINEAGE", "Running Program recovery has no active generation");
+        }
+        const auto migration_capsule =
+            impl_->config.transitions->load_graph_migration_capsule(
+                owner_scope, record->run_id(), active_lineage->lineage.id());
+        if (migration_capsule) {
+            const auto checkpoint = record->exact_checkpoint();
+            if (migration_capsule->owner_scope() != owner_scope ||
+                migration_capsule->source_run_id() != record->run_id() ||
+                migration_capsule->source_program_version_id() !=
+                    record->program_version_id() ||
+                migration_capsule->source_bundle_id() != record->bundle_id() ||
+                migration_capsule->source_generation() !=
+                    active_lineage->generation.generation() ||
+                migration_capsule->source_generation_id() !=
+                    active_lineage->generation.id() ||
+                migration_capsule->source_lineage_head_id() !=
+                    active_lineage->lineage.id() ||
+                !checkpoint || *checkpoint != migration_capsule->core_checkpoint() ||
+                !record->exact_checkpoint_content_id() ||
+                *record->exact_checkpoint_content_id() !=
+                    graph_migration_checkpoint_content_id(
+                        migration_capsule->checkpoint())) {
+                throw_runtime_diagnostic(
+                    "P_GRAPH_MIGRATION_HOLD",
+                    "Durable graph migration source hold is corrupt");
+            }
+
+            const auto timestamp = std::max(now_ms(), record->updated_at_ms());
+            const auto elapsed = static_cast<std::uint64_t>(
+                timestamp - record->updated_at_ms());
+            if (elapsed < active_lineage->lineage.remaining_budget().wall_time_ms) {
+                throw_runtime_diagnostic(
+                    "P_GRAPH_MIGRATION_HELD",
+                    "Program source is held by a durable graph migration",
+                    json{{"run_id", record->run_id()},
+                         {"capsule_id", migration_capsule->id()}});
+            }
+
+            const auto remaining = program_replacement_remaining_budget(
+                *record, active_lineage->lineage, timestamp);
+            const auto previous_journal =
+                impl_->config.transitions->latest(owner_scope, record->run_id());
+            if (!previous_journal || previous_journal->id != record->journal_head()) {
+                throw_runtime_diagnostic(
+                    "P_GRAPH_MIGRATION_HOLD",
+                    "Expired graph migration hold lost its transition head");
+            }
+            auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+                record->journal_head(), record->run_id(), record->program_version_id(),
+                record->bundle_id(), previous_journal->sequence + 1,
+                ProgramContinuation{"root", ContinuationState::TimedOut,
+                                    record->continuation().attempt},
+                remaining, RunBudget{}, checkpoint, timestamp});
+            ProgramResultData result_data;
+            result_data.status = ProgramTerminalStatus::TimedOut;
+            result_data.run_id = record->run_id();
+            result_data.program_version_id = record->program_version_id();
+            result_data.bundle_id = record->bundle_id();
+            result_data.operation_id = "root";
+            result_data.attempt = record->continuation().attempt;
+            result_data.remaining_budget = remaining;
+            result_data.checkpoint = checkpoint;
+            result_data.failure = ProgramFailure{
+                "P_GRAPH_MIGRATION_EXPIRED",
+                "Graph migration source hold exhausted its wall-time budget",
+                "root", checkpoint->core_name, 0,
+                json{{"capsule_id", migration_capsule->id()}}};
+            auto terminal_result = ProgramResult::create(std::move(result_data));
+            auto terminal_event = ProgramEvent::create(ProgramEvent{
+                "", record->event_sequence() + 1, timestamp, record->run_id(),
+                record->program_version_id(), record->bundle_id(), "root",
+                checkpoint->core_generation_id, checkpoint->core_thread_id,
+                record->invocation().correlation_id, record->continuation().attempt,
+                ProgramEventKind::Terminal,
+                ProgramTerminalEvent{ProgramTerminalStatus::TimedOut}});
+            ProgramRunRecordData data;
+            data.owner_scope = record->owner_scope();
+            data.run_id = record->run_id();
+            data.program_version_id = record->program_version_id();
+            data.bundle_id = record->bundle_id();
+            data.binding_fingerprint = record->binding_fingerprint();
+            data.invocation = record->invocation();
+            data.child_depth = record->child_depth();
+            data.continuation = journal.continuation;
+            data.remaining_budget = remaining;
+            data.exact_checkpoint = checkpoint;
+            data.exact_checkpoint_content_id = record->exact_checkpoint_content_id();
+            data.pending_input = record->pending_input();
+            data.pending_effect = record->pending_effect();
+            data.terminal_result = terminal_result;
+            data.fork_receipt = record->fork_receipt();
+            data.children = record->children();
+            data.journal_head = journal.id;
+            data.fork_source_run_id = record->fork_source_run_id();
+            data.fork_source_program_version_id =
+                record->fork_source_program_version_id();
+            data.fork_source_checkpoint_id = record->fork_source_checkpoint_id();
+            data.recorded_binding_set_fingerprint =
+                record->recorded_binding_set_fingerprint();
+            data.event_sequence = terminal_event.sequence;
+            data.effect_sequence = record->effect_sequence();
+            data.created_at_ms = record->created_at_ms();
+            data.updated_at_ms = timestamp;
+            auto publication = ProgramTransitionPublication{
+                ProgramRunRecord::create(std::move(data)), std::move(journal),
+                {terminal_event}, {}};
+            const auto published = compare_publish_with_lineage(
+                *impl_->config.transitions, owner_scope, record->journal_head(),
+                std::move(publication));
+            if (published == ProgramTransitionPublishResult::Conflict) {
+                const auto winner = impl_->config.transitions->load_run_lineage(
+                    owner_scope, record->run_id());
+                if (!winner || winner->id() == active_lineage->lineage.id()) {
+                    throw_runtime_diagnostic(
+                        "P_GRAPH_MIGRATION_HOLD",
+                        "Expired graph migration hold could not be fenced");
+                }
+            }
+            reconnect_lock.unlock();
+            return reconnect(owner_scope, run_id);
+        }
         const auto version =
             impl_->config.catalog->resolve_version(owner_scope, record->program_version_id());
         if (!version) {
@@ -4685,6 +5923,82 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                                      "Running Program recovery identity is incompatible");
         }
 
+        if (supports_root_execution_lease(*pinned, record->remaining_budget()) &&
+            record->child_depth() == 0 &&
+            record->invocation().parent_run_id.empty()) {
+            const auto execution_lease =
+                impl_->config.transitions->load_execution_lease(owner_scope, run_id);
+            if (!execution_lease) {
+                throw_runtime_diagnostic(
+                    "P_RUN_LEASE_MISSING",
+                    "Migration-capable Program recovery has no durable execution lease");
+            }
+            const auto expected_thread_id = record->exact_checkpoint()
+                ? record->exact_checkpoint()->core_thread_id
+                : core_thread_identity(run_id, pinned->root->compiled_plan_identity);
+            const auto valid_lease =
+                execution_lease->owner_scope() == owner_scope &&
+                execution_lease->run_id() == run_id &&
+                execution_lease->attempt() == record->continuation().attempt &&
+                execution_lease->program_version_id() == record->program_version_id() &&
+                execution_lease->bundle_id() == record->bundle_id() &&
+                execution_lease->core_name() == pinned->root->core_name &&
+                execution_lease->core_generation_id() ==
+                    pinned->root->compiled_plan_identity &&
+                execution_lease->core_thread_id() == expected_thread_id &&
+                execution_lease->acquired_at_ms() == record->updated_at_ms() &&
+                execution_lease->expires_at_ms() >=
+                    execution_lease->acquired_at_ms() &&
+                static_cast<std::uint64_t>(execution_lease->expires_at_ms() -
+                                           execution_lease->acquired_at_ms()) ==
+                    record->remaining_budget().wall_time_ms;
+            if (!valid_lease) {
+                throw_runtime_diagnostic(
+                    "P_RUN_LEASE_CORRUPT",
+                    "Migration-capable Program recovery has an invalid execution lease");
+            }
+
+            const auto timestamp = std::max(now_ms(), record->updated_at_ms());
+            if (timestamp < execution_lease->expires_at_ms()) {
+                throw_runtime_diagnostic(
+                    "P_RUN_LEASE_HELD",
+                    "Program execution is owned by another live runtime",
+                    json{{"run_id", record->run_id()},
+                         {"lease_id", execution_lease->id()},
+                         {"expires_at_ms", execution_lease->expires_at_ms()}});
+            }
+
+            ProgramPersistedInvocation expired_invocation{
+                record->invocation().input, record->remaining_budget(),
+                record->invocation().correlation_id,
+                record->invocation().parent_run_id, record->child_depth()};
+            auto expired_control = std::make_shared<detail::RunControl>(
+                std::string(owner_scope), std::string(run_id),
+                record->continuation().attempt, pinned, record->binding_fingerprint(),
+                std::move(expired_invocation), record->invocation(), expected_thread_id,
+                record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
+                impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+                impl_->config.state_store, impl_->config.transitions, execution_lease);
+            detail::RunOutcome timed_out;
+            timed_out.status = ProgramTerminalStatus::TimedOut;
+            timed_out.remaining_budget = program_replacement_remaining_budget(
+                *record, active_lineage->lineage, timestamp);
+            timed_out.checkpoint = record->exact_checkpoint();
+            timed_out.failure = ProgramFailure{
+                "P_RUN_LEASE_EXPIRED",
+                "Program execution lease exhausted its wall-time budget", "root",
+                pinned->root->core_name, 0,
+                json{{"lease_id", execution_lease->id()}}};
+            expired_control->complete(std::move(timed_out));
+            const auto result = expired_control->try_result();
+            if (result && result->status() == ProgramTerminalStatus::TimedOut) {
+                return ProgramHandle(std::move(expired_control));
+            }
+            throw_runtime_diagnostic(
+                "P_RUN_RECOVERY_CONFLICT",
+                "Expired Program execution lease lost its terminal fencing CAS");
+        }
+
         const auto                 checkpoint = record->exact_checkpoint();
         std::string                recovered_thread_id;
         std::optional<std::string> resume_checkpoint_id;
@@ -4696,9 +6010,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             }
             const auto stored_checkpoint =
                 impl_->config.checkpoints->load_by_id(checkpoint->checkpoint_id);
-            if (!stored_checkpoint || stored_checkpoint->thread_id != checkpoint->core_thread_id ||
+            if (!stored_checkpoint || stored_checkpoint->id != checkpoint->checkpoint_id ||
+                stored_checkpoint->thread_id != checkpoint->core_thread_id ||
                 stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
-                stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {
+                stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION ||
+                (record->exact_checkpoint_content_id() &&
+                 graph_migration_checkpoint_content_id(*stored_checkpoint) !=
+                     *record->exact_checkpoint_content_id())) {
                 throw_runtime_diagnostic(
                     "P_CHECKPOINT_INCOMPATIBLE",
                     "Running Program recovery checkpoint is absent or invalid");
@@ -4762,7 +6080,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             if (auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id))
                 parent->attach_child(control);
         }
-        auto registration = impl_->register_control(control, replacement_generation);
+        auto registration = impl_->register_control(control, successor_generation);
         if (!registration.inserted) return ProgramHandle(std::move(registration.control));
         spawn_run_attempt(impl_->pool, control, record->invocation().input,
                           std::move(resume_checkpoint_id), impl_->config.host_admission,
@@ -5109,15 +6427,22 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
             javascript_resume_terminal_result(resume_value.value,
                                               previous_journal->inflight_reservation)));
     }
-    auto       publication = ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
-                                                    std::move(journal),
-                                                          {started},
-                                                          {},
-                                                    std::nullopt,
-                                                    std::move(command_entries)};
-    const auto published   = compare_publish_with_lineage(
-        *impl_->config.transitions, owner_scope, previous->journal_head(),
-        std::move(publication));
+    auto publication = attach_run_lineage(
+        *impl_->config.transitions,
+        ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
+                                     std::move(journal),
+                                     {started},
+                                     {},
+                                     std::nullopt,
+                                     std::move(command_entries)});
+    const auto execution_lease =
+        make_execution_lease(*control->materialized, publication);
+    const auto published = execution_lease
+        ? impl_->config.transitions->compare_publish_execution(
+              owner_scope, previous->journal_head(), std::move(publication),
+              std::nullopt, execution_lease)
+        : impl_->config.transitions->compare_publish(
+              owner_scope, previous->journal_head(), std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
         const auto                winner = impl_->config.transitions->load(owner_scope, run_id);
         ProgramPendingDisposition disposition = ProgramPendingDisposition::Conflict;
@@ -5138,6 +6463,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
     }
     child_concurrency.commit();
+    if (execution_lease) control->set_execution_lease(*execution_lease);
 
     impl_->register_control(control);
     try {
@@ -5445,14 +6771,23 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             javascript_resume_terminal_result(*resolution.result,
                                               previous_journal->inflight_reservation)));
     }
-    const auto published = compare_publish_with_lineage(
-        *impl_->config.transitions, owner_scope, previous->journal_head(),
+    auto publication = attach_run_lineage(
+        *impl_->config.transitions,
         ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                      std::move(journal),
                                      outbox,
                                      {},
                                      std::nullopt,
                                      std::move(command_entries)});
+    const auto execution_lease = live_control
+        ? make_execution_lease(*live_control->materialized, publication)
+        : std::nullopt;
+    const auto published = execution_lease
+        ? impl_->config.transitions->compare_publish_execution(
+              owner_scope, previous->journal_head(), std::move(publication),
+              std::nullopt, execution_lease)
+        : impl_->config.transitions->compare_publish(
+              owner_scope, previous->journal_head(), std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
         const auto winner = impl_->config.transitions->load(owner_scope, run_id);
         if (winner && winner->pending_effect()) {
@@ -5473,6 +6808,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
                                  "Program reconciliation lost the transition CAS");
     }
     child_concurrency.commit();
+    if (execution_lease) live_control->set_execution_lease(*execution_lease);
     if (!completed) {
         // Reconciliation replaces an already-terminal Interrupted control with
         // a newer durable terminal state.  Do not let reconnect reuse that

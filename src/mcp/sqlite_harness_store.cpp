@@ -1,6 +1,7 @@
 #include <neograph/mcp/sqlite_harness_store.h>
 
 #include "harness_journal_internal.h"
+#include "../program/canonical_json.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -225,7 +226,7 @@ std::optional<program::ProgramUsage> command_terminal_usage(
 }
 
 bool checkpoint_event_matches(const std::vector<program::ProgramEvent>&             events,
-                              const std::optional<program::CoreCheckpointIdentity>& checkpoint) {
+                               const std::optional<program::CoreCheckpointIdentity>& checkpoint) {
     if (!checkpoint) return false;
     return std::any_of(events.begin(), events.end(), [&](const auto& event) {
         return event.kind == program::ProgramEventKind::CheckpointPublished &&
@@ -233,20 +234,76 @@ bool checkpoint_event_matches(const std::vector<program::ProgramEvent>&         
     });
 }
 
+bool javascript_call_core_checkpoint_matches(
+    const program::ProgramRunRecord& run,
+    const program::ProgramJavaScriptCommandJournalEntry& pending,
+    const program::CoreCheckpointIdentity& checkpoint) {
+    const auto thread_for = [&](std::string_view operation_id) {
+        std::string identity(run.run_id());
+        identity.push_back('\0');
+        identity.append(operation_id);
+        identity.push_back('\0');
+        identity.append(checkpoint.core_generation_id);
+        return program::detail::sha256_identity("program-core-thread/v1", identity);
+    };
+    std::function<bool(const program::JavaScriptCommand&, std::string, std::size_t)> matches;
+    matches = [&](const program::JavaScriptCommand& command,
+                  std::string operation_id,
+                  std::size_t depth) {
+        if (depth > 32) return false;
+        if (command.kind() == program::JavaScriptCommandKind::CallCore) {
+            const auto arguments = command.arguments();
+            return arguments.contains("name") && arguments.at("name").is_string() &&
+                   arguments.at("name").get<std::string>() == checkpoint.core_name &&
+                   thread_for(operation_id) == checkpoint.core_thread_id;
+        }
+        const auto arguments = command.arguments();
+        if (command.kind() == program::JavaScriptCommandKind::Await) {
+            return matches(program::JavaScriptCommand::from_json(arguments.at("command")),
+                           operation_id + "/await", depth + 1);
+        }
+        if (command.kind() == program::JavaScriptCommandKind::Join) {
+            const auto& members = arguments.at("members");
+            for (std::size_t index = 0; index < members.size(); ++index) {
+                if (matches(program::JavaScriptCommand::from_json(members.at(index)),
+                            operation_id + "/member/" + std::to_string(index), depth + 1)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    return matches(pending.command(),
+                   "root.javascript." + std::to_string(pending.command_ordinal()), 0);
+}
+
 bool valid_command_reservation_transition(
+    const program::ProgramRunRecord&                                  previous_run,
     const program::ProgramJournalRecord&                              previous_journal,
     const program::ProgramJournalRecord&                              next_journal,
     const std::vector<program::ProgramJavaScriptCommandJournalEntry>& old_commands,
-    const program::ProgramTransitionPublication&                      publication) {
+    const program::ProgramTransitionPublication&                      publication,
+    const program::ProgramGraphSafePointEvidence*                     safe_point_evidence,
+    const program::GraphMigrationCapsule*                             safe_point_capsule,
+    const program::ProgramExecutionLease*                             execution_lease) {
     const bool increased =
         budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
     const bool ordinary =
         program::is_valid_program_journal_transition(previous_journal, next_journal);
     const auto completed = std::find_if(publication.commands.begin(), publication.commands.end(),
-                                        [](const auto& entry) { return entry.completed(); });
+                                         [](const auto& entry) { return entry.completed(); });
+    const bool checkpoint_changed =
+        previous_journal.core_checkpoint != next_journal.core_checkpoint;
     if (completed != publication.commands.end()) {
         if (publication.commands.size() != 1 ||
             !budget_is_empty(next_journal.inflight_reservation)) {
+            return false;
+        }
+        if (checkpoint_changed &&
+            (!checkpoint_event_matches(publication.events, next_journal.core_checkpoint) ||
+             !next_journal.core_checkpoint ||
+             !javascript_call_core_checkpoint_matches(
+                 publication.run_record, *completed, *next_journal.core_checkpoint))) {
             return false;
         }
         if (budget_is_empty(previous_journal.inflight_reservation)) return ordinary && !increased;
@@ -254,14 +311,24 @@ bool valid_command_reservation_transition(
         return usage && program::is_valid_program_journal_reservation_settlement(
                             previous_journal, next_journal, *usage);
     }
-    if (!increased) return ordinary;
+    if (!increased) {
+        if (safe_point_evidence && safe_point_capsule && execution_lease) {
+            return program::is_valid_program_graph_safe_point_transition(
+                previous_run, previous_journal, publication, *safe_point_evidence,
+                *safe_point_capsule, *execution_lease);
+        }
+        return ordinary;
+    }
     if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
-        old_commands.back().command().kind() != program::JavaScriptCommandKind::CallCore ||
         publication.run_record.continuation().state != program::ContinuationState::Interrupted ||
         !publication.run_record.terminal_result() ||
         publication.run_record.terminal_result()->status() !=
             program::ProgramTerminalStatus::Interrupted ||
         !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
+        !publication.run_record.exact_checkpoint() ||
+        !javascript_call_core_checkpoint_matches(
+            publication.run_record, old_commands.back(),
+            *publication.run_record.exact_checkpoint()) ||
         (previous_journal.core_checkpoint &&
          previous_journal.core_checkpoint == next_journal.core_checkpoint)) {
         return false;
@@ -774,6 +841,21 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_lineage_runs (
         REFERENCES neograph_harness_program_lineage_heads (owner_scope, lineage_id)
         ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS neograph_harness_program_graph_migration_capsules (
+    owner_scope            TEXT NOT NULL,
+    source_run_id          TEXT NOT NULL,
+    source_lineage_head_id TEXT NOT NULL,
+    capsule_id             TEXT NOT NULL,
+    capsule_json           TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, source_run_id, source_lineage_head_id)
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_execution_leases (
+    owner_scope TEXT NOT NULL,
+    program_run_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    lease_json TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, program_run_id)
+);
 CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
     run_id             TEXT PRIMARY KEY,
     owner_scope        TEXT NOT NULL,
@@ -1206,17 +1288,72 @@ public:
         return publication;
     }
 
+    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner_scope, std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override {
+        if (owner_scope.empty() || source_run_id.empty() || source_lineage_head_id.empty())
+            return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        return load_graph_migration_capsule_locked(
+            owner_scope, source_run_id, source_lineage_head_id);
+    }
+    std::optional<program::ProgramExecutionLease> load_execution_lease(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        if (owner_scope.empty() || run_id.empty()) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        return load_execution_lease_locked(owner_scope, run_id);
+    }
+
     program::ProgramTransitionPublishResult compare_publish(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
         program::ProgramTransitionPublication publication) override {
+        return compare_publish_impl(owner_scope, expected_journal_head,
+                                    std::move(publication), nullptr, nullptr, nullptr, nullptr);
+    }
+
+    program::ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        program::ProgramTransitionPublication publication,
+        std::optional<program::ProgramExecutionLease> expected_lease,
+        std::optional<program::ProgramExecutionLease> next_lease) override {
+        return compare_publish_impl(
+            owner_scope, expected_journal_head, std::move(publication), nullptr, nullptr,
+            expected_lease ? &*expected_lease : nullptr,
+            next_lease ? &*next_lease : nullptr);
+    }
+
+    program::ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        program::ProgramTransitionPublication publication,
+        const program::ProgramGraphSafePointEvidence& evidence,
+        const program::GraphMigrationCapsule& capsule,
+        const program::ProgramExecutionLease& execution_lease) override {
+        return compare_publish_impl(owner_scope, expected_journal_head,
+                                    std::move(publication), &evidence, &capsule,
+                                    &execution_lease, nullptr);
+    }
+
+    program::ProgramTransitionPublishResult compare_publish_impl(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        program::ProgramTransitionPublication publication,
+        const program::ProgramGraphSafePointEvidence* safe_point_evidence,
+        const program::GraphMigrationCapsule* safe_point_capsule,
+        const program::ProgramExecutionLease* expected_lease,
+        const program::ProgramExecutionLease* next_lease) {
         std::string                            publication_bytes;
         std::optional<HarnessProgramRunRecord> wrapper;
         if (!expected_journal_head.empty() && !is_program_identity(expected_journal_head)) {
             return program::ProgramTransitionPublishResult::Conflict;
         }
         try {
-            if (!valid_effect_outbox_binding(publication.run_record, publication.effects)) {
+            if (static_cast<bool>(safe_point_evidence) !=
+                static_cast<bool>(safe_point_capsule) ||
+                (safe_point_evidence && (!expected_lease || next_lease)) ||
+                !valid_effect_outbox_binding(publication.run_record, publication.effects)) {
                 return program::ProgramTransitionPublishResult::Conflict;
             }
             publication_bytes = publication.serialize_canonical();
@@ -1283,6 +1420,11 @@ public:
                 impl_->exec("ROLLBACK;");
                 return program::ProgramTransitionPublishResult::Conflict;
             }
+            if (safe_point_evidence && !exists) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            const auto current_lease = load_execution_lease_locked(owner_scope, run_id);
             if (exists) {
                 try {
                     const auto previous_publication =
@@ -1323,10 +1465,47 @@ public:
                 validate_publication_locked(stored_wrapper, current.text(5), current.text(7));
             }
             if (exists && current.text(7) == publication_bytes) {
+                if (safe_point_capsule) {
+                    const auto stored = load_graph_migration_capsule_locked(
+                        owner_scope, publication.run_record.run_id(),
+                        safe_point_capsule->source_lineage_head_id());
+                    if (!stored || stored->id() != safe_point_capsule->id()) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                }
+                const bool lease_result_matches = next_lease
+                    ? current_lease && current_lease->id() == next_lease->id()
+                    : !expected_lease || !current_lease;
+                if (!lease_result_matches) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
                 impl_->exec("ROLLBACK;");
                 return expected_journal_head == publication.journal_record.previous_id
                            ? program::ProgramTransitionPublishResult::AlreadyPresent
-                           : program::ProgramTransitionPublishResult::Conflict;
+                            : program::ProgramTransitionPublishResult::Conflict;
+            }
+            if (expected_lease) {
+                if (!current_lease || current_lease->id() != expected_lease->id() || !exists ||
+                    expected_lease->owner_scope() != owner_scope ||
+                    expected_lease->run_id() != run_id ||
+                    expected_lease->attempt() !=
+                        program::ProgramTransitionPublication::parse(current.text(7))
+                            .run_record.continuation().attempt ||
+                    expected_lease->program_version_id() != current.text(3) ||
+                    expected_lease->bundle_id() != current.text(2)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            } else if (current_lease) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            if (next_lease &&
+                !program::does_program_execution_lease_bind(*next_lease, publication)) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
             }
             if (!exists && publication.fork_source_lineage) {
                 const auto fork = publication.run_record.fork_receipt();
@@ -1463,7 +1642,10 @@ public:
                                 impl_->db, "Program migration command read failed");
                         }
                         const bool has_command = command_result == SQLITE_ROW;
-                        valid_successor = !has_command && publication.commands.empty() &&
+                        const auto durable_capsule = load_graph_migration_capsule_locked(
+                            owner_scope, previous_generation.run_id(), current_lineage->id());
+                        valid_successor = durable_capsule && next_lease && !has_command &&
+                            publication.commands.empty() &&
                             publication.effects.empty() && publication.events.size() == 1 &&
                             program::does_program_graph_migration_started_event_bind(
                                 publication.events.front(), publication.run_record) &&
@@ -1471,7 +1653,8 @@ public:
                             publication.migration_plan &&
                             program::is_valid_program_graph_migration_transition(
                                 previous_generation, *current_lineage, source,
-                                *publication.migration_plan, *publication.run_generation,
+                                *durable_capsule, *publication.migration_plan,
+                                *publication.run_generation,
                                 *publication.run_lineage, publication.run_record);
                     } else {
                         Statement checkpoint_query(
@@ -1745,8 +1928,10 @@ public:
                 }
                 if (!valid_command_history_append(previous_run, previous_commands,
                                                   publication.commands) ||
-                    !valid_command_reservation_transition(previous, publication.journal_record,
-                                                          previous_commands, publication)) {
+                    !valid_command_reservation_transition(
+                        previous_run, previous, publication.journal_record,
+                        previous_commands, publication, safe_point_evidence,
+                        safe_point_capsule, expected_lease)) {
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
@@ -1951,6 +2136,48 @@ public:
             for (const auto& command : publication.commands) {
                 insert_javascript_command(storage_run_id, owner_scope, command);
             }
+            if (safe_point_capsule) {
+                Statement insert_capsule(
+                    impl_->db,
+                    "INSERT INTO neograph_harness_program_graph_migration_capsules "
+                    "(owner_scope, source_run_id, source_lineage_head_id, capsule_id, "
+                    "capsule_json) VALUES(?, ?, ?, ?, ?)");
+                insert_capsule.bind_text(1, safe_point_capsule->owner_scope());
+                insert_capsule.bind_text(2, safe_point_capsule->source_run_id());
+                insert_capsule.bind_text(3, safe_point_capsule->source_lineage_head_id());
+                insert_capsule.bind_text(4, safe_point_capsule->id());
+                insert_capsule.bind_text(5, safe_point_capsule->serialize_canonical());
+                if (insert_capsule.step() != SQLITE_DONE) {
+                    throw_sqlite_error(impl_->db,
+                                       "Program graph migration capsule insert failed");
+                }
+            }
+            if (next_lease) {
+                Statement insert_lease(
+                    impl_->db,
+                    "INSERT INTO neograph_harness_program_execution_leases "
+                    "(owner_scope, program_run_id, lease_id, lease_json) VALUES(?, ?, ?, ?) "
+                    "ON CONFLICT(owner_scope, program_run_id) DO UPDATE SET "
+                    "lease_id=excluded.lease_id, lease_json=excluded.lease_json");
+                insert_lease.bind_text(1, next_lease->owner_scope());
+                insert_lease.bind_text(2, next_lease->run_id());
+                insert_lease.bind_text(3, next_lease->id());
+                insert_lease.bind_text(4, next_lease->serialize_canonical());
+                if (insert_lease.step() != SQLITE_DONE) {
+                    throw_sqlite_error(impl_->db, "Program execution lease insert failed");
+                }
+            } else if (expected_lease) {
+                Statement delete_lease(
+                    impl_->db,
+                    "DELETE FROM neograph_harness_program_execution_leases "
+                    "WHERE owner_scope=? AND program_run_id=? AND lease_id=?");
+                delete_lease.bind_text(1, expected_lease->owner_scope());
+                delete_lease.bind_text(2, expected_lease->run_id());
+                delete_lease.bind_text(3, expected_lease->id());
+                if (delete_lease.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1) {
+                    throw_sqlite_error(impl_->db, "Program execution lease delete failed");
+                }
+            }
             maybe_fail(SqliteHarnessProgramFaultPoint::BeforeCommit);
             impl_->exec("COMMIT;");
             return program::ProgramTransitionPublishResult::Published;
@@ -1963,6 +2190,52 @@ public:
     }
 
 private:
+    std::optional<program::ProgramExecutionLease> load_execution_lease_locked(
+        std::string_view owner_scope, std::string_view run_id) const {
+        Statement query(
+            impl_->db,
+            "SELECT lease_json FROM neograph_harness_program_execution_leases "
+            "WHERE owner_scope=? AND program_run_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(run_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) {
+            throw_sqlite_error(impl_->db, "Program execution lease read failed");
+        }
+        auto lease = program::ProgramExecutionLease::parse(query.text(0));
+        if (lease.owner_scope() != owner_scope || lease.run_id() != run_id) {
+            throw std::invalid_argument(
+                "Stored Program execution lease binding is corrupt");
+        }
+        return lease;
+    }
+
+    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule_locked(
+        std::string_view owner_scope, std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const {
+        Statement query(
+            impl_->db,
+            "SELECT capsule_json FROM neograph_harness_program_graph_migration_capsules "
+            "WHERE owner_scope=? AND source_run_id=? AND source_lineage_head_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(source_run_id));
+        query.bind_text(3, std::string(source_lineage_head_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) {
+            throw_sqlite_error(impl_->db, "Program graph migration capsule read failed");
+        }
+        auto capsule = program::GraphMigrationCapsule::parse(query.text(0));
+        if (capsule.owner_scope() != owner_scope ||
+            capsule.source_run_id() != source_run_id ||
+            capsule.source_lineage_head_id() != source_lineage_head_id) {
+            throw std::invalid_argument(
+                "Stored Program graph migration capsule binding is corrupt");
+        }
+        return capsule;
+    }
+
     void maybe_fail(SqliteHarnessProgramFaultPoint point) {
         if (impl_->program_crash && *impl_->program_crash == point) {
             impl_->program_crash.reset();

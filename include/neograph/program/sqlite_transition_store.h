@@ -64,12 +64,40 @@ public:
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override;
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner_scope,
+        std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override;
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner_scope,
+        std::string_view run_id) const override;
     ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,
                     ProgramTransitionPublication publication) override;
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override;
+    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence,
+        const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& execution_lease) override;
 
 private:
+    ProgramTransitionPublishResult compare_publish_impl(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence* evidence,
+        const GraphMigrationCapsule* capsule,
+        const ProgramExecutionLease* expected_lease,
+        const ProgramExecutionLease* next_lease);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

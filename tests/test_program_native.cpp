@@ -694,6 +694,10 @@ public:
         std::uint64_t generation) const override {
         return inner_.load_generation(owner, lineage_id, generation);
     }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_execution_lease(owner, run_id);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -709,6 +713,15 @@ public:
         condition_.notify_all();
         condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
         return published;
+    }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        return inner_.compare_publish_execution(
+            owner, expected, std::move(publication), std::move(expected_lease),
+            std::move(next_lease));
     }
 
     bool wait_for_result(std::chrono::milliseconds timeout) {

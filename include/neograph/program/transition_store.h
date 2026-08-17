@@ -54,7 +54,6 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     /// On a fork's first publication, atomically debits the still-active source
     /// lineage while the target starts in an independent generation-one lineage.
     std::optional<ProgramRunLineage>         fork_source_lineage;
-
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
 };
@@ -138,6 +137,18 @@ public:
     load_generation_initial_publication(std::string_view /*owner_scope*/,
                                         std::string_view /*lineage_id*/,
                                         std::uint64_t /*generation*/) const;
+    /** Immutable source hold captured atomically with one graph safe point. */
+    virtual std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view /*owner_scope*/,
+        std::string_view /*source_run_id*/,
+        std::string_view /*source_lineage_head_id*/) const {
+        return std::nullopt;
+    }
+    /** Current backend-global root Core dispatch owner, when one is active. */
+    virtual std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view /*owner_scope*/, std::string_view /*run_id*/) const {
+        return std::nullopt;
+    }
 
     /**
      * Atomically publishes the run snapshot, journal head, events, effect outbox,
@@ -148,6 +159,25 @@ public:
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,
                     ProgramTransitionPublication publication) = 0;
+    /** Atomically publishes and acquires, releases, or replaces a dispatch lease. */
+    virtual ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    /** Host-only peer for a running source checkpoint; evidence is never serialized. */
+    virtual ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence,
+        const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& execution_lease) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
 };
 
 class NEOGRAPH_PROGRAM_API InMemoryProgramTransitionStore final
@@ -191,15 +221,43 @@ public:
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override;
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner_scope,
+        std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override;
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner_scope,
+        std::string_view run_id) const override;
     ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,
                     ProgramTransitionPublication publication) override;
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override;
+    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence,
+        const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& execution_lease) override;
 
     /// Fail the next publication at a staged boundary; test-only hook.
     void fail_next_publication_for_testing(ProgramTransitionFaultPoint point);
 
 private:
+    ProgramTransitionPublishResult compare_publish_impl(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence* evidence,
+        const GraphMigrationCapsule* capsule,
+        const ProgramExecutionLease* expected_lease,
+        const ProgramExecutionLease* next_lease);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

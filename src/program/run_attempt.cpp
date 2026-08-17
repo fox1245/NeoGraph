@@ -65,6 +65,124 @@ RunBudget settle_budget(const RunBudget& granted, const ProgramUsage& usage) {
     return remaining;
 }
 
+class ExactCheckpointContentStore final : public graph::CheckpointStore {
+public:
+    ExactCheckpointContentStore(std::shared_ptr<graph::CheckpointStore> inner,
+                                std::string checkpoint_id,
+                                std::string content_id)
+        : inner_(std::move(inner)),
+          checkpoint_id_(std::move(checkpoint_id)),
+          content_id_(std::move(content_id)) {
+        if (!inner_ || checkpoint_id_.empty() || content_id_.empty()) {
+            throw std::invalid_argument(
+                "Exact checkpoint content store requires a complete binding");
+        }
+    }
+
+    void save(const graph::Checkpoint& checkpoint) override {
+        validate(checkpoint);
+        inner_->save(checkpoint);
+    }
+    std::optional<graph::Checkpoint> load_latest(const std::string& thread_id) override {
+        auto checkpoint = inner_->load_latest(thread_id);
+        validate(checkpoint);
+        return checkpoint;
+    }
+    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override {
+        auto checkpoint = inner_->load_by_id(id);
+        if (id == checkpoint_id_ && !checkpoint) {
+            throw std::runtime_error("Exact checkpoint disappeared before consuming load");
+        }
+        validate(checkpoint);
+        return checkpoint;
+    }
+    std::vector<graph::Checkpoint> list(const std::string& thread_id, int limit) override {
+        auto checkpoints = inner_->list(thread_id, limit);
+        for (const auto& checkpoint : checkpoints) validate(checkpoint);
+        return checkpoints;
+    }
+    void delete_thread(const std::string& thread_id) override {
+        inner_->delete_thread(thread_id);
+    }
+
+    asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint) override {
+        validate(checkpoint);
+        co_await inner_->save_async(checkpoint);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_latest_async(
+        const std::string& thread_id) override {
+        auto checkpoint = co_await inner_->load_latest_async(thread_id);
+        validate(checkpoint);
+        co_return checkpoint;
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_by_id_async(
+        const std::string& id) override {
+        auto checkpoint = co_await inner_->load_by_id_async(id);
+        if (id == checkpoint_id_ && !checkpoint) {
+            throw std::runtime_error("Exact checkpoint disappeared before consuming load");
+        }
+        validate(checkpoint);
+        co_return checkpoint;
+    }
+    asio::awaitable<std::vector<graph::Checkpoint>> list_async(
+        const std::string& thread_id,
+        int limit) override {
+        auto checkpoints = co_await inner_->list_async(thread_id, limit);
+        for (const auto& checkpoint : checkpoints) validate(checkpoint);
+        co_return checkpoints;
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
+        co_await inner_->delete_thread_async(thread_id);
+    }
+
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const graph::PendingWrite& write) override {
+        inner_->put_writes(thread_id, parent_checkpoint_id, write);
+    }
+    std::vector<graph::PendingWrite> get_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override {
+        return inner_->get_writes(thread_id, parent_checkpoint_id);
+    }
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id) override {
+        inner_->clear_writes(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const graph::PendingWrite& write) override {
+        co_await inner_->put_writes_async(thread_id, parent_checkpoint_id, write);
+    }
+    asio::awaitable<std::vector<graph::PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override {
+        co_return co_await inner_->get_writes_async(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override {
+        co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id);
+    }
+
+private:
+    void validate(const graph::Checkpoint& checkpoint) const {
+        if (checkpoint.id == checkpoint_id_ &&
+            graph_migration_checkpoint_content_id(checkpoint) != content_id_) {
+            throw std::runtime_error(
+                "Exact checkpoint content changed before consuming load");
+        }
+    }
+    void validate(const std::optional<graph::Checkpoint>& checkpoint) const {
+        if (checkpoint) validate(*checkpoint);
+    }
+
+    std::shared_ptr<graph::CheckpointStore> inner_;
+    std::string checkpoint_id_;
+    std::string content_id_;
+};
+
 bool has_resource_reservation(const RunBudget& reservation) noexcept {
     return reservation.wall_time_ms != 0 || reservation.model_tokens != 0 ||
            reservation.monetary_microunits != 0 || reservation.max_core_steps != 0;
@@ -1043,13 +1161,28 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         asio::detached);
 
     std::optional<CoreCheckpointIdentity> resume_checkpoint;
+    std::optional<std::string>            resume_checkpoint_content_id;
     RunOutcome                            outcome;
     try {
         const auto control_source = control->materialized->bundle.control_source();
         if (checkpoint_id) {
             resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
+            if (const auto durable = control->transitions->load(
+                    control->owner_scope, control->run_id);
+                durable && durable->exact_checkpoint() &&
+                durable->exact_checkpoint()->checkpoint_id == *checkpoint_id) {
+                resume_checkpoint_content_id = durable->exact_checkpoint_content_id();
+            }
+            bool content_valid = true;
+            if (resume_checkpoint_content_id) {
+                const auto stored = control->checkpoints->load_by_id(*checkpoint_id);
+                content_valid = stored &&
+                    graph_migration_checkpoint_content_id(*stored) ==
+                        *resume_checkpoint_content_id;
+            }
             const bool resume_valid =
                 resume_checkpoint &&
+                content_valid &&
                 (control_source ? checkpoint_matches_generation(*control, *resume_checkpoint)
                                 : checkpoint_matches(*control, *resume_checkpoint));
             if (!resume_valid) {
@@ -1242,45 +1375,100 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         };
 
         auto run_core = [&](std::string operation_id, json core_input,
-                            std::optional<std::string> resume, std::string thread_id,
-                            std::shared_ptr<graph::CancelToken> operation_token)
+                             std::optional<std::string> resume, std::string thread_id,
+                             std::shared_ptr<graph::CancelToken> operation_token)
             -> asio::awaitable<CoreInvocation> {
-            graph::RunConfig config;
-            config.thread_id          = thread_id;
-            config.input              = resume ? json::object() : core_input;
-            config.max_steps          = static_cast<int>(std::min<std::uint64_t>(
-                control->granted_budget.max_core_steps,
-                static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
-            config.stream_mode        = graph::StreamMode::ALL;
-            config.cancel_token       = std::move(operation_token);
-            config.usage              = usage;
-            config.model_token_budget = control->granted_budget.model_tokens;
-            config.budget_exhausted   = control->budget_exhausted;
+            auto next_resume = std::move(resume);
+            auto next_input = std::move(core_input);
+            for (;;) {
+                graph::RunConfig config;
+                config.thread_id          = thread_id;
+                config.input              = next_resume ? json::object() : next_input;
+                config.max_steps          = static_cast<int>(std::min<std::uint64_t>(
+                    subtract_saturated(control->granted_budget.max_core_steps,
+                                       core_progress->steps()),
+                    static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+                config.stream_mode        = graph::StreamMode::ALL;
+                config.cancel_token       = operation_token;
+                config.usage              = usage;
+                config.model_token_budget = control->granted_budget.model_tokens;
+                config.budget_exhausted   = control->budget_exhausted;
 
-            graph::RunMetadata metadata;
-            metadata.deadline    = deadline;
-            metadata.run_id      = control->run_id;
-            metadata.owner_scope = control->owner_scope;
-            metadata.trace_id    = control->trace_id;
-            graph::RunResources        resources{control->checkpoints, control->state_store};
-            graph::GraphStreamCallback callback = [control, core_progress,
-                                                   operation_id](const graph::GraphEvent& event) {
-                core_progress->observe(event);
-                control->emit(operation_id, ProgramEventKind::Core, graph::to_typed_event(event));
-            };
-            graph::RunResult result;
-            if (resume) {
-                result = co_await control->materialized->root->engine->resume_from_async(
-                    std::move(config), *resume, std::move(core_input), std::move(callback),
-                    std::move(metadata), std::move(resources));
-            } else {
-                result = co_await control->materialized->root->engine->run_stream_async(
-                    std::move(config), std::move(callback), std::move(metadata),
-                    std::move(resources));
+                graph::RunMetadata metadata;
+                metadata.deadline    = deadline;
+                metadata.run_id      = control->run_id;
+                metadata.owner_scope = control->owner_scope;
+                metadata.trace_id    = control->trace_id;
+                auto operation_checkpoints = control->checkpoints;
+                if (next_resume && resume_checkpoint_content_id) {
+                    operation_checkpoints =
+                        std::make_shared<ExactCheckpointContentStore>(
+                            control->checkpoints, *next_resume,
+                            *resume_checkpoint_content_id);
+                }
+                graph::RunResources resources{operation_checkpoints, control->state_store};
+                graph::GraphStreamCallback callback =
+                    [control, core_progress, operation_id](const graph::GraphEvent& event) {
+                        core_progress->observe(event);
+                        control->emit(operation_id, ProgramEventKind::Core,
+                                      graph::to_typed_event(event));
+                    };
+                auto safe_point_request = control->graph_safe_point_request();
+                graph::RunResult result;
+                if (next_resume) {
+                    if (safe_point_request) {
+                        result = co_await control->materialized->root->engine
+                                     ->resume_from_until_safe_point_async(
+                                         std::move(config), *next_resume,
+                                         safe_point_request, std::move(next_input),
+                                         std::move(callback), std::move(metadata),
+                                         std::move(resources));
+                    } else {
+                        result = co_await control->materialized->root->engine->resume_from_async(
+                            std::move(config), *next_resume, std::move(next_input),
+                            std::move(callback), std::move(metadata), std::move(resources));
+                    }
+                } else if (safe_point_request) {
+                    result = co_await control->materialized->root->engine
+                                 ->run_until_safe_point_async(
+                                     std::move(config), safe_point_request,
+                                     std::move(callback), std::move(metadata),
+                                     std::move(resources));
+                } else {
+                    result = co_await control->materialized->root->engine->run_stream_async(
+                        std::move(config), std::move(callback), std::move(metadata),
+                        std::move(resources));
+                }
+
+                auto checkpoint = inspect_checkpoint_for(*control, result.checkpoint_id, thread_id);
+                if (checkpoint && checkpoint->core_thread_id != thread_id) checkpoint.reset();
+                if (result.status() != graph::RunStatus::SafePoint) {
+                    co_return CoreInvocation{std::move(result), std::move(checkpoint)};
+                }
+                const auto captured = safe_point_request
+                    ? safe_point_request->safe_point()
+                    : std::nullopt;
+                if (!captured || !checkpoint ||
+                    checkpoint->checkpoint_id != captured->checkpoint().id) {
+                    throw std::runtime_error(
+                        "Graph safe point did not retain its exact durable checkpoint");
+                }
+
+                ProgramUsage consumed;
+                consumed.wall_time_ms = elapsed_ms(started_at);
+                consumed.model_tokens = model_tokens(usage);
+                consumed.program_operations = operation_count;
+                consumed.core_steps = core_progress->steps();
+                consumed.peak_concurrency =
+                    peak_concurrency.load(std::memory_order_relaxed);
+                co_await control->hold_graph_migration(
+                    *captured, settle_budget(control->granted_budget, consumed));
+                operation_token->throw_if_cancelled("graph migration safe point");
+                next_resume = captured->checkpoint().id;
+                resume_checkpoint_content_id =
+                    graph_migration_checkpoint_content_id(captured->checkpoint());
+                next_input = json::object();
             }
-            auto checkpoint = inspect_checkpoint_for(*control, result.checkpoint_id, thread_id);
-            if (checkpoint && checkpoint->core_thread_id != thread_id) checkpoint.reset();
-            co_return CoreInvocation{std::move(result), std::move(checkpoint)};
         };
 
         struct ExpansionTaskRun {
@@ -4152,6 +4340,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
+        outcome.checkpoint               = control->latest_checkpoint();
         auto cause                       = terminal_cause_at_deadline(control, deadline);
         if (cause == CancellationCause::None) cause = CancellationCause::User;
         apply_terminal_cause(outcome, cause, error.what());

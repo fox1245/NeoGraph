@@ -500,10 +500,14 @@ bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&            
 }
 
 bool valid_command_reservation_transition(
+    const ProgramRunRecord&                                  previous_run,
     const ProgramJournalRecord&                              previous_journal,
     const ProgramJournalRecord&                              next_journal,
     const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
-    const ProgramTransitionPublication&                      publication) {
+    const ProgramTransitionPublication&                      publication,
+    const ProgramGraphSafePointEvidence*                     safe_point_evidence,
+    const GraphMigrationCapsule*                             safe_point_capsule,
+    const ProgramExecutionLease*                             execution_lease) {
     const bool increased =
         budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
     const bool ordinary  = is_valid_program_journal_transition(previous_journal, next_journal);
@@ -526,7 +530,14 @@ bool valid_command_reservation_transition(
         return usage && is_valid_program_journal_reservation_settlement(previous_journal,
                                                                         next_journal, *usage);
     }
-    if (!increased) return ordinary;
+    if (!increased) {
+        if (safe_point_evidence && safe_point_capsule && execution_lease) {
+            return is_valid_program_graph_safe_point_transition(
+                previous_run, previous_journal, publication, *safe_point_evidence,
+                *safe_point_capsule, *execution_lease);
+        }
+        return ordinary;
+    }
 
     // A safely interrupted CallCore keeps its command coordinate Pending but
     // may release verified unused capacity only when the exact newer
@@ -581,6 +592,14 @@ std::string key(std::string_view owner, std::string_view run) {
     out.append(owner);
     out.push_back('\0');
     out.append(run);
+    return out;
+}
+std::string graph_migration_capsule_key(std::string_view owner,
+                                        std::string_view run,
+                                        std::string_view lineage_head) {
+    auto out = key(owner, run);
+    out.push_back('\0');
+    out.append(lineage_head);
     return out;
 }
 void validate_pub(const ProgramTransitionPublication& publication, std::string_view owner) {
@@ -967,6 +986,8 @@ struct InMemoryProgramTransitionStore::Impl {
     mutable std::mutex                                                mutex;
     std::map<std::string, std::shared_ptr<const Stored>, std::less<>> runs;
     std::map<std::string, std::shared_ptr<const StoredLineage>, std::less<>> lineages;
+    std::map<std::string, GraphMigrationCapsule, std::less<>> graph_migration_capsules;
+    std::map<std::string, ProgramExecutionLease, std::less<>> execution_leases;
     std::optional<ProgramTransitionFaultPoint>                        fault;
 };
 InMemoryProgramTransitionStore::InMemoryProgramTransitionStore()
@@ -1121,11 +1142,66 @@ InMemoryProgramTransitionStore::load_generation_initial_publication(
     }
     return ProgramTransitionPublication::parse(bytes);
 }
+std::optional<GraphMigrationCapsule>
+InMemoryProgramTransitionStore::load_graph_migration_capsule(
+    std::string_view owner, std::string_view run_id,
+    std::string_view source_lineage_head_id) const {
+    if (owner.empty() || run_id.empty() || source_lineage_head_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->graph_migration_capsules.find(
+        graph_migration_capsule_key(owner, run_id, source_lineage_head_id));
+    return found == impl_->graph_migration_capsules.end()
+        ? std::nullopt : std::optional<GraphMigrationCapsule>{found->second};
+}
+std::optional<ProgramExecutionLease>
+InMemoryProgramTransitionStore::load_execution_lease(
+    std::string_view owner, std::string_view run_id) const {
+    if (owner.empty() || run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->execution_leases.find(key(owner, run_id));
+    return found == impl_->execution_leases.end()
+        ? std::nullopt : std::optional<ProgramExecutionLease>{found->second};
+}
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
+    return compare_publish_impl(owner, expected, std::move(publication), nullptr, nullptr,
+                                nullptr, nullptr);
+}
+ProgramTransitionPublishResult
+InMemoryProgramTransitionStore::compare_publish_execution(
+    std::string_view owner, std::string_view expected,
+    ProgramTransitionPublication publication,
+    std::optional<ProgramExecutionLease> expected_lease,
+    std::optional<ProgramExecutionLease> next_lease) {
+    return compare_publish_impl(owner, expected, std::move(publication), nullptr, nullptr,
+                                expected_lease ? &*expected_lease : nullptr,
+                                next_lease ? &*next_lease : nullptr);
+}
+ProgramTransitionPublishResult
+InMemoryProgramTransitionStore::compare_publish_graph_safe_point(
+    std::string_view owner,
+    std::string_view expected,
+    ProgramTransitionPublication publication,
+    const ProgramGraphSafePointEvidence& evidence,
+    const GraphMigrationCapsule& capsule,
+    const ProgramExecutionLease& execution_lease) {
+    return compare_publish_impl(owner, expected, std::move(publication), &evidence, &capsule,
+                                &execution_lease, nullptr);
+}
+ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_impl(
+    std::string_view owner,
+    std::string_view expected,
+    ProgramTransitionPublication publication,
+    const ProgramGraphSafePointEvidence* safe_point_evidence,
+    const GraphMigrationCapsule* safe_point_capsule,
+    const ProgramExecutionLease* expected_lease,
+    const ProgramExecutionLease* next_lease) {
     std::string publication_bytes;
     try {
-        if (publication.run_record.owner_scope() != owner) {
+        if (publication.run_record.owner_scope() != owner ||
+            static_cast<bool>(safe_point_evidence) !=
+                static_cast<bool>(safe_point_capsule) ||
+            (safe_point_evidence && (!expected_lease || next_lease))) {
             return ProgramTransitionPublishResult::Conflict;
         }
         publication_bytes = publication.serialize_canonical();
@@ -1142,10 +1218,46 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     auto            storage_key = key(owner, publication.run_record.run_id());
     std::lock_guard lock(impl_->mutex);
     auto            current = impl_->runs.find(storage_key);
+    auto current_lease = impl_->execution_leases.find(storage_key);
+    if (safe_point_evidence && current == impl_->runs.end()) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
     if (current != impl_->runs.end() && current->second->bytes == publication_bytes) {
+        if (safe_point_capsule) {
+            const auto stored = impl_->graph_migration_capsules.find(
+                graph_migration_capsule_key(owner, publication.run_record.run_id(),
+                                            safe_point_capsule->source_lineage_head_id()));
+            if (stored == impl_->graph_migration_capsules.end() ||
+                stored->second.id() != safe_point_capsule->id()) {
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        }
+        const bool lease_result_matches = next_lease
+            ? current_lease != impl_->execution_leases.end() &&
+                  current_lease->second.id() == next_lease->id()
+            : !expected_lease || current_lease == impl_->execution_leases.end();
+        if (!lease_result_matches) return ProgramTransitionPublishResult::Conflict;
         return expected == publication.journal_record.previous_id
                    ? ProgramTransitionPublishResult::AlreadyPresent
                    : ProgramTransitionPublishResult::Conflict;
+    }
+    if (expected_lease) {
+        if (current_lease == impl_->execution_leases.end() ||
+            current_lease->second.id() != expected_lease->id() ||
+            expected_lease->owner_scope() != owner ||
+            expected_lease->run_id() != publication.run_record.run_id() ||
+            current == impl_->runs.end() ||
+            expected_lease->attempt() != current->second->run.continuation().attempt ||
+            expected_lease->program_version_id() !=
+                current->second->run.program_version_id() ||
+            expected_lease->bundle_id() != current->second->run.bundle_id()) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    } else if (current_lease != impl_->execution_leases.end()) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication)) {
+        return ProgramTransitionPublishResult::Conflict;
     }
     if (current == impl_->runs.end() && publication.fork_source_lineage) {
         const auto fork = publication.run_record.fork_receipt();
@@ -1211,16 +1323,24 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             }
             const auto graph_migration =
                 publication.run_generation->graph_migration_receipt();
+            const auto durable_capsule = graph_migration
+                ? impl_->graph_migration_capsules.find(graph_migration_capsule_key(
+                      owner, source->second->run.run_id(),
+                      current_lineage->second->head.id()))
+                : impl_->graph_migration_capsules.end();
             const bool valid_successor = graph_migration
-                ? source->second->commands.empty() && publication.commands.empty() &&
+                ? durable_capsule != impl_->graph_migration_capsules.end() &&
+                      next_lease &&
+                      source->second->commands.empty() && publication.commands.empty() &&
                       publication.effects.empty() && publication.events.size() == 1 &&
                       does_program_graph_migration_started_event_bind(
                           publication.events.front(), publication.run_record) &&
                       publication.run_record.event_sequence() == 1 &&
                       publication.migration_plan &&
-                      is_valid_program_graph_migration_transition(
-                          active->second, current_lineage->second->head,
-                          source->second->run, *publication.migration_plan,
+                       is_valid_program_graph_migration_transition(
+                           active->second, current_lineage->second->head,
+                           source->second->run, durable_capsule->second,
+                           *publication.migration_plan,
                           *publication.run_generation, *publication.run_lineage,
                           publication.run_record)
                 : !source->second->commands.empty() &&
@@ -1323,7 +1443,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
         const bool command_history_valid =
             valid_command_history_append(old.run, old.commands, publication.commands);
         const bool reservation_valid = valid_command_reservation_transition(
-            old.journal, publication.journal_record, old.commands, publication);
+            old.run, old.journal, publication.journal_record, old.commands, publication,
+            safe_point_evidence, safe_point_capsule, expected_lease);
         if (!command_history_valid || !reservation_valid) {
             return ProgramTransitionPublishResult::Conflict;
         }
@@ -1419,16 +1540,31 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
                           : std::nullopt,
                       std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
-    if (staged_lineage || staged_fork_source) {
+    if (staged_lineage || staged_fork_source || safe_point_capsule ||
+        expected_lease || next_lease) {
         auto staged_runs     = impl_->runs;
         auto staged_lineages = impl_->lineages;
+        auto staged_capsules = impl_->graph_migration_capsules;
+        auto staged_leases   = impl_->execution_leases;
         staged_runs.insert_or_assign(storage_key, std::move(candidate));
         if (staged_lineage)
             staged_lineages.insert_or_assign(lineage_key, std::move(staged_lineage));
         if (staged_fork_source)
             staged_lineages.insert_or_assign(fork_source_key, std::move(staged_fork_source));
+        if (safe_point_capsule) {
+            staged_capsules.insert_or_assign(
+                graph_migration_capsule_key(owner, safe_point_capsule->source_run_id(),
+                                            safe_point_capsule->source_lineage_head_id()),
+                *safe_point_capsule);
+        }
+        if (next_lease)
+            staged_leases.insert_or_assign(storage_key, *next_lease);
+        else if (expected_lease)
+            staged_leases.erase(storage_key);
         impl_->runs.swap(staged_runs);
         impl_->lineages.swap(staged_lineages);
+        impl_->graph_migration_capsules.swap(staged_capsules);
+        impl_->execution_leases.swap(staged_leases);
     } else if (current == impl_->runs.end()) {
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));
     } else {

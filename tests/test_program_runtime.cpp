@@ -3,6 +3,9 @@
 #include <neograph/graph/node.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
+#include <neograph/graph/sqlite_checkpoint.h>
+#endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
 #endif
@@ -759,11 +762,12 @@ struct AdmittedRuntime {
             .minimum_execution_guarantee(minimum_guarantee);
         return std::move(builder).build();
     }
-    std::unique_ptr<ProgramRuntime> make_runtime() const {
+    std::unique_ptr<ProgramRuntime> make_runtime_with_transitions(
+        std::shared_ptr<ProgramTransitionStore> transitions) const {
         RuntimeConfig config{catalog,
-                             checkpoints,
-                             {},
-                             journal,
+                              checkpoints,
+                              {},
+                              std::move(transitions),
                              scheduler_thread_count,
                              [bindings = child_bindings](std::string_view owner_scope,
                                                          std::string_view parent_version_id,
@@ -780,6 +784,9 @@ struct AdmittedRuntime {
         };
         config.child_quota = child_quota;
         return std::make_unique<ProgramRuntime>(std::move(config));
+    }
+    std::unique_ptr<ProgramRuntime> make_runtime() const {
+        return make_runtime_with_transitions(journal);
     }
 
     ProgramVersion admit(std::string node_type) {
@@ -1114,6 +1121,17 @@ public:
         std::uint64_t generation) const override {
         return inner_.load_generation(owner, lineage_id, generation);
     }
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner,
+        std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override {
+        return inner_.load_graph_migration_capsule(
+            owner, source_run_id, source_lineage_head_id);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_execution_lease(owner, run_id);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -1124,11 +1142,151 @@ public:
         }
         return inner_.compare_publish(owner, expected, std::move(publication));
     }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        if (publication.journal_record.continuation.state != ContinuationState::Running &&
+            !injected_.exchange(true)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        return inner_.compare_publish_execution(
+            owner, expected, std::move(publication), expected_lease, next_lease);
+    }
     bool injected() const noexcept { return injected_.load(); }
 
 private:
     InMemoryProgramTransitionStore inner_;
     std::atomic<bool>              injected_{false};
+};
+
+class IsolatedProcessTransitionStore final : public ProgramTransitionStore {
+public:
+    explicit IsolatedProcessTransitionStore(
+        std::shared_ptr<ProgramTransitionStore> target)
+        : target_(std::move(target)) {}
+
+    std::optional<ProgramRunRecord> load(
+        std::string_view owner, std::string_view run_id) const override {
+        return target_->load(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest(
+        std::string_view owner, std::string_view run_id) const override {
+        return target_->latest(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return target_->load_events(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return target_->load_effects(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id,
+        std::uint64_t sequence) const override {
+        return target_->load_javascript_commands(owner, run_id, sequence);
+    }
+    std::optional<MigrationPlan> load_migration_plan(
+        std::string_view owner, std::string_view run_id) const override {
+        return target_->load_migration_plan(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage(
+        std::string_view owner, std::string_view lineage_id) const override {
+        return target_->load_lineage(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage(
+        std::string_view owner, std::string_view run_id) const override {
+        return target_->load_run_lineage(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head(
+        std::string_view owner, std::string_view lineage_id,
+        std::string_view head_id) const override {
+        return target_->load_lineage_head(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return target_->load_generation(owner, lineage_id, generation);
+    }
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+        std::string_view owner, std::string_view lineage_id,
+        std::uint64_t generation) const override {
+        return target_->load_generation_initial_publication(
+            owner, lineage_id, generation);
+    }
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner, std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override {
+        return target_->load_graph_migration_capsule(
+            owner, source_run_id, source_lineage_head_id);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner, std::string_view run_id) const override {
+        return target_->load_execution_lease(owner, run_id);
+    }
+    ProgramTransitionPublishResult compare_publish(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication) override {
+        return target_->compare_publish(owner, expected, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        const bool terminal_release = expected_lease && !next_lease &&
+            publication.run_record.continuation().state != ContinuationState::Running;
+        if (terminal_release) {
+            std::unique_lock lock(execution_release_mutex_);
+            if (block_execution_release_) {
+                execution_release_observed_ = true;
+                execution_release_condition_.notify_all();
+                execution_release_condition_.wait_for(
+                    lock, std::chrono::seconds(5),
+                    [this] { return execution_release_released_; });
+            }
+        }
+        return target_->compare_publish_execution(
+            owner, expected, std::move(publication), expected_lease, next_lease);
+    }
+    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence,
+        const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& execution_lease) override {
+        return target_->compare_publish_graph_safe_point(
+            owner, expected, std::move(publication), evidence, capsule,
+            execution_lease);
+    }
+    void block_execution_release() {
+        std::lock_guard lock(execution_release_mutex_);
+        block_execution_release_ = true;
+        execution_release_observed_ = false;
+        execution_release_released_ = false;
+    }
+    bool wait_for_execution_release(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(execution_release_mutex_);
+        return execution_release_condition_.wait_for(
+            lock, timeout, [this] { return execution_release_observed_; });
+    }
+    void release_execution_release() {
+        std::lock_guard lock(execution_release_mutex_);
+        execution_release_released_ = true;
+        execution_release_condition_.notify_all();
+    }
+
+private:
+    std::shared_ptr<ProgramTransitionStore> target_;
+    std::mutex execution_release_mutex_;
+    std::condition_variable execution_release_condition_;
+    bool block_execution_release_ = false;
+    bool execution_release_observed_ = false;
+    bool execution_release_released_ = false;
 };
 
 class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
@@ -1182,6 +1340,17 @@ public:
         }
         return inner_.load_generation(owner, lineage_id, generation);
     }
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner,
+        std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override {
+        return inner_.load_graph_migration_capsule(
+            owner, source_run_id, source_lineage_head_id);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_execution_lease(owner, run_id);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -1216,6 +1385,46 @@ public:
         condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
         return published;
     }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        const bool replacement =
+            publication.run_generation && publication.run_generation->replacement_receipt();
+        if (replacement && throw_before_replacement_.exchange(false)) {
+            throw std::runtime_error("simulated replacement failure before publication");
+        }
+        const auto published = inner_.compare_publish_execution(
+            owner, expected, std::move(publication), expected_lease, next_lease);
+        if (replacement && published == ProgramTransitionPublishResult::Published &&
+            crash_after_replacement_.exchange(false)) {
+            if (unreadable_replacement_commit_.exchange(false)) {
+                replacement_readback_failures_.store(2);
+            }
+            throw std::runtime_error("simulated crash after replacement publication");
+        }
+        return published;
+    }
+    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner,
+        std::string_view expected,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence,
+        const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& execution_lease) override {
+        const auto published = inner_.compare_publish_graph_safe_point(
+            owner, expected, std::move(publication), evidence, capsule,
+            execution_lease);
+        if (published == ProgramTransitionPublishResult::Published &&
+            crash_after_graph_safe_point_.exchange(false)) {
+            if (unreadable_graph_safe_point_commit_.exchange(false)) {
+                throw_next_load_.store(true);
+            }
+            throw std::runtime_error("simulated crash after graph safe-point publication");
+        }
+        return published;
+    }
     bool wait_for_result(std::chrono::milliseconds timeout) {
         std::unique_lock lock(mutex_);
         return condition_.wait_for(lock, timeout, [this] { return observed_; });
@@ -1229,6 +1438,10 @@ public:
     void crash_after_next_replacement_with_unreadable_commit() {
         unreadable_replacement_commit_.store(true);
         crash_after_replacement_.store(true);
+    }
+    void crash_after_next_graph_safe_point_with_unreadable_commit() {
+        unreadable_graph_safe_point_commit_.store(true);
+        crash_after_graph_safe_point_.store(true);
     }
     void throw_on_next_load() { throw_next_load_.store(true); }
     void throw_before_next_replacement_with_occupied_target(
@@ -1258,6 +1471,8 @@ private:
     bool                           released_ = false;
     std::atomic<bool>              crash_after_replacement_{false};
     std::atomic<bool>              unreadable_replacement_commit_{false};
+    std::atomic<bool>              crash_after_graph_safe_point_{false};
+    std::atomic<bool>              unreadable_graph_safe_point_commit_{false};
     mutable std::atomic<int>       replacement_readback_failures_{0};
     std::atomic<bool>              throw_before_replacement_{false};
     mutable std::atomic<bool>      throw_next_load_{false};
@@ -1306,6 +1521,10 @@ public:
         std::uint64_t generation) const override {
         return inner_.load_generation(owner, lineage_id, generation);
     }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_execution_lease(owner, run_id);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -1319,6 +1538,15 @@ public:
             return ProgramTransitionPublishResult::Conflict;
         }
         return ProgramTransitionPublishResult::Conflict;
+    }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        return inner_.compare_publish_execution(
+            owner, expected, std::move(publication), std::move(expected_lease),
+            std::move(next_lease));
     }
     void allow_dispatch() noexcept { block_dispatch_.store(false); }
 
@@ -1368,11 +1596,24 @@ public:
         std::uint64_t generation) const override {
         return inner_.load_generation(owner, lineage_id, generation);
     }
+    std::optional<ProgramExecutionLease> load_execution_lease(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_execution_lease(owner, run_id);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
         return inner_.compare_publish(owner, expected, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        return inner_.compare_publish_execution(
+            owner, expected, std::move(publication), std::move(expected_lease),
+            std::move(next_lease));
     }
     std::optional<ProgramJournalRecord> stored_latest(std::string_view run_id) const {
         return inner_.latest("tenant:runtime", run_id);
@@ -1392,16 +1633,42 @@ public:
         WrongSchemaAtCoreLoad,
         WrongIdAtCoreLoad,
         MissingAfterFirstExactLoad,
-        MissingAfterCoreLoad
+        MissingAfterCoreLoad,
+        FailMigrationTargetSave,
+        WrongMigrationContentAtConsumingLoad,
+        DelayMigrationTargetSave
     };
 
     void arm(Mode mode) {
         mode_.store(mode);
         exact_loads_.store(0);
+        migration_target_save_failures_.store(0);
+        migration_target_loads_.store(0);
+        migration_target_save_started_.store(false);
     }
     std::uint32_t exact_loads() const noexcept { return exact_loads_.load(); }
+    std::uint32_t migration_target_save_failures() const noexcept {
+        return migration_target_save_failures_.load();
+    }
+    bool migration_target_save_started() const noexcept {
+        return migration_target_save_started_.load();
+    }
 
-    void save(const Checkpoint& checkpoint) override { inner_->save(checkpoint); }
+    void save(const Checkpoint& checkpoint) override {
+        if (mode_.load() == Mode::DelayMigrationTargetSave &&
+            checkpoint.metadata.is_object() &&
+            checkpoint.metadata.contains("migrated_from")) {
+            migration_target_save_started_.store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        if (mode_.load() == Mode::FailMigrationTargetSave &&
+            checkpoint.metadata.is_object() &&
+            checkpoint.metadata.contains("migrated_from")) {
+            migration_target_save_failures_.fetch_add(1);
+            throw std::runtime_error("injected migration target save failure");
+        }
+        inner_->save(checkpoint);
+    }
 
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override {
         return inner_->load_latest(thread_id);
@@ -1411,6 +1678,13 @@ public:
         auto       checkpoint = inner_->load_by_id(id);
         const auto call       = exact_loads_.fetch_add(1);
         const auto mode       = mode_.load();
+        if (checkpoint && checkpoint->metadata.is_object() &&
+            checkpoint->metadata.contains("migrated_from")) {
+            const auto migration_call = migration_target_loads_.fetch_add(1);
+            if (mode == Mode::WrongMigrationContentAtConsumingLoad && migration_call >= 3) {
+                checkpoint->channel_values["channels"]["value"]["value"] = "tampered";
+            }
+        }
         if (mode == Mode::MissingAfterFirstExactLoad && call > 0) {
             return std::nullopt;
         }
@@ -1459,6 +1733,9 @@ private:
     std::shared_ptr<InMemoryCheckpointStore> inner_ = std::make_shared<InMemoryCheckpointStore>();
     std::atomic<Mode>                        mode_{Mode::Normal};
     std::atomic<std::uint32_t>               exact_loads_{0};
+    std::atomic<std::uint32_t>               migration_target_save_failures_{0};
+    std::atomic<std::uint32_t>               migration_target_loads_{0};
+    std::atomic<bool>                        migration_target_save_started_{false};
 };
 json typed_event_value(const TypedGraphEvent& event) {
     json value{{"index", event.index()}};
@@ -2381,6 +2658,8 @@ TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResul
         journal->load_javascript_commands("tenant:runtime", original.run_id(), 0);
     ASSERT_EQ(durable_commands.size(), 2U);
     EXPECT_TRUE(durable_commands.back().completed());
+    EXPECT_FALSE(journal->load_execution_lease(
+        "tenant:runtime", original.run_id()));
     const auto durable_snapshot = journal->load("tenant:runtime", original.run_id());
     ASSERT_TRUE(durable_snapshot.has_value());
     ASSERT_TRUE(durable_snapshot->exact_checkpoint().has_value());
@@ -2411,6 +2690,520 @@ TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResul
     (void)original.wait();
     EXPECT_EQ(completed_calls.load(), 1U);
 }
+
+TEST(ProgramRuntimeTest, GraphMigrationFencesSourceAndExactResumesGenerationTwo) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto version = fixture.admit("runtime-short-blocking");
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-graph-migration-source", {}});
+    auto target = fixture.runtime->migrate_graph(
+        source, ProgramGraphMigrationTarget{version.id(), "graph-migration-target", {}});
+    const auto result = target.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message
+                             : "no failure detail");
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    EXPECT_EQ(lineage->active_run_record_id(), target.snapshot().id());
+    EXPECT_EQ(lineage->remaining_budget(), result.remaining_budget());
+    const auto generation = fixture.journal->load_generation(
+        "tenant:runtime", lineage->lineage_id(), 2);
+    ASSERT_TRUE(generation);
+    ASSERT_TRUE(generation->graph_migration_receipt());
+    EXPECT_FALSE(generation->replacement_receipt());
+    EXPECT_EQ(generation->graph_migration_receipt()->capsule().source_run_id(),
+              source.run_id());
+    const auto durable_capsule = fixture.journal->load_graph_migration_capsule(
+        "tenant:runtime", source.run_id(),
+        generation->graph_migration_receipt()->capsule().source_lineage_head_id());
+    ASSERT_TRUE(durable_capsule);
+    EXPECT_EQ(durable_capsule->id(),
+              generation->graph_migration_receipt()->capsule().id());
+    const auto initial = fixture.journal->load_generation_initial_publication(
+        "tenant:runtime", lineage->lineage_id(), 2);
+    ASSERT_TRUE(initial);
+    ASSERT_TRUE(initial->run_record.exact_checkpoint());
+    ASSERT_TRUE(initial->run_record.exact_checkpoint_content_id());
+    const auto target_checkpoint = fixture.checkpoints->load_by_id(
+        initial->run_record.exact_checkpoint()->checkpoint_id);
+    ASSERT_TRUE(target_checkpoint);
+    EXPECT_EQ(*initial->run_record.exact_checkpoint_content_id(),
+              graph_migration_checkpoint_content_id(*target_checkpoint));
+
+    const auto reconnected = fixture.runtime->reconnect(
+        "tenant:runtime", source.run_id()).wait();
+    EXPECT_EQ(reconnected.id(), result.id());
+    EXPECT_EQ(reconnected.run_id(), target.run_id());
+    const auto retried = fixture.runtime
+                             ->migrate_graph(
+                                 source,
+                                 ProgramGraphMigrationTarget{
+                                     version.id(), "graph-migration-target", {}})
+                             .wait();
+    EXPECT_EQ(retried.id(), result.id());
+    EXPECT_EQ(retried.run_id(), target.run_id());
+    (void)source.wait();
+    EXPECT_EQ(followup_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, GraphMigrationTargetSaveFailureResumesHeldSource) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    auto checkpoints = std::make_shared<AdversarialCheckpointStore>();
+    checkpoints->arm(AdversarialCheckpointStore::Mode::FailMigrationTargetSave);
+    AdmittedRuntime fixture(1, checkpoints);
+    const auto version = fixture.admit("runtime-short-blocking");
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-graph-migration-failed", {}});
+    EXPECT_THROW(
+        (void)fixture.runtime->migrate_graph(
+            source,
+            ProgramGraphMigrationTarget{version.id(), "graph-migration-failed-target", {}}),
+        std::runtime_error);
+
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+    EXPECT_EQ(checkpoints->migration_target_save_failures(), 1U);
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 1U);
+    EXPECT_EQ(lineage->active_run_record_id(), source.snapshot().id());
+    EXPECT_FALSE(fixture.journal->load_graph_migration_capsule(
+        "tenant:runtime", source.run_id(), lineage->id()));
+    EXPECT_FALSE(fixture.journal->load(
+        "tenant:runtime", "graph-migration-failed-target"));
+}
+
+TEST(ProgramRuntimeTest, GraphMigrationRejectsContentChangedAtConsumingLoad) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    auto checkpoints = std::make_shared<AdversarialCheckpointStore>();
+    checkpoints->arm(
+        AdversarialCheckpointStore::Mode::WrongMigrationContentAtConsumingLoad);
+    AdmittedRuntime fixture(1, checkpoints);
+    const auto version = fixture.admit("runtime-short-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(),
+                          "trace-graph-migration-content-race", {}});
+
+    const auto result = fixture.runtime
+                            ->migrate_graph(
+                                source,
+                                ProgramGraphMigrationTarget{
+                                    version.id(), "graph-migration-content-race-target", {}})
+                            .wait();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 0U);
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    (void)source.wait();
+}
+
+TEST(ProgramRuntimeTest, UnreadableSafePointCommitFencesSourceDurably) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(1, {}, journal);
+    const auto version = fixture.admit("runtime-short-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(),
+                          "trace-graph-migration-uncertain-source", {}});
+    journal->crash_after_next_graph_safe_point_with_unreadable_commit();
+
+    EXPECT_THROW(
+        (void)fixture.runtime->migrate_graph(
+            source,
+            ProgramGraphMigrationTarget{
+                version.id(), "graph-migration-uncertain-target", {}}),
+        std::runtime_error);
+    const auto source_result = source.wait();
+    EXPECT_EQ(source_result.status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 0U);
+    const auto durable = journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(durable);
+    EXPECT_EQ(durable->continuation().state, ContinuationState::Cancelled);
+    ASSERT_TRUE(durable->exact_checkpoint());
+    ASSERT_TRUE(durable->exact_checkpoint_content_id());
+    EXPECT_FALSE(journal->load(
+        "tenant:runtime", "graph-migration-uncertain-target"));
+
+    auto fresh_runtime = fixture.make_runtime();
+    EXPECT_EQ(fresh_runtime->reconnect("tenant:runtime", source.run_id()).wait().status(),
+              ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(followup_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, CancellationDuringGraphMigrationFencePublishesNoSuccessor) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    AdmittedRuntime fixture(2);
+    const auto version = fixture.admit("runtime-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-graph-migration-cancel", {}});
+    for (unsigned attempt = 0; blocking_active.load() == 0 && attempt < 2000; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(blocking_active.load(), 1U);
+
+    auto migration = std::async(std::launch::async, [&] {
+        return fixture.runtime->migrate_graph(
+            source,
+            ProgramGraphMigrationTarget{version.id(), "graph-migration-cancelled-target", {}});
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(source.cancel());
+    EXPECT_THROW((void)migration.get(), std::runtime_error);
+    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 1U);
+    EXPECT_FALSE(fixture.journal->load(
+        "tenant:runtime", "graph-migration-cancelled-target"));
+}
+
+TEST(ProgramRuntimeTest, CancellationAfterHeldSourceLinearizesBehindMigrationCommit) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    auto checkpoints = std::make_shared<AdversarialCheckpointStore>();
+    checkpoints->arm(AdversarialCheckpointStore::Mode::DelayMigrationTargetSave);
+    AdmittedRuntime fixture(1, checkpoints);
+    const auto version = fixture.admit("runtime-short-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(),
+                          "trace-graph-migration-linearized-cancel", {}});
+    auto migration = std::async(std::launch::async, [&] {
+        return fixture.runtime
+            ->migrate_graph(
+                source,
+                ProgramGraphMigrationTarget{
+                    version.id(), "graph-migration-linearized-target", {}})
+            .wait();
+    });
+    for (unsigned attempt = 0;
+         !checkpoints->migration_target_save_started() && attempt < 3000; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(checkpoints->migration_target_save_started());
+
+    EXPECT_FALSE(source.cancel());
+    const auto target = migration.get();
+    EXPECT_EQ(target.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    const auto generation = fixture.journal->load_generation(
+        "tenant:runtime", lineage->lineage_id(), 2);
+    ASSERT_TRUE(generation);
+    const auto receipt = generation->graph_migration_receipt();
+    ASSERT_TRUE(receipt);
+    const auto source_record = fixture.journal->load(
+        "tenant:runtime", source.run_id());
+    const auto source_head = fixture.journal->load_lineage_head(
+        "tenant:runtime", lineage->lineage_id(),
+        receipt->capsule().source_lineage_head_id());
+    const auto initial = fixture.journal->load_generation_initial_publication(
+        "tenant:runtime", lineage->lineage_id(), 2);
+    ASSERT_TRUE(source_record);
+    ASSERT_TRUE(source_head);
+    ASSERT_TRUE(initial);
+    EXPECT_EQ(initial->run_record.invocation().budget,
+              program_replacement_remaining_budget(
+                  *source_record, *source_head,
+                  initial->run_record.created_at_ms()));
+    EXPECT_LE(initial->run_record.invocation().budget.wall_time_ms + 150,
+              source_record->remaining_budget().wall_time_ms);
+    (void)source.wait();
+}
+
+TEST(ProgramRuntimeTest, RemoteReconnectCannotStealLiveRootExecutionLease) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    auto backend = std::make_shared<InMemoryProgramTransitionStore>();
+    auto local_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    AdmittedRuntime fixture(2, {}, local_view);
+    const auto version = fixture.admit("runtime-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(),
+                          "trace-live-root-execution-lease", {}});
+    for (unsigned attempt = 0; blocking_active.load() == 0 && attempt < 2000; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(blocking_active.load(), 1U);
+    const auto lease = backend->load_execution_lease(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lease);
+
+    auto remote_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    auto remote_runtime = fixture.make_runtime_with_transitions(remote_view);
+    try {
+        (void)remote_runtime->reconnect("tenant:runtime", source.run_id());
+        FAIL() << "remote reconnect unexpectedly stole a live root execution lease";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_RUN_LEASE_HELD");
+    }
+    EXPECT_EQ(blocking_calls.load(), 1U);
+
+    EXPECT_TRUE(source.cancel());
+    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_FALSE(backend->load_execution_lease(
+        "tenant:runtime", source.run_id()));
+}
+
+TEST(ProgramRuntimeTest, ExpiredRootExecutionLeaseFencesWithoutRedispatch) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    auto backend = std::make_shared<InMemoryProgramTransitionStore>();
+    auto local_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    local_view->block_execution_release();
+    AdmittedRuntime fixture(2, {}, local_view);
+    const auto version = fixture.admit("runtime-blocking");
+    auto short_budget = grant();
+    short_budget.wall_time_ms = 100;
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), short_budget,
+                          "trace-expired-root-execution-lease", {}});
+    for (unsigned attempt = 0; blocking_active.load() == 0 && attempt < 2000; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(blocking_active.load(), 1U);
+    if (!local_view->wait_for_execution_release(std::chrono::seconds(2))) {
+        local_view->release_execution_release();
+        FAIL() << "root execution did not reach its blocked lease release";
+    }
+
+    auto first_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    auto second_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    auto first_runtime = fixture.make_runtime_with_transitions(first_view);
+    auto second_runtime = fixture.make_runtime_with_transitions(second_view);
+    std::barrier ready(3);
+    const auto recover = [&](ProgramRuntime& runtime) {
+        ready.arrive_and_wait();
+        try {
+            return runtime.reconnect("tenant:runtime", source.run_id()).wait().status();
+        } catch (const ProgramDiagnosticError&) {
+            return ProgramTerminalStatus::Failed;
+        }
+    };
+    auto first = std::async(std::launch::async, [&] { return recover(*first_runtime); });
+    auto second = std::async(std::launch::async, [&] { return recover(*second_runtime); });
+    ready.arrive_and_wait();
+    const auto first_status = first.get();
+    const auto second_status = second.get();
+
+    const auto durable = backend->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(durable);
+    ASSERT_TRUE(durable->terminal_result());
+    EXPECT_EQ(durable->terminal_result()->status(), ProgramTerminalStatus::TimedOut);
+    EXPECT_TRUE(first_status == ProgramTerminalStatus::TimedOut ||
+                second_status == ProgramTerminalStatus::TimedOut);
+    EXPECT_FALSE(backend->load_execution_lease("tenant:runtime", source.run_id()));
+    EXPECT_EQ(blocking_calls.load(), 1U);
+
+    local_view->release_execution_release();
+    (void)source.wait();
+    EXPECT_EQ(blocking_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, RemoteReconnectCannotDispatchDurablyHeldGraphMigrationSource) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    auto checkpoints = std::make_shared<AdversarialCheckpointStore>();
+    checkpoints->arm(AdversarialCheckpointStore::Mode::DelayMigrationTargetSave);
+    auto backend = std::make_shared<InMemoryProgramTransitionStore>();
+    auto local_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    AdmittedRuntime fixture(1, checkpoints, local_view);
+    const auto version = fixture.admit("runtime-short-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(),
+                          "trace-graph-migration-remote-fence", {}});
+    auto migration = std::async(std::launch::async, [&] {
+        return fixture.runtime
+            ->migrate_graph(
+                source,
+                ProgramGraphMigrationTarget{
+                    version.id(), "graph-migration-remote-fence-target", {}})
+            .wait();
+    });
+    for (unsigned attempt = 0;
+         !checkpoints->migration_target_save_started() && attempt < 3000; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(checkpoints->migration_target_save_started());
+    const auto held_lineage = backend->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(held_lineage);
+    ASSERT_TRUE(backend->load_graph_migration_capsule(
+        "tenant:runtime", source.run_id(), held_lineage->id()));
+
+    auto remote_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
+    auto remote_runtime = fixture.make_runtime_with_transitions(remote_view);
+    EXPECT_THROW(
+        (void)remote_runtime->reconnect("tenant:runtime", source.run_id()),
+        ProgramDiagnosticError);
+    EXPECT_EQ(followup_calls.load(), 0U);
+
+    const auto target = migration.get();
+    EXPECT_EQ(target.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+    (void)source.wait();
+}
+
+TEST(ProgramRuntimeTest, ConcurrentGraphMigrationRequestsPublishOneSuccessor) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto version = fixture.admit("runtime-short-blocking");
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-graph-migration-race", {}});
+    auto second_runtime = fixture.make_runtime();
+    std::barrier ready(3);
+    const auto migrate = [&](ProgramRuntime& runtime, std::string run_id) {
+        ready.arrive_and_wait();
+        try {
+            const auto result = runtime
+                                    .migrate_graph(
+                                        source,
+                                        ProgramGraphMigrationTarget{
+                                            version.id(), std::move(run_id), {}})
+                                    .wait();
+            return result.status() == ProgramTerminalStatus::Completed ? 1 : -1;
+        } catch (const std::exception&) {
+            return 0;
+        }
+    };
+    auto first = std::async(std::launch::async, [&] {
+        return migrate(*fixture.runtime, "graph-migration-race-first");
+    });
+    auto second = std::async(std::launch::async, [&] {
+        return migrate(*second_runtime, "graph-migration-race-second");
+    });
+    ready.arrive_and_wait();
+
+    EXPECT_EQ(first.get() + second.get(), 1);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    (void)source.wait();
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
+TEST(ProgramRuntimeTest, GraphMigrationSurvivesSqliteRuntimeReopen) {
+    static std::atomic<unsigned> sequence{0};
+    const auto id = sequence.fetch_add(1);
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-runtime-graph-migration-" +
+          std::to_string(id) + ".db"))
+            .string();
+    const auto checkpoint_path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-runtime-graph-migration-checkpoints-" +
+          std::to_string(id) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    std::filesystem::remove(checkpoint_path);
+    blocking_calls.store(0);
+    followup_calls.store(0);
+
+    {
+        auto transitions = std::make_shared<SQLiteProgramTransitionStore>(path);
+        auto checkpoints = std::make_shared<SqliteCheckpointStore>(checkpoint_path);
+        AdmittedRuntime fixture(1, checkpoints, transitions);
+        const auto version = fixture.admit("runtime-short-blocking");
+        std::string source_run_id;
+        std::string target_run_id;
+        std::string target_result_id;
+        {
+            auto source = fixture.runtime->start(
+                "tenant:runtime", version,
+                ProgramInvocation{json::object(), grant(),
+                                  "trace-sqlite-graph-migration", {}});
+            const auto target = fixture.runtime
+                                    ->migrate_graph(
+                                        source,
+                                        ProgramGraphMigrationTarget{
+                                            version.id(), "sqlite-graph-migration-target", {}})
+                                    .wait();
+            ASSERT_EQ(target.status(), ProgramTerminalStatus::Completed);
+            (void)source.wait();
+            source_run_id = source.run_id();
+            target_run_id = target.run_id();
+            target_result_id = target.id();
+        }
+        EXPECT_EQ(blocking_calls.load(), 1U);
+        EXPECT_EQ(followup_calls.load(), 1U);
+
+        fixture.runtime.reset();
+        fixture.journal.reset();
+        fixture.checkpoints.reset();
+        transitions.reset();
+        checkpoints.reset();
+        fixture.journal = std::make_shared<SQLiteProgramTransitionStore>(path);
+        fixture.checkpoints = std::make_shared<SqliteCheckpointStore>(checkpoint_path);
+        fixture.runtime = fixture.make_runtime();
+        const auto lineage = fixture.journal->load_run_lineage(
+            "tenant:runtime", source_run_id);
+        ASSERT_TRUE(lineage);
+        EXPECT_EQ(lineage->active_generation(), 2U);
+        const auto generation = fixture.journal->load_generation(
+            "tenant:runtime", lineage->lineage_id(), 2);
+        ASSERT_TRUE(generation);
+        ASSERT_TRUE(generation->graph_migration_receipt());
+        const auto capsule = fixture.journal->load_graph_migration_capsule(
+            "tenant:runtime", source_run_id,
+            generation->graph_migration_receipt()->capsule().source_lineage_head_id());
+        ASSERT_TRUE(capsule);
+        EXPECT_EQ(capsule->id(),
+                  generation->graph_migration_receipt()->capsule().id());
+        const auto recovered = fixture.runtime->reconnect(
+            "tenant:runtime", source_run_id).wait();
+        EXPECT_EQ(recovered.id(), target_result_id);
+        EXPECT_EQ(recovered.run_id(), target_run_id);
+        EXPECT_EQ(followup_calls.load(), 1U);
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(checkpoint_path);
+}
+#endif
+#endif
 
 TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGenerationTwo) {
     completed_calls.store(0);

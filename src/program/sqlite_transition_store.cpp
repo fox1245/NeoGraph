@@ -235,6 +235,39 @@ std::optional<ProgramTransitionPublication> load_generation_initial_publication_
     return publication;
 }
 
+std::optional<GraphMigrationCapsule> load_graph_migration_capsule_record(
+    sqlite3* db, std::string_view owner_scope, std::string_view source_run_id,
+    std::string_view source_lineage_head_id) {
+    Statement statement(
+        db, "SELECT capsule_bytes FROM program_graph_migration_capsules_v1 "
+            "WHERE owner_scope = ?1 AND source_run_id = ?2 AND source_lineage_head_id = ?3");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, source_run_id);
+    statement.bind_text(3, source_lineage_head_id);
+    if (!statement.step_row()) return std::nullopt;
+    auto capsule = GraphMigrationCapsule::parse(column_blob(statement.get(), 0));
+    if (capsule.owner_scope() != owner_scope || capsule.source_run_id() != source_run_id ||
+        capsule.source_lineage_head_id() != source_lineage_head_id) {
+        throw std::invalid_argument("Stored graph migration capsule binding is corrupt");
+    }
+    return capsule;
+}
+
+std::optional<ProgramExecutionLease> load_execution_lease_record(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id) {
+    Statement statement(
+        db, "SELECT lease_bytes FROM program_execution_leases_v1 "
+            "WHERE owner_scope = ?1 AND run_id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) return std::nullopt;
+    auto lease = ProgramExecutionLease::parse(column_blob(statement.get(), 0));
+    if (lease.owner_scope() != owner_scope || lease.run_id() != run_id) {
+        throw std::invalid_argument("Stored Program execution lease binding is corrupt");
+    }
+    return lease;
+}
+
 std::optional<std::string> load_run_lineage_id(sqlite3* db,
                                                std::string_view owner_scope,
                                                std::string_view run_id) {
@@ -477,10 +510,14 @@ bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&            
 }
 
 bool valid_command_reservation_transition(
+    const ProgramRunRecord&                                  previous_run,
     const ProgramJournalRecord&                              previous_journal,
     const ProgramJournalRecord&                              next_journal,
     const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
-    const ProgramTransitionPublication&                      publication) {
+    const ProgramTransitionPublication&                      publication,
+    const ProgramGraphSafePointEvidence*                     safe_point_evidence,
+    const GraphMigrationCapsule*                             safe_point_capsule,
+    const ProgramExecutionLease*                             execution_lease) {
     const bool increased =
         budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
     const bool ordinary  = is_valid_program_journal_transition(previous_journal, next_journal);
@@ -503,7 +540,14 @@ bool valid_command_reservation_transition(
         return usage && is_valid_program_journal_reservation_settlement(previous_journal,
                                                                         next_journal, *usage);
     }
-    if (!increased) return ordinary;
+    if (!increased) {
+        if (safe_point_evidence && safe_point_capsule && execution_lease) {
+            return is_valid_program_graph_safe_point_transition(
+                previous_run, previous_journal, publication, *safe_point_evidence,
+                *safe_point_capsule, *execution_lease);
+        }
+        return ordinary;
+    }
     if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
         publication.run_record.continuation().state != ContinuationState::Interrupted ||
         !publication.run_record.terminal_result() ||
@@ -538,9 +582,12 @@ bool valid_initial_publication(const ProgramTransitionPublication& publication) 
 }
 
 bool valid_increment(sqlite3* db, std::string_view owner_scope,
-                     const StoredHead& old_head,
-                     const ProgramTransitionPublication& next_publication,
-                     std::string_view expected_journal_head) {
+                      const StoredHead& old_head,
+                       const ProgramTransitionPublication& next_publication,
+                       std::string_view expected_journal_head,
+                       const ProgramGraphSafePointEvidence* safe_point_evidence,
+                       const GraphMigrationCapsule* safe_point_capsule,
+                       const ProgramExecutionLease* execution_lease) {
     const auto& old_run      = old_head.run_record;
     const auto& next_run     = next_publication.run_record;
     const auto& old_journal  = old_head.journal_record;
@@ -591,8 +638,10 @@ bool valid_increment(sqlite3* db, std::string_view owner_scope,
         }
     }
     if (!valid_command_history_append(old_run, old_commands, next_publication.commands) ||
-        !valid_command_reservation_transition(old_journal, next_journal, old_commands,
-                                              next_publication))
+        !valid_command_reservation_transition(old_run, old_journal, next_journal,
+                                               old_commands, next_publication,
+                                               safe_point_evidence, safe_point_capsule,
+                                               execution_lease))
         return false;
     if (next_publication.migration_plan &&
         (!old_head.migration_plan ||
@@ -650,6 +699,14 @@ void create_v2_schema(sqlite3* db) {
              "PRIMARY KEY(owner_scope, run_id), "
              "FOREIGN KEY(owner_scope, lineage_id) REFERENCES "
              "program_run_lineage_heads_v1(owner_scope, lineage_id) ON DELETE CASCADE)");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_graph_migration_capsules_v1 ("
+             "owner_scope TEXT NOT NULL, source_run_id TEXT NOT NULL, "
+             "source_lineage_head_id TEXT NOT NULL, capsule_id TEXT NOT NULL, "
+             "capsule_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, source_run_id, source_lineage_head_id))");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_execution_leases_v1 ("
+             "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, lease_id TEXT NOT NULL, "
+             "lease_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, run_id))");
 }
 
 bool fork_binds_predecessor(const ProgramRunRecord&     target,
@@ -817,6 +874,46 @@ void insert_run_lineage(sqlite3* db,
     statement.bind_text(2, run_id);
     statement.bind_text(3, lineage_id);
     statement.step_done();
+}
+
+void insert_graph_migration_capsule(sqlite3* db,
+                                    const GraphMigrationCapsule& capsule) {
+    Statement statement(
+        db, "INSERT INTO program_graph_migration_capsules_v1"
+            "(owner_scope, source_run_id, source_lineage_head_id, capsule_id, capsule_bytes) "
+            "VALUES(?1, ?2, ?3, ?4, ?5)");
+    statement.bind_text(1, capsule.owner_scope());
+    statement.bind_text(2, capsule.source_run_id());
+    statement.bind_text(3, capsule.source_lineage_head_id());
+    statement.bind_text(4, capsule.id());
+    statement.bind_blob(5, capsule.serialize_canonical());
+    statement.step_done();
+}
+
+void insert_execution_lease(sqlite3* db, const ProgramExecutionLease& lease) {
+    Statement statement(
+        db, "INSERT INTO program_execution_leases_v1"
+            "(owner_scope, run_id, lease_id, lease_bytes) VALUES(?1, ?2, ?3, ?4) "
+            "ON CONFLICT(owner_scope, run_id) DO UPDATE SET "
+            "lease_id = excluded.lease_id, lease_bytes = excluded.lease_bytes");
+    statement.bind_text(1, lease.owner_scope());
+    statement.bind_text(2, lease.run_id());
+    statement.bind_text(3, lease.id());
+    statement.bind_blob(4, lease.serialize_canonical());
+    statement.step_done();
+}
+
+void delete_execution_lease(sqlite3* db, const ProgramExecutionLease& lease) {
+    Statement statement(
+        db, "DELETE FROM program_execution_leases_v1 "
+            "WHERE owner_scope = ?1 AND run_id = ?2 AND lease_id = ?3");
+    statement.bind_text(1, lease.owner_scope());
+    statement.bind_text(2, lease.run_id());
+    statement.bind_text(3, lease.id());
+    statement.step_done();
+    if (sqlite3_changes(db) != 1) {
+        throw std::runtime_error("Program execution lease delete lost its compare-and-swap");
+    }
 }
 
 void insert_head(sqlite3* db, std::string_view owner_scope, const ProgramRunRecord& run_record,
@@ -1207,6 +1304,24 @@ SQLiteProgramTransitionStore::load_generation_initial_publication(
         impl_->db, owner_scope, lineage_id, generation);
 }
 
+std::optional<GraphMigrationCapsule>
+SQLiteProgramTransitionStore::load_graph_migration_capsule(
+    std::string_view owner_scope, std::string_view source_run_id,
+    std::string_view source_lineage_head_id) const {
+    if (owner_scope.empty() || source_run_id.empty() || source_lineage_head_id.empty())
+        return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_graph_migration_capsule_record(
+        impl_->db, owner_scope, source_run_id, source_lineage_head_id);
+}
+std::optional<ProgramExecutionLease>
+SQLiteProgramTransitionStore::load_execution_lease(
+    std::string_view owner_scope, std::string_view run_id) const {
+    if (owner_scope.empty() || run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_execution_lease_record(impl_->db, owner_scope, run_id);
+}
+
 std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head(
     std::string_view owner_scope, std::string_view lineage_id, std::string_view head_id) const {
     if (owner_scope.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
@@ -1217,9 +1332,47 @@ std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head
 ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication) {
+    return compare_publish_impl(owner_scope, expected_journal_head,
+                                std::move(publication), nullptr, nullptr, nullptr, nullptr);
+}
+
+ProgramTransitionPublishResult
+SQLiteProgramTransitionStore::compare_publish_execution(
+    std::string_view owner_scope, std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    std::optional<ProgramExecutionLease> expected_lease,
+    std::optional<ProgramExecutionLease> next_lease) {
+    return compare_publish_impl(
+        owner_scope, expected_journal_head, std::move(publication), nullptr, nullptr,
+        expected_lease ? &*expected_lease : nullptr,
+        next_lease ? &*next_lease : nullptr);
+}
+
+ProgramTransitionPublishResult
+SQLiteProgramTransitionStore::compare_publish_graph_safe_point(
+    std::string_view owner_scope, std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    const ProgramGraphSafePointEvidence& evidence,
+    const GraphMigrationCapsule& capsule,
+    const ProgramExecutionLease& execution_lease) {
+    return compare_publish_impl(owner_scope, expected_journal_head,
+                                std::move(publication), &evidence, &capsule,
+                                &execution_lease, nullptr);
+}
+
+ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_impl(
+    std::string_view owner_scope, std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    const ProgramGraphSafePointEvidence* safe_point_evidence,
+    const GraphMigrationCapsule* safe_point_capsule,
+    const ProgramExecutionLease* expected_lease,
+    const ProgramExecutionLease* next_lease) {
     std::string publication_bytes;
     try {
-        if (publication.run_record.owner_scope() != owner_scope)
+        if (publication.run_record.owner_scope() != owner_scope ||
+            static_cast<bool>(safe_point_evidence) !=
+                static_cast<bool>(safe_point_capsule) ||
+            (safe_point_evidence && (!expected_lease || next_lease)))
             throw std::invalid_argument("Program transition owner scope does not match the publication");
         if (!valid_effect_outbox_binding(publication.run_record, publication.effects))
             return ProgramTransitionPublishResult::Conflict;
@@ -1232,13 +1385,52 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
     const auto current = load_head(impl_->db, owner_scope, run_id);
+    const auto current_lease = load_execution_lease_record(impl_->db, owner_scope, run_id);
+    if (safe_point_evidence && !current) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
 
     if (current && current->last_publication_bytes == publication_bytes) {
+        if (safe_point_capsule) {
+            const auto stored = load_graph_migration_capsule_record(
+                impl_->db, owner_scope, publication.run_record.run_id(),
+                safe_point_capsule->source_lineage_head_id());
+            if (!stored || stored->id() != safe_point_capsule->id()) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+        }
+        const bool lease_result_matches = next_lease
+            ? current_lease && current_lease->id() == next_lease->id()
+            : !expected_lease || !current_lease;
+        if (!lease_result_matches) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
         const auto result = expected_journal_head == publication.journal_record.previous_id
                                 ? ProgramTransitionPublishResult::AlreadyPresent
                                 : ProgramTransitionPublishResult::Conflict;
         transaction.commit();
         return result;
+    }
+    if (expected_lease) {
+        if (!current_lease || current_lease->id() != expected_lease->id() || !current ||
+            expected_lease->owner_scope() != owner_scope ||
+            expected_lease->run_id() != run_id ||
+            expected_lease->attempt() != current->run_record.continuation().attempt ||
+            expected_lease->program_version_id() != current->run_record.program_version_id() ||
+            expected_lease->bundle_id() != current->run_record.bundle_id()) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    } else if (current_lease) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication)) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
     }
     if (!current && publication.fork_source_lineage) {
         const auto fork = publication.run_record.fork_receipt();
@@ -1255,7 +1447,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
             return ProgramTransitionPublishResult::Conflict;
         }
     } else if (!valid_increment(impl_->db, owner_scope, *current, publication,
-                                expected_journal_head)) {
+                                expected_journal_head, safe_point_evidence,
+                                safe_point_capsule, expected_lease)) {
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
@@ -1323,14 +1516,17 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
             if (graph_migration) {
                 const auto command = load_latest_javascript_command(
                     impl_->db, owner_scope, active->run_id());
-                valid_successor = !command && publication.commands.empty() &&
+                const auto durable_capsule = load_graph_migration_capsule_record(
+                    impl_->db, owner_scope, active->run_id(), current_lineage->id());
+                valid_successor = durable_capsule && next_lease && !command &&
+                    publication.commands.empty() &&
                     publication.effects.empty() && publication.events.size() == 1 &&
                     does_program_graph_migration_started_event_bind(
                         publication.events.front(), publication.run_record) &&
                     publication.run_record.event_sequence() == 1 &&
                     publication.migration_plan &&
                     is_valid_program_graph_migration_transition(
-                        *active, *current_lineage, source->run_record,
+                        *active, *current_lineage, source->run_record, *durable_capsule,
                         *publication.migration_plan, *publication.run_generation,
                         *publication.run_lineage, publication.run_record);
             } else {
@@ -1413,6 +1609,11 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
         update_lineage_head(impl_->db, *publication.fork_source_lineage);
         insert_lineage_history(impl_->db, *publication.fork_source_lineage);
     }
+    if (safe_point_capsule) insert_graph_migration_capsule(impl_->db, *safe_point_capsule);
+    if (next_lease)
+        insert_execution_lease(impl_->db, *next_lease);
+    else if (expected_lease)
+        delete_execution_lease(impl_->db, *expected_lease);
     transaction.commit();
     return ProgramTransitionPublishResult::Published;
 }

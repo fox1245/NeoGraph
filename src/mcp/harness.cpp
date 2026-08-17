@@ -501,11 +501,44 @@ public:
         }
         return source_->load_generation_initial_publication(owner_scope, lineage_id, generation);
     }
+    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule(
+        std::string_view owner_scope,
+        std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override {
+        return select(source_run_id).load_graph_migration_capsule(
+            owner_scope, source_run_id, source_lineage_head_id);
+    }
+    std::optional<program::ProgramExecutionLease> load_execution_lease(
+        std::string_view owner_scope,
+        std::string_view run_id) const override {
+        return select(run_id).load_execution_lease(owner_scope, run_id);
+    }
     program::ProgramTransitionPublishResult compare_publish(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
         program::ProgramTransitionPublication publication) override {
         return target_->compare_publish(owner_scope, expected_journal_head, std::move(publication));
+    }
+    program::ProgramTransitionPublishResult compare_publish_execution(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        program::ProgramTransitionPublication publication,
+        std::optional<program::ProgramExecutionLease> expected_lease,
+        std::optional<program::ProgramExecutionLease> next_lease) override {
+        return target_->compare_publish_execution(
+            owner_scope, expected_journal_head, std::move(publication),
+            std::move(expected_lease), std::move(next_lease));
+    }
+    program::ProgramTransitionPublishResult compare_publish_graph_safe_point(
+        std::string_view owner_scope,
+        std::string_view expected_journal_head,
+        program::ProgramTransitionPublication publication,
+        const program::ProgramGraphSafePointEvidence& evidence,
+        const program::GraphMigrationCapsule& capsule,
+        const program::ProgramExecutionLease& execution_lease) override {
+        return target_->compare_publish_graph_safe_point(
+            owner_scope, expected_journal_head, std::move(publication), evidence, capsule,
+            execution_lease);
     }
 
 private:

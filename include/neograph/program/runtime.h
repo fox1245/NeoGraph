@@ -56,6 +56,13 @@ struct ProgramEffectResolution {
     std::shared_ptr<ProgramEventSink> events;
 };
 
+/** Already-admitted immutable target selected by the host for one live migration. */
+struct ProgramGraphMigrationTarget {
+    std::string                       target_program_version_id;
+    std::string                       requested_run_id;
+    std::shared_ptr<ProgramEventSink> events;
+};
+
 /**
  * Immutable data available when a host scheduler admits one Program attempt.
  *
@@ -195,9 +202,15 @@ public:
                            const ProgramVersion&            target,
                            ProgramInvocation                invocation);
     ProgramHandle replace(std::string_view      owner_scope,
-                          ProgramHandoff&&       source,
-                          const ProgramVersion&  target,
-                          ProgramInvocation      invocation);
+                           ProgramHandoff&&       source,
+                           const ProgramVersion&  target,
+                           ProgramInvocation      invocation);
+    /**
+     * Stop one live native root Core call at its next durable super-step,
+     * atomically publish an admitted successor generation, and exact-resume it.
+     */
+    ProgramHandle migrate_graph(const ProgramHandle&          source,
+                                ProgramGraphMigrationTarget target);
 
     asio::awaitable<ProgramResult> run_async(std::string owner_scope,
                                              ProgramVersion version,
