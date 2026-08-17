@@ -125,13 +125,15 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     next_host_tool_request.fetch_add(1, std::memory_order_relaxed) + 1);
             }
             if (execution.hook_runtime) {
-                co_await execution.hook_runtime->emit_async(
+                // GCC 13 ICEs when the returned awaitable is consumed as a temporary.
+                auto emission = execution.hook_runtime->emit_async(
                     HookPhase::BeforeToolExecution, "tool_execution",
                     call_execution.identity.owner_scope, call_execution.identity.root_run_id,
                     json{{"tool_call_id", tc.id}, {"tool_name", tc.name}, {"arguments", args},
                          {"thread_id", call_execution.identity.thread_id},
                          {"request_id", call_execution.identity.request_id}},
                     execution.cancel_token, hook_deadline());
+                co_await std::move(emission);
             }
             auto controller = call_execution.controller
                             ? call_execution.controller
@@ -153,13 +155,14 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     .dump();
             }
             if (execution.hook_runtime) {
-                co_await execution.hook_runtime->emit_async(
+                auto emission = execution.hook_runtime->emit_async(
                     HookPhase::AfterToolExecution, "tool_execution",
                     call_execution.identity.owner_scope, call_execution.identity.root_run_id,
                     json{{"tool_call_id", tc.id}, {"tool_name", tc.name}, {"status", tool_msg.tool_status},
                          {"result", tool_msg.content}, {"thread_id", call_execution.identity.thread_id},
                          {"request_id", call_execution.identity.request_id}},
                     execution.cancel_token, hook_deadline());
+                co_await std::move(emission);
             }
             if (execution.cancel_token) {
                 execution.cancel_token->throw_if_cancelled("after tool execution");

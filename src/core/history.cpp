@@ -185,8 +185,10 @@ asio::awaitable<CompactedHistory> compact_history(
     params.max_tokens = 500;
     ChatMessage sys{"system", "Summarize the following conversation concisely in 3-5 sentences. Preserve key facts, user preferences, and important context. Respond in the same language as the conversation."};
     ChatMessage usr{"user", conversation};
-    auto completion = co_await controller->invoke_async(
+    // GCC 13 ICEs when this overloaded call's awaitable remains a temporary.
+    auto invocation = controller->invoke_async(
         std::move(params), {}, {std::move(sys)}, {std::move(usr)});
+    auto completion = co_await std::move(invocation);
     if (!completion.message.content.empty()) {
         result.summary = completion.message.content;
         result.compacted = true;

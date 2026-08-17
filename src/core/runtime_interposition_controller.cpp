@@ -118,17 +118,21 @@ asio::awaitable<ChatCompletion> RuntimeInterpositionController::invoke_async(
         dispatch_id = epoch.run_id() + "-dispatch-" + std::to_string(++impl_->dispatch_sequence);
     }
     if (hooks) {
-        co_await hooks->emit_async(HookPhase::BeforeProviderRequest, "provider_request", owner_id,
-                                    epoch.run_id(), json{{"dispatch_id", dispatch_id}, {"epoch_id", epoch.id()}},
-                                    cancellation, hook_deadline());
+        // GCC 13 ICEs when the returned awaitable is consumed as a temporary.
+        auto emission = hooks->emit_async(HookPhase::BeforeProviderRequest, "provider_request", owner_id,
+                                           epoch.run_id(), json{{"dispatch_id", dispatch_id}, {"epoch_id", epoch.id()}},
+                                           cancellation, hook_deadline());
+        co_await std::move(emission);
     }
     auto completion = co_await impl_->controlled.dispatch_async(owner_id, std::move(dispatch_id),
                                                                   turn.assembly_receipt,
                                                                   std::move(turn.request));
     if (hooks) {
-        co_await hooks->emit_async(HookPhase::AfterProviderResponse, "provider_response", owner_id,
-                                    epoch.run_id(), json{{"epoch_id", epoch.id()}, {"tool_call_count", completion.message.tool_calls.size()}},
-                                    cancellation, hook_deadline());
+        auto emission = hooks->emit_async(
+            HookPhase::AfterProviderResponse, "provider_response", owner_id, epoch.run_id(),
+            json{{"epoch_id", epoch.id()}, {"tool_call_count", completion.message.tool_calls.size()}},
+            cancellation, hook_deadline());
+        co_await std::move(emission);
     }
     co_return completion;
 }

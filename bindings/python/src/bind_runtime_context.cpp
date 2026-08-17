@@ -181,8 +181,8 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("dispatch_id", &ProviderDispatchReceipt::dispatch_id);
     bind_identity_methods(dispatch_receipt);
     py::class_<ProviderDispatchReceiptStore, std::shared_ptr<ProviderDispatchReceiptStore>>(m, "ProviderDispatchReceiptStore")
-        .def("persist", &ProviderDispatchReceiptStore::persist)
-        .def("state", &ProviderDispatchReceiptStore::state);
+        .def("persist", py::overload_cast<const ProviderDispatchReceipt&>(&ProviderDispatchReceiptStore::persist))
+        .def("state", py::overload_cast<std::string_view>(&ProviderDispatchReceiptStore::state, py::const_));
     py::class_<DurableProviderDispatchReceiptStore, ProviderDispatchReceiptStore, PyDurableProviderDispatchReceiptStore,
                std::shared_ptr<DurableProviderDispatchReceiptStore>>(m, "DurableProviderDispatchReceiptStore").def(py::init<>());
     py::class_<InMemoryProviderDispatchReceiptStore, ProviderDispatchReceiptStore,

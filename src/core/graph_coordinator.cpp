@@ -131,10 +131,12 @@ asio::awaitable<void> CheckpointCoordinator::publish_checkpoint_async(
     data["run_metadata"] = json{{"owner_scope", hook_context_.owner_scope},
                                 {"run_id", hook_context_.run_id},
                                 {"trace_id", hook_context_.trace_id}};
-    co_await hook_runtime_->emit_async(
+    // GCC 13 ICEs when the returned awaitable is consumed as a temporary.
+    auto emission = hook_runtime_->emit_async(
         HookPhase::CheckpointPublished, "checkpoint_published",
         hook_context_.owner_scope, hook_context_.run_id, std::move(data),
         hook_context_.cancellation, hook_context_.parent_deadline);
+    co_await std::move(emission);
 }
 
 std::string CheckpointCoordinator::save_super_step(const GraphState&               state,

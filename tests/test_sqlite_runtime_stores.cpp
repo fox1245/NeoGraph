@@ -44,8 +44,11 @@ TEST(SQLiteRuntimeStores, ContextReopensWithOwnerIsolationAndCas) {
 TEST(SQLiteRuntimeStores, HookLeaseSurvivesReopenAndFencesStaleWorker) {
     const auto path = database("hook_reopen"); const auto now = std::chrono::system_clock::now();
     const auto event = RuntimeEvent::create({{}, 1, HookPhase::BeforeToolExecution, "event", "owner", "run", json::object()});
-    const auto call = invocation(event); HookLease first;
-    { SQLiteHookJournal journal(path); journal.enqueue(call, event, 2, now + std::chrono::minutes(1)); journal.publish(call.id()); first = *journal.claim(call.id(), "first", now, std::chrono::milliseconds(1)); }
+    const auto call = invocation(event);
+    const auto first = [&] {
+        SQLiteHookJournal journal(path); journal.enqueue(call, event, 2, now + std::chrono::minutes(1)); journal.publish(call.id());
+        return *journal.claim(call.id(), "first", now, std::chrono::milliseconds(1));
+    }();
     SQLiteHookJournal reopened(path);
     const auto second = *reopened.claim(call.id(), "second", now + std::chrono::seconds(1), std::chrono::seconds(1));
     EXPECT_GT(second.fencing_token, first.fencing_token);
