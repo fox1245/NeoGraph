@@ -58,7 +58,7 @@ json base_schema() {
     return json{
         {"name", "test_schema"},
         {"connection", {
-            {"base_url", "http://localhost:9999"},
+            {"base_url", "http://127.0.0.1:9999"},
             {"endpoint", "/v1/responses"},
             {"auth_header", "Authorization"},
             {"auth_prefix", "Bearer "},

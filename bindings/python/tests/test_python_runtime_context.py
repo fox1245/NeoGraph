@@ -107,7 +107,8 @@ def test_controlled_path_assembles_epoch_and_keeps_dependencies_alive():
     provider = _Provider()
     contexts = ng.InMemoryContextStore()
     receipts = _DurableReceipts()
-    controller = ng.RuntimeInterpositionController(provider, contexts, receipts, _sha("b"))
+    controller = ng.RuntimeInterpositionController(
+        provider, contexts, receipts, _sha("b"), max_input_tokens=1024)
     controller.activate("owner", _epoch(contexts, ng.RuntimeGuaranteeProfile.Strict))
     params = ng.CompletionParams(model="model")
     params.messages = [ng.ChatMessage("user", "unadmitted legacy prompt")]

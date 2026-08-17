@@ -332,18 +332,16 @@ TEST(SchemaProviderResponsesStream, FunctionCallOutputIsFlatOnTheFollowupTurn) {
     ASSERT_TRUE(body.contains("input"));
     ASSERT_TRUE(body["input"].is_array());
 
-    const auto function_call = std::find_if(
-        body["input"].begin(), body["input"].end(), [](const json& item) {
-            return item.value("type", "") == "function_call";
-        });
-    const auto function_output = std::find_if(
-        body["input"].begin(), body["input"].end(), [](const json& item) {
-            return item.value("type", "") == "function_call_output";
-    });
-    ASSERT_NE(function_call, body["input"].end());
-    ASSERT_NE(function_output, body["input"].end());
-    EXPECT_EQ("call_abc", (*function_call).at("call_id").get<std::string>());
-    EXPECT_EQ("call_abc", (*function_output).at("call_id").get<std::string>());
+    const json* function_call = nullptr;
+    const json* function_output = nullptr;
+    for (const auto& item : body["input"]) {
+        if (item.value("type", "") == "function_call") function_call = &item;
+        if (item.value("type", "") == "function_call_output") function_output = &item;
+    }
+    ASSERT_NE(function_call, nullptr);
+    ASSERT_NE(function_output, nullptr);
+    EXPECT_EQ("call_abc", function_call->at("call_id").get<std::string>());
+    EXPECT_EQ("call_abc", function_output->at("call_id").get<std::string>());
     EXPECT_EQ(R"({"temperature":24})",
-              (*function_output).at("output").get<std::string>());
+              function_output->at("output").get<std::string>());
 }

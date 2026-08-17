@@ -26,6 +26,10 @@ asio::awaitable<std::string> forward(MCPClient& client, RpcRequest request) {
         result = co_await client.rpc_call_async(envelope["method"].get<std::string>(), envelope["params"],
                                                 request.deadline, request.cancel_token);
     } catch (const std::exception& error) {
+        if ((request.cancel_token && request.cancel_token->is_cancelled())
+            || std::chrono::steady_clock::now() >= request.deadline) {
+            throw;
+        }
         // Preserve the outer hook protocol even when the MCP server uses a
         // transport-specific error representation.
         co_return json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {
