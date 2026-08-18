@@ -127,6 +127,23 @@ struct Pending {
     struct curl_slist* curl_hdrs   = nullptr;
 };
 
+struct PostBarrier {
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    released = false;
+
+    void wait() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return released; });
+    }
+
+    void release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_one();
+    }
+};
+
 bool header_name_equals(std::string_view left, std::string_view right) noexcept {
     if (left.size() != right.size()) return false;
     return std::equal(left.begin(), left.end(), right.begin(),
@@ -280,11 +297,18 @@ struct CurlH2Pool::Impl {
                   std::exception_ptr err = {}) {
         auto on_done = std::move(p->on_done);
         auto caller_ex = std::move(p->caller_ex);
+        auto barrier = std::make_shared<PostBarrier>();
         asio::post(caller_ex,
             [ec, response = std::move(response), err = std::move(err),
-             on_done = std::move(on_done)]() mutable {
+             on_done = std::move(on_done), barrier]() mutable {
+                barrier->wait();
                 on_done(ec, std::move(response), std::move(err));
             });
+        // The posted handler may run immediately on another thread. Do not let
+        // it complete the caller coroutine (and destroy its io_context) until
+        // this worker has released its last executor reference.
+        caller_ex = {};
+        barrier->release();
     }
 
     void cancel_active() {

@@ -11,6 +11,7 @@
 #include <asio/error.hpp>
 #include <asio/experimental/parallel_group.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/strand.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -583,12 +584,17 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // Build deferred ops, one per ready node. co_spawn-with-deferred
     // returns an op that, when awaited, runs the worker coroutine and
     // completes with (exception_ptr, NodeResult).
-    using DeferredOp =
-        decltype(asio::co_spawn(branch_ex, worker(std::declval<std::string>()), asio::deferred));
+    // Each branch gets its own strand. Distinct strands retain branch-level
+    // parallelism while keeping a coroutine's Asio cancellation state on one
+    // serial executor; a bare multi-threaded pool lets cancellation emission
+    // race the frame's next await_transform.
+    using DeferredOp = decltype(asio::co_spawn(
+        asio::make_strand(branch_ex), worker(std::declval<std::string>()), asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(ready.size());
     for (const auto& node_name : ready) {
-        ops.push_back(asio::co_spawn(branch_ex, worker(node_name), asio::deferred));
+        ops.push_back(asio::co_spawn(
+            asio::make_strand(branch_ex), worker(node_name), asio::deferred));
     }
 
     // wait_for_all returns:

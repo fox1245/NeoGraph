@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -332,14 +333,14 @@ TEST(SchemaProviderResponsesStream, FunctionCallOutputIsFlatOnTheFollowupTurn) {
     ASSERT_TRUE(body.contains("input"));
     ASSERT_TRUE(body["input"].is_array());
 
-    const json* function_call = nullptr;
-    const json* function_output = nullptr;
-    for (const auto& item : body["input"]) {
-        if (item.value("type", "") == "function_call") function_call = &item;
-        if (item.value("type", "") == "function_call_output") function_output = &item;
+    std::optional<json> function_call;
+    std::optional<json> function_output;
+    for (const auto item : body["input"]) {
+        if (item.value("type", "") == "function_call") function_call = item;
+        if (item.value("type", "") == "function_call_output") function_output = item;
     }
-    ASSERT_NE(function_call, nullptr);
-    ASSERT_NE(function_output, nullptr);
+    ASSERT_TRUE(function_call.has_value());
+    ASSERT_TRUE(function_output.has_value());
     EXPECT_EQ("call_abc", function_call->at("call_id").get<std::string>());
     EXPECT_EQ("call_abc", function_output->at("call_id").get<std::string>());
     EXPECT_EQ(R"({"temperature":24})",
