@@ -100,11 +100,16 @@ void validate_data(const ProgramJavaScriptCommandJournalEntryData& data) {
 struct ProgramJavaScriptCommandJournalEntry::Impl {
     explicit Impl(ProgramJavaScriptCommandJournalEntryData value)
         : data(std::move(value)), coordinate_id(coordinate_id_for(data)),
-          id(entry_id_for(data)) {}
+          id(entry_id_for(data)) {
+        auto canonical = entry_body(data);
+        canonical["id"] = id;
+        canonical_bytes = detail::canonical_json_bytes(canonical);
+    }
 
     ProgramJavaScriptCommandJournalEntryData data;
     std::string                            coordinate_id;
     std::string                            id;
+    std::string                            canonical_bytes;
 };
 
 ProgramJavaScriptCommandJournalEntry::ProgramJavaScriptCommandJournalEntry(
@@ -197,14 +202,7 @@ const std::string& ProgramJavaScriptCommandJournalEntry::id() const noexcept {
 }
 
 std::string ProgramJavaScriptCommandJournalEntry::serialize_canonical() const {
-    validate_data(impl_->data);
-    if (coordinate_id_for(impl_->data) != impl_->coordinate_id ||
-        entry_id_for(impl_->data) != impl_->id) {
-        throw std::invalid_argument("JavaScript command journal entry identity mismatch");
-    }
-    auto value = entry_body(impl_->data);
-    value["id"] = impl_->id;
-    return detail::canonical_json_bytes(value);
+    return impl_->canonical_bytes;
 }
 
 }  // namespace neograph::program

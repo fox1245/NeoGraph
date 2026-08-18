@@ -563,12 +563,14 @@ ProgramJournalRecord ProgramJournalRecord::parse(std::string_view stored_bytes) 
 std::string ProgramJournalRecord::serialize_canonical() const {
     validate_record_body(*this);
     require_sha256(id, "Program journal id");
-    auto value = record_body(*this);
-    const auto bytes = detail::canonical_json_bytes(value);
+    auto bytes = detail::canonical_json_bytes(record_body(*this));
     if (id != detail::sha256_identity("program-journal-record/v1", bytes))
         throw std::invalid_argument("Program journal id does not match its canonical body");
-    value["id"] = id;
-    return detail::canonical_json_bytes(value);
+    const auto position = bytes.find(",\"inflight_reservation\":");
+    if (position == std::string::npos)
+        throw std::invalid_argument("Program journal canonical body is malformed");
+    bytes.insert(position, ",\"id\":\"" + id + "\"");
+    return bytes;
 }
 
 struct InMemoryProgramJournal::Impl {
