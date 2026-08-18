@@ -7,9 +7,9 @@
 //   * value and void specializations return / complete cleanly;
 //   * exceptions thrown inside the awaitable rethrow on the caller;
 //   * n_threads == 0 still runs (clamped to 1);
-//   * a make_parallel_group with sleeping branches finishes in
-//     roughly max(branch_time), not sum(branch_time), on a 4-worker
-//     pool — i.e. CPU parallelism actually materializes.
+//   * a make_parallel_group can enter four blocking branches
+//     concurrently on a 4-worker pool — i.e. CPU parallelism actually
+//     materializes.
 
 #include <gtest/gtest.h>
 
@@ -19,12 +19,13 @@
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <stdexcept>
 
 using namespace std::chrono_literals;
@@ -67,17 +68,22 @@ TEST(RunSyncPool, ZeroThreadsClampsToOne) {
 }
 
 TEST(RunSyncPool, ParallelGroupActuallyParallelizes) {
-    // Four 100ms timers running through make_parallel_group on a
-    // 4-worker pool should land near 100ms, not 400ms. 250ms gives
-    // headroom for CI noise without allowing full serialization.
-    constexpr auto branch_ms = 100ms;
-    constexpr auto ceiling_ms = 250ms;
+    std::mutex              mutex;
+    std::condition_variable ready;
+    std::size_t             arrived   = 0;
+    bool                    timed_out = false;
 
     auto aw = [&]() -> asio::awaitable<void> {
         auto ex = co_await asio::this_coro::executor;
         auto branch = [&](auto) -> asio::awaitable<void> {
-            asio::steady_timer t(ex, branch_ms);
-            co_await t.async_wait(asio::use_awaitable);
+            std::unique_lock lock(mutex);
+            ++arrived;
+            ready.notify_all();
+            if (!ready.wait_for(lock, 5s, [&] { return arrived == 4 || timed_out; })) {
+                timed_out = true;
+                ready.notify_all();
+            }
+            co_return;
         };
         co_await asio::experimental::make_parallel_group(
             asio::co_spawn(ex, branch(0), asio::deferred),
@@ -88,12 +94,7 @@ TEST(RunSyncPool, ParallelGroupActuallyParallelizes) {
                         asio::use_awaitable);
     };
 
-    auto t0 = std::chrono::steady_clock::now();
     run_sync_pool(aw(), 4);
-    auto elapsed = std::chrono::steady_clock::now() - t0;
-
-    EXPECT_LT(elapsed, ceiling_ms)
-        << "parallel group took "
-        << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
-        << "ms — likely serialized";
+    EXPECT_FALSE(timed_out) << "four worker branches did not overlap";
+    EXPECT_EQ(arrived, 4U);
 }
