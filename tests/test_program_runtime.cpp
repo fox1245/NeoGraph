@@ -282,11 +282,11 @@ public:
     asio::awaitable<NodeOutput> run(NodeInput input) override {
         ++blocking_calls;
         const auto active = blocking_active.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (active == 2 && overlap_ready) overlap_ready->set_value();
         auto peak = blocking_peak.load(std::memory_order_relaxed);
         while (peak < active &&
                !blocking_peak.compare_exchange_weak(peak, active, std::memory_order_relaxed,
-                                                    std::memory_order_relaxed)) {}
+                                                     std::memory_order_relaxed)) {}
+        if (active == 2 && overlap_ready) overlap_ready->set_value();
         ActiveCallGuard active_guard(blocking_active);
         if (overlap_barrier) overlap_barrier->arrive_and_wait();
         auto timer = asio::steady_timer(co_await asio::this_coro::executor);
