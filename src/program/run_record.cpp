@@ -430,11 +430,18 @@ ProgramChildState program_child_state_from_string(std::string_view value) {
 struct ProgramRunRecord::Impl {
     explicit Impl(ProgramRunRecordData value, std::uint32_t version)
         : data(std::move(value)), schema_version(version) {
-        auto body             = stored_body(data, schema_version);
-        const auto body_bytes = detail::canonical_json_bytes(body);
+        auto body_bytes = detail::canonical_json_bytes(stored_body(data, schema_version));
         id = detail::sha256_identity("program-run-record/v1", body_bytes);
-        body["id"] = id;
-        canonical_bytes = detail::canonical_json_bytes(body);
+        const auto format_position =
+            body_bytes.find("\"format\":\"neograph-program-run-record\"");
+        const auto position = format_position == std::string::npos
+                                  ? std::string::npos
+                                  : body_bytes.find(",\"invocation\":", format_position);
+        if (position == std::string::npos) {
+            throw std::invalid_argument("Program run record canonical body is malformed");
+        }
+        body_bytes.insert(position, ",\"id\":\"" + id + "\"");
+        canonical_bytes = std::move(body_bytes);
     }
 
     ProgramRunRecordData data;
