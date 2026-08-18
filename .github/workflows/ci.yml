@@ -45,8 +45,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake \
             build-essential \
             libpq-dev \
@@ -163,8 +162,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake \
             build-essential \
             libpq-dev \
@@ -421,8 +419,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
 
       - name: Configure (Release, benches on, postgres off)
@@ -485,8 +482,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake build-essential python3
 
       - name: Run blocking QuickJS matrix (Core median 1.10x / p95 1.15x)
@@ -542,8 +538,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake build-essential libssl-dev libcurl4-openssl-dev \
             libpq-dev pkg-config
 
@@ -681,8 +676,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake build-essential libssl-dev libcurl4-openssl-dev \
             pkg-config util-linux
 
@@ -747,8 +741,7 @@ jobs:
 
       - name: Install Clang + build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake build-essential clang libssl-dev libcurl4-openssl-dev \
             pkg-config
 
@@ -832,8 +825,7 @@ jobs:
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci_apt_install.sh \
             cmake \
             build-essential \
             libpq-dev \
