@@ -5058,13 +5058,13 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                  {"expected_plan_id", migration_plan.id()},
                  {"stored_plan_id", durable_plan ? durable_plan->id() : std::string{}}});
     }
+    if (execution_lease) control->set_execution_lease(*execution_lease);
+    impl_->register_control(control);
     fork_lock.unlock();
     if (cloned_context) {
         impl_->config.runtime_recovery_handler(ProgramRuntimeRecoveryState{
             std::string(owner_scope), run_id, {*cloned_context}, {}, {}, std::nullopt});
     }
-    if (execution_lease) control->set_execution_lease(*execution_lease);
-    impl_->register_control(control);
     if (!admit_started(control, started, invocation.budget, target_checkpoint)) {
         return ProgramHandle(std::move(control));
     }
