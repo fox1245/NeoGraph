@@ -19,6 +19,7 @@
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
+#include <asio/post.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -76,6 +77,7 @@ TEST(RunSyncPool, ParallelGroupActuallyParallelizes) {
     auto aw = [&]() -> asio::awaitable<void> {
         auto ex = co_await asio::this_coro::executor;
         auto branch = [&](auto) -> asio::awaitable<void> {
+            co_await asio::post(ex, asio::use_awaitable);
             std::unique_lock lock(mutex);
             ++arrived;
             ready.notify_all();
