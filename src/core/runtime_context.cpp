@@ -238,6 +238,7 @@ std::string_view to_string(ContextArtifactKind value) noexcept {
         case ContextArtifactKind::DerivedContext: return "derived_context";
         case ContextArtifactKind::RequiredSkill: return "required_skill";
         case ContextArtifactKind::HookOutput: return "hook_output";
+        case ContextArtifactKind::HardConstraint: return "hard_constraint";
     }
     return "unknown";
 }
@@ -273,6 +274,7 @@ ContextArtifactKind context_artifact_kind_from_string(std::string_view value) {
     if (value == "derived_context") return ContextArtifactKind::DerivedContext;
     if (value == "required_skill") return ContextArtifactKind::RequiredSkill;
     if (value == "hook_output") return ContextArtifactKind::HookOutput;
+    if (value == "hard_constraint") return ContextArtifactKind::HardConstraint;
     throw std::invalid_argument("Unknown context artifact kind");
 }
 
@@ -385,6 +387,9 @@ ContextArtifact ContextArtifact::create(ContextArtifactData data) {
         (!data.required || !data.source_feed_id.empty())) {
         throw std::invalid_argument(
             "Required skill artifacts must be required and independent of runtime history");
+    }
+    if (data.kind == ContextArtifactKind::HardConstraint && !data.required) {
+        throw std::invalid_argument("Hard constraint artifacts must be required");
     }
     data.content = detail::owned_json_copy(data.content);
     auto impl = std::make_shared<Impl>();

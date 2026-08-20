@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/context-transform-receipt-v1.schema.json",
+  "title": "NeoGraph Context Transform Receipt v1",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "source_context_epoch_id", "transformer_identity", "input_artifact_ids", "output_artifact_ids", "preserved_required_artifact_ids"],
+  "properties": {
+    "format": { "const": "neograph-context-transform-receipt" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "source_context_epoch_id": { "$ref": "#/$defs/sha256" },
+    "transformer_identity": { "$ref": "#/$defs/sha256" },
+    "input_artifact_ids": { "$ref": "#/$defs/identities" },
+    "output_artifact_ids": { "$ref": "#/$defs/identities" },
+    "preserved_required_artifact_ids": { "$ref": "#/$defs/identities" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "identities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sha256" }
+    }
+  }
+}
+

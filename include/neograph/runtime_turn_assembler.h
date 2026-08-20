@@ -24,6 +24,13 @@ struct NEOGRAPH_API RuntimeTurn {
     ContextAssemblyReceipt assembly_receipt;
 };
 
+struct RuntimeContextRequirements {
+    /** Every identity must appear in the active epoch and name a required artifact. */
+    std::vector<std::string> required_artifact_ids;
+    /** Subset of required_artifact_ids that must be RequiredSkill artifacts. */
+    std::vector<std::string> required_skill_artifact_ids;
+};
+
 /**
  * Hydrates and verifies a ContextEpoch before constructing a provider request.
  *
@@ -35,6 +42,9 @@ public:
     RuntimeTurnAssembler(ContextStore& store,
                           std::vector<std::string> static_required_skill_artifact_ids = {},
                           std::uint64_t max_input_tokens = 0);
+    RuntimeTurnAssembler(ContextStore& store,
+                         std::uint64_t max_input_tokens,
+                         RuntimeContextRequirements requirements);
     ~RuntimeTurnAssembler();
     RuntimeTurnAssembler(RuntimeTurnAssembler&&) noexcept;
     RuntimeTurnAssembler& operator=(RuntimeTurnAssembler&&) noexcept;

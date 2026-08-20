@@ -14,7 +14,49 @@ class Stmt { public: Stmt(sqlite3* d, const char* s): db(d) { if(sqlite3_prepare
 class Tx { public: explicit Tx(sqlite3* d):db(d){exec(db,"BEGIN IMMEDIATE");} ~Tx(){if(!ok){char* e=nullptr;sqlite3_exec(db,"ROLLBACK",nullptr,nullptr,&e);sqlite3_free(e);}} void commit(){exec(db,"COMMIT");ok=true;} private:sqlite3* db;bool ok=false;};
 std::string bytes(sqlite3_stmt* s,int i){auto p=static_cast<const char*>(sqlite3_column_blob(s,i));int n=sqlite3_column_bytes(s,i);if(!p||n<0)throw std::runtime_error("SQLite runtime store has null canonical bytes");return {p,static_cast<size_t>(n)};}
 std::string text(sqlite3_stmt* s,int i){auto p=reinterpret_cast<const char*>(sqlite3_column_text(s,i));int n=sqlite3_column_bytes(s,i);if(!p||n<0)throw std::runtime_error("SQLite runtime store has null text");return {p,static_cast<size_t>(n)};}
-void open(sqlite3*& db,const std::string& path){if(path.empty())throw std::invalid_argument("SQLite runtime store path must not be empty");if(sqlite3_open_v2(path.c_str(),&db,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_FULLMUTEX,nullptr)!=SQLITE_OK)fail(db,"open");try{exec(db,"PRAGMA journal_mode=WAL");exec(db,"PRAGMA synchronous=FULL");exec(db,"PRAGMA foreign_keys=ON");exec(db,"PRAGMA busy_timeout=5000");Tx tx(db);exec(db,"CREATE TABLE IF NOT EXISTS ng_runtime_store_schema(version INTEGER NOT NULL)");Stmt v(db,"SELECT version FROM ng_runtime_store_schema");const auto version=v.row()?sqlite3_column_int(v.get(),0):0;if(version>2)throw std::runtime_error("SQLite runtime store schema is newer than this library");exec(db,"CREATE TABLE IF NOT EXISTS ng_runtime_history(owner_id TEXT NOT NULL,feed_id TEXT NOT NULL,sequence INTEGER NOT NULL,record_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_id,feed_id,sequence))");exec(db,"CREATE UNIQUE INDEX IF NOT EXISTS ng_runtime_history_identity ON ng_runtime_history(owner_id,feed_id,record_id)");exec(db,"CREATE TABLE IF NOT EXISTS ng_runtime_artifacts(owner_id TEXT NOT NULL,artifact_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_id,artifact_id))");exec(db,"CREATE TABLE IF NOT EXISTS ng_hook_outbox(invocation_id TEXT PRIMARY KEY NOT NULL,canonical BLOB NOT NULL,state INTEGER NOT NULL)");exec(db,"CREATE INDEX IF NOT EXISTS ng_hook_outbox_state ON ng_hook_outbox(state)");if(version==1){exec(db,"CREATE TABLE ng_provider_receipts_v2(owner_scope TEXT NOT NULL,dispatch_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_scope,dispatch_id))");exec(db,"INSERT INTO ng_provider_receipts_v2 SELECT '',dispatch_id,canonical FROM ng_provider_receipts");exec(db,"DROP TABLE ng_provider_receipts");exec(db,"ALTER TABLE ng_provider_receipts_v2 RENAME TO ng_provider_receipts");exec(db,"UPDATE ng_runtime_store_schema SET version=2");}else{exec(db,"CREATE TABLE IF NOT EXISTS ng_provider_receipts(owner_scope TEXT NOT NULL,dispatch_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_scope,dispatch_id))");if(!version)exec(db,"INSERT INTO ng_runtime_store_schema VALUES(2)");}tx.commit();}catch(...){sqlite3_close_v2(db);db=nullptr;throw;}}
+void open(sqlite3*& db, const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("SQLite runtime store path must not be empty");
+    if (sqlite3_open_v2(path.c_str(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                        nullptr) != SQLITE_OK) {
+        fail(db, "open");
+    }
+    try {
+        exec(db, "PRAGMA journal_mode=WAL");
+        exec(db, "PRAGMA synchronous=FULL");
+        exec(db, "PRAGMA foreign_keys=ON");
+        exec(db, "PRAGMA busy_timeout=5000");
+        Tx tx(db);
+        exec(db, "CREATE TABLE IF NOT EXISTS ng_runtime_store_schema(version INTEGER NOT NULL)");
+        Stmt v(db, "SELECT version FROM ng_runtime_store_schema");
+        const auto version = v.row() ? sqlite3_column_int(v.get(), 0) : 0;
+        if (version > 3) {
+            throw std::runtime_error("SQLite runtime store schema is newer than this library");
+        }
+        exec(db, "CREATE TABLE IF NOT EXISTS ng_runtime_history(owner_id TEXT NOT NULL,feed_id TEXT NOT NULL,sequence INTEGER NOT NULL,record_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_id,feed_id,sequence))");
+        exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS ng_runtime_history_identity ON ng_runtime_history(owner_id,feed_id,record_id)");
+        exec(db, "CREATE TABLE IF NOT EXISTS ng_runtime_artifacts(owner_id TEXT NOT NULL,artifact_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_id,artifact_id))");
+        exec(db, "CREATE TABLE IF NOT EXISTS ng_hook_outbox(invocation_id TEXT PRIMARY KEY NOT NULL,canonical BLOB NOT NULL,state INTEGER NOT NULL)");
+        exec(db, "CREATE INDEX IF NOT EXISTS ng_hook_outbox_state ON ng_hook_outbox(state)");
+        if (version == 1) {
+            exec(db, "CREATE TABLE ng_provider_receipts_v2(owner_scope TEXT NOT NULL,dispatch_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_scope,dispatch_id))");
+            exec(db, "INSERT INTO ng_provider_receipts_v2 SELECT '',dispatch_id,canonical FROM ng_provider_receipts");
+            exec(db, "DROP TABLE ng_provider_receipts");
+            exec(db, "ALTER TABLE ng_provider_receipts_v2 RENAME TO ng_provider_receipts");
+            exec(db, "UPDATE ng_runtime_store_schema SET version=2");
+        } else {
+            exec(db, "CREATE TABLE IF NOT EXISTS ng_provider_receipts(owner_scope TEXT NOT NULL,dispatch_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(owner_scope,dispatch_id))");
+            if (!version) exec(db, "INSERT INTO ng_runtime_store_schema VALUES(2)");
+        }
+        exec(db, "CREATE TABLE IF NOT EXISTS ng_provider_outcomes(owner_scope TEXT NOT NULL,dispatch_id TEXT NOT NULL,canonical BLOB NOT NULL,state INTEGER NOT NULL,PRIMARY KEY(owner_scope,dispatch_id),FOREIGN KEY(owner_scope,dispatch_id) REFERENCES ng_provider_receipts(owner_scope,dispatch_id))");
+        if (version < 3) exec(db, "UPDATE ng_runtime_store_schema SET version=3");
+        tx.commit();
+    } catch (...) {
+        sqlite3_close_v2(db);
+        db = nullptr;
+        throw;
+    }
+}
 void validate_owner(std::string_view owner){if(owner.empty()||owner.size()>InMemoryContextStore::MAX_OWNER_ID_BYTES)throw std::invalid_argument("Context store owner_id is invalid");detail::validate_token(owner,"Context store owner_id");}
 void validate_receipt_owner(std::string_view owner){if(!owner.empty())validate_owner(owner);}
 void validate_feed(const ContextStoreFeed& f){validate_owner(f.owner_id);if(f.feed_id.empty()||f.feed_id.size()>InMemoryContextStore::MAX_FEED_ID_BYTES)throw std::invalid_argument("Context store feed_id is invalid");detail::validate_token(f.feed_id,"Context store feed_id");}
@@ -50,5 +92,112 @@ SQLiteProviderDispatchReceiptStore::SQLiteProviderDispatchReceiptStore(std::stri
 ProviderDispatchReceiptPutResult SQLiteProviderDispatchReceiptStore::persist(const ProviderDispatchReceipt& r){return persist({},r);}
 ProviderDispatchReceiptPutResult SQLiteProviderDispatchReceiptStore::persist(std::string_view owner,const ProviderDispatchReceipt& r){validate_receipt_owner(owner);auto b=r.serialize_canonical();std::lock_guard l(impl_->mu);Tx tx(impl_->db);Stmt s(impl_->db,"SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");s.text(1,owner);s.text(2,r.dispatch_id());if(s.row()){const auto stored=bytes(s.get(),0);if(ProviderDispatchReceipt::parse(stored).dispatch_id()!=r.dispatch_id())throw std::runtime_error("SQLite provider receipt dispatch identity mismatch");auto result=stored==b?ProviderDispatchReceiptPutResult::AlreadyPresent:ProviderDispatchReceiptPutResult::Conflict;tx.commit();return result;}Stmt p(impl_->db,"INSERT INTO ng_provider_receipts VALUES(?1,?2,?3)");p.text(1,owner);p.text(2,r.dispatch_id());p.text(3,b);p.done();tx.commit();return ProviderDispatchReceiptPutResult::Stored;}
 ProviderDispatchState SQLiteProviderDispatchReceiptStore::state(std::string_view id)const{return state({},id);}
-ProviderDispatchState SQLiteProviderDispatchReceiptStore::state(std::string_view owner,std::string_view id)const{validate_receipt_owner(owner);std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");s.text(1,owner);s.text(2,id);if(!s.row())return ProviderDispatchState::Missing;auto receipt=ProviderDispatchReceipt::parse(bytes(s.get(),0));if(receipt.dispatch_id()!=id)throw std::runtime_error("SQLite provider receipt dispatch identity mismatch");return ProviderDispatchState::AdmittedPending;}
+ProviderDispatchState SQLiteProviderDispatchReceiptStore::state(
+    std::string_view owner, std::string_view id) const {
+    validate_receipt_owner(owner);
+    std::lock_guard l(impl_->mu);
+    Stmt terminal(impl_->db,
+                  "SELECT canonical,state FROM ng_provider_outcomes WHERE owner_scope=?1 AND dispatch_id=?2");
+    terminal.text(1, owner);
+    terminal.text(2, id);
+    if (terminal.row()) {
+        const auto parsed = ProviderDispatchOutcomeReceipt::parse(bytes(terminal.get(), 0));
+        const auto stored_state = static_cast<ProviderDispatchState>(
+            sqlite3_column_int64(terminal.get(), 1));
+        if (parsed.dispatch_id() != id || parsed.state() != stored_state) {
+            throw std::runtime_error("SQLite provider outcome identity or state mismatch");
+        }
+        Stmt admitted(impl_->db,
+                      "SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");
+        admitted.text(1, owner);
+        admitted.text(2, id);
+        if (!admitted.row() ||
+            ProviderDispatchReceipt::parse(bytes(admitted.get(), 0)).id() !=
+                parsed.dispatch_receipt_id()) {
+            throw std::runtime_error(
+                "SQLite provider outcome does not bind its admitted dispatch");
+        }
+        return stored_state;
+    }
+    Stmt pending(impl_->db,
+                 "SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");
+    pending.text(1, owner);
+    pending.text(2, id);
+    if (!pending.row()) return ProviderDispatchState::Missing;
+    auto receipt = ProviderDispatchReceipt::parse(bytes(pending.get(), 0));
+    if (receipt.dispatch_id() != id) {
+        throw std::runtime_error("SQLite provider receipt dispatch identity mismatch");
+    }
+    return ProviderDispatchState::AdmittedPending;
+}
+
+ProviderDispatchOutcomePutResult SQLiteProviderDispatchReceiptStore::settle(
+    std::string_view owner, const ProviderDispatchOutcomeReceipt& outcome_receipt) {
+    validate_receipt_owner(owner);
+    const auto canonical = outcome_receipt.serialize_canonical();
+    std::lock_guard l(impl_->mu);
+    Tx tx(impl_->db);
+    Stmt pending(impl_->db,
+                 "SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");
+    pending.text(1, owner);
+    pending.text(2, outcome_receipt.dispatch_id());
+    if (!pending.row()) {
+        tx.commit();
+        return ProviderDispatchOutcomePutResult::MissingDispatch;
+    }
+    const auto dispatch = ProviderDispatchReceipt::parse(bytes(pending.get(), 0));
+    if (dispatch.id() != outcome_receipt.dispatch_receipt_id()) {
+        tx.commit();
+        return ProviderDispatchOutcomePutResult::Conflict;
+    }
+    Stmt existing(impl_->db,
+                  "SELECT canonical FROM ng_provider_outcomes WHERE owner_scope=?1 AND dispatch_id=?2");
+    existing.text(1, owner);
+    existing.text(2, outcome_receipt.dispatch_id());
+    if (existing.row()) {
+        const auto result = bytes(existing.get(), 0) == canonical
+                                ? ProviderDispatchOutcomePutResult::AlreadyPresent
+                                : ProviderDispatchOutcomePutResult::Conflict;
+        tx.commit();
+        return result;
+    }
+    Stmt insert(impl_->db,
+                "INSERT INTO ng_provider_outcomes VALUES(?1,?2,?3,?4)");
+    insert.text(1, owner);
+    insert.text(2, outcome_receipt.dispatch_id());
+    insert.text(3, canonical);
+    insert.i64(4, static_cast<unsigned>(outcome_receipt.state()));
+    insert.done();
+    tx.commit();
+    return ProviderDispatchOutcomePutResult::Stored;
+}
+
+std::optional<ProviderDispatchOutcomeReceipt>
+SQLiteProviderDispatchReceiptStore::outcome(
+    std::string_view owner, std::string_view id) const {
+    validate_receipt_owner(owner);
+    std::lock_guard l(impl_->mu);
+    Stmt statement(impl_->db,
+                   "SELECT canonical,state FROM ng_provider_outcomes WHERE owner_scope=?1 AND dispatch_id=?2");
+    statement.text(1, owner);
+    statement.text(2, id);
+    if (!statement.row()) return std::nullopt;
+    auto parsed = ProviderDispatchOutcomeReceipt::parse(bytes(statement.get(), 0));
+    const auto stored_state = static_cast<ProviderDispatchState>(
+        sqlite3_column_int64(statement.get(), 1));
+    if (parsed.dispatch_id() != id || parsed.state() != stored_state) {
+        throw std::runtime_error("SQLite provider outcome identity or state mismatch");
+    }
+    Stmt admitted(impl_->db,
+                  "SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");
+    admitted.text(1, owner);
+    admitted.text(2, id);
+    if (!admitted.row() ||
+        ProviderDispatchReceipt::parse(bytes(admitted.get(), 0)).id() !=
+            parsed.dispatch_receipt_id()) {
+        throw std::runtime_error(
+            "SQLite provider outcome does not bind its admitted dispatch");
+    }
+    return parsed;
+}
 }  // namespace neograph

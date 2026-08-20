@@ -24,6 +24,13 @@ public:
                                     std::string provider_binding_identity,
                                     std::uint64_t max_input_tokens = 0,
                                     std::vector<std::string> static_required_skill_artifact_ids = {});
+    RuntimeInterpositionController(
+        std::shared_ptr<Provider> provider,
+        std::shared_ptr<ContextStore> context_store,
+        std::shared_ptr<ProviderDispatchReceiptStore> dispatch_store,
+        std::string provider_binding_identity,
+        RuntimeContextRequirements requirements,
+        std::uint64_t max_input_tokens);
     ~RuntimeInterpositionController();
     RuntimeInterpositionController(RuntimeInterpositionController&&) noexcept;
     RuntimeInterpositionController& operator=(RuntimeInterpositionController&&) noexcept;

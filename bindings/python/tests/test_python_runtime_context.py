@@ -58,6 +58,7 @@ class _DurableReceipts(ng.DurableProviderDispatchReceiptStore):
     def __init__(self):
         super().__init__()
         self.receipts = {}
+        self.outcomes = {}
 
     def persist(self, receipt):
         existing = self.receipts.get(receipt.dispatch_id)
@@ -67,6 +68,19 @@ class _DurableReceipts(ng.DurableProviderDispatchReceiptStore):
         if existing == receipt.serialize_canonical():
             return ng.ProviderDispatchReceiptPutResult.AlreadyPresent
         return ng.ProviderDispatchReceiptPutResult.Conflict
+
+    def settle(self, owner_scope, outcome):
+        existing = self.outcomes.get((owner_scope, outcome.dispatch_id))
+        if existing is None:
+            self.outcomes[(owner_scope, outcome.dispatch_id)] = outcome.serialize_canonical()
+            return ng.ProviderDispatchOutcomePutResult.Stored
+        if existing == outcome.serialize_canonical():
+            return ng.ProviderDispatchOutcomePutResult.AlreadyPresent
+        return ng.ProviderDispatchOutcomePutResult.Conflict
+
+    def outcome(self, owner_scope, dispatch_id):
+        value = self.outcomes.get((owner_scope, dispatch_id))
+        return None if value is None else ng.ProviderDispatchOutcomeReceipt.parse(value)
 
 
 def test_runtime_context_canonical_roundtrip_and_profiles_are_public():
@@ -116,6 +130,7 @@ def test_controlled_path_assembles_epoch_and_keeps_dependencies_alive():
     assert provider.calls == 1
     assert [message.content for message in provider.last_messages] == ["hello-1"]
     assert len(receipts.receipts) == 1
+    assert len(receipts.outcomes) == 1
 
 
 def test_controller_retains_shared_provider_and_store_dependencies():

@@ -3,6 +3,7 @@
 #include <neograph/controlled_provider.h>
 #include <neograph/runtime_interposition_controller.h>
 #include <neograph/runtime_turn_assembler.h>
+#include <neograph/strict_runtime.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 
@@ -63,6 +64,24 @@ public:
     }
     ProviderDispatchReceiptPutResult result = ProviderDispatchReceiptPutResult::Stored;
     std::string receipt;
+    std::string terminal;
+    ProviderDispatchOutcomePutResult settle(
+        std::string_view,
+        const ProviderDispatchOutcomeReceipt& value) override {
+        if (!terminal.empty()) {
+            return terminal == value.serialize_canonical()
+                       ? ProviderDispatchOutcomePutResult::AlreadyPresent
+                       : ProviderDispatchOutcomePutResult::Conflict;
+        }
+        terminal = value.serialize_canonical();
+        return ProviderDispatchOutcomePutResult::Stored;
+    }
+    std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view,
+        std::string_view) const override {
+        if (terminal.empty()) return std::nullopt;
+        return ProviderDispatchOutcomeReceipt::parse(terminal);
+    }
 };
 
 class RecordingProvider final : public CompletionProvider {
@@ -75,6 +94,7 @@ public:
     std::shared_ptr<graph::CancelToken> cancellation;
     const std::string* persisted_receipt = nullptr;
     bool receipt_precedes_call = false;
+    bool fail = false;
 protected:
     asio::awaitable<ChatCompletion> do_invoke(CompletionRequest request) override {
         ++calls;
@@ -83,6 +103,7 @@ protected:
         cancellation = request.params().cancel_token;
         messages = request.params().messages;
         receipt_precedes_call = persisted_receipt && !persisted_receipt->empty();
+        if (fail) throw std::runtime_error("provider outcome is unknown");
         ChatCompletion result;
         result.message = {"assistant", "ok"};
         co_return result;
@@ -137,6 +158,46 @@ private:
     mutable bool released = false;
 };
 
+class DurableMemoryContextStore final : public DurableContextStore {
+public:
+    ContextStoreAppendResult append_history(
+        const ContextStoreFeed& feed, const RuntimeHistoryRecord& record,
+        const std::optional<std::string>& head) override {
+        return inner.append_history(feed, record, head);
+    }
+    ContextStoreHead history_head(const ContextStoreFeed& feed) const override {
+        return inner.history_head(feed);
+    }
+    ContextHistoryRange snapshot_history(
+        const ContextStoreFeed& feed, std::uint64_t from,
+        std::uint64_t through) const override {
+        return inner.snapshot_history(feed, from, through);
+    }
+    std::string hydrate_history(const ContextHistoryRange& range) const override {
+        return inner.hydrate_history(range);
+    }
+    ContextArtifactPutResult put_artifact(
+        std::string_view owner, const ContextArtifact& artifact) override {
+        return inner.put_artifact(owner, artifact);
+    }
+    std::optional<ContextArtifact> get_artifact(
+        std::string_view owner, std::string_view id) const override {
+        return inner.get_artifact(owner, id);
+    }
+    InMemoryContextStore inner;
+};
+
+std::shared_ptr<HookRuntime> empty_hook_runtime() {
+    HookTargetResolver resolver = [](std::string_view)
+        -> std::optional<HookTargetContract> { return std::nullopt; };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(
+        resolver, std::make_shared<ToolExecutionController>());
+    return std::make_shared<HookRuntime>(std::make_shared<MandatoryHookRunner>(
+        std::make_shared<InMemoryHookJournal>(), std::move(registry),
+        std::move(adapter)));
+}
+
 }  // namespace
 
 TEST(ControlledProvider, PersistsDistinctDispatchReceiptBeforeStreamDispatch) {
@@ -161,6 +222,12 @@ TEST(ControlledProvider, PersistsDistinctDispatchReceiptBeforeStreamDispatch) {
     EXPECT_EQ(receipt.dispatch_id(), "dispatch-1");
     EXPECT_EQ(receipt.provider_binding_identity(), sha('f'));
     EXPECT_EQ(receipt.model(), "model");
+    ASSERT_FALSE(store->terminal.empty());
+    const auto terminal = ProviderDispatchOutcomeReceipt::parse(store->terminal);
+    EXPECT_EQ(terminal.dispatch_receipt_id(), receipt.id());
+    EXPECT_EQ(terminal.state(), ProviderDispatchState::Succeeded);
+    EXPECT_TRUE(terminal.error().empty());
+    EXPECT_FALSE(terminal.response_digest().empty());
 }
 
 TEST(ControlledProvider, DoesNotCallProviderWhenReceiptPersistenceConflicts) {
@@ -206,7 +273,7 @@ TEST(ControlledProvider, RejectsDuplicateDispatchAndPreservesCollectCancellation
     } catch (const std::runtime_error& error) {
         EXPECT_NE(std::string(error.what()).find("reconciliation_required"), std::string::npos);
     }
-    EXPECT_EQ(store->state("dispatch-once"), ProviderDispatchState::AdmittedPending);
+    EXPECT_EQ(store->state("dispatch-once"), ProviderDispatchState::Succeeded);
     EXPECT_EQ(provider->calls, 1);
     EXPECT_EQ(provider->mode, CompletionMode::COLLECT);
     EXPECT_FALSE(provider->callback);
@@ -219,6 +286,40 @@ TEST(ControlledProvider, RejectsDuplicateDispatchAndPreservesCollectCancellation
                                        CompletionRequest::collect(changed_params)),
                   std::runtime_error);
     EXPECT_EQ(provider->calls, 1);
+}
+
+TEST(ControlledProvider, PersistsReconciliationWhenProviderOutcomeIsUnknown) {
+    auto provider = std::make_shared<RecordingProvider>();
+    provider->fail = true;
+    auto store = std::make_shared<InMemoryProviderDispatchReceiptStore>();
+    ControlledProvider controlled(provider, store, sha('f'));
+    CompletionParams params;
+    params.model = "model";
+    EXPECT_THROW(controlled.dispatch(
+                     "dispatch-unknown", assembly(CompletionRequest::collect(params)),
+                     CompletionRequest::collect(params)),
+                 std::runtime_error);
+    EXPECT_EQ(store->state("dispatch-unknown"),
+              ProviderDispatchState::ReconciliationRequired);
+    const auto terminal = store->outcome({}, "dispatch-unknown");
+    ASSERT_TRUE(terminal);
+    EXPECT_EQ(terminal->state(), ProviderDispatchState::ReconciliationRequired);
+    EXPECT_FALSE(terminal->error().empty());
+}
+
+TEST(ProviderDispatchOutcomeReceipt, RejectsForgedAndNonTerminalOutcomes) {
+    const auto success = ProviderDispatchOutcomeReceipt::create(
+        {"dispatch", sha('a'), ProviderDispatchState::Succeeded, sha('b'), {}});
+    EXPECT_EQ(ProviderDispatchOutcomeReceipt::parse(success.serialize_canonical()).id(),
+              success.id());
+    EXPECT_THROW(ProviderDispatchOutcomeReceipt::create(
+                     {"dispatch", sha('a'), ProviderDispatchState::AdmittedPending,
+                      sha('b'), {}}),
+                 std::invalid_argument);
+    EXPECT_THROW(ProviderDispatchOutcomeReceipt::create(
+                     {"dispatch", sha('a'), ProviderDispatchState::Succeeded,
+                      {}, {}}),
+                 std::invalid_argument);
 }
 
 TEST(ControlledProvider, ValidatesDispatchAndBindingIdentities) {
@@ -341,4 +442,33 @@ TEST(RuntimeInterpositionController, ClearBlocksAnInvocationFromAnOlderGeneratio
     contexts->release();
     EXPECT_TRUE(invoked.get());
     EXPECT_EQ(provider->calls, 0);
+}
+
+TEST(StrictRuntimeProfile, RequiresDurableDependenciesAndStrictEpoch) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<DurableMemoryContextStore>();
+    auto receipts = std::make_shared<RecordingStore>();
+    StrictRuntimeProfile profile({provider, contexts, receipts,
+                                  empty_hook_runtime(), sha('f'), 1000, {}});
+    ContextEpochData recorded_data;
+    recorded_data.run_id = "recorded";
+    recorded_data.sequence = 1;
+    recorded_data.guarantee_profile = RuntimeGuaranteeProfile::Recorded;
+    EXPECT_THROW(profile.activate(
+                     "owner", ContextEpoch::create(std::move(recorded_data))),
+                 std::invalid_argument);
+    profile.activate("owner", admitted_epoch(
+                                  contexts->inner,
+                                  RuntimeGuaranteeProfile::Strict));
+    EXPECT_TRUE(profile.active());
+    CompletionParams params;
+    params.model = "model";
+    EXPECT_EQ(profile.interposition()->invoke(params).message.content, "ok");
+    EXPECT_FALSE(receipts->terminal.empty());
+    profile.clear();
+    EXPECT_FALSE(profile.active());
+
+    EXPECT_THROW(StrictRuntimeProfile({provider, contexts, receipts,
+                                       empty_hook_runtime(), sha('f'), 0, {}}),
+                 std::invalid_argument);
 }

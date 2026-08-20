@@ -106,6 +106,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_graph_migration_capsule.cpp
         test_program_transition_store.cpp
         test_program_runtime.cpp
+        test_program_runtime_instruction.cpp
         test_program_invocation.cpp
         test_program_task_graph_proposal.cpp
     )
@@ -116,6 +117,12 @@ if(NEOGRAPH_BUILD_PROGRAM)
         neograph::program
         GTest::gtest_main
     )
+    if(MSVC)
+        # test_program_runtime.cpp intentionally exercises the complete durable
+        # state machine and exceeds COFF's default section count in optimized
+        # multi-config builds.
+        target_compile_options(neograph_program_tests PRIVATE /bigobj)
+    endif()
     if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
@@ -392,6 +399,7 @@ endif()
 # transports so canonical identity tests remain runnable in minimal Core builds.
 add_executable(neograph_runtime_context_tests
     test_runtime_context.cpp
+    test_context_transform.cpp
 )
 target_link_libraries(neograph_runtime_context_tests PRIVATE
     neograph::core
@@ -428,6 +436,22 @@ target_link_libraries(neograph_context_store_tests PRIVATE
     GTest::gtest_main
 )
 gtest_discover_tests(neograph_context_store_tests)
+
+if(NEOGRAPH_BUILD_SQLITE)
+    # Keep runtime-store migration and outcome lifecycle tests independently
+    # buildable on Windows; unrelated checkpoint fixtures include POSIX-only
+    # test helpers in some developer configurations.
+    add_executable(neograph_sqlite_runtime_store_tests
+        test_sqlite_runtime_stores.cpp
+    )
+    target_link_libraries(neograph_sqlite_runtime_store_tests PRIVATE
+        neograph::core
+        neograph::sqlite
+        SQLite::SQLite3
+        GTest::gtest_main
+    )
+    gtest_discover_tests(neograph_sqlite_runtime_store_tests)
+endif()
 
 add_executable(neograph_runtime_turn_tests
     test_runtime_turn_assembler.cpp

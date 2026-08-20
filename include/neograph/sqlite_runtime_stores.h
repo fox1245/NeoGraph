@@ -10,7 +10,7 @@
 namespace neograph {
 
 /** Optional SQLite implementations of the runtime durability contracts. */
-class NEOGRAPH_API SQLiteContextStore final : public ContextStore {
+class NEOGRAPH_API SQLiteContextStore final : public DurableContextStore {
 public:
     explicit SQLiteContextStore(std::string database_path);
     ~SQLiteContextStore() override;
@@ -60,6 +60,12 @@ public:
     ProviderDispatchState state(std::string_view) const override;
     ProviderDispatchState state(std::string_view owner_scope,
                                 std::string_view) const override;
+    ProviderDispatchOutcomePutResult settle(
+        std::string_view owner_scope,
+        const ProviderDispatchOutcomeReceipt&) override;
+    std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view owner_scope,
+        std::string_view dispatch_id) const override;
 private: struct Impl; std::unique_ptr<Impl> impl_;
 };
 

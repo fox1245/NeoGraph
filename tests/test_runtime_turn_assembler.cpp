@@ -34,6 +34,19 @@ ContextArtifact artifact(std::string producer, std::string text, ContextPlacemen
     return ContextArtifact::create(std::move(data));
 }
 
+ContextArtifact hard_constraint(std::string text) {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::HardConstraint;
+    data.producer_id = "host-policy.v1";
+    data.source_digest = sha('f');
+    data.media_type = "text/markdown";
+    data.placement = ContextPlacement::BeforeLatestUser;
+    data.priority = 1000;
+    data.required = true;
+    data.content = std::move(text);
+    return ContextArtifact::create(std::move(data));
+}
+
 }  // namespace
 
 TEST(RuntimeTurnAssembler, VerifiesEpochAndProducesDeterministicMergedRequest) {
@@ -131,6 +144,47 @@ TEST(RuntimeTurnAssembler, EnforcesConfiguredRequiredSkillsAndUserAnchor) {
     const auto no_user = ContextEpoch::create(std::move(no_user_data));
     EXPECT_THROW(RuntimeTurnAssembler(store, {skill.id()}).assemble(
                      "owner", no_user, CompletionRequest::collect(params)), std::invalid_argument);
+}
+
+TEST(RuntimeTurnAssembler, EnforcesGeneralRequiredContextAndCountsMandatoryTokens) {
+    InMemoryContextStore store;
+    const ContextStoreFeed feed{"owner", "feed"};
+    const auto first = history(1, std::nullopt);
+    ASSERT_EQ(store.append_history(feed, first, std::nullopt),
+              ContextStoreAppendResult::Appended);
+    const auto raw = store.snapshot_history(feed, 1, 1);
+    const auto constraint = hard_constraint("Never publish without verification.");
+    ASSERT_EQ(store.put_artifact("owner", constraint),
+              ContextArtifactPutResult::Stored);
+    ContextEpochData epoch_data;
+    epoch_data.run_id = "required-context";
+    epoch_data.sequence = 1;
+    epoch_data.feed_id = "feed";
+    epoch_data.raw_from_sequence = 1;
+    epoch_data.raw_through_sequence = 1;
+    epoch_data.raw_window_digest = raw.digest;
+    epoch_data.artifact_ids = {constraint.id()};
+    const auto epoch = ContextEpoch::create(std::move(epoch_data));
+    CompletionParams params;
+    params.model = "model";
+    RuntimeContextRequirements requirements;
+    requirements.required_artifact_ids = {constraint.id()};
+    const auto turn = RuntimeTurnAssembler(store, 1000, requirements).assemble(
+        "owner", epoch, CompletionRequest::collect(params));
+    EXPECT_GT(turn.assembly_receipt.mandatory_input_tokens(), 0u);
+    EXPECT_TRUE(turn.assembly_receipt.required_skill_artifact_ids().empty());
+
+    ContextEpochData omitted_data;
+    omitted_data.run_id = "required-context-omitted";
+    omitted_data.sequence = 1;
+    omitted_data.feed_id = "feed";
+    omitted_data.raw_from_sequence = 1;
+    omitted_data.raw_through_sequence = 1;
+    omitted_data.raw_window_digest = raw.digest;
+    const auto omitted = ContextEpoch::create(std::move(omitted_data));
+    EXPECT_THROW(RuntimeTurnAssembler(store, 1000, requirements).assemble(
+                     "owner", omitted, CompletionRequest::collect(params)),
+                 std::invalid_argument);
 }
 
 TEST(RuntimeTurnAssembler, NormalizedDigestCoversRequestShapeButExcludesCancellationIdentity) {

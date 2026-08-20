@@ -930,6 +930,40 @@ struct AdmittedRuntime {
     }
 };
 
+class DurableInstructionContextStore final : public neograph::DurableContextStore {
+public:
+    neograph::ContextStoreAppendResult append_history(
+        const neograph::ContextStoreFeed& feed,
+        const neograph::RuntimeHistoryRecord& record,
+        const std::optional<std::string>& expected) override {
+        return inner.append_history(feed, record, expected);
+    }
+    neograph::ContextStoreHead history_head(
+        const neograph::ContextStoreFeed& feed) const override {
+        return inner.history_head(feed);
+    }
+    neograph::ContextHistoryRange snapshot_history(
+        const neograph::ContextStoreFeed& feed, std::uint64_t from,
+        std::uint64_t through) const override {
+        return inner.snapshot_history(feed, from, through);
+    }
+    std::string hydrate_history(
+        const neograph::ContextHistoryRange& range) const override {
+        return inner.hydrate_history(range);
+    }
+    neograph::ContextArtifactPutResult put_artifact(
+        std::string_view owner,
+        const neograph::ContextArtifact& artifact) override {
+        return inner.put_artifact(owner, artifact);
+    }
+    std::optional<neograph::ContextArtifact> get_artifact(
+        std::string_view owner, std::string_view id) const override {
+        return inner.get_artifact(owner, id);
+    }
+private:
+    neograph::InMemoryContextStore inner;
+};
+
 struct LinkedChildAdmission {
     ProgramVersion    parent_version;
     ProgramVersion    child_version;
@@ -2045,6 +2079,53 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
         EXPECT_EQ(events[index].attempt, 1U);
         EXPECT_EQ(events[index].trace_id, "trace-completed");
     }
+}
+
+TEST(ProgramRuntimeTest, DeveloperInstructionIsDurableBeforeActiveGenerationDecision) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    auto handle = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "instruction-source", {}});
+    const auto result = handle.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+
+    auto contexts = std::make_shared<DurableInstructionContextStore>();
+    RuntimeInstructionController controller({
+        contexts,
+        fixture.journal,
+        fixture.catalog,
+        [](const RuntimeDeveloperInstruction& instruction,
+           const ProgramRunLineage& lineage,
+           const ProgramRunGeneration&) {
+            RuntimeInstructionDecisionData decision;
+            decision.instruction_id = instruction.id();
+            decision.source_run_id = instruction.data().source_run_id;
+            decision.expected_lineage_head_id = lineage.id();
+            decision.policy_identity = digest('9');
+            decision.action = RuntimeInstructionAction::SatisfiedInPlace;
+            decision.reason = "current topology already satisfies the instruction";
+            return decision;
+        }});
+    RuntimeDeveloperInstructionData data;
+    data.owner_scope = "tenant:runtime";
+    data.source_run_id = result.run_id();
+    data.feed_id = "developer-instructions";
+    data.sequence = 1;
+    data.submitted_at_ms = 1;
+    data.text = "Keep the current topology";
+    const auto instruction = RuntimeDeveloperInstruction::create(std::move(data));
+    const auto plan = controller.submit_and_plan(instruction, std::nullopt);
+    EXPECT_EQ(plan.decision.data().action,
+              RuntimeInstructionAction::SatisfiedInPlace);
+    EXPECT_EQ(plan.decision.data().instruction_id, instruction.id());
+    const auto head = contexts->history_head(
+        {"tenant:runtime", "developer-instructions"});
+    ASSERT_TRUE(head.record_id);
+    EXPECT_EQ(*head.record_id, plan.history_record.id());
+    ASSERT_TRUE(contexts->get_artifact("tenant:runtime",
+                                       plan.decision_artifact.id()));
+    EXPECT_TRUE(plan.decision_artifact.required());
 }
 
 TEST(ProgramRuntimeTest, ReconnectFailsClosedWithoutDurableRuntimeRecoveryBoundary) {
@@ -8012,3 +8093,50 @@ TEST(ProgramRuntimeTest, ParallelMapLaunchesNextWindowAfterPriorCompletion) {
     EXPECT_EQ(window_second_started_before_completion.load(), 0U);
     window_first_barrier.reset();
 }
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramSynthesisGateway, ReservesBeforeCompilingAndAdmitsExactSuccessor) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    auto compiler = std::make_shared<ProgramCompiler>(
+        fixture.registry, ProgramCompilerConfig{"program-runtime-test/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "generated-successor.js",
+        javascript_runtime_source("runtime-completed", "return {ok: true};"));
+    ProgramSynthesisProposalData proposal_data;
+    proposal_data.owner_scope = "tenant:runtime";
+    proposal_data.lineage_id = digest('1');
+    proposal_data.parent_run_id = "parent-run";
+    proposal_data.source = source;
+    proposal_data.requested_budget = javascript_budget(1, 1, 0, 0);
+    proposal_data.created_at_ms = 1;
+    const auto proposal = ProgramSynthesisProposal::create(std::move(proposal_data));
+
+    bool reserved = false;
+    ProgramSynthesisGateway gateway({
+        compiler,
+        fixture.catalog,
+        [&](const ProgramSynthesisProposal& value) {
+            reserved = true;
+            auto before = javascript_budget(1, 1, 0, 0);
+            before.max_dynamic_compiles = 1;
+            auto after = before;
+            after.max_dynamic_compiles = 0;
+            return ProgramSynthesisReservation::create(
+                {value.id(), value.data().lineage_id, digest('2'), digest('3'),
+                 before, after});
+        },
+        [&](const ProgramSynthesisProposal&, const ProgramBundle&,
+            const ProgramSynthesisReservation&) {
+            EXPECT_TRUE(reserved);
+            return ProgramAdmission{"tenant:runtime", fixture.profile,
+                                    fixture.policy, {}};
+        },
+        1024 * 1024});
+    const auto result = gateway.synthesize(proposal);
+    EXPECT_TRUE(reserved);
+    EXPECT_EQ(result.receipt.data().proposal_id, proposal.id());
+    EXPECT_EQ(result.receipt.data().bundle_id, result.bundle.id());
+    EXPECT_EQ(result.receipt.data().program_version_id, result.version.id());
+    ASSERT_TRUE(fixture.catalog->find_version("tenant:runtime", result.version.id()));
+}
+#endif

@@ -19,6 +19,7 @@
 #include <vector>
 
 namespace neograph { class RuntimeInterpositionController; }
+namespace neograph { class HookRuntime; }
 namespace neograph::llm {
 
 /**
@@ -141,6 +142,11 @@ class NEOGRAPH_API Agent {
     /// Opt into assembled, receipt-journaled provider dispatch for this agent.
     void set_runtime_interposition(std::shared_ptr<::neograph::RuntimeInterpositionController> controller);
 
+    /// Install the host-owned lifecycle boundary used by standalone tool dispatch.
+    void set_hook_runtime(std::shared_ptr<::neograph::HookRuntime> runtime) {
+        hook_runtime_ = std::move(runtime);
+    }
+
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
@@ -164,6 +170,7 @@ class NEOGRAPH_API Agent {
 
     int tool_detection_timeout_seconds_ = -1;
     std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime_;
 
     void ensure_system_message(std::vector<ChatMessage>& messages);
     std::vector<ChatTool> get_tool_definitions() const;

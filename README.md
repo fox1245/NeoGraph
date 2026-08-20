@@ -240,6 +240,13 @@ Python-bound), plus `SqliteHarnessRecordStore` for immutable Harness artifacts
 and restart-safe run records. Lock-free `RequestQueue` + `AsyncTool` in
 `neograph::util`.
 
+**Strict runtime interposition** — immutable RAW history and ContextEpochs ·
+required Skill and hard-constraint injection · provider request and terminal
+outcome receipts · mandatory event-driven Hooks over native, stdio, or HTTP ·
+verified context transformation · durable runtime developer instructions ·
+bounded reserve-before-compile Program synthesis. See
+[`docs/STRICT_RUNTIME_INTERPOSITION.md`](docs/STRICT_RUNTIME_INTERPOSITION.md).
+
 `NEOGRAPH_BUILD_MCP` remains the compatibility umbrella for both MCP roles.
 Use `NEOGRAPH_BUILD_MCP_CLIENT` or `NEOGRAPH_BUILD_MCP_SERVER` for a narrow
 build; the stdio server-only target does not require `neograph::async` or

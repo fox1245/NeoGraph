@@ -21,10 +21,10 @@ struct RuntimeInterpositionController::Impl {
 
     Impl(std::shared_ptr<ContextStore> store_, std::shared_ptr<Provider> provider,
           std::shared_ptr<ProviderDispatchReceiptStore> receipts, std::string binding,
-          std::uint64_t max_input_tokens, std::vector<std::string> static_required_skill_artifact_ids)
+          std::uint64_t max_input_tokens, RuntimeContextRequirements requirements)
         : store(std::move(store_))
         , receipts(receipts)
-        , assembler(*store, std::move(static_required_skill_artifact_ids), max_input_tokens)
+        , assembler(*store, max_input_tokens, std::move(requirements))
         , controlled(std::move(provider), std::move(receipts), std::move(binding)) {}
 };
 
@@ -32,13 +32,25 @@ RuntimeInterpositionController::RuntimeInterpositionController(
     std::shared_ptr<Provider> provider, std::shared_ptr<ContextStore> context_store,
     std::shared_ptr<ProviderDispatchReceiptStore> dispatch_store,
     std::string provider_binding_identity, std::uint64_t max_input_tokens,
-    std::vector<std::string> static_required_skill_artifact_ids) {
+    std::vector<std::string> static_required_skill_artifact_ids)
+    : RuntimeInterpositionController(
+          std::move(provider), std::move(context_store), std::move(dispatch_store),
+          std::move(provider_binding_identity),
+          RuntimeContextRequirements{static_required_skill_artifact_ids,
+                                     std::move(static_required_skill_artifact_ids)},
+          max_input_tokens) {}
+
+RuntimeInterpositionController::RuntimeInterpositionController(
+    std::shared_ptr<Provider> provider, std::shared_ptr<ContextStore> context_store,
+    std::shared_ptr<ProviderDispatchReceiptStore> dispatch_store,
+    std::string provider_binding_identity, RuntimeContextRequirements requirements,
+    std::uint64_t max_input_tokens) {
     if (!context_store || !dispatch_store) {
         throw std::invalid_argument("Runtime interposition requires durable context and dispatch stores");
     }
     impl_ = std::make_shared<Impl>(std::move(context_store), std::move(provider),
                                     std::move(dispatch_store), std::move(provider_binding_identity),
-                                    max_input_tokens, std::move(static_required_skill_artifact_ids));
+                                    max_input_tokens, std::move(requirements));
 }
 RuntimeInterpositionController::~RuntimeInterpositionController() = default;
 RuntimeInterpositionController::RuntimeInterpositionController(RuntimeInterpositionController&&) noexcept = default;

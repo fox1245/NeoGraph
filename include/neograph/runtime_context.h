@@ -26,6 +26,7 @@ enum class ContextArtifactKind : std::uint8_t {
     DerivedContext,
     RequiredSkill,
     HookOutput,
+    HardConstraint,
 };
 
 enum class ContextPlacement : std::uint8_t {

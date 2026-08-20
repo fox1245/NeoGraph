@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/provider-dispatch-outcome-receipt-v1.schema.json",
+  "title": "NeoGraph Provider Dispatch Outcome Receipt v1",
+  "type": "object",
+  "required": [
+    "format",
+    "storage_schema_version",
+    "id",
+    "dispatch_id",
+    "dispatch_receipt_id",
+    "state",
+    "response_digest",
+    "error"
+  ],
+  "properties": {
+    "format": { "const": "neograph-provider-dispatch-outcome-receipt" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "dispatch_id": { "type": "string", "minLength": 1 },
+    "dispatch_receipt_id": { "$ref": "#/$defs/sha256" },
+    "state": {
+      "enum": ["succeeded", "failed", "reconciliation_required"]
+    },
+    "response_digest": { "type": "string" },
+    "error": { "type": "string", "maxLength": 4096 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "succeeded" } } },
+      "then": {
+        "properties": {
+          "response_digest": { "$ref": "#/$defs/sha256" },
+          "error": { "const": "" }
+        }
+      },
+      "else": {
+        "properties": {
+          "response_digest": { "const": "" },
+          "error": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

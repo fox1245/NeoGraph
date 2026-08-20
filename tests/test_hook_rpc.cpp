@@ -18,6 +18,13 @@ private:
     std::string response_;
 };
 
+class AuditTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+    std::string get_name() const override { return "audit"; }
+    std::string execute(const json&) override { return "unused"; }
+};
+
 HookInvocation invocation() {
     return HookInvocation::create({{}, "sha256:" + std::string(64, '1'), "sha256:" + std::string(64, '2'),
         "audit", HookPhase::BeforeToolExecution, HookDelivery::BlockingMandatory,
@@ -30,6 +37,14 @@ std::string success(const HookInvocation& value) {
         {"invocation_id", value.id()}, {"idempotency_key", value.id()}, {"status", "succeeded"},
         {"external_effect", {{"receipt_id", "remote-receipt"}, {"outcome_known", true},
                              {"succeeded", true}, {"detail", "completed"}}}}}}.dump();
+}
+
+std::string success_with_artifact(const HookInvocation& value,
+                                  const ContextArtifact& artifact) {
+    auto response = json::parse(success(value));
+    response["result"]["artifacts"] =
+        json::array({json::parse(artifact.serialize_canonical())});
+    return response.dump();
 }
 
 HookRpcExecution execute(HookRpcExecutor& executor, const HookInvocation& value) {
@@ -94,3 +109,81 @@ TEST_P(HookRpcTranscriptParity, RejectsTheSameMalformedTranscript) {
 
 INSTANTIATE_TEST_SUITE_P(StdioAndHttp, HookRpcTranscriptParity,
     ::testing::Values("stdio", "http"));
+
+TEST(RpcHookExecutionAdapter, MandatoryRunnerPublishesBoundHookOutput) {
+    AuditTool tool;
+    HookTargetResolver resolver = [&tool](std::string_view id)
+        -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{&tool, {}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    HookDefinitionData definition;
+    definition.phase = HookPhase::BeforeProviderRequest;
+    definition.target_id = "audit";
+    definition.effect = ToolEffectClass::ReadOnly;
+    definition.predicate = HookPredicate{};
+    definition.input_mapper =
+        {HookInputMapperKind::Template, {}, json::object(), {}};
+    registry->admit(HookDefinition::create(std::move(definition)));
+    const auto runtime = RuntimeEvent::create(
+        {{}, 1, HookPhase::BeforeProviderRequest, "provider_request",
+         "owner", "run", json::object()});
+    const auto planned = registry->plan(runtime);
+    ASSERT_EQ(planned.size(), 1u);
+
+    ContextArtifactData artifact_data;
+    artifact_data.kind = ContextArtifactKind::HookOutput;
+    artifact_data.producer_id = "rpc-hook.v1";
+    artifact_data.source_digest = planned.front().id();
+    artifact_data.media_type = "text/plain";
+    artifact_data.content = "hook context";
+    const auto artifact = ContextArtifact::create(std::move(artifact_data));
+
+    auto transport = std::make_shared<TranscriptTransport>(
+        success_with_artifact(planned.front(), artifact));
+    auto adapter = std::make_shared<RpcHookExecutionAdapter>(
+        std::make_shared<HookRpcExecutor>(transport));
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto publisher = std::make_shared<ContextStoreHookArtifactPublisher>(contexts);
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    HookExecutionBackend backend =
+        [adapter](const HookInvocation& invocation, const RuntimeEvent& event,
+                  std::uint32_t attempt, ToolExecutionContext context) {
+            return adapter->execute_async(invocation, event, attempt,
+                                          std::move(context));
+        };
+    HookArtifactPublisher publish =
+        [publisher](const HookInvocation& invocation, const RuntimeEvent& event,
+                    const std::vector<ContextArtifact>& artifacts) {
+            publisher->publish(invocation, event, artifacts);
+        };
+    MandatoryHookRunner runner(journal, registry, std::move(backend),
+                               std::move(publish));
+    EXPECT_NO_THROW(async::run_sync(runner.run_async(
+        runtime, std::chrono::system_clock::now() + std::chrono::seconds(2))));
+    const auto stored = contexts->get_artifact("owner", artifact.id());
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->serialize_canonical(), artifact.serialize_canonical());
+    const auto head = journal->get(planned.front().id());
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->data().state, HookExecutionState::Succeeded);
+}
+
+TEST(ContextStoreHookArtifactPublisher, RejectsUnboundOrNonHookArtifacts) {
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    ContextStoreHookArtifactPublisher publisher(contexts);
+    const auto runtime = RuntimeEvent::create(
+        {{}, 1, HookPhase::BeforeProviderRequest, "provider_request",
+         "owner", "run", json::object()});
+    const auto value = invocation();
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::DerivedContext;
+    data.producer_id = "rpc-hook.v1";
+    data.source_digest = value.id();
+    data.media_type = "text/plain";
+    data.content = "forged";
+    EXPECT_THROW(publisher.publish(value, runtime,
+                                   {ContextArtifact::create(std::move(data))}),
+                 std::invalid_argument);
+}

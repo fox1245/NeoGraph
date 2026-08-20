@@ -39,6 +39,17 @@ ContextArtifact required_skill() {
     return ContextArtifact::create(std::move(data));
 }
 
+ContextArtifact hard_constraint() {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::HardConstraint;
+    data.producer_id = "host-policy.v1";
+    data.source_digest = sha('b');
+    data.media_type = "text/markdown";
+    data.required = true;
+    data.content = "Never skip verification.";
+    return ContextArtifact::create(std::move(data));
+}
+
 }  // namespace
 
 TEST(RuntimeContext, RawHistoryRoundTripsLosslesslyAndDeepCopiesSourcePayload) {
@@ -60,6 +71,21 @@ TEST(RuntimeContext, RawHistoryRoundTripsLosslesslyAndDeepCopiesSourcePayload) {
     EXPECT_EQ(parsed.serialize_canonical(), record.serialize_canonical());
     EXPECT_EQ(parsed.source_payload()->at("role").get<std::string>(), "user");
     EXPECT_EQ(parsed.message().content, "hello");
+}
+
+TEST(RuntimeContext, HardConstraintIsRequiredAndRoundTripsCanonically) {
+    const auto value = hard_constraint();
+    const auto parsed = ContextArtifact::parse(value.serialize_canonical());
+    EXPECT_EQ(parsed.kind(), ContextArtifactKind::HardConstraint);
+    EXPECT_TRUE(parsed.required());
+    EXPECT_EQ(parsed.id(), value.id());
+    auto invalid = ContextArtifactData{};
+    invalid.kind = ContextArtifactKind::HardConstraint;
+    invalid.producer_id = "host-policy.v1";
+    invalid.source_digest = sha('c');
+    invalid.media_type = "text/plain";
+    invalid.content = "invalid";
+    EXPECT_THROW(ContextArtifact::create(std::move(invalid)), std::invalid_argument);
 }
 
 TEST(RuntimeContext, RuntimeHistoryIdentityMatchesKnownVector) {

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -45,11 +46,48 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
-enum class ProviderDispatchReceiptPutResult : std::uint8_t { Stored, AlreadyPresent, Conflict };
-
 /** Durable state of a previously admitted provider dispatch. */
 enum class ProviderDispatchState : std::uint8_t {
     Unavailable, Missing, AdmittedPending, Succeeded, Failed, ReconciliationRequired,
+};
+
+struct ProviderDispatchOutcomeReceiptData {
+    std::string dispatch_id;
+    std::string dispatch_receipt_id;
+    ProviderDispatchState state = ProviderDispatchState::ReconciliationRequired;
+    std::string response_digest;
+    std::string error;
+};
+
+/** Immutable terminal or reconciliation evidence for one admitted dispatch. */
+class NEOGRAPH_API ProviderDispatchOutcomeReceipt final {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    static ProviderDispatchOutcomeReceipt create(ProviderDispatchOutcomeReceiptData data);
+    static ProviderDispatchOutcomeReceipt parse(std::string_view stored_bytes);
+
+    const std::string& dispatch_id() const noexcept;
+    const std::string& dispatch_receipt_id() const noexcept;
+    ProviderDispatchState state() const noexcept;
+    const std::string& response_digest() const noexcept;
+    const std::string& error() const noexcept;
+    const std::string& id() const noexcept;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit ProviderDispatchOutcomeReceipt(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+};
+
+enum class ProviderDispatchReceiptPutResult : std::uint8_t { Stored, AlreadyPresent, Conflict };
+
+enum class ProviderDispatchOutcomePutResult : std::uint8_t {
+    Stored,
+    AlreadyPresent,
+    Conflict,
+    MissingDispatch,
 };
 
 /** Durable write-ahead journal keyed by owner scope and dispatch_id; AlreadyPresent requires exact receipt bytes. */
@@ -77,14 +115,30 @@ public:
     }
 };
 
+/** Optional terminal-outcome extension for receipt stores. */
+class NEOGRAPH_API ProviderDispatchOutcomeStore {
+public:
+    virtual ~ProviderDispatchOutcomeStore() = default;
+    virtual ProviderDispatchOutcomePutResult settle(
+        std::string_view owner_scope,
+        const ProviderDispatchOutcomeReceipt& outcome) = 0;
+    virtual std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view owner_scope,
+        std::string_view dispatch_id) const = 0;
+};
+
 /** Opt-in marker for receipt stores backed by durable storage. */
-class NEOGRAPH_API DurableProviderDispatchReceiptStore : public ProviderDispatchReceiptStore {
+class NEOGRAPH_API DurableProviderDispatchReceiptStore
+    : public ProviderDispatchReceiptStore,
+      public ProviderDispatchOutcomeStore {
 public:
     ~DurableProviderDispatchReceiptStore() override = default;
 };
 
 /** Thread-safe in-memory receipt journal for standalone use and tests. */
-class NEOGRAPH_API InMemoryProviderDispatchReceiptStore final : public ProviderDispatchReceiptStore {
+class NEOGRAPH_API InMemoryProviderDispatchReceiptStore final
+    : public ProviderDispatchReceiptStore,
+      public ProviderDispatchOutcomeStore {
 public:
     InMemoryProviderDispatchReceiptStore();
     ~InMemoryProviderDispatchReceiptStore() override;
@@ -98,6 +152,12 @@ public:
     ProviderDispatchState state(std::string_view dispatch_id) const override;
     ProviderDispatchState state(std::string_view owner_scope,
                                 std::string_view dispatch_id) const override;
+    ProviderDispatchOutcomePutResult settle(
+        std::string_view owner_scope,
+        const ProviderDispatchOutcomeReceipt& outcome) override;
+    std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view owner_scope,
+        std::string_view dispatch_id) const override;
 
 private:
     struct Impl;

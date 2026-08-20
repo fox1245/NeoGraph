@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/runtime-instruction-decision-v1.schema.json",
+  "title": "NeoGraph Runtime Instruction Decision v1",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "instruction_id", "source_run_id", "expected_lineage_head_id", "policy_identity", "action", "target_program_version_id", "target_run_id", "reason"],
+  "properties": {
+    "format": { "const": "neograph-runtime-instruction-decision" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "instruction_id": { "$ref": "#/$defs/sha256" },
+    "source_run_id": { "type": "string", "minLength": 1 },
+    "expected_lineage_head_id": { "$ref": "#/$defs/sha256" },
+    "policy_identity": { "$ref": "#/$defs/sha256" },
+    "action": { "enum": ["satisfied_in_place", "rejected", "replace_at_handoff", "migrate_graph"] },
+    "target_program_version_id": { "type": "string" },
+    "target_run_id": { "type": "string" },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 4096 }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

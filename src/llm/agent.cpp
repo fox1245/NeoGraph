@@ -118,6 +118,7 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
         // tools took 900 ms here and 300 ms there.
         ToolExecutionContext execution;
         execution.controller = tool_execution_controller_;
+        execution.hook_runtime = hook_runtime_;
         auto tool_msgs = neograph::async::run_sync(
             dispatch_tool_calls(msg.tool_calls, tool_ptrs(), tool_gate_, {}, std::move(execution)));
         for (auto& tm : tool_msgs) {
@@ -195,6 +196,7 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
 
         ToolExecutionContext execution;
         execution.controller = tool_execution_controller_;
+        execution.hook_runtime = hook_runtime_;
         auto tool_msgs = neograph::async::run_sync(
             dispatch_tool_calls(std::move(calls), tool_ptrs(), tool_gate_, {}, std::move(execution)));
         for (auto& tm : tool_msgs) {

@@ -12,6 +12,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Strict runtime interposition completion.** Added `StrictRuntimeProfile`,
+  durable provider terminal-outcome receipts and SQLite schema v3 migration,
+  transport-neutral mandatory Hook backends with JSON-RPC stdio/HTTP artifact
+  publication, general required context and `HardConstraint` artifacts,
+  exact-preservation `ContextTransformReceipt`, durable runtime developer
+  instruction decisions, and a reserve-before-compile `ProgramSynthesisGateway`.
+  Generated source still cannot activate, bind, migrate, or spawn itself; those
+  remain separate host-owned Program transitions. Custom subclasses of
+  `DurableProviderDispatchReceiptStore` must now implement terminal
+  `settle`/`outcome`; C++ consumers must rebuild against this ABI change.
+
 - **Isolated PostgreSQL Program-store integration fixture.** Added
   digest-pinned, loopback-only `tests/fixtures/q7-postgres/compose.yaml` with
   tmpfs storage and a health gate. When `NEOGRAPH_TEST_POSTGRES_URL` names a

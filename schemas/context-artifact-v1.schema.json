@@ -9,7 +9,7 @@
     "format": { "const": "neograph-context-artifact" },
     "storage_schema_version": { "const": 1 },
     "id": { "$ref": "#/$defs/sha256" },
-    "kind": { "enum": ["raw_history", "derived_context", "required_skill", "hook_output"] },
+    "kind": { "enum": ["raw_history", "derived_context", "required_skill", "hook_output", "hard_constraint"] },
     "producer_id": { "$ref": "#/$defs/token" },
     "source_digest": { "$ref": "#/$defs/sha256" },
     "source_feed_id": { "type": "string" },
@@ -33,6 +33,10 @@
           "covers_through_sequence": { "const": 0 }
         }
       }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "hard_constraint" } }, "required": ["kind"] },
+      "then": { "properties": { "required": { "const": true } } }
     }
   ],
   "$defs": {

@@ -60,6 +60,41 @@ HookRpcExecutor::HookRpcExecutor(std::shared_ptr<RpcTransport> transport, Limits
     }
 }
 
+RpcHookExecutionAdapter::RpcHookExecutionAdapter(
+    std::shared_ptr<HookRpcExecutor> executor)
+    : executor_(std::move(executor)) {
+    if (!executor_) {
+        throw std::invalid_argument("RPC Hook execution adapter requires an executor");
+    }
+}
+
+asio::awaitable<HookExecutionAttempt> RpcHookExecutionAdapter::execute_async(
+    const HookInvocation& invocation, const RuntimeEvent& event,
+    std::uint32_t attempt, ToolExecutionContext context) const {
+    if (invocation.data().event_id != event.id() ||
+        invocation.data().phase != event.phase()) {
+        throw std::invalid_argument("RPC Hook invocation does not match runtime event");
+    }
+    if (!context.deadline) {
+        throw std::invalid_argument("RPC Hook execution requires a bounded deadline");
+    }
+    try {
+        auto execution = co_await executor_->execute_async(
+            invocation, attempt, *context.deadline, std::move(context.cancel_token));
+        co_return HookExecutionAttempt{std::move(execution.receipt),
+                                        std::move(execution.artifacts)};
+    } catch (const std::exception& error) {
+        const auto state = invocation.data().idempotency == HookIdempotency::NonIdempotent
+                               ? HookExecutionState::ReconciliationRequired
+                               : HookExecutionState::Failed;
+        auto message = std::string(error.what()).substr(0, 4096);
+        co_return HookExecutionAttempt{
+            HookExecutionReceipt::create(
+                {invocation.id(), attempt, state, {}, std::move(message)}),
+            {}};
+    }
+}
+
 asio::awaitable<HookRpcExecution> HookRpcExecutor::execute_async(
     const HookInvocation& invocation, std::uint32_t attempt,
     std::chrono::steady_clock::time_point deadline,

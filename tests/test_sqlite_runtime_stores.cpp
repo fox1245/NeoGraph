@@ -59,10 +59,16 @@ TEST(SQLiteRuntimeStores, HookLeaseSurvivesReopenAndFencesStaleWorker) {
 TEST(SQLiteRuntimeStores, ProviderReceiptReopensAndFailsClosedOnCorruption) {
     const auto path = database("receipt_reopen");
     const auto receipt = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('b'), sha('c'), "model", CompletionMode::COLLECT});
-    { SQLiteProviderDispatchReceiptStore store(path); EXPECT_EQ(store.persist(receipt), ProviderDispatchReceiptPutResult::Stored); }
+    const auto outcome = ProviderDispatchOutcomeReceipt::create(
+        {"dispatch", receipt.id(), ProviderDispatchState::Succeeded, sha('d'), {}});
+    { SQLiteProviderDispatchReceiptStore store(path);
+      EXPECT_EQ(store.persist(receipt), ProviderDispatchReceiptPutResult::Stored);
+      EXPECT_EQ(store.settle({}, outcome), ProviderDispatchOutcomePutResult::Stored); }
     SQLiteProviderDispatchReceiptStore reopened(path);
     EXPECT_EQ(reopened.persist(receipt), ProviderDispatchReceiptPutResult::AlreadyPresent);
-    EXPECT_EQ(reopened.state("dispatch"), ProviderDispatchState::AdmittedPending);
+    EXPECT_EQ(reopened.state("dispatch"), ProviderDispatchState::Succeeded);
+    ASSERT_TRUE(reopened.outcome({}, "dispatch"));
+    EXPECT_EQ(reopened.outcome({}, "dispatch")->id(), outcome.id());
     sqlite3* raw = nullptr; ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(raw, "UPDATE ng_provider_receipts SET canonical='bad' WHERE dispatch_id='dispatch'", nullptr, nullptr, nullptr), SQLITE_OK);
     sqlite3_close(raw);
@@ -76,7 +82,12 @@ TEST(SQLiteRuntimeStores, ProviderReceiptsAreOwnerIsolated) {
     EXPECT_EQ(store.persist("owner_a", first), ProviderDispatchReceiptPutResult::Stored);
     EXPECT_EQ(store.persist("owner_b", second), ProviderDispatchReceiptPutResult::Stored);
     EXPECT_EQ(store.persist("owner_a", second), ProviderDispatchReceiptPutResult::Conflict);
-    EXPECT_EQ(store.state("owner_a", "dispatch"), ProviderDispatchState::AdmittedPending);
+    const auto outcome = ProviderDispatchOutcomeReceipt::create(
+        {"dispatch", first.id(), ProviderDispatchState::Succeeded, sha('f'), {}});
+    EXPECT_EQ(store.settle("owner_a", outcome), ProviderDispatchOutcomePutResult::Stored);
+    EXPECT_EQ(store.settle("owner_b", outcome), ProviderDispatchOutcomePutResult::Conflict);
+    EXPECT_EQ(store.settle("owner_c", outcome), ProviderDispatchOutcomePutResult::MissingDispatch);
+    EXPECT_EQ(store.state("owner_a", "dispatch"), ProviderDispatchState::Succeeded);
     EXPECT_EQ(store.state("owner_b", "dispatch"), ProviderDispatchState::AdmittedPending);
     EXPECT_EQ(store.state("owner_c", "dispatch"), ProviderDispatchState::Missing);
 }

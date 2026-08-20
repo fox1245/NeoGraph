@@ -1,10 +1,12 @@
 /** @file hook_outbox.h @brief Durable hook dispatch contracts and in-memory journal. */
 #pragma once
 
+#include <neograph/context_store.h>
 #include <neograph/hook.h>
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -141,12 +143,45 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+/** One transport-neutral Hook execution attempt and its context evidence. */
+struct HookExecutionAttempt {
+    HookExecutionReceipt receipt;
+    std::vector<ContextArtifact> artifacts;
+};
+
+using HookExecutionBackend = std::function<asio::awaitable<HookExecutionAttempt>(
+    const HookInvocation&,
+    const RuntimeEvent&,
+    std::uint32_t attempt,
+    ToolExecutionContext)>;
+
+using HookArtifactPublisher = std::function<void(
+    const HookInvocation&,
+    const RuntimeEvent&,
+    const std::vector<ContextArtifact>&)>;
+
+/** Owner-scoped idempotent publisher for HookOutput artifacts. */
+class NEOGRAPH_API ContextStoreHookArtifactPublisher final {
+public:
+    explicit ContextStoreHookArtifactPublisher(std::shared_ptr<ContextStore> store);
+    void publish(const HookInvocation& invocation,
+                 const RuntimeEvent& event,
+                 const std::vector<ContextArtifact>& artifacts) const;
+private:
+    std::shared_ptr<ContextStore> store_;
+};
+
 /** Plans, journals, and executes mandatory hooks without owning lifecycle call sites. */
 class NEOGRAPH_API MandatoryHookRunner final {
 public:
     MandatoryHookRunner(std::shared_ptr<HookJournal> journal, std::shared_ptr<const HookRegistry> registry,
                         std::shared_ptr<const NativeHookExecutionAdapter> adapter,
                         std::string worker_id = "local-hook-runner");
+    MandatoryHookRunner(std::shared_ptr<HookJournal> journal,
+                        std::shared_ptr<const HookRegistry> registry,
+                        HookExecutionBackend backend,
+                        HookArtifactPublisher artifact_publisher = {},
+                        std::string worker_id = "hook-backend-runner");
     asio::awaitable<void> run_async(const RuntimeEvent& event,
                                     std::chrono::system_clock::time_point deadline,
                                     std::uint32_t max_attempts = 1);
@@ -154,6 +189,8 @@ private:
     std::shared_ptr<HookJournal> journal_;
     std::shared_ptr<const HookRegistry> registry_;
     std::shared_ptr<const NativeHookExecutionAdapter> adapter_;
+    HookExecutionBackend backend_;
+    HookArtifactPublisher artifact_publisher_;
     std::string worker_id_;
 };
 

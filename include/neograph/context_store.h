@@ -78,6 +78,12 @@ public:
         std::string_view artifact_id) const = 0;
 };
 
+/** Opt-in marker for ContextStore implementations that survive process restart. */
+class NEOGRAPH_API DurableContextStore : public ContextStore {
+public:
+    ~DurableContextStore() override = default;
+};
+
 /** Thread-safe in-memory implementation of the ContextStore durable contract. */
 class NEOGRAPH_API InMemoryContextStore final : public ContextStore {
 public:

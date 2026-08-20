@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/runtime-developer-instruction-v1.schema.json",
+  "title": "NeoGraph Runtime Developer Instruction v1",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "owner_scope", "source_run_id", "feed_id", "sequence", "predecessor_record_id", "submitted_at_ms", "text", "payload", "requested_capabilities", "requested_effects"],
+  "properties": {
+    "format": { "const": "neograph-runtime-developer-instruction" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "owner_scope": { "type": "string", "minLength": 1 },
+    "source_run_id": { "type": "string", "minLength": 1 },
+    "feed_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "predecessor_record_id": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    "submitted_at_ms": { "type": "integer", "minimum": 0 },
+    "text": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+    "payload": {},
+    "requested_capabilities": { "$ref": "#/$defs/tokens" },
+    "requested_effects": { "$ref": "#/$defs/tokens" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "tokens": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+  }
+}
+

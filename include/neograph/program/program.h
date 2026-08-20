@@ -35,7 +35,9 @@
 #include <neograph/program/run_record.h>
 #include <neograph/program/result.h>
 #include <neograph/program/runtime.h>
+#include <neograph/program/runtime_instruction.h>
 #include <neograph/program/source.h>
+#include <neograph/program/synthesis.h>
 #include <neograph/program/task_graph_proposal.h>
 #include <neograph/program/task_graph_fragment.h>
 #include <neograph/program/transition_store.h>

@@ -533,9 +533,11 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/evidence_ledger.cpp
     src/core/runtime_context.cpp
     src/core/context_store.cpp
+    src/core/context_transform.cpp
     src/core/runtime_turn_assembler.cpp
     src/core/controlled_provider.cpp
     src/core/runtime_interposition_controller.cpp
+    src/core/strict_runtime.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
     src/core/graph_safe_point.cpp
@@ -626,7 +628,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/contract.cpp
         src/program/bundle.cpp
         src/program/diagnostic.cpp
-        src/program/source.cpp
+    src/program/source.cpp
+    src/program/synthesis.cpp
         src/program/task_graph_proposal.cpp
         src/program/task_graph_fragment.cpp
         src/program/javascript.cpp
@@ -653,7 +656,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/run_record.cpp
         src/program/transition_store.cpp
         src/program/catalog.cpp
-        src/program/runtime.cpp
+    src/program/runtime.cpp
+    src/program/runtime_instruction.cpp
         src/program/core_progress.cpp
         src/program/run_attempt.cpp
         src/program/invocation.cpp

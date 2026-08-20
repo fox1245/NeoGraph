@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-synthesis-proposal-v1.schema.json",
+  "title": "NeoGraph Program Synthesis Proposal v1",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "owner_scope", "lineage_id", "parent_run_id", "instruction_id", "source", "requested_capabilities", "requested_effects", "requested_budget", "created_at_ms"],
+  "properties": {
+    "format": { "const": "neograph-program-synthesis-proposal" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "owner_scope": { "type": "string", "minLength": 1 },
+    "lineage_id": { "$ref": "#/$defs/sha256" },
+    "parent_run_id": { "type": "string", "minLength": 1 },
+    "instruction_id": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    "source": { "type": "string", "minLength": 1 },
+    "requested_capabilities": { "$ref": "#/$defs/tokens" },
+    "requested_effects": { "$ref": "#/$defs/tokens" },
+    "requested_budget": { "type": "object" },
+    "created_at_ms": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "tokens": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+  }
+}
+

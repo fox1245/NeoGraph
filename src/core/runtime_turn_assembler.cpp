@@ -114,11 +114,32 @@ ChatMessage render_artifact(const ContextArtifact& artifact) {
     return {"system", content.at("text").get<std::string>()};
 }
 
+void normalize_required_ids(std::vector<std::string>& ids,
+                            std::string_view label) {
+    for (const auto& id : ids) {
+        if (!detail::is_sha256_identity(id)) {
+            throw std::invalid_argument(std::string(label) +
+                                        " must contain sha256 identities");
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) {
+        throw std::invalid_argument(std::string(label) + " contains a duplicate");
+    }
+}
+
+RuntimeContextRequirements skill_requirements(std::vector<std::string> skills) {
+    RuntimeContextRequirements requirements;
+    requirements.required_artifact_ids = skills;
+    requirements.required_skill_artifact_ids = std::move(skills);
+    return requirements;
+}
+
 }  // namespace
 
 struct RuntimeTurnAssembler::Impl {
     ContextStore* store;
-    std::vector<std::string> static_required_skill_artifact_ids;
+    RuntimeContextRequirements requirements;
     std::uint64_t max_input_tokens;
 };
 
@@ -127,20 +148,27 @@ ContextBudgetBlocked::ContextBudgetBlocked()
 
 RuntimeTurnAssembler::RuntimeTurnAssembler(
     ContextStore& store, std::vector<std::string> static_required_skill_artifact_ids,
-    std::uint64_t max_input_tokens) {
-    for (const auto& id : static_required_skill_artifact_ids) {
-        if (!detail::is_sha256_identity(id)) {
-            throw std::invalid_argument("Static required skill artifact id must be a sha256 identity");
-        }
-    }
-    std::sort(static_required_skill_artifact_ids.begin(), static_required_skill_artifact_ids.end());
-    if (std::adjacent_find(static_required_skill_artifact_ids.begin(),
-                           static_required_skill_artifact_ids.end()) !=
-        static_required_skill_artifact_ids.end()) {
-        throw std::invalid_argument("Static required skill artifact ids contain a duplicate");
+    std::uint64_t max_input_tokens)
+    : RuntimeTurnAssembler(store, max_input_tokens,
+                           skill_requirements(
+                               std::move(static_required_skill_artifact_ids))) {}
+
+RuntimeTurnAssembler::RuntimeTurnAssembler(
+    ContextStore& store, std::uint64_t max_input_tokens,
+    RuntimeContextRequirements requirements) {
+    normalize_required_ids(requirements.required_artifact_ids,
+                           "Required context artifact ids");
+    normalize_required_ids(requirements.required_skill_artifact_ids,
+                           "Required skill artifact ids");
+    if (!std::includes(requirements.required_artifact_ids.begin(),
+                       requirements.required_artifact_ids.end(),
+                       requirements.required_skill_artifact_ids.begin(),
+                       requirements.required_skill_artifact_ids.end())) {
+        throw std::invalid_argument(
+            "Required skill artifacts must be included in required context artifacts");
     }
     impl_ = std::make_unique<Impl>(
-        Impl{&store, std::move(static_required_skill_artifact_ids), max_input_tokens});
+        Impl{&store, std::move(requirements), max_input_tokens});
 }
 RuntimeTurnAssembler::~RuntimeTurnAssembler() = default;
 RuntimeTurnAssembler::RuntimeTurnAssembler(RuntimeTurnAssembler&&) noexcept = default;
@@ -175,9 +203,9 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         throw std::invalid_argument("Runtime turn request template must not contain messages");
     }
     if (!std::includes(epoch.artifact_ids().begin(), epoch.artifact_ids().end(),
-                       impl_->static_required_skill_artifact_ids.begin(),
-                       impl_->static_required_skill_artifact_ids.end())) {
-        throw std::invalid_argument("Context epoch omits a static required skill artifact");
+                       impl_->requirements.required_artifact_ids.begin(),
+                       impl_->requirements.required_artifact_ids.end())) {
+        throw std::invalid_argument("Context epoch omits a required context artifact");
     }
     if (epoch.guarantee_profile() == RuntimeGuaranteeProfile::Strict &&
         impl_->max_input_tokens == 0) {
@@ -203,13 +231,19 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         const auto artifact = impl_->store->get_artifact(owner_id, id);
         if (!artifact) throw std::invalid_argument("Context epoch artifact is not available to this owner");
         const bool static_required = std::binary_search(
-            impl_->static_required_skill_artifact_ids.begin(),
-            impl_->static_required_skill_artifact_ids.end(), id);
-        if (artifact->kind() == ContextArtifactKind::RequiredSkill && !static_required) {
+            impl_->requirements.required_artifact_ids.begin(),
+            impl_->requirements.required_artifact_ids.end(), id);
+        const bool required_skill = std::binary_search(
+            impl_->requirements.required_skill_artifact_ids.begin(),
+            impl_->requirements.required_skill_artifact_ids.end(), id);
+        if (artifact->kind() == ContextArtifactKind::RequiredSkill && !required_skill) {
             throw std::invalid_argument("Context epoch selects an unadmitted required skill artifact");
         }
-        if (static_required && (artifact->kind() != ContextArtifactKind::RequiredSkill ||
-                                !artifact->required())) {
+        if (static_required && !artifact->required()) {
+            throw std::invalid_argument(
+                "Configured required context identity is not a required artifact");
+        }
+        if (required_skill && artifact->kind() != ContextArtifactKind::RequiredSkill) {
             throw std::invalid_argument("Configured skill identity is not a required skill artifact");
         }
         selected.push_back({*artifact});
@@ -228,7 +262,7 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     std::uint64_t mandatory = 0;
     for (const auto& item : selected) {
         const auto rendered = render_artifact(item.artifact);
-        if (item.artifact.kind() == ContextArtifactKind::RequiredSkill) {
+        if (item.artifact.required()) {
             mandatory += estimate_json_tokens(messages_json({rendered}));
         }
         (item.artifact.placement() == ContextPlacement::BeforeLatestUser ? before : after)

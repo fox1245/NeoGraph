@@ -63,4 +63,19 @@ private:
     Limits limits_;
 };
 
+/** Binds the strict JSON-RPC executor to MandatoryHookRunner's backend contract. */
+class NEOGRAPH_API RpcHookExecutionAdapter final {
+public:
+    explicit RpcHookExecutionAdapter(std::shared_ptr<HookRpcExecutor> executor);
+
+    asio::awaitable<HookExecutionAttempt> execute_async(
+        const HookInvocation& invocation,
+        const RuntimeEvent& event,
+        std::uint32_t attempt,
+        ToolExecutionContext context) const;
+
+private:
+    std::shared_ptr<HookRpcExecutor> executor_;
+};
+
 } // namespace neograph

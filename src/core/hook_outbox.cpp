@@ -62,13 +62,197 @@ std::vector<HookOutboxEntry> InMemoryHookJournal::pending() const { std::lock_gu
 std::vector<HookOutboxEntry> InMemoryHookJournal::reconciliation_required() const { std::lock_guard<std::mutex> lock(impl_->mu); std::vector<HookOutboxEntry> r; for (const auto& [_, e] : impl_->entries) if (e.data().state == HookExecutionState::ReconciliationRequired) r.push_back(e); return r; }
 std::optional<HookOutboxEntry> InMemoryHookJournal::get(std::string_view id) const { std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); return it == impl_->entries.end() ? std::nullopt : std::optional<HookOutboxEntry>(it->second); }
 
-MandatoryHookRunner::MandatoryHookRunner(std::shared_ptr<HookJournal> journal, std::shared_ptr<const HookRegistry> registry, std::shared_ptr<const NativeHookExecutionAdapter> adapter, std::string worker) : journal_(std::move(journal)), registry_(std::move(registry)), adapter_(std::move(adapter)), worker_id_(std::move(worker)) { if (!journal_ || !registry_ || !adapter_ || worker_id_.empty()) throw std::invalid_argument("hook runner requires durable dependencies and a worker identity"); }
-asio::awaitable<void> MandatoryHookRunner::run_async(const RuntimeEvent& event, Clock::time_point deadline, std::uint32_t max_attempts) { if (deadline <= Clock::now() || !max_attempts) throw std::invalid_argument("invalid hook execution deadline"); for (const auto& invocation : registry_->plan(event)) { auto entry = journal_->enqueue(invocation, event, max_attempts, deadline); entry = journal_->publish(invocation.id()); for (;;) { const auto now = Clock::now(); if (now >= deadline) { entry = journal_->get(invocation.id()).value_or(entry); if (invocation.data().delivery == HookDelivery::BlockingMandatory) throw HookBoundaryBlocked(invocation.id(), entry.data().state, "mandatory hook deadline elapsed"); break; } const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now); auto lease = journal_->claim(invocation.id(), worker_id_, now, std::min(std::chrono::milliseconds(30'000), remaining)); if (!lease) { entry = journal_->get(invocation.id()).value_or(entry); } else { ToolExecutionContext context; context.identity.request_id = invocation.id(); context.identity.root_run_id = event.run_id(); context.identity.thread_id = "hook-fence:" + std::to_string(lease->fencing_token); context.deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(deadline - Clock::now()); try { const auto result = co_await adapter_->execute_result_async(invocation, event, std::move(context)); const auto settled = journal_->settle(invocation.id(), lease->fencing_token, result_receipt(lease->entry, result), Clock::now()); if (!settled) { entry = journal_->get(invocation.id()).value_or(lease->entry); if (invocation.data().delivery == HookDelivery::BlockingMandatory) throw HookBoundaryBlocked(invocation.id(), entry.data().state, "hook settlement lost ownership"); break; } entry = *settled; } catch (const HookBoundaryBlocked&) { throw; } catch (const std::exception& error) { const auto settled = journal_->settle(invocation.id(), lease->fencing_token, failed_receipt(lease->entry, error.what()), Clock::now()); if (!settled) { entry = journal_->get(invocation.id()).value_or(lease->entry); if (invocation.data().delivery == HookDelivery::BlockingMandatory) throw HookBoundaryBlocked(invocation.id(), entry.data().state, "hook settlement lost ownership"); break; } entry = *settled; } }
+ContextStoreHookArtifactPublisher::ContextStoreHookArtifactPublisher(
+    std::shared_ptr<ContextStore> store)
+    : store_(std::move(store)) {
+    if (!store_) {
+        throw std::invalid_argument("Hook artifact publisher requires a ContextStore");
+    }
+}
+
+void ContextStoreHookArtifactPublisher::publish(
+    const HookInvocation& invocation, const RuntimeEvent& event,
+    const std::vector<ContextArtifact>& artifacts) const {
+    if (invocation.data().event_id != event.id() ||
+        invocation.data().phase != event.phase()) {
+        throw std::invalid_argument(
+            "Hook artifact publication does not match its runtime event");
+    }
+    for (const auto& artifact : artifacts) {
+        if (artifact.kind() != ContextArtifactKind::HookOutput ||
+            artifact.source_digest() != invocation.id()) {
+            throw std::invalid_argument(
+                "RPC Hook artifact must be HookOutput evidence bound to the invocation");
+        }
+        const auto result = store_->put_artifact(event.owner_scope(), artifact);
+        if (result == ContextArtifactPutResult::Conflict) {
+            throw std::runtime_error("Hook artifact publication conflicted");
+        }
+    }
+}
+
+MandatoryHookRunner::MandatoryHookRunner(
+    std::shared_ptr<HookJournal> journal,
+    std::shared_ptr<const HookRegistry> registry,
+    std::shared_ptr<const NativeHookExecutionAdapter> adapter,
+    std::string worker)
+    : journal_(std::move(journal)),
+      registry_(std::move(registry)),
+      adapter_(std::move(adapter)),
+      worker_id_(std::move(worker)) {
+    if (!journal_ || !registry_ || !adapter_ || worker_id_.empty()) {
+        throw std::invalid_argument(
+            "hook runner requires durable dependencies and a worker identity");
+    }
+}
+
+MandatoryHookRunner::MandatoryHookRunner(
+    std::shared_ptr<HookJournal> journal,
+    std::shared_ptr<const HookRegistry> registry,
+    HookExecutionBackend backend,
+    HookArtifactPublisher artifact_publisher,
+    std::string worker)
+    : journal_(std::move(journal)),
+      registry_(std::move(registry)),
+      backend_(std::move(backend)),
+      artifact_publisher_(std::move(artifact_publisher)),
+      worker_id_(std::move(worker)) {
+    if (!journal_ || !registry_ || !backend_ || worker_id_.empty()) {
+        throw std::invalid_argument(
+            "hook backend runner requires durable dependencies and a worker identity");
+    }
+}
+
+asio::awaitable<void> MandatoryHookRunner::run_async(
+    const RuntimeEvent& event, Clock::time_point deadline,
+    std::uint32_t max_attempts) {
+    if (deadline <= Clock::now() || !max_attempts) {
+        throw std::invalid_argument("invalid hook execution deadline");
+    }
+    for (const auto& invocation : registry_->plan(event)) {
+        auto entry = journal_->enqueue(invocation, event, max_attempts, deadline);
+        entry = journal_->publish(invocation.id());
+        for (;;) {
+            const auto now = Clock::now();
+            if (now >= deadline) {
+                entry = journal_->get(invocation.id()).value_or(entry);
+                if (invocation.data().delivery == HookDelivery::BlockingMandatory) {
+                    throw HookBoundaryBlocked(invocation.id(), entry.data().state,
+                                              "mandatory hook deadline elapsed");
+                }
+                break;
+            }
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            auto lease = journal_->claim(
+                invocation.id(), worker_id_, now,
+                std::min(std::chrono::milliseconds(30'000), remaining));
+            if (!lease) {
+                entry = journal_->get(invocation.id()).value_or(entry);
+            } else {
+                ToolExecutionContext context;
+                context.identity.request_id = invocation.id();
+                context.identity.root_run_id = event.run_id();
+                context.identity.owner_scope = event.owner_scope();
+                context.identity.thread_id =
+                    "hook-fence:" + std::to_string(lease->fencing_token);
+                context.deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        deadline - Clock::now());
+                try {
+                    HookExecutionReceipt attempt_receipt = [&]() {
+                        return failed_receipt(lease->entry,
+                                              "hook backend did not produce a receipt");
+                    }();
+                    if (backend_) {
+                        auto attempted = co_await backend_(
+                            invocation, event, lease->entry.data().attempt_count,
+                            std::move(context));
+                        if (attempted.receipt.data().invocation_id != invocation.id() ||
+                            attempted.receipt.data().attempt !=
+                                lease->entry.data().attempt_count) {
+                            throw std::invalid_argument(
+                                "Hook backend receipt does not bind the leased attempt");
+                        }
+                        attempt_receipt = std::move(attempted.receipt);
+                        if (!attempted.artifacts.empty()) {
+                            if (attempt_receipt.data().state !=
+                                HookExecutionState::Succeeded) {
+                                throw std::invalid_argument(
+                                    "Only a successful Hook attempt may publish artifacts");
+                            }
+                            try {
+                                if (!artifact_publisher_) {
+                                    throw std::runtime_error(
+                                        "Hook backend returned artifacts without a publisher");
+                                }
+                                artifact_publisher_(invocation, event,
+                                                    attempted.artifacts);
+                            } catch (const std::exception& error) {
+                                auto message =
+                                    std::string("Hook artifact publication requires reconciliation: ") +
+                                    error.what();
+                                if (message.size() > 4096) message.resize(4096);
+                                attempt_receipt = HookExecutionReceipt::create(
+                                    {invocation.id(),
+                                     lease->entry.data().attempt_count,
+                                     HookExecutionState::ReconciliationRequired,
+                                     attempt_receipt.data().external_effect,
+                                     std::move(message)});
+                            }
+                        }
+                    } else {
+                        const auto result = co_await adapter_->execute_result_async(
+                            invocation, event, std::move(context));
+                        attempt_receipt = result_receipt(lease->entry, result);
+                    }
+                    const auto settled = journal_->settle(
+                        invocation.id(), lease->fencing_token,
+                        std::move(attempt_receipt), Clock::now());
+                    if (!settled) {
+                        entry = journal_->get(invocation.id()).value_or(lease->entry);
+                        if (invocation.data().delivery ==
+                            HookDelivery::BlockingMandatory) {
+                            throw HookBoundaryBlocked(invocation.id(),
+                                                      entry.data().state,
+                                                      "hook settlement lost ownership");
+                        }
+                        break;
+                    }
+                    entry = *settled;
+                } catch (const HookBoundaryBlocked&) {
+                    throw;
+                } catch (const std::exception& error) {
+                    const auto settled = journal_->settle(
+                        invocation.id(), lease->fencing_token,
+                        failed_receipt(lease->entry, error.what()), Clock::now());
+                    if (!settled) {
+                        entry = journal_->get(invocation.id()).value_or(lease->entry);
+                        if (invocation.data().delivery ==
+                            HookDelivery::BlockingMandatory) {
+                            throw HookBoundaryBlocked(invocation.id(),
+                                                      entry.data().state,
+                                                      "hook settlement lost ownership");
+                        }
+                        break;
+                    }
+                    entry = *settled;
+                }
+            }
             if (entry.data().state == HookExecutionState::Succeeded) break;
-            if (entry.data().state == HookExecutionState::Failed && entry.data().attempt_count < entry.data().max_attempts && Clock::now() < deadline) continue;
-            if (invocation.data().delivery == HookDelivery::BlockingMandatory) throw HookBoundaryBlocked(invocation.id(), entry.data().state, "mandatory hook did not settle successfully");
+            if (entry.data().state == HookExecutionState::Failed &&
+                entry.data().attempt_count < entry.data().max_attempts &&
+                Clock::now() < deadline) {
+                continue;
+            }
+            if (invocation.data().delivery == HookDelivery::BlockingMandatory) {
+                throw HookBoundaryBlocked(invocation.id(), entry.data().state,
+                                          "mandatory hook did not settle successfully");
+            }
             break;
         }
-    } co_return;
+    }
+    co_return;
 }
 } // namespace neograph

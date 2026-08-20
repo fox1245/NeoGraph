@@ -25,6 +25,20 @@ public:
         PYBIND11_OVERRIDE_PURE(ProviderDispatchReceiptPutResult,
                                DurableProviderDispatchReceiptStore, persist, receipt);
     }
+    ProviderDispatchOutcomePutResult settle(
+        std::string_view owner_scope,
+        const ProviderDispatchOutcomeReceipt& outcome) override {
+        PYBIND11_OVERRIDE_PURE(ProviderDispatchOutcomePutResult,
+                               DurableProviderDispatchReceiptStore, settle,
+                               owner_scope, outcome);
+    }
+    std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view owner_scope,
+        std::string_view dispatch_id) const override {
+        PYBIND11_OVERRIDE_PURE(std::optional<ProviderDispatchOutcomeReceipt>,
+                               DurableProviderDispatchReceiptStore, outcome,
+                               owner_scope, dispatch_id);
+    }
 };
 
 CompletionRequest request_from(CompletionParams params, bool stream, StreamCallback on_chunk) {
@@ -51,7 +65,8 @@ void init_runtime_context(py::module_& m) {
         .value("RawHistory", ContextArtifactKind::RawHistory)
         .value("DerivedContext", ContextArtifactKind::DerivedContext)
         .value("RequiredSkill", ContextArtifactKind::RequiredSkill)
-        .value("HookOutput", ContextArtifactKind::HookOutput);
+        .value("HookOutput", ContextArtifactKind::HookOutput)
+        .value("HardConstraint", ContextArtifactKind::HardConstraint);
     py::enum_<ContextPlacement>(m, "ContextPlacement")
         .value("BeforeLatestUser", ContextPlacement::BeforeLatestUser)
         .value("AfterLatestUser", ContextPlacement::AfterLatestUser);
@@ -71,6 +86,11 @@ void init_runtime_context(py::module_& m) {
         .value("Stored", ProviderDispatchReceiptPutResult::Stored)
         .value("AlreadyPresent", ProviderDispatchReceiptPutResult::AlreadyPresent)
         .value("Conflict", ProviderDispatchReceiptPutResult::Conflict);
+    py::enum_<ProviderDispatchOutcomePutResult>(m, "ProviderDispatchOutcomePutResult")
+        .value("Stored", ProviderDispatchOutcomePutResult::Stored)
+        .value("AlreadyPresent", ProviderDispatchOutcomePutResult::AlreadyPresent)
+        .value("Conflict", ProviderDispatchOutcomePutResult::Conflict)
+        .value("MissingDispatch", ProviderDispatchOutcomePutResult::MissingDispatch);
     py::enum_<ProviderDispatchState>(m, "ProviderDispatchState")
         .value("Unavailable", ProviderDispatchState::Unavailable)
         .value("Missing", ProviderDispatchState::Missing)
@@ -180,13 +200,34 @@ void init_runtime_context(py::module_& m) {
     dispatch_receipt.def_static("create", &ProviderDispatchReceipt::create).def_static("parse", &ProviderDispatchReceipt::parse)
         .def_property_readonly("dispatch_id", &ProviderDispatchReceipt::dispatch_id);
     bind_identity_methods(dispatch_receipt);
+    py::class_<ProviderDispatchOutcomeReceiptData>(m, "ProviderDispatchOutcomeReceiptData")
+        .def(py::init<>())
+        .def_readwrite("dispatch_id", &ProviderDispatchOutcomeReceiptData::dispatch_id)
+        .def_readwrite("dispatch_receipt_id", &ProviderDispatchOutcomeReceiptData::dispatch_receipt_id)
+        .def_readwrite("state", &ProviderDispatchOutcomeReceiptData::state)
+        .def_readwrite("response_digest", &ProviderDispatchOutcomeReceiptData::response_digest)
+        .def_readwrite("error", &ProviderDispatchOutcomeReceiptData::error);
+    py::class_<ProviderDispatchOutcomeReceipt> outcome_receipt(
+        m, "ProviderDispatchOutcomeReceipt");
+    outcome_receipt
+        .def_static("create", &ProviderDispatchOutcomeReceipt::create)
+        .def_static("parse", &ProviderDispatchOutcomeReceipt::parse)
+        .def_property_readonly("dispatch_id", &ProviderDispatchOutcomeReceipt::dispatch_id)
+        .def_property_readonly("dispatch_receipt_id", &ProviderDispatchOutcomeReceipt::dispatch_receipt_id)
+        .def_property_readonly("state", &ProviderDispatchOutcomeReceipt::state)
+        .def_property_readonly("response_digest", &ProviderDispatchOutcomeReceipt::response_digest)
+        .def_property_readonly("error", &ProviderDispatchOutcomeReceipt::error);
+    bind_identity_methods(outcome_receipt);
     py::class_<ProviderDispatchReceiptStore, std::shared_ptr<ProviderDispatchReceiptStore>>(m, "ProviderDispatchReceiptStore")
         .def("persist", py::overload_cast<const ProviderDispatchReceipt&>(&ProviderDispatchReceiptStore::persist))
         .def("state", py::overload_cast<std::string_view>(&ProviderDispatchReceiptStore::state, py::const_));
     py::class_<DurableProviderDispatchReceiptStore, ProviderDispatchReceiptStore, PyDurableProviderDispatchReceiptStore,
                std::shared_ptr<DurableProviderDispatchReceiptStore>>(m, "DurableProviderDispatchReceiptStore").def(py::init<>());
     py::class_<InMemoryProviderDispatchReceiptStore, ProviderDispatchReceiptStore,
-               std::shared_ptr<InMemoryProviderDispatchReceiptStore>>(m, "InMemoryProviderDispatchReceiptStore").def(py::init<>());
+               std::shared_ptr<InMemoryProviderDispatchReceiptStore>>(m, "InMemoryProviderDispatchReceiptStore")
+        .def(py::init<>())
+        .def("settle", &InMemoryProviderDispatchReceiptStore::settle)
+        .def("outcome", &InMemoryProviderDispatchReceiptStore::outcome);
 
     py::class_<ControlledProvider>(m, "ControlledProvider")
         .def(py::init<std::shared_ptr<Provider>, std::shared_ptr<ProviderDispatchReceiptStore>, std::string>(),
