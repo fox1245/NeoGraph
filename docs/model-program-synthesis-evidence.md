@@ -125,9 +125,25 @@ authority nor recompiles the source on the replacement path.
 This Program-level replacement must not be confused with arbitrary
 GraphEngine state/frontier migration. A migration plan from the source Core
 topology to the model topology was correctly classified `blocked` because its
-materialization and runtime contract differed. Automatic child binding/spawn,
-crash recovery across every synthesis boundary, and an in-Program
-`ng.proposeProgram` command surface also remain separate qualification gates.
+materialization and runtime contract differed.
+
+NeoGraph now also has a deliberately narrow P1 GraphEngine path:
+`GraphSemanticMigrationAdapter`. A host must prepare this immutable adapter
+from the exact admitted source and target artifacts. It admits only native,
+single-root `call_core` Programs with identical checkpointed channels/reducers,
+node names, edges, routing, barriers, retry/interrupt shape, capability binding,
+authority, and input/output contracts. It can therefore carry an identity-mapped
+frontier and channel snapshot into a successor with a different sealed Core
+definition and compiled-plan identity. The adapter is stored in the migration
+receipt and revalidated during recovery.
+
+QuickJS control, node/frontier renames, channel or reducer translation, changed
+barrier membership, pending effects, children, and arbitrary topology edits are
+still fail-closed. Those cases continue to require an explicit handoff/restart
+until a later mapping class proves every affected state dimension. Automatic
+child binding/spawn, crash recovery across every synthesis boundary, and an
+in-Program `ng.proposeProgram` command surface also remain separate
+qualification gates.
 
 Reproduce with the `program_model_synthesis_probe` target and:
 

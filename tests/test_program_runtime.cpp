@@ -3157,6 +3157,94 @@ TEST(ProgramRuntimeTest, GraphMigrationFencesSourceAndExactResumesGenerationTwo)
     EXPECT_EQ(followup_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterAdmitsShapePreservingSuccessor) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(1);
+
+    const auto source_version = fixture.admit("runtime-short-blocking");
+    auto       target_document = program_document("runtime-short-blocking");
+    // The target has a different immutable Core definition/plan identity, but
+    // preserves every checkpointed channel, node id, edge, and barrier member.
+    target_document["root"]["definition"]["nodes"]["work"]["migration_epoch"] = 2;
+    const auto target_version = fixture.admit_document(std::move(target_document));
+    ASSERT_NE(source_version.id(), target_version.id());
+    ASSERT_NE(source_version.core_materialization_receipt().plans.front().compiled_plan_identity,
+              target_version.core_materialization_receipt().plans.front().compiled_plan_identity);
+
+    const auto source_bundle = fixture.store->get_bundle("tenant:runtime", source_version.bundle_id());
+    const auto target_bundle = fixture.store->get_bundle("tenant:runtime", target_version.bundle_id());
+    ASSERT_TRUE(source_bundle);
+    ASSERT_TRUE(target_bundle);
+    EXPECT_FALSE(MigrationPlan::between(source_version, *source_bundle, target_version, *target_bundle)
+                     .is_compatible());
+    const auto adapter = GraphSemanticMigrationAdapter::prepare(
+        source_version, *source_bundle, target_version, *target_bundle);
+    EXPECT_TRUE(adapter.binds(source_version, *source_bundle, target_version, *target_bundle));
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", source_version,
+        ProgramInvocation{json::object(), grant(), "trace-semantic-graph-migration-source", {}});
+    EXPECT_THROW(
+        (void)fixture.runtime->migrate_graph(
+            source, ProgramGraphMigrationTarget{target_version.id(),
+                                                "semantic-graph-migration-without-adapter", {}}),
+        ProgramDiagnosticError);
+    auto target = fixture.runtime->migrate_graph(
+        source, ProgramGraphMigrationTarget{target_version.id(), "semantic-graph-migration-target",
+                                             {}, adapter});
+    const auto result = target.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message
+                             : "no failure detail");
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+
+    const auto lineage = fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    const auto generation = fixture.journal->load_generation(
+        "tenant:runtime", lineage->lineage_id(), 2);
+    ASSERT_TRUE(generation);
+    const auto receipt = generation->graph_migration_receipt();
+    ASSERT_TRUE(receipt);
+    ASSERT_TRUE(receipt->semantic_adapter());
+    EXPECT_EQ(receipt->semantic_adapter()->id(), adapter.id());
+    EXPECT_EQ(receipt->target_version().id(), target_version.id());
+    const auto parsed = ProgramGraphMigrationReceipt::parse(receipt->serialize_canonical());
+    ASSERT_TRUE(parsed.semantic_adapter());
+    EXPECT_EQ(parsed.semantic_adapter()->id(), adapter.id());
+    EXPECT_EQ(parsed.target_checkpoint().metadata.at("semantic_migration_adapter_id"), adapter.id());
+
+    auto recovered = fixture.make_runtime();
+    EXPECT_EQ(recovered->reconnect("tenant:runtime", source.run_id()).wait().status(),
+              ProgramTerminalStatus::Completed);
+    (void)source.wait();
+}
+
+TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterRejectsFrontierRename) {
+    AdmittedRuntime fixture(1);
+    const auto source_version = fixture.admit("runtime-short-blocking");
+    auto       target_document = program_document("runtime-short-blocking");
+    auto       definition = target_document["root"]["definition"];
+    definition["nodes"] = json{{"work", json{{"type", "runtime-short-blocking"}}},
+                               {"after", json{{"type", "runtime-followup"}}}};
+    definition["edges"] = json::array({
+        json{{"from", "__start__"}, {"to", "work"}},
+        json{{"from", "work"}, {"to", "after"}},
+        json{{"from", "after"}, {"to", "__end__"}},
+    });
+    target_document["root"]["definition"] = std::move(definition);
+    const auto target_version = fixture.admit_document(std::move(target_document));
+    const auto source_bundle = fixture.store->get_bundle("tenant:runtime", source_version.bundle_id());
+    const auto target_bundle = fixture.store->get_bundle("tenant:runtime", target_version.bundle_id());
+    ASSERT_TRUE(source_bundle);
+    ASSERT_TRUE(target_bundle);
+
+    EXPECT_THROW((void)GraphSemanticMigrationAdapter::prepare(
+                     source_version, *source_bundle, target_version, *target_bundle),
+                 std::invalid_argument);
+}
+
 TEST(ProgramRuntimeTest, GraphMigrationTargetSaveFailureResumesHeldSource) {
     blocking_calls.store(0);
     followup_calls.store(0);

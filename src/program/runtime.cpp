@@ -5553,13 +5553,17 @@ ProgramHandle ProgramRuntime::migrate_graph(
         *impl_->config.catalog, *source_version);
     auto target_pinned = detail::CatalogRuntimeAccess::pin(
         *impl_->config.catalog, *target_version);
-    const auto migration_plan = impl_->config.catalog->plan_migration(
-        owner_scope, source_version->id(), target_version->id());
+    const auto migration_plan = target.semantic_adapter
+        ? target.semantic_adapter->migration_plan(*source_version, source_pinned->bundle,
+                                                  *target_version, target_pinned->bundle)
+        : impl_->config.catalog->plan_migration(
+              owner_scope, source_version->id(), target_version->id());
     if (!supports_live_graph_migration(*source_pinned) ||
         !supports_live_graph_migration(*target_pinned) ||
-        source_pinned->root->core_name != target_pinned->root->core_name ||
-        source_pinned->root->compiled_plan_identity !=
-            target_pinned->root->compiled_plan_identity ||
+        (!target.semantic_adapter &&
+         (source_pinned->root->core_name != target_pinned->root->core_name ||
+          source_pinned->root->compiled_plan_identity !=
+              target_pinned->root->compiled_plan_identity)) ||
         !migration_plan.is_compatible()) {
         throw_runtime_diagnostic(
             "P_GRAPH_MIGRATION_INCOMPATIBLE",
@@ -5680,12 +5684,18 @@ ProgramHandle ProgramRuntime::migrate_graph(
             "P_GRAPH_MIGRATION_EXPIRED",
             "Program graph migration exhausted its wall-time budget before target preparation");
     }
-    auto target_snapshot = capsule.checkpoint();
+    auto target_snapshot = target.semantic_adapter
+        ? target.semantic_adapter->project(capsule)
+        : capsule.checkpoint();
     target_snapshot.id = graph::Checkpoint::generate_id();
     target_snapshot.thread_id = program_root_core_thread_id(
         target_run_id, target_pinned->root->compiled_plan_identity);
     target_snapshot.parent_id = capsule.core_checkpoint().checkpoint_id;
     target_snapshot.metadata["migrated_from"] = capsule.id();
+    if (target.semantic_adapter) {
+        target_snapshot.metadata["semantic_migration_adapter_id"] =
+            target.semantic_adapter->id();
+    }
     target_snapshot.timestamp = snapshot_time;
     impl_->config.checkpoints->save(target_snapshot);
     const auto durable_target_checkpoint =
@@ -5753,9 +5763,9 @@ ProgramHandle ProgramRuntime::migrate_graph(
             migration_plan.id(), active->generation.generation() + 1,
             target_run_id, target_version->id(), target_version->bundle_id(),
             publication.run_record.invocation().canonical_identity(),
-            publication.run_record.binding_fingerprint(),
-            publication.run_record.id(), publication.run_record.journal_head(),
-            target_checkpoint, target_snapshot});
+             publication.run_record.binding_fingerprint(),
+             publication.run_record.id(), publication.run_record.journal_head(),
+             target_checkpoint, target_snapshot, target.semantic_adapter});
     std::optional<ProgramRuntimeStateTransferReceipt> transfer_receipt;
     if (!source_contexts.empty() || !unresolved_source_hooks.empty()) {
         std::vector<std::string> context_ids;
@@ -6091,8 +6101,12 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 "P_GRAPH_MIGRATION_PROOF",
                 "Graph migration recovery does not match its exact admitted artifacts");
         }
-        const auto expected_plan = impl_->config.catalog->plan_migration(
-            owner_scope, source_version->id(), target_version->id());
+        const auto expected_plan = graph_migration_receipt->semantic_adapter()
+            ? graph_migration_receipt->semantic_adapter()->migration_plan(
+                  *source_version, source_materialized->bundle,
+                  *target_version, target_materialized->bundle)
+            : impl_->config.catalog->plan_migration(
+                  owner_scope, source_version->id(), target_version->id());
         if (!expected_plan.is_compatible() ||
             stored_plan->id() != expected_plan.id()) {
             throw_runtime_diagnostic(

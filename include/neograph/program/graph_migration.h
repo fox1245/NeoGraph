@@ -139,6 +139,58 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+/**
+ * Host-admitted P1 semantic bridge for an immutable native Core successor.
+ *
+ * It proves an identity projection of durable GraphEngine state: checkpointed
+ * channels, frontier node names, and barrier members are preserved exactly,
+ * while the successor may carry a different sealed Core definition and
+ * compiled-plan identity. It intentionally does not rename state, translate
+ * reducer values, move pending effects, or transfer JavaScript control state.
+ */
+class NEOGRAPH_PROGRAM_API GraphSemanticMigrationAdapter final {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    static GraphSemanticMigrationAdapter prepare(const ProgramVersion& source_version,
+                                                 const ProgramBundle&  source_bundle,
+                                                 const ProgramVersion& target_version,
+                                                 const ProgramBundle&  target_bundle);
+    static GraphSemanticMigrationAdapter parse(std::string_view stored_bytes);
+
+    const std::string& id() const noexcept;
+    const std::string& owner_scope() const noexcept;
+    const std::string& source_program_version_id() const noexcept;
+    const std::string& source_bundle_id() const noexcept;
+    const std::string& target_program_version_id() const noexcept;
+    const std::string& target_bundle_id() const noexcept;
+    const std::string& source_core_name() const noexcept;
+    const std::string& target_core_name() const noexcept;
+    const std::string& source_core_generation_id() const noexcept;
+    const std::string& target_core_generation_id() const noexcept;
+    const std::string& topology_shape_id() const noexcept;
+
+    /** Revalidates the exact admitted source/target artifacts. */
+    bool binds(const ProgramVersion& source_version, const ProgramBundle& source_bundle,
+               const ProgramVersion& target_version, const ProgramBundle& target_bundle) const;
+    /**
+     * Projects only verified identity-mapped GraphEngine checkpoint state.
+     * The caller supplies target checkpoint identity metadata separately.
+     */
+    graph::Checkpoint project(const GraphMigrationCapsule& capsule) const;
+    /** Builds the compatible transition proof authorized by this adapter. */
+    MigrationPlan migration_plan(const ProgramVersion& source_version,
+                                 const ProgramBundle&  source_bundle,
+                                 const ProgramVersion& target_version,
+                                 const ProgramBundle&  target_bundle) const;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit GraphSemanticMigrationAdapter(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+};
+
 struct ProgramGraphMigrationReceiptData {
     GraphMigrationCapsule capsule;
     ProgramBundle         source_bundle;
@@ -156,12 +208,14 @@ struct ProgramGraphMigrationReceiptData {
     std::string           target_initial_journal_head;
     CoreCheckpointIdentity target_core_checkpoint;
     graph::Checkpoint      target_checkpoint;
+    std::optional<GraphSemanticMigrationAdapter> semantic_adapter;
 };
 
 /** Immutable evidence admitted with one same-lineage GraphEngine successor. */
 class NEOGRAPH_PROGRAM_API ProgramGraphMigrationReceipt final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
+    static constexpr std::uint32_t PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
 
     explicit ProgramGraphMigrationReceipt(ProgramGraphMigrationReceiptData data);
     static ProgramGraphMigrationReceipt parse(std::string_view stored_bytes);
@@ -172,6 +226,7 @@ public:
     const ProgramVersion& source_version() const noexcept;
     const ProgramBundle& target_bundle() const noexcept;
     const ProgramVersion& target_version() const noexcept;
+    const std::optional<GraphSemanticMigrationAdapter>& semantic_adapter() const noexcept;
     const std::string& migration_plan_id() const noexcept;
     std::uint64_t target_generation() const noexcept;
     const std::string& target_run_id() const noexcept;

@@ -1,5 +1,6 @@
 #include <neograph/program/graph_migration.h>
 
+#include <neograph/graph/compiler.h>
 #include <neograph/program/lineage.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/event.h>
@@ -21,6 +22,7 @@ namespace neograph::program {
 namespace {
 
 constexpr std::string_view CAPSULE_FORMAT = "neograph-graph-migration-capsule";
+constexpr std::string_view ADAPTER_FORMAT = "neograph-graph-semantic-migration-adapter";
 constexpr std::string_view RECEIPT_FORMAT = "neograph-program-graph-migration-receipt";
 constexpr std::string_view EXECUTION_LEASE_FORMAT = "neograph-program-execution-lease";
 
@@ -35,6 +37,22 @@ struct CapsuleData {
     std::string            source_bundle_id;
     CoreCheckpointIdentity core_checkpoint;
     graph::Checkpoint      checkpoint;
+};
+
+struct SemanticAdapterData {
+    std::string              owner_scope;
+    std::string              source_program_version_id;
+    std::string              source_bundle_id;
+    std::string              target_program_version_id;
+    std::string              target_bundle_id;
+    std::string              source_core_name;
+    std::string              target_core_name;
+    std::string              source_core_generation_id;
+    std::string              target_core_generation_id;
+    std::string              topology_shape_id;
+    std::vector<std::string> node_names;
+    std::vector<std::string> checkpoint_channel_names;
+    std::vector<std::string> barrier_names;
 };
 
 std::string require_string(const json& value, std::string_view field) {
@@ -190,6 +208,222 @@ void require_identity(std::string_view value, std::string_view field) {
     }
 }
 
+json string_array(const std::vector<std::string>& values) {
+    json result = json::array();
+    for (const auto& value : values) result.push_back(value);
+    return result;
+}
+
+std::vector<std::string> parse_token_array(const json& value, std::string_view field) {
+    if (!value.is_array()) {
+        throw std::invalid_argument("Graph semantic migration adapter field '" +
+                                    std::string(field) + "' must be an array");
+    }
+    std::vector<std::string> result;
+    result.reserve(value.size());
+    for (const auto& item : value) {
+        if (!item.is_string()) {
+            throw std::invalid_argument("Graph semantic migration adapter token array is invalid");
+        }
+        result.push_back(item.get<std::string>());
+    }
+    for (const auto& item : result)
+        detail::validate_token(item, "Graph semantic migration adapter topology token");
+    if (!std::is_sorted(result.begin(), result.end()) ||
+        std::adjacent_find(result.begin(), result.end()) != result.end()) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter topology tokens must be sorted and unique");
+    }
+    return result;
+}
+
+struct NativeRootCore {
+    std::string            name;
+    std::string            compiled_plan_identity;
+    SealedCoreDefinition   definition;
+};
+
+NativeRootCore native_root_core(const ProgramVersion& version, const ProgramBundle& bundle) {
+    if (version.bundle_id() != bundle.id() || bundle.control_source()) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter requires an admitted native Program bundle");
+    }
+    const auto& plan = bundle.typed_orchestration_plan();
+    if (plan.nodes().size() != 1 || plan.root().operation() != ProgramOperationKind::CallCore ||
+        !plan.root().core()) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter requires a native single-root CallCore plan");
+    }
+    NativeRootCore result;
+    result.name = *plan.root().core();
+    const auto materialized = std::find_if(
+        version.core_materialization_receipt().plans.begin(),
+        version.core_materialization_receipt().plans.end(), [&](const CorePlanIdentity& candidate) {
+            return candidate.name == result.name;
+        });
+    auto definitions = bundle.sealed_core_definitions();
+    const auto definition = std::find_if(
+        definitions.begin(), definitions.end(),
+        [&](const SealedCoreDefinition& candidate) { return candidate.name == result.name; });
+    if (materialized == version.core_materialization_receipt().plans.end() ||
+        definition == definitions.end()) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter root does not bind its admitted materialization");
+    }
+    result.compiled_plan_identity = materialized->compiled_plan_identity;
+    result.definition             = *definition;
+    return result;
+}
+
+struct TopologyProjection {
+    std::string              shape_id;
+    std::vector<std::string> node_names;
+    std::vector<std::string> checkpoint_channel_names;
+    std::vector<std::string> barrier_names;
+};
+
+TopologyProjection topology_projection(const SealedCoreDefinition& definition) {
+    const auto topology = graph::GraphCompiler::parse(definition.definition);
+    json       shape = json::object();
+    for (const auto& [key, value] : topology.to_json().items()) {
+        if (key != "name") shape[key] = value;
+    }
+    json nodes = json::object();
+    std::vector<std::string> node_names;
+    node_names.reserve(topology.node_defs.size());
+    for (const auto& [name, unused] : topology.node_defs) {
+        (void)unused;
+        node_names.push_back(name);
+        nodes[name] = json::object();
+    }
+    shape["nodes"] = std::move(nodes);
+
+    std::vector<std::string> checkpoint_channels;
+    for (const auto& channel : topology.channel_defs) {
+        if (channel.persistence == graph::ChannelPersistencePolicy::Checkpoint)
+            checkpoint_channels.push_back(channel.name);
+    }
+    std::vector<std::string> barriers;
+    barriers.reserve(topology.barrier_specs.size());
+    for (const auto& [name, unused] : topology.barrier_specs) {
+        (void)unused;
+        barriers.push_back(name);
+    }
+    return {detail::sha256_identity("graph-semantic-topology-shape/v1",
+                                    detail::canonical_json_bytes(shape)),
+            std::move(node_names), std::move(checkpoint_channels), std::move(barriers)};
+}
+
+json semantic_adapter_body(const SemanticAdapterData& data) {
+    return {{"format", std::string(ADAPTER_FORMAT)},
+            {"storage_schema_version", GraphSemanticMigrationAdapter::STORAGE_SCHEMA_VERSION},
+            {"owner_scope", data.owner_scope},
+            {"source_program_version_id", data.source_program_version_id},
+            {"source_bundle_id", data.source_bundle_id},
+            {"target_program_version_id", data.target_program_version_id},
+            {"target_bundle_id", data.target_bundle_id},
+            {"source_core_name", data.source_core_name},
+            {"target_core_name", data.target_core_name},
+            {"source_core_generation_id", data.source_core_generation_id},
+            {"target_core_generation_id", data.target_core_generation_id},
+            {"topology_shape_id", data.topology_shape_id},
+            {"node_names", string_array(data.node_names)},
+            {"checkpoint_channel_names", string_array(data.checkpoint_channel_names)},
+            {"barrier_names", string_array(data.barrier_names)}};
+}
+
+void validate_semantic_adapter_data(const SemanticAdapterData& data) {
+    detail::validate_token(data.owner_scope, "Graph semantic migration adapter owner scope");
+    for (const auto* identity : {&data.source_program_version_id, &data.source_bundle_id,
+                                 &data.target_program_version_id, &data.target_bundle_id,
+                                 &data.source_core_generation_id,
+                                 &data.target_core_generation_id, &data.topology_shape_id}) {
+        require_identity(*identity, "Graph semantic migration adapter identity");
+    }
+    for (const auto* token : {&data.source_core_name, &data.target_core_name})
+        detail::validate_token(*token, "Graph semantic migration adapter Core name");
+    for (const auto* values : {&data.node_names, &data.checkpoint_channel_names,
+                               &data.barrier_names}) {
+        for (const auto& value : *values)
+            detail::validate_token(value, "Graph semantic migration adapter topology token");
+        if (!std::is_sorted(values->begin(), values->end()) ||
+            std::adjacent_find(values->begin(), values->end()) != values->end()) {
+            throw std::invalid_argument(
+                "Graph semantic migration adapter topology tokens must be sorted and unique");
+        }
+    }
+    if (data.node_names.empty()) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter requires a nonempty native topology");
+    }
+    if (data.source_program_version_id == data.target_program_version_id) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter requires distinct admitted ProgramVersions");
+    }
+}
+
+SemanticAdapterData prepare_semantic_adapter_data(const ProgramVersion& source_version,
+                                                  const ProgramBundle&  source_bundle,
+                                                  const ProgramVersion& target_version,
+                                                  const ProgramBundle&  target_bundle) {
+    const auto source_root = native_root_core(source_version, source_bundle);
+    const auto target_root = native_root_core(target_version, target_bundle);
+    if (source_version.ownership_scope() != target_version.ownership_scope() ||
+        source_bundle.capability_effect_closure() != target_bundle.capability_effect_closure() ||
+        source_bundle.execution_guarantee() != target_bundle.execution_guarantee() ||
+        source_bundle.executable_registry_identities() !=
+            target_bundle.executable_registry_identities() ||
+        source_version.core_materialization_receipt().compiler_build_id !=
+            target_version.core_materialization_receipt().compiler_build_id ||
+        source_version.core_materialization_receipt().registry_snapshot_fingerprint !=
+            target_version.core_materialization_receipt().registry_snapshot_fingerprint ||
+        source_version.core_materialization_receipt().capability_bindings !=
+            target_version.core_materialization_receipt().capability_bindings ||
+        source_bundle.input_contract().schema_version != target_bundle.input_contract().schema_version ||
+        detail::canonical_json_bytes(source_bundle.input_contract().schema) !=
+            detail::canonical_json_bytes(target_bundle.input_contract().schema) ||
+        source_bundle.output_contract().schema_version != target_bundle.output_contract().schema_version ||
+        detail::canonical_json_bytes(source_bundle.output_contract().schema) !=
+            detail::canonical_json_bytes(target_bundle.output_contract().schema)) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter changes authority, bindings, or contracts");
+    }
+    const auto source_topology = topology_projection(source_root.definition);
+    const auto target_topology = topology_projection(target_root.definition);
+    if (source_topology.shape_id != target_topology.shape_id ||
+        source_topology.node_names != target_topology.node_names ||
+        source_topology.checkpoint_channel_names != target_topology.checkpoint_channel_names ||
+        source_topology.barrier_names != target_topology.barrier_names) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter requires an identity-mapped topology shape");
+    }
+    const auto baseline = MigrationPlan::between(source_version, source_bundle,
+                                                 target_version, target_bundle);
+    for (const auto& diagnostic : baseline.diagnostics()) {
+        if (diagnostic.code != "core_materialization_receipt" &&
+            diagnostic.code != "bundle_runtime_contract") {
+            throw std::invalid_argument(
+                "Graph semantic migration adapter cannot override migration diagnostic '" +
+                diagnostic.code + "'");
+        }
+    }
+    SemanticAdapterData data{source_version.ownership_scope(),
+                             source_version.id(),
+                             source_bundle.id(),
+                             target_version.id(),
+                             target_bundle.id(),
+                             source_root.name,
+                             target_root.name,
+                             source_root.compiled_plan_identity,
+                             target_root.compiled_plan_identity,
+                             source_topology.shape_id,
+                             source_topology.node_names,
+                             source_topology.checkpoint_channel_names,
+                             source_topology.barrier_names};
+    validate_semantic_adapter_data(data);
+    return data;
+}
+
 void validate(const CapsuleData& data) {
     detail::validate_token(data.owner_scope, "Graph migration capsule owner scope");
     detail::validate_token(data.source_run_id, "Graph migration capsule source run id");
@@ -322,9 +556,17 @@ void validate_receipt(const ProgramGraphMigrationReceiptData& data) {
         throw std::invalid_argument(
             "Program Graph migration admitted artifacts do not bind the capsule");
     }
-    const auto expected_plan = MigrationPlan::between(
-        data.source_version, data.source_bundle,
-        data.target_version, data.target_bundle);
+    if (data.semantic_adapter && !data.semantic_adapter->binds(
+                                     data.source_version, data.source_bundle,
+                                     data.target_version, data.target_bundle)) {
+        throw std::invalid_argument(
+            "Program Graph migration semantic adapter does not bind admitted artifacts");
+    }
+    const auto expected_plan = data.semantic_adapter
+        ? data.semantic_adapter->migration_plan(data.source_version, data.source_bundle,
+                                                data.target_version, data.target_bundle)
+        : MigrationPlan::between(data.source_version, data.source_bundle,
+                                 data.target_version, data.target_bundle);
     if (!expected_plan.is_compatible() ||
         expected_plan.id() != data.migration_plan_id) {
         throw std::invalid_argument(
@@ -388,22 +630,29 @@ void validate_receipt(const ProgramGraphMigrationReceiptData& data) {
         });
     if (target.core_thread_id !=
             program_root_core_thread_id(data.target_run_id,
-                                        target.core_generation_id) ||
+                                         target.core_generation_id) ||
         target.checkpoint_id == capsule.core_checkpoint().checkpoint_id ||
         target.checkpoint_schema_version != graph::CHECKPOINT_SCHEMA_VERSION ||
-        target.core_name != capsule.core_checkpoint().core_name ||
-        target.core_generation_id != capsule.core_checkpoint().core_generation_id ||
+        (!data.semantic_adapter && target.core_name != capsule.core_checkpoint().core_name) ||
+        (!data.semantic_adapter &&
+         target.core_generation_id != capsule.core_checkpoint().core_generation_id) ||
         target_materialization ==
             data.target_version.core_materialization_receipt().plans.end()) {
         throw std::invalid_argument(
             "Program Graph migration target checkpoint is not an exact root clone");
     }
     const auto& snapshot = data.target_checkpoint;
-    auto expected_snapshot = capsule.checkpoint();
+    auto expected_snapshot = data.semantic_adapter
+        ? data.semantic_adapter->project(capsule)
+        : capsule.checkpoint();
     expected_snapshot.id = target.checkpoint_id;
     expected_snapshot.thread_id = target.core_thread_id;
     expected_snapshot.parent_id = capsule.core_checkpoint().checkpoint_id;
     expected_snapshot.metadata["migrated_from"] = capsule.id();
+    if (data.semantic_adapter) {
+        expected_snapshot.metadata["semantic_migration_adapter_id"] =
+            data.semantic_adapter->id();
+    }
     expected_snapshot.timestamp = snapshot.timestamp;
     if (snapshot.id != target.checkpoint_id ||
         snapshot.thread_id != target.core_thread_id ||
@@ -415,10 +664,10 @@ void validate_receipt(const ProgramGraphMigrationReceiptData& data) {
     }
 }
 
-json receipt_body(const ProgramGraphMigrationReceiptData& data) {
-    return {{"format", std::string(RECEIPT_FORMAT)},
-            {"storage_schema_version",
-             ProgramGraphMigrationReceipt::STORAGE_SCHEMA_VERSION},
+json receipt_body(const ProgramGraphMigrationReceiptData& data,
+                  std::uint32_t                          storage_schema_version) {
+    json result{{"format", std::string(RECEIPT_FORMAT)},
+                {"storage_schema_version", storage_schema_version},
             {"capsule", detail::parse_json_strict(
                             data.capsule.serialize_canonical())},
             {"source_bundle", detail::parse_json_strict(
@@ -428,7 +677,7 @@ json receipt_body(const ProgramGraphMigrationReceiptData& data) {
             {"target_bundle", detail::parse_json_strict(
                                   data.target_bundle.serialize_canonical())},
             {"target_version", detail::parse_json_strict(
-                                   data.target_version.serialize_canonical())},
+                                    data.target_version.serialize_canonical())},
             {"migration_plan_id", data.migration_plan_id},
             {"target_generation", data.target_generation},
             {"target_run_id", data.target_run_id},
@@ -441,6 +690,12 @@ json receipt_body(const ProgramGraphMigrationReceiptData& data) {
             {"target_core_checkpoint",
              encode_core_checkpoint(data.target_core_checkpoint)},
             {"target_checkpoint", encode_checkpoint(data.target_checkpoint)}};
+    if (storage_schema_version >= ProgramGraphMigrationReceipt::STORAGE_SCHEMA_VERSION) {
+        result["semantic_adapter"] = data.semantic_adapter
+            ? detail::parse_json_strict(data.semantic_adapter->serialize_canonical())
+            : json(nullptr);
+    }
+    return result;
 }
 
 bool budget_at_most(const RunBudget& value, const RunBudget& limit) noexcept {
@@ -860,10 +1115,188 @@ std::string GraphMigrationCapsule::serialize_canonical() const {
     return impl_->canonical_bytes;
 }
 
+struct GraphSemanticMigrationAdapter::Impl {
+    explicit Impl(SemanticAdapterData value) : data(std::move(value)) {
+        auto encoded = semantic_adapter_body(data);
+        id = detail::sha256_identity("graph-semantic-migration-adapter/v1",
+                                     detail::canonical_json_bytes(encoded));
+        encoded["id"] = id;
+        canonical_bytes = detail::canonical_json_bytes(encoded);
+    }
+
+    SemanticAdapterData data;
+    std::string         id;
+    std::string         canonical_bytes;
+};
+
+GraphSemanticMigrationAdapter::GraphSemanticMigrationAdapter(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+GraphSemanticMigrationAdapter GraphSemanticMigrationAdapter::prepare(
+    const ProgramVersion& source_version, const ProgramBundle& source_bundle,
+    const ProgramVersion& target_version, const ProgramBundle& target_bundle) {
+    return GraphSemanticMigrationAdapter(std::make_shared<const Impl>(
+        prepare_semantic_adapter_data(source_version, source_bundle, target_version, target_bundle)));
+}
+
+GraphSemanticMigrationAdapter GraphSemanticMigrationAdapter::parse(std::string_view stored_bytes) {
+    const auto value = detail::parse_json_strict(stored_bytes);
+    if (!value.is_object() || require_string(value, "format") != ADAPTER_FORMAT) {
+        throw std::invalid_argument("Stored Graph semantic migration adapter has unknown format");
+    }
+    detail::reject_unknown_fields(
+        value, "Stored Graph semantic migration adapter",
+        {"format", "storage_schema_version", "id", "owner_scope", "source_program_version_id",
+         "source_bundle_id", "target_program_version_id", "target_bundle_id", "source_core_name",
+         "target_core_name", "source_core_generation_id", "target_core_generation_id",
+         "topology_shape_id", "node_names", "checkpoint_channel_names", "barrier_names"});
+    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
+        throw std::invalid_argument("Stored Graph semantic migration adapter schema is unsupported");
+    }
+    const auto require_array = [&](std::string_view field) -> json {
+        const auto key = std::string(field);
+        if (!value.contains(key)) {
+            throw std::invalid_argument("Stored Graph semantic migration adapter is incomplete");
+        }
+        return value.at(key);
+    };
+    SemanticAdapterData data{require_string(value, "owner_scope"),
+                             require_string(value, "source_program_version_id"),
+                             require_string(value, "source_bundle_id"),
+                             require_string(value, "target_program_version_id"),
+                             require_string(value, "target_bundle_id"),
+                             require_string(value, "source_core_name"),
+                             require_string(value, "target_core_name"),
+                             require_string(value, "source_core_generation_id"),
+                             require_string(value, "target_core_generation_id"),
+                             require_string(value, "topology_shape_id"),
+                             parse_token_array(require_array("node_names"), "node_names"),
+                             parse_token_array(require_array("checkpoint_channel_names"),
+                                               "checkpoint_channel_names"),
+                             parse_token_array(require_array("barrier_names"), "barrier_names")};
+    validate_semantic_adapter_data(data);
+    GraphSemanticMigrationAdapter result(std::make_shared<const Impl>(std::move(data)));
+    if (result.id() != require_string(value, "id")) {
+        throw std::invalid_argument("Stored Graph semantic migration adapter identity is invalid");
+    }
+    return result;
+}
+
+#define NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(name)                 \
+    const std::string& GraphSemanticMigrationAdapter::name() const noexcept { \
+        return impl_->data.name;                                         \
+    }
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(owner_scope)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(source_program_version_id)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(source_bundle_id)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(target_program_version_id)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(target_bundle_id)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(source_core_name)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(target_core_name)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(source_core_generation_id)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(target_core_generation_id)
+NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR(topology_shape_id)
+#undef NEOGRAPH_SEMANTIC_ADAPTER_STRING_ACCESSOR
+
+const std::string& GraphSemanticMigrationAdapter::id() const noexcept { return impl_->id; }
+
+bool GraphSemanticMigrationAdapter::binds(const ProgramVersion& source_version,
+                                          const ProgramBundle& source_bundle,
+                                          const ProgramVersion& target_version,
+                                          const ProgramBundle& target_bundle) const {
+    try {
+        const auto expected = prepare_semantic_adapter_data(
+            source_version, source_bundle, target_version, target_bundle);
+        return detail::canonical_json_bytes(semantic_adapter_body(impl_->data)) ==
+               detail::canonical_json_bytes(semantic_adapter_body(expected));
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+graph::Checkpoint GraphSemanticMigrationAdapter::project(
+    const GraphMigrationCapsule& capsule) const {
+    if (capsule.owner_scope() != owner_scope() ||
+        capsule.source_program_version_id() != source_program_version_id() ||
+        capsule.source_bundle_id() != source_bundle_id() ||
+        capsule.core_checkpoint().core_name != source_core_name() ||
+        capsule.core_checkpoint().core_generation_id != source_core_generation_id()) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter does not bind the source capsule");
+    }
+    auto result = capsule.checkpoint();
+    const auto& channels = result.channel_values.at("channels");
+    for (const auto& [name, unused] : channels.items()) {
+        (void)unused;
+        if (!std::binary_search(impl_->data.checkpoint_channel_names.begin(),
+                                impl_->data.checkpoint_channel_names.end(), name)) {
+            throw std::invalid_argument(
+                "Graph semantic migration adapter cannot project an unknown channel");
+        }
+    }
+    for (const auto& name : impl_->data.checkpoint_channel_names) {
+        if (!channels.contains(name)) {
+            throw std::invalid_argument(
+                "Graph semantic migration adapter requires every checkpoint channel");
+        }
+    }
+    const auto known_node = [&](const std::string& name) {
+        return name == "__start__" || name == "__end__" ||
+               std::binary_search(impl_->data.node_names.begin(), impl_->data.node_names.end(), name);
+    };
+    if (!known_node(result.current_node)) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter cannot project an unknown current node");
+    }
+    for (const auto& node : result.next_nodes) {
+        if (!known_node(node)) {
+            throw std::invalid_argument(
+                "Graph semantic migration adapter cannot project an unknown frontier node");
+        }
+    }
+    for (const auto& [barrier, signals] : result.barrier_state) {
+        if (!std::binary_search(impl_->data.barrier_names.begin(),
+                                impl_->data.barrier_names.end(), barrier)) {
+            throw std::invalid_argument(
+                "Graph semantic migration adapter cannot project an unknown barrier");
+        }
+        for (const auto& signal : signals) {
+            if (!known_node(signal)) {
+                throw std::invalid_argument(
+                    "Graph semantic migration adapter cannot project an unknown barrier signal");
+            }
+        }
+    }
+    return result;
+}
+
+MigrationPlan GraphSemanticMigrationAdapter::migration_plan(
+    const ProgramVersion& source_version, const ProgramBundle& source_bundle,
+    const ProgramVersion& target_version, const ProgramBundle& target_bundle) const {
+    if (!binds(source_version, source_bundle, target_version, target_bundle)) {
+        throw std::invalid_argument(
+            "Graph semantic migration adapter does not bind the admitted versions");
+    }
+    const auto baseline = MigrationPlan::between(source_version, source_bundle,
+                                                 target_version, target_bundle);
+    std::vector<MigrationMapping> mappings = baseline.mappings();
+    mappings.push_back(
+        {MigrationDimension::Materialization, "shape_preserving_semantic_adapter",
+         json{{"adapter_id", id()}, {"topology_shape_id", topology_shape_id()}},
+         json{{"adapter_id", id()}, {"topology_shape_id", topology_shape_id()}}});
+    return MigrationPlan::create(
+        {source_version.id(), target_version.id(), source_version.ownership_scope(),
+         MigrationCompatibility::ForkCompatible, {}, {}, std::move(mappings)});
+}
+
+std::string GraphSemanticMigrationAdapter::serialize_canonical() const {
+    return impl_->canonical_bytes;
+}
+
 struct ProgramGraphMigrationReceipt::Impl {
-    explicit Impl(ProgramGraphMigrationReceiptData value)
-        : data(std::move(value)) {
-        auto encoded = receipt_body(data);
+    Impl(ProgramGraphMigrationReceiptData value, std::uint32_t storage_schema)
+        : data(std::move(value)), storage_schema_version(storage_schema) {
+        auto encoded = receipt_body(data, storage_schema_version);
         id = detail::sha256_identity(
             "program-graph-migration-receipt/v1",
             detail::canonical_json_bytes(encoded));
@@ -872,6 +1305,7 @@ struct ProgramGraphMigrationReceipt::Impl {
     }
 
     ProgramGraphMigrationReceiptData data;
+    std::uint32_t                     storage_schema_version = 0;
     std::string                      id;
     std::string                      canonical_bytes;
 };
@@ -879,7 +1313,7 @@ struct ProgramGraphMigrationReceipt::Impl {
 ProgramGraphMigrationReceipt::ProgramGraphMigrationReceipt(
     ProgramGraphMigrationReceiptData data) {
     validate_receipt(data);
-    impl_ = std::make_shared<const Impl>(std::move(data));
+    impl_ = std::make_shared<const Impl>(std::move(data), STORAGE_SCHEMA_VERSION);
 }
 
 ProgramGraphMigrationReceipt::ProgramGraphMigrationReceipt(
@@ -895,15 +1329,17 @@ ProgramGraphMigrationReceipt ProgramGraphMigrationReceipt::parse(
     }
     detail::reject_unknown_fields(
         value, "Stored Program Graph migration receipt",
-        {"format", "storage_schema_version", "id", "capsule", "source_bundle",
-         "source_version", "target_bundle", "target_version",
-         "migration_plan_id", "target_generation", "target_run_id",
+         {"format", "storage_schema_version", "id", "capsule", "source_bundle",
+          "source_version", "target_bundle", "target_version",
+          "semantic_adapter",
+          "migration_plan_id", "target_generation", "target_run_id",
          "target_program_version_id", "target_bundle_id",
          "target_invocation_id", "target_binding_fingerprint",
          "target_initial_run_record_id", "target_initial_journal_head",
          "target_core_checkpoint", "target_checkpoint"});
-    if (require_uint32(value, "storage_schema_version") !=
-        STORAGE_SCHEMA_VERSION || !value.contains("capsule") ||
+    const auto schema_version = require_uint32(value, "storage_schema_version");
+    if ((schema_version != STORAGE_SCHEMA_VERSION &&
+         schema_version != PREVIOUS_STORAGE_SCHEMA_VERSION) || !value.contains("capsule") ||
         !value.at("capsule").is_object() ||
         !value.contains("source_bundle") || !value.at("source_bundle").is_object() ||
         !value.contains("source_version") || !value.at("source_version").is_object() ||
@@ -916,7 +1352,17 @@ ProgramGraphMigrationReceipt ProgramGraphMigrationReceipt::parse(
         throw std::invalid_argument(
             "Stored Program Graph migration receipt is unsupported or incomplete");
     }
-    ProgramGraphMigrationReceipt result(ProgramGraphMigrationReceiptData{
+    if (schema_version == STORAGE_SCHEMA_VERSION && !value.contains("semantic_adapter")) {
+        throw std::invalid_argument(
+            "Stored Program Graph migration receipt is missing its semantic adapter marker");
+    }
+    std::optional<GraphSemanticMigrationAdapter> semantic_adapter;
+    if (schema_version != PREVIOUS_STORAGE_SCHEMA_VERSION &&
+        !value.at("semantic_adapter").is_null()) {
+        semantic_adapter.emplace(GraphSemanticMigrationAdapter::parse(
+            detail::canonical_json_bytes(value.at("semantic_adapter"))));
+    }
+    ProgramGraphMigrationReceiptData data{
         GraphMigrationCapsule::parse(
             detail::canonical_json_bytes(value.at("capsule"))),
         ProgramBundle::parse(
@@ -937,7 +1383,11 @@ ProgramGraphMigrationReceipt ProgramGraphMigrationReceipt::parse(
         require_string(value, "target_initial_run_record_id"),
         require_string(value, "target_initial_journal_head"),
         parse_core_checkpoint(value.at("target_core_checkpoint")),
-        parse_checkpoint(value.at("target_checkpoint"))});
+        parse_checkpoint(value.at("target_checkpoint")),
+        std::move(semantic_adapter)};
+    validate_receipt(data);
+    ProgramGraphMigrationReceipt result(
+        std::make_shared<const Impl>(std::move(data), schema_version));
     if (result.id() != require_string(value, "id")) {
         throw std::invalid_argument(
             "Stored Program Graph migration receipt id does not match content");
@@ -963,6 +1413,10 @@ const ProgramBundle& ProgramGraphMigrationReceipt::target_bundle() const noexcep
 }
 const ProgramVersion& ProgramGraphMigrationReceipt::target_version() const noexcept {
     return impl_->data.target_version;
+}
+const std::optional<GraphSemanticMigrationAdapter>&
+ProgramGraphMigrationReceipt::semantic_adapter() const noexcept {
+    return impl_->data.semantic_adapter;
 }
 const std::string&
 ProgramGraphMigrationReceipt::migration_plan_id() const noexcept {
@@ -1019,9 +1473,12 @@ bool is_valid_program_graph_migration_transition(
             : std::numeric_limits<std::uint64_t>::max();
         const auto expected_budget = program_replacement_remaining_budget(
             source, previous_lineage, target.created_at_ms());
-        const auto expected_plan = MigrationPlan::between(
-            receipt->source_version(), receipt->source_bundle(),
-            receipt->target_version(), receipt->target_bundle());
+        const auto expected_plan = receipt->semantic_adapter()
+            ? receipt->semantic_adapter()->migration_plan(
+                  receipt->source_version(), receipt->source_bundle(),
+                  receipt->target_version(), receipt->target_bundle())
+            : MigrationPlan::between(receipt->source_version(), receipt->source_bundle(),
+                                     receipt->target_version(), receipt->target_bundle());
         return durable_capsule.id() == capsule.id() &&
                durable_capsule.serialize_canonical() == capsule.serialize_canonical() &&
                migration_plan.is_compatible() &&

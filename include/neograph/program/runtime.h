@@ -11,6 +11,7 @@
 #include <neograph/hook_runtime.h>
 #include <neograph/program/catalog.h>
 #include <neograph/program/fork.h>
+#include <neograph/program/graph_migration.h>
 #include <neograph/program/handle.h>
 #include <neograph/program/module.h>
 #include <neograph/program/pending.h>
@@ -62,6 +63,8 @@ struct ProgramGraphMigrationTarget {
     std::string                       target_program_version_id;
     std::string                       requested_run_id;
     std::shared_ptr<ProgramEventSink> events;
+    /// Required whenever the target changes the pinned native Core identity.
+    std::optional<GraphSemanticMigrationAdapter> semantic_adapter;
 };
 
 /**
