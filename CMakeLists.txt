@@ -1257,6 +1257,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     if(NEOGRAPH_BUILD_PROGRAM)
         add_executable(example_program_quickstart examples/63_program_quickstart.cpp)
         target_link_libraries(example_program_quickstart PRIVATE neograph::program)
+
+        # External retrievers return immutable ProgramVersion candidates; this
+        # example shows NeoGraph's Catalog/adapter/runtime verification boundary.
+        add_executable(example_topology_retrieval examples/64_topology_retrieval.cpp)
+        target_link_libraries(example_topology_retrieval PRIVATE neograph::program)
     endif()
 
     if(NEOGRAPH_BUILD_LLM)

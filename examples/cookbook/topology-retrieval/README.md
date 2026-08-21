@@ -30,3 +30,13 @@ The non-mock command obtains BGE-M3 embeddings and Voyage reranking through
 `OPENROUTER_API_KEY`. It never executes a retrieved topology. The returned
 candidate must still resolve an exact admitted ProgramVersion and pass NeoGraph
 compatibility, authority, budget, and migration checks.
+
+The NeoGraph-side consumer is the C++ `example_topology_retrieval` target. It
+accepts the reranked `TopologyVersionId` contract, resolves the exact admitted
+bundle from `ProgramCatalog`, proves the P1 adapter, and performs a durable
+generation-2 migration. Build and run it with:
+
+```powershell
+cmake --build build --target example_topology_retrieval
+./build/example_topology_retrieval
+```
