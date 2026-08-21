@@ -140,7 +140,7 @@ private:
 };
 
 /**
- * Host-admitted P1 semantic bridge for an immutable native Core successor.
+ * Host-admitted P1 semantic bridge for an immutable control-free Core successor.
  *
  * It proves an identity projection of durable GraphEngine state: checkpointed
  * channels, frontier node names, and barrier members are preserved exactly,

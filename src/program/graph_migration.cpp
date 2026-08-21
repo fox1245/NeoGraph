@@ -246,13 +246,13 @@ struct NativeRootCore {
 NativeRootCore native_root_core(const ProgramVersion& version, const ProgramBundle& bundle) {
     if (version.bundle_id() != bundle.id() || bundle.control_source()) {
         throw std::invalid_argument(
-            "Graph semantic migration adapter requires an admitted native Program bundle");
+            "Graph semantic migration adapter requires an admitted control-free Program bundle");
     }
     const auto& plan = bundle.typed_orchestration_plan();
     if (plan.nodes().size() != 1 || plan.root().operation() != ProgramOperationKind::CallCore ||
         !plan.root().core()) {
         throw std::invalid_argument(
-            "Graph semantic migration adapter requires a native single-root CallCore plan");
+            "Graph semantic migration adapter requires a control-free single-root CallCore plan");
     }
     NativeRootCore result;
     result.name = *plan.root().core();
@@ -354,7 +354,7 @@ void validate_semantic_adapter_data(const SemanticAdapterData& data) {
     }
     if (data.node_names.empty()) {
         throw std::invalid_argument(
-            "Graph semantic migration adapter requires a nonempty native topology");
+            "Graph semantic migration adapter requires a nonempty control-free topology");
     }
     if (data.source_program_version_id == data.target_program_version_id) {
         throw std::invalid_argument(
@@ -584,7 +584,7 @@ void validate_receipt(const ProgramGraphMigrationReceiptData& data) {
         *source_plan.root().core() != capsule.core_checkpoint().core_name ||
         *target_plan.root().core() != data.target_core_checkpoint.core_name) {
         throw std::invalid_argument(
-            "Program Graph migration supports only a native single-root CallCore plan");
+            "Program Graph migration supports only a control-free single-root CallCore plan");
     }
     detail::validate_token(data.target_run_id,
                            "Program Graph migration target run id");

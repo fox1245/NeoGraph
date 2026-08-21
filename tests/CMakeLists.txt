@@ -141,6 +141,20 @@ if(NEOGRAPH_BUILD_PROGRAM)
         set_tests_properties(Program.ModelSynthesisProbe PROPERTIES
             LABELS "program;quickjs;synthesis"
         )
+        add_executable(program_model_semantic_migration_probe
+            program_model_semantic_migration_probe.cpp
+        )
+        target_link_libraries(program_model_semantic_migration_probe PRIVATE
+            neograph::program
+        )
+        add_test(
+            NAME Program.ModelSemanticMigrationProbe
+            COMMAND program_model_semantic_migration_probe
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/model_semantic_migration/valid.js
+        )
+        set_tests_properties(Program.ModelSemanticMigrationProbe PROPERTIES
+            LABELS "program;quickjs;synthesis;migration"
+        )
     endif()
     if(TARGET neograph_program_sqlite)
         target_compile_definitions(neograph_program_tests PRIVATE

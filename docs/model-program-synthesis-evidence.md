@@ -129,8 +129,9 @@ materialization and runtime contract differed.
 
 NeoGraph now also has a deliberately narrow P1 GraphEngine path:
 `GraphSemanticMigrationAdapter`. A host must prepare this immutable adapter
-from the exact admitted source and target artifacts. It admits only native,
-single-root `call_core` Programs with identical checkpointed channels/reducers,
+from the exact admitted source and target artifacts. It admits only
+declaration-only (no runtime JavaScript control), single-root `call_core`
+Programs with identical checkpointed channels/reducers,
 node names, edges, routing, barriers, retry/interrupt shape, capability binding,
 authority, and input/output contracts. It can therefore carry an identity-mapped
 frontier and channel snapshot into a successor with a different sealed Core
@@ -145,10 +146,44 @@ child binding/spawn, crash recovery across every synthesis boundary, and an
 in-Program `ng.proposeProgram` command surface also remain separate
 qualification gates.
 
+## Model-generated P1 GraphEngine migration
+
+The P1 adapter was also exercised end-to-end with a live
+`deepseek/deepseek-v4-flash-0731` OpenRouter response
+`gen-1787291529-fCOHp8pry7EwHHHu1MUH`. The model generated a declaration-only
+QuickJS `define()` source (SHA-256
+`346329bf39790cc5557a9961a7faa5da0b35168f84257b12d6166565d594df08d`) whose
+topology preserved the source graph's `work -> followup` frontier shape while
+introducing a distinct target Core definition through `migration_epoch: 2`.
+
+```text
+model QuickJS define()
+  -> ProgramSynthesisProposal
+  -> dynamic-compile reservation
+  -> ProgramCompiler + ProgramCatalog admission
+  -> GraphSemanticMigrationAdapter preparation
+  -> durable GraphEngine generation-2 migration
+  -> recovery-proof validation
+```
+
+The ordinary migration plan remained `blocked`, as required for a changed
+bundle/materialization. The host-created adapter then admitted the narrow
+identity projection. The target completed at generation `2`; `work` ran once
+on the source generation and `followup` ran once on the successor. The exact
+adapter identity was persisted in the migration receipt.
+
 Reproduce with the `program_model_synthesis_probe` target and:
 
 ```powershell
 bun run scripts/run_model_program_synthesis_probe.ts `
   --probe build-agent-vs/tests/Release/program_model_synthesis_probe.exe `
+  --model deepseek/deepseek-v4-flash-0731
+```
+
+For the GraphEngine P1 path, use `program_model_semantic_migration_probe` and:
+
+```powershell
+bun run scripts/run_model_semantic_migration_probe.ts `
+  --probe build-agent-vs/tests/Release/program_model_semantic_migration_probe.exe `
   --model deepseek/deepseek-v4-flash-0731
 ```
