@@ -26,7 +26,7 @@ Construct exactly one graph using only this reviewed vocabulary:
 - nodes, in this exact order: seed of type probe.seed, double of type probe.double, finish of type probe.finish
 - entry seed, edge seed to double, edge double to finish, exit finish
 
-The two channel calls must use the property name initial, not init.
+The channel calls must be exactly graph.channel("value", {reducer: "probe.overwrite", initial: 0}); and graph.channel("path", {reducer: "probe.overwrite", initial: ""});. The reducer value must remain a quoted string and the property name must be initial, not init.
 Build the nodes from this exact pair array: [["seed", "probe.seed"], ["double", "probe.double"], ["finish", "probe.finish"]].
 For each pair call graph.node(name, {type}); the second argument must be an object containing the type property, never a string.
 Use iteration only for those three graph.node() calls so this is genuine JavaScript topology authoring rather than copied canonical graph JSON. Do not construct or return an object with channels, nodes, edges, entry, or exit properties.
