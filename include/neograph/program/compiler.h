@@ -27,6 +27,21 @@ struct JavaScriptCompileLimits {
     std::size_t   max_generated_document_bytes = 16u * 1024u * 1024u;
 };
 
+/**
+ * Host-owned admissible runtime budget interval for a JavaScript Program.
+ *
+ * The interval is sealed into the resulting immutable bundle. It is useful
+ * for a successor that will inherit a debited lineage remainder: the maximum
+ * remains an authority ceiling while the minimum expresses only the runtime
+ * structural floor that must still be available at activation.
+ */
+struct ProgramBudgetBounds {
+    RunBudget minimum;
+    RunBudget maximum;
+
+    bool operator==(const ProgramBudgetBounds&) const = default;
+};
+
 struct ProgramCompilerConfig {
     // Exact opaque build identity. It identifies Program normalization,
     // closure, Core-parser, round-trip, and validator semantics together.
@@ -81,6 +96,12 @@ public:
      * conservative generic budget before admission.
      */
     ProgramBundle compile(const ProgramSource& source, const RunBudget& javascript_budget) const;
+    /**
+     * Compile JavaScript with host-owned admissible budget bounds. The
+     * compiler rejects inverted bounds before evaluating the Program source.
+     */
+    ProgramBundle compile(const ProgramSource& source,
+                          const ProgramBudgetBounds& javascript_budget_bounds) const;
     /**
      * Compile JavaScript under one exact host-owned runtime budget and
      * invocation/result contract pair. Host values replace source-authored

@@ -518,6 +518,45 @@ TEST(ProgramCompilerTest, JavaScriptHostBudgetAndContractsReplaceEvaluatedDeclar
     }
 }
 
+TEST(ProgramCompilerTest, JavaScriptHostBudgetBoundsSealAnAdmissibleInterval) {
+    const auto source = ProgramSource::from_javascript("host-budget-bounds.js", R"JS(
+        export function define() {
+            const graph = ng.graph("main");
+            graph.channel("value", {reducer: "local-reducer", initial: 0});
+            graph.node("work", {type: "local-node"});
+            graph.entry("work");
+            graph.exit("work");
+            return graph;
+        }
+    )JS");
+    const ProgramBudgetBounds bounds{
+        RunBudget{1, 0, 0, 1, 1, 1, 0, 0, 0},
+        RunBudget{5000, 1000, 1, 2, 4, 20, 0, 0, 0}};
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript-bounds/v1"});
+    const auto bundle = compiler.compile(source, bounds);
+
+    const json expected_minimum = {
+        {"wall_time_ms", 1}, {"model_tokens", 0}, {"monetary_microunits", 0},
+        {"max_concurrency", 1}, {"max_program_operations", 1}, {"max_core_steps", 1},
+        {"max_dynamic_compiles", 0}, {"max_child_depth", 0}, {"max_total_children", 0},
+    };
+    const json expected_maximum = {
+        {"wall_time_ms", 5000}, {"model_tokens", 1000}, {"monetary_microunits", 1},
+        {"max_concurrency", 2}, {"max_program_operations", 4}, {"max_core_steps", 20},
+        {"max_dynamic_compiles", 0}, {"max_child_depth", 0}, {"max_total_children", 0},
+    };
+    for (const auto& requirement : bundle.declared_budget_requirements()) {
+        EXPECT_EQ(requirement.minimum,
+                  expected_minimum.at(requirement.resource).get<std::uint64_t>());
+        EXPECT_EQ(requirement.maximum,
+                  expected_maximum.at(requirement.resource).get<std::uint64_t>());
+    }
+
+    auto inverted = bounds;
+    inverted.minimum.max_core_steps = inverted.maximum.max_core_steps + 1;
+    EXPECT_THROW((void)compiler.compile(source, inverted), std::invalid_argument);
+}
+
 TEST(ProgramCompilerTest, JavaScriptDefinitionMustReturnOneGraphBuilder) {
     ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
     const auto source = ProgramSource::from_javascript(

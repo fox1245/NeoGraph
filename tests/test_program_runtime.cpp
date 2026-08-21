@@ -8138,5 +8138,35 @@ TEST(ProgramSynthesisGateway, ReservesBeforeCompilingAndAdmitsExactSuccessor) {
     EXPECT_EQ(result.receipt.data().bundle_id, result.bundle.id());
     EXPECT_EQ(result.receipt.data().program_version_id, result.version.id());
     ASSERT_TRUE(fixture.catalog->find_version("tenant:runtime", result.version.id()));
+
+    const auto& remaining = result.reservation.data().remaining_after_reservation;
+    const std::map<std::string, std::uint64_t> expected_maximum = {
+        {"wall_time_ms", remaining.wall_time_ms},
+        {"model_tokens", remaining.model_tokens},
+        {"monetary_microunits", remaining.monetary_microunits},
+        {"max_concurrency", remaining.max_concurrency},
+        {"max_program_operations", remaining.max_program_operations},
+        {"max_core_steps", remaining.max_core_steps},
+        {"max_dynamic_compiles", remaining.max_dynamic_compiles},
+        {"max_child_depth", remaining.max_child_depth},
+        {"max_total_children", remaining.max_total_children},
+    };
+    const std::map<std::string, std::uint64_t> expected_minimum = {
+        {"wall_time_ms", 1},
+        {"model_tokens", 0},
+        {"monetary_microunits", 0},
+        {"max_concurrency", 1},
+        {"max_program_operations", 1},
+        {"max_core_steps", 1},
+        {"max_dynamic_compiles", 0},
+        {"max_child_depth", 0},
+        {"max_total_children", 0},
+    };
+    ASSERT_EQ(result.bundle.declared_budget_requirements().size(), expected_maximum.size());
+    for (const auto& requirement : result.bundle.declared_budget_requirements()) {
+        ASSERT_TRUE(expected_minimum.contains(requirement.resource));
+        EXPECT_EQ(requirement.minimum, expected_minimum.at(requirement.resource));
+        EXPECT_EQ(requirement.maximum, expected_maximum.at(requirement.resource));
+    }
 }
 #endif

@@ -31,17 +31,42 @@ constexpr std::array<std::string_view, 9> kBudgetResources = {
     "max_dynamic_compiles", "max_child_depth",        "max_total_children",
 };
 
-json budget_document(const RunBudget& budget) {
-    const std::array<std::uint64_t, 9> values = {
-        budget.wall_time_ms,         budget.model_tokens,           budget.monetary_microunits,
-        budget.max_concurrency,      budget.max_program_operations, budget.max_core_steps,
-        budget.max_dynamic_compiles, budget.max_child_depth,        budget.max_total_children,
+bool budget_not_greater_than(const RunBudget& left, const RunBudget& right) noexcept {
+    return left.wall_time_ms <= right.wall_time_ms &&
+           left.model_tokens <= right.model_tokens &&
+           left.monetary_microunits <= right.monetary_microunits &&
+           left.max_concurrency <= right.max_concurrency &&
+           left.max_program_operations <= right.max_program_operations &&
+           left.max_core_steps <= right.max_core_steps &&
+           left.max_dynamic_compiles <= right.max_dynamic_compiles &&
+           left.max_child_depth <= right.max_child_depth &&
+           left.max_total_children <= right.max_total_children;
+}
+
+json budget_document(const ProgramBudgetBounds& bounds) {
+    if (!budget_not_greater_than(bounds.minimum, bounds.maximum)) {
+        throw std::invalid_argument(
+            "JavaScript Program host-owned budget minimum exceeds its maximum");
+    }
+    const std::array<std::uint64_t, 9> minima = {
+        bounds.minimum.wall_time_ms, bounds.minimum.model_tokens,
+        bounds.minimum.monetary_microunits, bounds.minimum.max_concurrency,
+        bounds.minimum.max_program_operations, bounds.minimum.max_core_steps,
+        bounds.minimum.max_dynamic_compiles, bounds.minimum.max_child_depth,
+        bounds.minimum.max_total_children,
+    };
+    const std::array<std::uint64_t, 9> maxima = {
+        bounds.maximum.wall_time_ms, bounds.maximum.model_tokens,
+        bounds.maximum.monetary_microunits, bounds.maximum.max_concurrency,
+        bounds.maximum.max_program_operations, bounds.maximum.max_core_steps,
+        bounds.maximum.max_dynamic_compiles, bounds.maximum.max_child_depth,
+        bounds.maximum.max_total_children,
     };
     json result = json::array();
     for (std::size_t index = 0; index < kBudgetResources.size(); ++index) {
         result.push_back({{"resource", std::string(kBudgetResources[index])},
-                          {"minimum", values[index]},
-                          {"maximum", values[index]}});
+                          {"minimum", minima[index]},
+                          {"maximum", maxima[index]}});
     }
     return result;
 }
@@ -2106,10 +2131,11 @@ struct ProgramCompiler::Impl {
     }
 
     ProgramBundle compile(const ProgramSource&            source,
-                          const ModuleResolution*         verified_resolution = nullptr,
-                          const std::optional<RunBudget>& javascript_budget   = std::nullopt,
-                          const ContractRecord*           input_contract      = nullptr,
-                          const ContractRecord*           output_contract     = nullptr) const {
+                           const ModuleResolution*         verified_resolution = nullptr,
+                           const std::optional<ProgramBudgetBounds>& javascript_budget_bounds =
+                               std::nullopt,
+                           const ContractRecord*           input_contract      = nullptr,
+                           const ContractRecord*           output_contract     = nullptr) const {
         DiagnosticAccumulator diagnostics(source);
         if (source.kind() == SourceKind::CanonicalJson) {
             diagnostics.add(
@@ -2120,12 +2146,19 @@ struct ProgramCompiler::Impl {
             diagnostics.throw_error();
         }
         const bool has_host_contracts = input_contract != nullptr || output_contract != nullptr;
-        if ((javascript_budget || has_host_contracts) && source.kind() != SourceKind::JavaScript)
+        if ((javascript_budget_bounds || has_host_contracts) &&
+            source.kind() != SourceKind::JavaScript)
             throw std::invalid_argument(
                 "Host-owned JavaScript budget and contracts require a JavaScript ProgramSource");
         if ((input_contract == nullptr) != (output_contract == nullptr))
             throw std::invalid_argument(
                 "Host-owned JavaScript input and output contracts must be supplied together");
+        if (javascript_budget_bounds &&
+            !budget_not_greater_than(javascript_budget_bounds->minimum,
+                                     javascript_budget_bounds->maximum)) {
+            throw std::invalid_argument(
+                "JavaScript Program host-owned budget minimum exceeds its maximum");
+        }
         try {
             if (source.kind() == SourceKind::JavaScript &&
                 source.javascript_runtime_identity() != configured_javascript_runtime()) {
@@ -2161,9 +2194,9 @@ struct ProgramCompiler::Impl {
                 if (source.kind() == SourceKind::JavaScript) {
                     auto evaluation = detail::evaluate_javascript_source(source, config.javascript);
                     document        = std::move(evaluation.document);
-                    if (javascript_budget)
+                    if (javascript_budget_bounds)
                         document["declared_budget_requirements"] =
-                            budget_document(*javascript_budget);
+                            budget_document(*javascript_budget_bounds);
                     if (input_contract) {
                         document["input_contract"]  = contract_json(*input_contract);
                         document["output_contract"] = contract_json(*output_contract);
@@ -2328,14 +2361,22 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource& source,
                                        const RunBudget&          javascript_budget) const {
-    return impl_->compile(source, nullptr, javascript_budget);
+    return impl_->compile(source, nullptr,
+                          ProgramBudgetBounds{javascript_budget, javascript_budget});
+}
+
+ProgramBundle ProgramCompiler::compile(
+    const ProgramSource& source, const ProgramBudgetBounds& javascript_budget_bounds) const {
+    return impl_->compile(source, nullptr, javascript_budget_bounds);
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource&  source,
                                        const RunBudget&      javascript_budget,
                                        const ContractRecord& input_contract,
                                        const ContractRecord& output_contract) const {
-    return impl_->compile(source, nullptr, javascript_budget, &input_contract, &output_contract);
+    return impl_->compile(source, nullptr,
+                          ProgramBudgetBounds{javascript_budget, javascript_budget},
+                          &input_contract, &output_contract);
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,

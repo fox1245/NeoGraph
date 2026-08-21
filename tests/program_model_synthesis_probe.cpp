@@ -257,10 +257,6 @@ int main(int argc, char** argv) {
             64 * 1024});
 
         const auto synthesized = gateway.synthesize(proposal);
-        const auto replacement_bundle = compiler->compile(source);
-        const auto replacement_version = catalog->admit(
-            replacement_bundle,
-            ProgramAdmission{"model-synthesis-probe", profile, policy, {}});
         auto transitions = std::make_shared<InMemoryProgramTransitionStore>();
         ProgramRuntime runtime(RuntimeConfig{
             catalog,
@@ -293,7 +289,7 @@ int main(int argc, char** argv) {
             source_bundle,
             ProgramAdmission{"model-synthesis-probe", profile, policy, {}});
         const auto migration_plan = catalog->plan_migration(
-            "model-synthesis-probe", source_version.id(), replacement_version.id());
+            "model-synthesis-probe", source_version.id(), synthesized.version.id());
 
         seed_calls = 0;
         double_calls = 0;
@@ -315,7 +311,7 @@ int main(int argc, char** argv) {
         auto target_handle = runtime.replace(
             "model-synthesis-probe",
             std::move(handoff),
-            replacement_version,
+            synthesized.version,
             ProgramInvocation{target_input, source_lineage_before_swap->remaining_budget(),
                               "model-swap-target-trace", {}});
         const auto swap_execution = target_handle.wait();
@@ -340,8 +336,8 @@ int main(int argc, char** argv) {
         const bool swap_calls_ok = seed_calls == 1 && double_calls == 1 &&
                                    finish_calls == 1 && stale_calls == 0;
         const bool lineage_ok = lineage && lineage->active_generation() == 2 &&
-                                generation && replacement &&
-                                generation->program_version_id() == replacement_version.id() &&
+                                 generation && replacement &&
+                                 generation->program_version_id() == synthesized.version.id() &&
                                 replacement->source_run_id() == source_run_id &&
                                 replacement->target_run_id() == target_handle.run_id();
 
@@ -353,9 +349,9 @@ int main(int argc, char** argv) {
 
         const bool direct_verified =
             direct_completed && direct_value_ok && direct_path_ok && direct_calls_ok;
-        const bool swap_verified =
-            swap_completed && swap_value_ok && swap_path_ok && swap_calls_ok && lineage_ok &&
-            replacement_bundle.source_hash() == synthesized.bundle.source_hash();
+        const bool swap_verified = swap_completed && swap_value_ok && swap_path_ok && swap_calls_ok &&
+                                   lineage_ok &&
+                                   generation->program_version_id() == synthesized.version.id();
 
         const json report = {
             {"source_kind", to_string(source.kind())},
@@ -365,10 +361,7 @@ int main(int argc, char** argv) {
             {"bundle_id", synthesized.bundle.id()},
             {"program_version_id", synthesized.version.id()},
             {"synthesis_receipt_id", synthesized.receipt.id()},
-            {"replacement_bundle_id", replacement_bundle.id()},
-            {"replacement_program_version_id", replacement_version.id()},
-            {"replacement_source_hash_matches_synthesis",
-             replacement_bundle.source_hash() == synthesized.bundle.source_hash()},
+            {"replacement_uses_synthesis_version", true},
             {"publication_found",
              catalog->find_version("model-synthesis-probe", synthesized.version.id()).has_value()},
             {"direct_execution",
@@ -381,7 +374,7 @@ int main(int argc, char** argv) {
               {"source_run_id", source_run_id},
               {"source_terminal_status", to_string(source_terminal.status())},
               {"target_run_id", target_handle.run_id()},
-              {"target_program_version_id", replacement_version.id()},
+               {"target_program_version_id", synthesized.version.id()},
               {"target_terminal_status", to_string(swap_execution.status())},
               {"active_generation", lineage ? lineage->active_generation() : 0},
               {"replacement_receipt_id", replacement ? replacement->id() : ""},

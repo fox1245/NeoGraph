@@ -85,6 +85,19 @@ bool budget_fits(const RunBudget& request, const RunBudget& available) {
            request.max_total_children <= available.max_total_children;
 }
 
+ProgramBudgetBounds successor_budget_bounds(const RunBudget& reserved_remainder) {
+    // A replacement must transfer the exact lineage remainder. These are the
+    // smallest structural grants that can activate an ordinary JavaScript
+    // Program; all consumable authority and child grants remain at the
+    // reservation-derived ceiling. This never replenishes a debited unit.
+    RunBudget structural_floor;
+    structural_floor.wall_time_ms           = 1;
+    structural_floor.max_concurrency        = 1;
+    structural_floor.max_program_operations = 1;
+    structural_floor.max_core_steps         = 1;
+    return {structural_floor, reserved_remainder};
+}
+
 std::string required_string(const json& value, std::string_view name) {
     const std::string key(name);
     if (!value.contains(key) || !value.at(key).is_string()) {
@@ -349,8 +362,8 @@ ProgramSynthesisResult ProgramSynthesisGateway::synthesize(
         throw std::runtime_error(
             "Program synthesis reservation does not bind the proposal or budget");
     }
-    auto bundle = config_.compiler->compile(proposal.source(),
-                                             proposal.data().requested_budget);
+    auto bundle = config_.compiler->compile(
+        proposal.source(), successor_budget_bounds(reservation.data().remaining_after_reservation));
     if (bundle.source_hash() != proposal.source().source_hash() ||
         !std::includes(proposal.data().requested_capabilities.begin(),
                        proposal.data().requested_capabilities.end(),
