@@ -127,6 +127,20 @@ if(NEOGRAPH_BUILD_PROGRAM)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
         )
+        add_executable(program_model_synthesis_probe
+            program_model_synthesis_probe.cpp
+        )
+        target_link_libraries(program_model_synthesis_probe PRIVATE
+            neograph::program
+        )
+        add_test(
+            NAME Program.ModelSynthesisProbe
+            COMMAND program_model_synthesis_probe
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/model_program_synthesis/valid.js
+        )
+        set_tests_properties(Program.ModelSynthesisProbe PROPERTIES
+            LABELS "program;quickjs;synthesis"
+        )
     endif()
     if(TARGET neograph_program_sqlite)
         target_compile_definitions(neograph_program_tests PRIVATE
