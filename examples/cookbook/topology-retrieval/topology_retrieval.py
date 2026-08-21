@@ -56,6 +56,7 @@ RRF_K = 60
 
 @dataclass(frozen=True)
 class TopologyDescriptor:
+    candidate_key: str
     vector_id: int
     topology_version_id: str
     title: str
@@ -79,6 +80,7 @@ class TopologyDescriptor:
     def sealed(self) -> "TopologyDescriptor":
         digest = hashlib.sha256(self.retrieval_document().encode("utf-8")).hexdigest()
         return TopologyDescriptor(
+            self.candidate_key,
             self.vector_id,
             self.topology_version_id,
             self.title,
@@ -94,6 +96,7 @@ CATALOG = tuple(
     descriptor.sealed()
     for descriptor in (
         TopologyDescriptor(
+            "shape-preserving-implementation-evolution",
             1001,
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "Shape-preserving implementation evolution",
@@ -106,6 +109,7 @@ CATALOG = tuple(
             "cpp_or_declaration_only_javascript",
         ),
         TopologyDescriptor(
+            "checkpoint-handoff-replacement",
             1002,
             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
             "Explicit checkpoint handoff replacement",
@@ -117,6 +121,7 @@ CATALOG = tuple(
             "javascript",
         ),
         TopologyDescriptor(
+            "parallel-evidence-review",
             1003,
             "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "Parallel evidence review graph",
@@ -128,6 +133,7 @@ CATALOG = tuple(
             "cpp_or_javascript",
         ),
         TopologyDescriptor(
+            "bounded-child-task-graph",
             1004,
             "sha256:4444444444444444444444444444444444444444444444444444444444444444",
             "Bounded child task graph",
@@ -375,6 +381,7 @@ def main() -> int:
         selected, relevance = reranked[0]
         decision = {
             "action": selected.migration_class,
+            "candidate_key": selected.candidate_key,
             "topology_version_id": selected.topology_version_id,
             "candidate_descriptor_sha256": selected.descriptor_sha256,
             "planner_required": "resolve exact ProgramVersion, then rerun NeoGraph compatibility/admission",

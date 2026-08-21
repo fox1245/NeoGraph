@@ -17,12 +17,14 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -165,17 +167,20 @@ ProgramSource source_program(std::uint64_t migration_epoch) {
 }
 
 struct RerankedTopologyCandidate {
+    std::string candidate_key;
     std::string topology_version_id;
-    double      dense_score = 0.0;
-    double      bm25_score  = 0.0;
-    double      rrf_score   = 0.0;
-    double      rerank_score = 0.0;
 };
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        std::string retrieved_key = "shape-preserving-implementation-evolution";
+        if (argc == 3 && std::string_view(argv[1]) == "--candidate-key") {
+            retrieved_key = argv[2];
+        } else if (argc != 1) {
+            throw std::invalid_argument("Usage: example_topology_retrieval [--candidate-key KEY]");
+        }
         work_calls = 0;
         followup_calls = 0;
         const auto registry = registry_snapshot();
@@ -194,14 +199,21 @@ int main() {
         const auto target_version = catalog->admit(
             target_bundle, ProgramAdmission{"topology-retrieval", admission_profile, admission_policy, {}});
 
-        // This is the exact contract that an external dense + BM25 -> RRF ->
-        // rerank service returns. It contains an immutable candidate reference,
-        // not graph JSON, a capability grant, or a command to execute code.
-        const std::vector<RerankedTopologyCandidate> reranked = {
-            {target_version.id(), 0.93, 12.4, 0.0328, 0.97},
+        // An external dense + BM25 -> RRF -> rerank service returns a stable
+        // candidate key. The local registry maps it to the current admitted
+        // ProgramVersion; a model never supplies graph JSON or execution authority.
+        const std::vector<RerankedTopologyCandidate> candidate_registry = {
+            {"shape-preserving-implementation-evolution", target_version.id()},
         };
-        const auto& selected = reranked.front();
-        const auto candidate = catalog->resolve_version("topology-retrieval", selected.topology_version_id);
+        const auto selected = std::find_if(
+            candidate_registry.begin(), candidate_registry.end(),
+            [&](const RerankedTopologyCandidate& candidate) {
+                return candidate.candidate_key == retrieved_key;
+            });
+        if (selected == candidate_registry.end()) {
+            throw std::runtime_error("Retrieved candidate key is not in the admitted topology registry");
+        }
+        const auto candidate = catalog->resolve_version("topology-retrieval", selected->topology_version_id);
         if (!candidate) throw std::runtime_error("Retrieved TopologyVersionId was not admitted");
         const auto stored_source = store->get_bundle("topology-retrieval", source_version.bundle_id());
         const auto stored_target = store->get_bundle("topology-retrieval", candidate->bundle_id());
@@ -231,10 +243,9 @@ int main() {
                               work_calls == 1 && followup_calls == 1 && lineage &&
                               lineage->active_generation() == 2;
         std::cout << json{
-            {"retrieval_contract", "dense+bm25->rrf->rerank returns only TopologyVersionId"},
-            {"candidate", {{"topology_version_id", selected.topology_version_id},
-                           {"dense_score", selected.dense_score}, {"bm25_score", selected.bm25_score},
-                           {"rrf_score", selected.rrf_score}, {"rerank_score", selected.rerank_score}}},
+            {"retrieval_contract", "dense+bm25->rrf->rerank returns a candidate key; registry resolves exact ProgramVersionId"},
+            {"candidate", {{"candidate_key", selected->candidate_key},
+                           {"topology_version_id", selected->topology_version_id}}},
             {"baseline_compatibility", to_string(baseline.compatibility())},
             {"semantic_adapter_id", adapter.id()},
             {"source_terminal_status", to_string(source_result.status())},
