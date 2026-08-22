@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1bc27ec8535e091253d051d0c90b861ca7a69040bcaddc2a58e8cad025bf8e1d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=bc98ab5033035a0bd02800d7fe9df6a25c7050a7c3f5a56effae5d40b5e80143 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -59,7 +59,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正済み
 
-- **Python Program wheel の依存関係を完結。** PyPI ビルドは QuickJS 制御ランタイムを有効化し、拡張モジュールの隣に `neograph_program` ローダーを同梱し、Windows の Program/Harness DLL 境界を越えて使用される非公開評価器をエクスポートするようになりました。これにより、`P_JS_UNAVAILABLE`、ローダー不足による import 失敗、および共有ビルドの `LNK2019` 失敗を防ぎます。
+- **Python Program wheel の依存関係を完結。** PyPI ビルドは QuickJS 制御ランタイムを有効化し、拡張モジュールの隣に `neograph_program` ローダーを同梱し、Windows の Program/Harness DLL 境界を越えて使用される非公開評価器をエクスポートするようになりました。これにより、`P_JS_UNAVAILABLE`、ローダー不足による import 失敗、および共有ビルドの `LNK2019` 失敗を防ぎます。また、コマンド identity の構築ではコンポーネント dylib 境界を越えるネストした initializer-list JSON コピーを回避し、Program 実行中に macOS arm64 で発生し得たクラッシュを防ぎます。
 - **境界付きのリモート輸送と資格情報の起源。** HTTP/1.1、HTTP/2、SSE、WebSocket の受信は、信頼されないサイズが割り当てられる前に、保守的な応答、ヘッダー、チャンク、ライン、フレーム、ハンドシェイク、メッセージ制限を強制する。リダイレクトされた POST リクエストは、正規化された同一オリジン内でのみフォローされ、プロバイダーの資格情報は、明示的な数値ループバック開発例外が有効でない限りTLS を必要とし、WebSocket デバッグ出力には、リクエストヘッダーやペイロードは含まれません。
 - **QuickJS `all` join 起動時レース。** 完了ハンドラは、JavaScript の join を閉じる前に、初期メンバー起動登録を待つようになりました。即座に完了する子は、その兄弟の初期コマンドまたは置換コマンドがディスパッチされる前に、ジェネレーターを再開できなくなりました。繰り返しのランタイムリグレッションは、両方のパスをカバーしています。
 - **Harness 集約ファインディングの来歴（issue #174）。** 詳細には、 `finding_sources` 配列が既存のフラットな `findings` 配列に揃えて含まれるようになりました。各エントリは、スキーマ検証済みのワーカー出力や確立された `findings` 形状を変更することなく、その集約インデックス、ソースワーカーID、およびワーカーローカルインデックスを記録します。
