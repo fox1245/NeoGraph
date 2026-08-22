@@ -578,11 +578,13 @@ std::string javascript_command_operation_id(std::uint64_t command_ordinal) {
 std::string javascript_command_effect_identity(const RunControl&        control,
                                                std::uint64_t            command_ordinal,
                                                const JavaScriptCommand& command) {
+    json payload = json::object();
+    payload["bundle_id"]      = control.bundle_id;
+    payload["command_ordinal"] = command_ordinal;
+    payload["command"]         = command.to_json();
     return detail::sha256_identity(
         "program-javascript-command-effect/v1",
-        detail::canonical_json_bytes(json{{"bundle_id", control.bundle_id},
-                                          {"command_ordinal", command_ordinal},
-                                          {"command", command.to_json()}}));
+        detail::canonical_json_bytes(payload));
 }
 
 std::optional<std::string> javascript_call_core_operation_for_thread(
