@@ -5,7 +5,7 @@ import { VIDEO } from "./theme";
 
 export const RemotionRoot: React.FC = () => (
   <Composition
-    id="PromoV2"
+    id="PromoV3"
     component={Promo}
     durationInFrames={VIDEO.durationInFrames}
     fps={VIDEO.fps}

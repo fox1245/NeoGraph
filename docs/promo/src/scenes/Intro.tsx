@@ -47,7 +47,7 @@ export const Intro: React.FC<{ durationInFrames: number }> = ({
             color: COLORS.navy,
           }}
         >
-          NEOGRAPH&nbsp;&nbsp;·&nbsp;&nbsp;V0.2.3
+          NEOGRAPH&nbsp;&nbsp;·&nbsp;&nbsp;V0.11.1
         </div>
       </div>
     </AbsoluteFill>

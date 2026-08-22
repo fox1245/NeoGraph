@@ -1,5 +1,7 @@
 # QuickJS DSL capability and model-synthesis evaluation
 
+**Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
+
 Status: implemented, deterministic conformance gated; live model evaluation opt-in
 Observed: 2026-08-22
 

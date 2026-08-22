@@ -1,28 +1,27 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=0db34ca3ab8056fa7c8562fd8e774815e8c6b76787b74570c41b80974be4fd88 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=a2fa88f0d8ef08b3821d8ffe9810bc53b0ed7cd56251bd719b552628036a5b0d -->
 # NeoGraph C++ API 参考 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
 
-
-
-一个 C++20 图 agent 引擎库，面向 C++ 的 LangGraph，带有可选的 Python 绑定。此站点是公共 C++ 标头 `include/neograph/` 的**生成参考**。
+一个 C++20 图智能体引擎库——面向 C++ 的 LangGraph，附带可选的 Python 绑定。本网站是 `include/neograph/` 中公共 C++ 头文件的**生成参考**。
 
 ## 从哪里开始
 
-如果你刚接触 NeoGraph，**首先阅读叙事文档** - 一旦你知道要查找的内容，此生成参考将用于查找类签名。
+如果你是 NeoGraph 的新手，**请先阅读叙述性文档** —— 本参考文档仅用于在您了解所需内容后查找类签名。
 
-|用途|入口|
+| 关于 | 请前往 |
 |---|---|
-|NeoGraph 是什么、为什么需要它、基准| [README](https://github.com/fox1245/NeoGraph#readme) |
-|心智模型——通道、节点、边、发送、命令|[核心概念](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
-|针对常见问题的症状优先修复|[故障排除](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
-|39 个可运行的 C++ 程序|[示例/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
-|23 个可运行的 Python 程序|[绑定/python/示例/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
-|异步/协程内部结构| [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
+| 了解 NeoGraph 是什么、为何选择它以及基准测试 | [README](https://github.com/fox1245/NeoGraph#readme) |
+| 心智模型 —— 频道、节点、边、Send、Command | [Core Concepts](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
+| 症状优先的常见问题修复 | [故障排查](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
+| 39 个可运行的C++程序 | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
+| 23 个可运行的 Python 程序 | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
+| 异步 / 协程内部机制 | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
 
-## 顶级标头
+## 顶层头文件
 
-便捷头文件引入了完整的核心+图引擎 API：
+便捷头文件引入了完整的 Core + GraphEngine API：
+
 ```cpp
 #include <neograph/neograph.h>
 
@@ -32,14 +31,15 @@ using namespace neograph::graph;
 
 子命名空间：
 
-- `neograph`— 基础类型（`Provider`, `Tool`, `ChatMessage`）
-- `neograph::graph`— 引擎、节点、状态、检查点
-- `neograph::llm`— 提供者实现（OpenAI、模式驱动、代理助手）
-- `neograph::mcp`— 模型上下文协议客户端
-- `neograph::async`— 协程 + io_context 基础设施
-- `neograph::util`— 并发原语
+- `neograph`           — 基础类型（`Provider`、`Tool`、`ChatMessage`）
+- `neograph::graph`    — 引擎、节点、状态、检查点
+- `neograph::llm`      — 提供方实现（OpenAI、模式驱动、子智能体辅助）
+- `neograph::mcp`      — Model Context Protocol 客户端
+- `neograph::async`    — 协程 + io_context 基础设施
+- `neograph::util`     — 并发原语
 
-## 第一个程序
+## 一个入门程序
+
 ```cpp
 #include <neograph/neograph.h>
 #include <neograph/llm/mock_provider.h>
@@ -70,13 +70,13 @@ int main() {
 }
 ```
 
-实际使用 LLM 时，将`MockProvider`替换为 `llm::OpenAIProvider` 或`llm::SchemaProvider`。完整的`Provider`接口位于`neograph::Provider`。
+对于真实的 LLM 使用场景，将 `MockProvider` 替换为 `llm::OpenAIProvider` 或 `llm::SchemaProvider`。完整的 `Provider` 接口位于 `neograph::Provider`。
 
 ## 参考索引
 
-侧边栏中的类列表、文件列表和命名空间列表是从以下头文件生成：`include/neograph/`。 [类列表](annotated.html)是最有用的切入点。
+侧边栏中的类列表、文件列表和命名空间列表是根据 `include/neograph/` 下的头文件生成的。[类列表](annotated.html) 是最常用的入口点。
 
-## 来源
+## 源代码
 
 项目主页：<https://github.com/fox1245/NeoGraph>
 

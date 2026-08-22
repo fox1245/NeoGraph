@@ -1,57 +1,46 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0972b9d4c384152233869c6375839d3a0469e17124fb375a7352ed453ce486ae -->
-# NeoGraph のコアコンセプト — ナラティブガイド
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=3d95cddd2a9d9ff0c7b8028968a5bfab4c44b404af3eff0115f8edfb25a7f1cc -->
+# NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
-例に入る前に、これを一度読んでください。それは、
-メンタル モデルを自分で構築する順序で作成します: グラフ →
-チャネル → ノード → エッジ → ファンアウト → ルーティング オーバーライド →
-チェックポイント→ストリーミング。
+例に飛び込む前に、これを一度読んでください。これは、あなた自身が構築する順序でメンタルモデルを構築します：グラフ → チャネル → ノード → エッジ → fan-out → ルーティングオーバーライド → チェックポイント → ストリーミング。
 
-コードサンプルは簡潔であるため、Python 側です。すべての地図
-C++ API に対して 1:1 (クラスについては [`reference-en.md`](reference-en.md) を参照)
-署名と `include/neograph/` 下の公開ヘッダーを使用します。
+コードサンプルは簡潔さのためPython側で記載しています。すべてはC++ APIに1:1で対応します（クラスシグネチャは[`reference-en.md`](reference-en.md)、公開ヘッダは`include/neograph/`以下を参照）。
 
-> **以前に LangGraph を使用したことがある場合:** プリミティブは意図的に
-> 同じ — リデューサーを備えたチャネル、書き込みを発行するノード、条件付き
-> エッジ、`Send`、`Command`、チェックポイント。違いについては、次のとおりです。
-> [Comparison with LangGraph](../README.md#vs-langgraph)
-> README。以下の説明は何も仮定していません。
+> **LangGraphを以前使ったことがある場合:** プリミティブは意図的に同じです — リデューサー付きチャンネル、書き込みを発行するノード、条件付きエッジ、`Send`、`Command`、チェックポイント。READMEはNeoGraphの[2つのランタイムレイヤー](../README.md#two-runtime-layers)を要約しています。以下の説明は何も前提としません。
 
 ---
 
 ## 目次
 
-(セクション 8.5 は v0.6.0 で追加 — `Tracing — OpenTelemetry + Phoenix / Langfuse`。
-外部ドキュメントのリンクを安定させるため、番号付きの見出しは 1 ～ 9 のままです。
-8.5 はストリーミングと一般的な落とし穴の間に位置します。)
+(セクション8.5はv0.6.0で追加 — `Tracing — OpenTelemetry + Phoenix / Langfuse`。番号付き見出しは1〜9のままで、外部ドキュメントのリンクを安定させています。8.5はStreamingとCommon pitfallsの間に位置します。)
 
 
-1. [The big picture](#1-the-big-picture)
-2. [Channels & reducers](#2-channels--reducers)
-3. [Nodes](#3-nodes)
-4. [Edges & conditional routing](#4-edges--conditional-routing)
-5. [Send — dynamic fan-out](#5-send--dynamic-fan-out)
-6. [Command — routing override + state patch](#6-command--routing-override--state-patch)
-7. [Checkpoints, interrupts, HITL](#7-checkpoints-interrupts-hitl)
-8. [Streaming events](#8-streaming-events)
-9. [Common pitfalls](#9-common-pitfalls)
+1. [全体像](#1-the-big-picture)
+2. [チャンネルとリデューサー](#2-channels--reducers)
+3. [ノード](#3-nodes)
+4. [エッジと条件付きルーティング](#4-edges--conditional-routing)
+5. [Send — 動的fan-out](#5-send--dynamic-fan-out)
+6. [Command — ルーティング上書き + 状態パッチ](#6-command--routing-override--state-patch)
+7. [チェックポイント、割り込み、HITL](#7-checkpoints-interrupts-hitl)
+8. [ストリーミングイベント](#8-streaming-events)
+9. [よくある落とし穴](#9-common-pitfalls)
 
 ---
 
 <a id="1-the-big-picture"></a>
 ## 1. 全体像
 
-NeoGraph **グラフ** には次の 4 つの要素があります。
+NeoGraph **グラフ**は以下の4つの要素です:
 
-|もの |それは何ですか |定義元 |
+| 要素 | 説明 | 定義元 |
 |---|---|---|
-| **チャンネル** |共有状態の名前付きスロット。それぞれに、新しい書き込みを既存の値と組み合わせる方法を定義するリデューサーがあります。 | `definition["channels"]` |
-| **ノード** |状態を読み取り、書き込みを発行する関数 (およびオプションで `Send` / `Command`)。 | `definition["nodes"]` |
-| **エッジ** |静的な次ノード ポインター。 | `definition["edges"]` |
-| **条件付きエッジ** |述語主導のルーティング — 状態に基づいて、いくつかの次のノードの 1 つを選択します。 | `definition["conditional_edges"]` |
+| **チャンネル** | 共有状態における名前付きスロット。それぞれにリデューサーがあり、新しい書き込みを既存の値とどのように結合するかを定義します。 | `definition["channels"]` |
+| **ノード** | 状態を読み取り、書き込みを発行する関数（オプションで`Send` / `Command`）。 | `definition["nodes"]` |
+| **エッジ** | 静的で次のノードを指すポインタ。 | `definition["edges"]` |
+| **条件付きエッジ** | 述語駆動のルーティング — 状態に基づいて複数の次のノードから1つを選択します。 | `definition["conditional_edges"]` |
 
-実行は **スーパーステップ ループ** です。
+実行は**スーパーステップループ**です：
 
 ```
 1. ready_set = nodes routed from __start__
@@ -62,20 +51,16 @@ NeoGraph **グラフ** には次の 4 つの要素があります。
    d. plan_next_step → new ready_set
 ```
 
-スーパー ステップは、並列処理、チェックポイント処理、および
-ストリーミングイベント。どちらも「現在」実行できる 2 つのノードは同じです
-スーパーステップ。彼らは同じ入力状態と書き込みを観察します。
-ステップ終了時にリデューサーを介して結合します。
+スーパーステップは、並列性、チェックポイント、およびストリーミングイベントの単位です。「今」実行できる2つのノードは同じスーパースステップであり、同じ入力状態を観測し、ステップ終了時にその書き込みは reducers を介して結合されます。
 
 ---
 
 <a id="2-channels--reducers"></a>
-## 2. チャネルとリデューサー
+## 2. チャンネルとReducer
 
-すべての状態は名前付きチャネルに存在します。チャネルは複数にわたって持続します
-ノードとスーパーステップ間。ノードは書き込みによって通信します。
+すべての状態は名前付きチャネルに格納される。チャネルはノードをまたいで、またスーパーステップをまたいで持続し、ノードはチャネルへの書き込みによって通信する。
 
-### チャネルの定義
+### チャンネルの定義
 
 ```python
 "channels": {
@@ -85,30 +70,25 @@ NeoGraph **グラフ** には次の 4 つの要素があります。
 }
 ```
 
-### 減速機内蔵
+### ビルトインレデューサー
 
-|減速機 |新しい書き込みセマンティクス |一般的な使用法 |
+| レデューサー | 新規書き込みセマンティクス | 典型的な用途 |
 |---|---|---|
-| `"overwrite"` |新しい値が古い値に置き換わります。並列書き込みでは最後の書き込み者が優先されます。 |単一値のスクラッチ (現在のノード、現在の質問、ルート ヒント)。 |
-| `"append"` |新しいリスト (リストである必要があります) は既存のリストに連結されます。順序: 前のステップの値が最初に、このステップの書き込みがノードの実行順序で追加されます。 |会話メッセージ、検索結果、ファンアウトコレクション。 |
+| `"overwrite"` | 新しい値が古い値に置き換わる。並列書き込み時は最後の書き込みが優先される。 | 単一値スクラッチ（現在のノード、現在の質問、ルートヒント）。 |
+| `"append"` | 新しいリスト（リストである必要があります！）は既存のリストに連結されます。順序：前のステップの値が先、このステップの書き込みはnode-execution orderで後に追加されます。 | 会話メッセージ、検索結果、fan-outコレクション。 |
 
-> 両方の減速機は `ReducerRegistry::ReducerRegistry()` に登録されています
-> エンジン始動時（[`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)）。
-> カスタム リデューサーは `ReducerRegistry::register_reducer(name, fn)` 経由で C++ から登録します
-> または Python から (v0.1.9 以降):
+> 両方のリデューサは、エンジン起動時に`ReducerRegistry::ReducerRegistry()`へ登録されます（[`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)）。カスタムリデューサは、C++から`ReducerRegistry::register_reducer(name, fn)`を介して、または（v0.1.9以降）Pythonから登録します：
 >
 > ```python
 > ng.ReducerRegistry.register_reducer("sum",
 >     lambda current, incoming: (current or 0) + incoming)
 > ```
 >
-> Python 呼び出し可能ファイルは GIL の下で実行されます。同時送信ファンアウト
-> Python カスタム ノードと同じ方法でシリアル化します。再登録する
-> 以前のリデューサーは名前に置き換えられます。
+> Pythonの呼び出し可能オブジェクトはGILの下で実行されます。並行するSend fan-outは、Pythonカスタムノードと同じ方法でその上で直列化されます。名前の再登録は、以前のリデューサを置き換えます。
 
 ### チャネルへの書き込み
 
-ノードは `ChannelWrite` のリストを返します。
+ノードは`ChannelWrite`のリストを返します：
 
 ```python
 return [
@@ -117,11 +97,11 @@ return [
 ]
 ```
 
-値の形状はリデューサーと一致する必要があります。
-- `"append"` → リストである必要があります (連結されます)。
-- `"overwrite"` → 任意の JSON シリアル化可能な値。
+値の形状はreducerと一致する必要があります：
+- `"append"` → リストでなければなりません（連結されます）。
+- `"overwrite"` → JSONシリアライズ可能な任意の値。
 
-### ノードから状態を読み取る
+### ノードからの状態の読み取り
 
 ```python
 def run(self, input):
@@ -130,36 +110,31 @@ def run(self, input):
     ...
 ```
 
-`state.get(channel)` はチャネルの現在値を返します。または、次の場合は `None` を返します。
-チャネルは存在しますが、まだ書き込まれていません。入力されたアクセスの場合
-チャット メッセージ、`state.get_messages()` は `list[ChatMessage]` を返します
-(`messages` チャネルから解析) — `llm_call` によって内部的に使用されます。
+`state.get(channel)`はチャンネルの現在の値を返します。チャンネルが存在するがまだ書き込まれていない場合は`None`を返します。チャットメッセージへの型付きアクセスの場合、`state.get_messages()`は`list[ChatMessage]`を返します（`messages`チャンネルから解析されます）— これは`llm_call`によって内部的に使用されます。
 
-### バージョン
+### Versions
 
-各チャネルは単調な `version` 番号を伝送します。エンジンが使用するのは、
-これはチェックポイントの差分と `state.channel_version(name)` 用です
-検査API。通常は直接読むことはありません。
+各チャンネルは単調増加する`version`番号を保持します。エンジンはこれをチェックポイントの差分比較と`state.channel_version(name)`検査APIに使用します。通常、これを直接読み取ることはありません。
 
 ---
 
 <a id="3-nodes"></a>
 ## 3. ノード
 
-ノード タイプを登録する 3 つの方法 (制御の昇順):
+ノードタイプを登録する3つの方法を、制御の度合いが増す順に示します。
 
 ### 3.1 組み込みノード
 
-| `type` (JSON 形式) |何をするのか |構成 |
+| `type`（JSON内） | 動作 | 設定 |
 |---|---|---|
-| `llm_call` | `provider->complete_async(messages, tools)` を呼び出し、アシスタント メッセージを `messages` に追加します。 | `NodeContext` から `provider`、`model`、`instructions`、`tools` を読み取ります。 |
-| `tool_dispatch` |最新のアシスタント メッセージの `tool_calls` を確認し、`Tool::execute` 経由でそれぞれを実行し、`{role: "tool", tool_call_id, content}` の結果を追加します。 | `NodeContext` から `tools` を読み取ります。 |
-| `intent_classifier` | LLM はユーザーの意図を N 個のラベルの 1 つに分類し、選択したラベルを `__route__` に書き込みます。 `route_channel` 条件付きでペアリングします。 | |
-| `subgraph` |別のグラフを単一のノードとして埋め込みます。内部状態は、構成されたキーの再マッピングを通じてマッピングされます。 | `extra_config: {graph_def, input_keys, output_keys}` |
+| `llm_call` | `provider->complete_async(messages, tools)`を呼び出し、アシスタントメッセージを`messages`に追加します。 | 読み取り `provider`, `model`, `instructions`, `tools` から `NodeContext`. |
+| `tool_dispatch` | 最新のアシスタントメッセージの`tool_calls`を確認し、`Tool::execute`を介してそれぞれを実行し、`{role: "tool", tool_call_id, content}`の結果を追加します。 | 読み取り `tools` から `NodeContext`. |
+| `intent_classifier` | LLMはユーザーの意図をN個のラベルのいずれかに分類し、選択したラベルを`__route__`に書き込みます。`route_channel`条件と組み合わせて使用します。 | `extra_config: {labels, prompt_template}` |
+| `subgraph` | 別のグラフを単一ノードとして埋め込みます。内部状態は設定されたキー再マッピングを通じてマッピングされます。 | `extra_config: {graph_def, input_keys, output_keys}` |
 
-### 3.2 `@ng.node` デコレーター (Python のみ)
+### 3.2 `@ng.node`デコレータ（Pythonのみ）
 
-書き込み専用ノードを定義する最短の方法:
+書き込み専用ノードを定義する最も短い方法：
 
 ```python
 @ng.node("greet")
@@ -169,15 +144,11 @@ def greet_node(state):
         [{"role": "assistant", "content": f"Hello, {name}!"}])]
 ```
 
-装飾された関数は `list[ChannelWrite]` (または `None`、
-`[]`として扱われます)。 `Send` または `Command` を発行することはできません。
-サブクラス `GraphNode`。
+デコレートされた関数は`list[ChannelWrite]`（または`None`、`[]`として扱われる）を返さなければなりません。`Send`や`Command`を出力することはできません。それらについては、`GraphNode`をサブクラス化してください。
 
-### 3.3 完全な `GraphNode` サブクラス
+### 3.3 完全な`GraphNode`サブクラス
 
-完全に制御するには、`run(input)` をオーバーライドします。これは v0.4.0 で導入され、
-v0.9.0 以降の唯一のカスタム ノード エントリ ポイント — 1 つのメソッド、1 つの
-サイン：
+完全な制御のために`run(input)`をオーバーライドします。これはv0.4.0で導入され、v0.9.0以降の唯一のカスタムノードエントリポイントです。1つのメソッド、1つのシグネチャです。
 
 ```python
 class Researcher(ng.GraphNode):
@@ -201,22 +172,13 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python は `input.ctx` で `cancel_token`、`thread_id`、`step`、`stream_mode`、
-`store`、`resume_value` を公開します。C++ 呼び出し元は `RunMetadata` に
-`deadline` と `trace_id` を設定でき、エンジンはそれらをネストした subgraph
-まで伝播します。この 2 フィールドはまだ Python バインディングには公開されません。
+Pythonは `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`、および `resume_value` を `input.ctx`上に公開します。C++の呼び出し元は `deadline` と `trace_id` を `RunMetadata`上に設定できます。エンジンはそれらをネストされたサブグラフを通じて伝播します。これら2つのフィールドは、Pythonバインディングではまだ公開されていません。
 
-必要ない場合は、裸の `list[ChannelWrite]` を返却することもできます。
-`Send` または `Command` — バインディングにより `NodeResult` に持ち上げられます。
-自動的に。
+また、裸の `list[ChannelWrite]` を返すこともできます。`Send` や `Command` が不要な場合、バインディングはそれを `NodeResult` に自動的にリフトします。
 
-> **v0.3.x からの移行:** 削除された v0.4 より前の複数エントリポイントの
-> ノード API は、`run(input)` をオーバーライドする形に移行します。
-> `input.state` から状態を読み取り、None 以外の場合は
-> `input.stream_cb` 経由でトークンを発行し、
-> `input.ctx.cancel_token` からキャンセル トークンを読み取ります。
+> **v0.3.xからの移行:** 削除されたv0.4以前のマルチエントリノードAPIには1つの置き換えがあります。`run(input)`をオーバーライドします。`input.state`から状態を読み取り、非Noneの場合は`input.stream_cb`を通じてトークンを出力し、`input.ctx.cancel_token`からキャンセルトークンを読み取ります。
 
-JSON ローダーがインスタンス化できるように型を登録します。
+型を登録して、JSONローダーがインスタンス化できるようにします：
 
 ```python
 ng.NodeFactory.register_type(
@@ -225,14 +187,11 @@ ng.NodeFactory.register_type(
 )
 ```
 
-工場では`(name, per-node config, NodeContext)`を認識しているので同じです
-クラスは、異なる構成を使用して複数の名前でインスタンス化できます。
+ファクトリは`(name, per-node config, NodeContext)`を認識するため、同じクラスを異なる設定で複数の名前の下でインスタンス化できます。
 
-### 3.4 ツール (別の概念、`tool_dispatch` で使用)
+### 3.4 ツール（別の概念。`tool_dispatch`が使用）
 
-`Tool` はノードではありません。`tool_dispatch` が呼び出すものです。サブクラス
-`ng.Tool`、3 つのメソッドをオーバーライドし、インスタンスをに渡します。
-`NodeContext(tools=[…])`:
+`Tool`はノードではありません。`tool_dispatch`が呼び出すものです。`ng.Tool`をサブクラス化し、3つのメソッドをオーバーライドし、インスタンスを`NodeContext(tools=[…])`に渡します。
 
 ```python
 class CalcTool(ng.Tool):
@@ -241,13 +200,12 @@ class CalcTool(ng.Tool):
     def execute(self, args):  return str(args["x"] * 2)
 ```
 
-エンジンはコンパイル時にツール リストの所有権を取得します。
-ローカル参照は後で削除される可能性があります。
+エンジンはコンパイル時にツールリストのオーナーシップを取得します — ローカル参照はその後ドロップできます。
 
 ---
 
 <a id="4-edges--conditional-routing"></a>
-## 4. エッジと条件付きルーティング
+## 4. エッジ & 条件付きルーティング
 
 ### 静的エッジ
 
@@ -259,14 +217,11 @@ class CalcTool(ng.Tool):
 ]
 ```
 
-同じ送信元ノードからの複数のエッジがファンアウトします (すべての後続ノードが停止します)
-次のスーパーステップの準備完了セットに組み込まれます)。同じターゲットへの 2 つのエッジ
-1 回のスーパーステップ重複排除から 1 回のターゲット実行まで。
+同じソースノードからの複数エッジはfan-outします(すべての後続ノードが次のスーパーステップの準備セットに入ります)。1つのスーパーステップから同じターゲットへの2つのエッジは、ターゲットの1回の実行に重複排除されます。
 
 ### 条件付きエッジ
 
-条件付きエッジは **名前付き条件** を実行し、次のノードを選択します
-`routes` マップから:
+条件付きエッジは**名前付き条件**を実行し、`routes`マップから次のノードを選択します。
 
 ```python
 "conditional_edges": [
@@ -278,16 +233,14 @@ class CalcTool(ng.Tool):
 ]
 ```
 
-条件名は、
-エンジン。 2 つは組み込みとして出荷されます。
+条件名は、エンジンに登録された`ConditionFn`に解決されます。2つが組み込みとして出荷されています：
 
-|状態 |返品 |いつ使用するか |
+| Condition | 戻り値 | 使用タイミング |
 |---|---|---|
-| `has_tool_calls` |最新のアシスタント メッセージに空ではない `tool_calls` がある場合は `"true"`。それ以外の場合は`"false"`。 | ReAct ループ — LLM が要求を停止するまでツールをディスパッチし続けます。 |
-| `route_channel` | `__route__` チャネルにある文字列は何でも。 `"default"` に戻ります。 |明示的インテント ルーティングには、`intent_classifier` と組み合わせます。 |
+| `has_tool_calls` | `"true"` 最新のアシスタントメッセージが空でない`tool_calls`を持つ場合; それ以外の場合は`"false"`。 | ReActループ — LLMが要求をやめるまでツールのディスパッチを続けます。 |
+| `route_channel` | `__route__`チャネルにある任意の文字列である場合、`"default"`にフォールバックします。 | 明示的なインテントルーティングのために`intent_classifier`とペアにしてください。 |
 
-`ConditionRegistry::register_condition(name, fn)` 経由で C++ からカスタム条件を登録
-または Python から (v0.1.9 以降):
+カスタム条件は、C++から`ConditionRegistry::register_condition(name, fn)`経由で、またはPythonから（v0.1.9以降）登録します：
 
 ```python
 def is_long(state):
@@ -297,15 +250,11 @@ def is_long(state):
 ng.ConditionRegistry.register_condition("is_long", is_long)
 ```
 
-呼び出し可能関数はライブ `GraphState` を受信します (つまり、`state.get(channel)` と
-`state.get_messages()` は機能します)、次のいずれかに一致する文字列を返す必要があります。
-条件付きエッジの `routes` キー。
+呼び出し可能オブジェクトは、ライブの`GraphState`を受け取り（そのため`state.get(channel)`と`state.get_messages()`が機能する）、条件付きエッジの`routes`キーの1つに一致する文字列を返す必要があります。
 
-### 2 つの同等の形式 - どちらも v0.1.8 以降で動作します
+### 2つの同等な形式 — どちらも v0.1.8 以降で動作します
 
-条件付きエッジは、`edges` 配列内に存在する可能性があります (
-`condition` フィールド) **または** 別の `conditional_edges` ブロック。
-どちらの形式も受け入れられます。より明確なものを選択してください:
+条件付きエッジは、`edges`配列内（`condition`フィールド付き）**または**別の`conditional_edges`ブロック内に存在できます。両方の形式が受け入れられます。どちらか明確な方を選択してください：
 
 ```python
 # Form A — top-level (LangGraph parity, recommended for Python)
@@ -319,19 +268,14 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 ]
 ```
 
-> **履歴:** フォーム A は、以前にグラフ コンパイラによってサイレントに削除されました。
-> v0.1.8 — README とすべての Python サンプルで使用されているため、ReAct ループが発生します
-> 単一の LLM 呼び出しに縮退します。コミット`e23a523`で修正されました。もしあなたが
-> ホイール ≤ 0.1.7 の場合は、アップグレードしてください。
+> **履歴：** 形式Aはv0.1.8より前のグラフコンパイラによって黙って破棄されていました — READMEとすべてのPythonの例がそれを使用していたため、ReActループは単一のLLM呼び出しに退化していました。コミット`e23a523`で修正されました。0.1.7以下のホイールでこれが見られる場合は、アップグレードしてください。
 
 ---
 
 <a id="5-send--dynamic-fan-out"></a>
-## 5. 送信 — 動的ファンアウト
+## 5. 送信 — 動的 fan-out
 
-`Send` は、次のステップのノードの数が依存する場合に使用します。
-州。従来の使用法: 検索トピックのリストを N 並列に分割します。
-研究者の呼び出し。
+`Send` は、次のステップのノード数が状態に依存するケース向けである。典型的な使用法: 検索トピックのリストをN個の並列リサーチャー呼び出しに分割する。
 
 ```python
 class Planner(ng.GraphNode):
@@ -343,21 +287,15 @@ class Planner(ng.GraphNode):
         )
 ```
 
-エンジンの `run_sends_async` は、ごとに 1 回 `researcher` をインスタンス化します。
-`Send`、それぞれに独自の `state.get("topic")` があり、それらを実行します
-`asio::experimental::make_parallel_group`経由でパラレル。
+エンジンの`run_sends_async`は、`researcher`を`Send`ごとに1回インスタンス化し、それぞれが独自の`state.get("topic")`を持ち、`asio::experimental::make_parallel_group`を介して並列に実行します。
 
 ### メンタルモデル
 
-`Send(target, payload)` は「この状態で `target` をインスタンス化します」
-パッチを適用してレディセットに追加します。ペイロードは
-ターゲットが `state` を認識する前に状態を書き込みます。
+`Send(target, payload)`は「この状態パッチで`target`をインスタンス化し、それを準備完了セットに追加する」ことです。ペイロードは、ターゲットが`state`を見る前に状態書き込みとして適用されます。
 
-並列グループが終了すると、次のスーパーステップのルーティングが始まります。
-Send で生成された各タスクの発信エッジ (または `Command.goto`、
-発した場合）。
+並列グループが終了した後、次のスーパーステップのルーティングは、各Sendが生成したタスクの出力エッジ（または、それを発行した場合はその`Command.goto`）から来ます。
 
-### 一般的な形状: ファンアウト 5、サマライザーへのファンイン
+### 一般的な形: fan-out 5、fan-in to summarizer (要約)
 
 ```
 planner ─┬─ Send("researcher", {topic: "A"})  ─┐
@@ -367,19 +305,13 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
          └─ Send("researcher", {topic: "E"})  ─┘
 ```
 
-`researcher` の発信エッジはちょうど `{"from": "researcher", "to": "summarizer"}` です
-— 静的エッジと同じ重複排除ルールなので、サマライザーは 1 回実行されます。
+`researcher`の出力エッジは`{"from": "researcher", "to": "summarizer"}`のみです — 静的エッジと同じ重複排除ルールなので、サマライザは一度だけ実行されます。
 
-### ワーカー数の調整
+### ワーカー数のチューニング
 
-`build()` のデフォルトは `EngineConfig::worker_count == 1` — エンジン所有のスレッドなし
-プール、ファンアウト ブランチはコルーチン自体でインラインでディスパッチされます
-執行者。これは、シーケンシャルに安価な割り当てなしの高速パスです。
-非スレッドセーフ状態を保持するノードに対しても安全です。
+`build()`はデフォルトで`EngineConfig::worker_count == 1`になります — エンジン所有のスレッドプールはなく、fan-outブランチはコルーチン自身のエグゼキュータ上でインラインにディスパッチされます。これはアロケーションなしの高速パスであり、シーケンシャルなグラフには安価で、非スレッドセーフな状態を保持するノードにも安全です。
 
-実際の並列処理を行うには、プールを明示的に選択します。正確に N を選択してください
-ファンアウト幅に一致させるか、`set_worker_count_auto()` を使用してください。
-`hardware_concurrency()` (フォールバック 4 を使用):
+実際の並列処理を行うには、プールを明示的に選択してください。fan-out幅に合わせて正確にNを選ぶか、`set_worker_count_auto()` を `hardware_concurrency()` に使用します（フォールバックは4）:
 
 ```python
 engine.set_worker_count(5)           # match a 5-way Send
@@ -387,19 +319,14 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-マルチ送信 (またはマルチ発信エッジ) ファンアウトが、
-オプトインされたプールでは、NeoGraph はワンショットの標準エラー出力警告を発行するため、
-サイレントシリアルのケースは目立たない。で抑制する
-意図的に運転する場合は`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`
-シリアル ファンアウト (たとえば、worker=1 高速パスのベンチマーク)。
+マルチSend（またはマルチ出力エッジ）のfan-outがオプトインされたプールなしで実行される場合、NeoGraphはワンショットのstderr警告を発行し、サイレントなシリアル実行がレーダーの下を通過しないようにします。意図的にシリアルfan-outを駆動する場合（例: worker=1高速パスのベンチマーク）は、`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`で抑制します。
 
 ---
 
 <a id="6-command--routing-override--state-patch"></a>
-## 6. コマンド — ルーティングオーバーライド + ステートパッチ
+## 6. Command — ルーティングオーバーライド + 状態パッチ
 
-`Command` は、ノードが次にどこに行くかを決定し、その状態で状態を変化させます。
-同じ戻り値。通常の発信エッジをバイパスします。
+`Command`により、ノードは次にどこへ進むかを決定し、同じ戻り値で状態を変更できます。これは通常の出力エッジをバイパスします。
 
 ```python
 class Evaluator(ng.GraphNode):
@@ -422,38 +349,28 @@ class Evaluator(ng.GraphNode):
             )
 ```
 
-### コマンドと条件付きエッジをいつ使用するか
+### Command と conditional edge の使い分け方
 
-- **条件付きエッジ**: ルーティングは状態述語に依存します。
-  ノードロジックは必要ありません。よりクリーンで宣言的。
-- **コマンド**: ルーティングは、作成するのが最も自然なロジックに依存します。
-  ノード内 - 複数基準のスコアリング、コンテンツ検査、再試行
-  決断。また、状態をアトミックに更新し、選択する唯一の方法です
-  次のノード。
+- **Conditional edge (条件付きエッジ)** : ルーティングは、ノード logic を必要としない state の predicateに依存します。よりクリーンで宣言的です。
+- **コマンド**: ルーティングはノード内に記述するのが最も自然なロジックに依存する — 複数基準のスコアリング、コンテンツ検査、再試行判断。また、状態を原子的に更新し、かつ次ノードを選定する唯一の方法でもある。
 
-### ファンインで最後のライターが勝利
+### fan-in 下でのラストライター勝ち
 
-複数のコマンドが同じスーパーステップで起動された場合 (まれですが、のみ)
-複数の並列グループの兄弟がそれらを発行する場合に可能)、最後の
-一人が勝ちます。順序は並列グループの補完によって決定されます。
-は非決定的です — 多くても 1 つを確保することで、これを考慮した設計を行ってください。
-兄弟は `Command` を発行します。
+同じスーパーステップで複数のCommandが発火する場合（稀 — 複数の並列グループの兄弟がそれらを発行する場合のみ可能）、最後のものが優先されます。順序は並列グループの完了によって決定され、これは非決定的です — 最大1つの兄弟が`Command`を発行することを保証して、これに対応して設計してください。
 
 ---
 
 <a id="7-checkpoints-interrupts-hitl"></a>
 ## 7. チェックポイント、割り込み、HITL
 
-### チェックポイント ストアのセットアップ
+### チェックポイントストアの設定
 
 ```python
 engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 # or: engine.set_checkpoint_store(ng.PostgresCheckpointStore(...))   # if built with PG
 ```
 
-ストアが接続されている場合、すべてのスーパーステップはチェックポイントを
-`(thread_id, checkpoint_id)` にキーを付けて保存します。 `RunResult.checkpoint_id`
-フィールドは最新のものです。
+ストアが接続されている場合、すべてのスーパーステップは`(thread_id, checkpoint_id)`をキーとしてチェックポイントをストアに書き込みます。`RunResult.checkpoint_id`フィールドが最新のものです。
 
 ### 静的割り込みポイント
 
@@ -462,8 +379,7 @@ engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 "interrupt_after":  ["llm"],       # pause after, before routing
 ```
 
-エンジンは `interrupted=True` を含む `RunResult` を返します。
-`interrupt_node`セット。再開するには:
+エンジンは `RunResult` を `interrupted=True` と `interrupt_node` を設定して返します。再開するには：
 
 ```python
 result = await engine.resume_async(thread_id="t1",
@@ -471,38 +387,31 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-### `NodeInterrupt` による動的割り込み
+### `NodeInterrupt`による動的割り込み
 
-ノード本体内からスローする (Python: `raise ng.NodeInterrupt(reason)`、
-C++: `throw NodeInterrupt(...)`)。エンジンが状態をキャッチし、維持し、
-スローノードで中断された`RunResult`を返します - 同じ
-APIを再開します。
+ノード本体の内部からスローします（Python: `raise ng.NodeInterrupt(reason)`、C++: `throw NodeInterrupt(...)`）。エンジンはキャッチし、状態を永続化し、スローしたノードで中断された`RunResult`を返します — 同じ再開APIです。
 
-一時停止の決定が中間ノードの出力に依存する場合に便利です
-(例: 「LLM は人間に見せる価値のあるものを生み出しましたか?」)。
+一時停止の決定が中間ノード出力に依存する場合に便利です（例:「LLM が人間に見せる価値のあるものを生成したか?」）。
 
 ### タイムトラベル
 
-`engine.fork(thread_id, from_checkpoint_id)` は新しいスレッドを返します。
-過去のチェックポイントからスタートします。 「もし私が答えていたらどうなるか」に便利
-違う」分岐。
+`engine.fork(thread_id, from_checkpoint_id)`は過去のチェックポイントから開始する新しいスレッドを返します。「別の答え方をしていたらどうなっていたか」という分岐に役立ちます。
 
 ---
 
 <a id="8-streaming-events"></a>
 ## 8. ストリーミングイベント
 
-`run_stream` / `run_stream_async` は、イベントの発生時にコールバックを呼び出します。
-モードは OR 可能なビットマスクです。
+`run_stream` / `run_stream_async`はイベントが発生する際にコールバックを呼び出します。モードはOR可能なビットマスクです:
 
-|モード |排出 |
+| モード | 出力を発火する |
 |---|---|
-| `EVENTS` | `NODE_START`、`NODE_END`、`INTERRUPT` |
-| `TOKENS` | `Provider` からのストリーミングされたトークンごとに `LLM_TOKEN` |
-| `DEBUG` |次に使用できるセットを示す `__routing__` イベント |
-| `VALUES` |各スーパーステップ後の完全な状態の `__state__` イベント |
-| `UPDATES` | `ChannelWrite` ごとの `CHANNEL_WRITE` イベント |
-| `ALL` |上記のすべて |
+| `EVENTS` | `NODE_START`, `NODE_END`, `INTERRUPT` |
+| `TOKENS` | `LLM_TOKEN` — `Provider`からストリーミングされた各トークン |
+| `DEBUG` | `__routing__` 次の準備完了セットを示すイベント |
+| `VALUES` | `__state__` 各スーパーステップ後の完全な状態を含むイベント |
+| `UPDATES` | `CHANNEL_WRITE` ごとの`ChannelWrite`イベント |
+| `ALL` | 上記のすべて |
 
 ```python
 def cb(event):
@@ -514,11 +423,9 @@ engine.run_stream(
     cb)
 ```
 
-> **注:** `event.node_name` (`event.node` ではありません)。 C++ 構造体フィールド
-> `node_name`です。 pybind は元の名前を保持します。
+> **注:** `event.node_name`（`event.node`ではない）。C++構造体フィールドは`node_name`です。pybindは元の名前を保持します。
 
-チャット形式のストリーミングの場合 (LangChain 互換のメッセージ辞書
-インクリメンタル `content_so_far`)、ヘルパーを使用します。
+チャット形式のストリーミング（増分`content_so_far`を含むLangChain互換メッセージ辞書）には、ヘルパーを使用します：
 
 ```python
 from neograph_engine import message_stream
@@ -529,12 +436,9 @@ engine.run_stream(
     message_stream(lambda chunk: print(chunk["content"], end="", flush=True)))
 ```
 
-### `asio::io_context.run()` 配置 (C++)
+### `asio::io_context.run()` 配置（C++）
 
-C++ から `engine.run_stream_async()` を駆動する場合、外側の
-`asio::io_context.run()` はアプリケーションのメインから呼び出す必要があります
-スレッド (または、
-通常のプロセスの起動パス)。テスト済みの良好な形状:
+C++から`engine.run_stream_async()`を駆動する場合、外側の`asio::io_context.run()`はアプリケーションのメインスレッド（または通常のプロセス起動パスを通じて初期化された任意の長命スレッド）から呼び出す必要があります。テスト済みの良好な形状：
 
 ```cpp
 // Main-thread driver — what examples/40 and the SchemaProvider tests use.
@@ -557,48 +461,21 @@ std::thread t([&]() {
 t.join();
 ```
 
-> **既知の制限 - HTTP サーバー ワーカー内のネストされた `io.run()`
-> callback** (問題 #16): `asio::io_context.run()` を内部にネストする
-> `httplib::Server::set_chunked_content_provider` (または同等のもの)
-> リクエストごとのワーカー コールバック自体が子スレッドを生成します。
-> `Provider::complete_stream_async` のデフォルトブリッジ) が観察されました
-> 一部の glibc / OpenSSL の組み合わせでは、`getaddrinfo` の SEGV に変換されます。の
-> ツリー内テスト
-> ([`tests/test_schema_provider_stream_async_nested_thread.cpp`](../tests/test_schema_provider_stream_async_nested_thread.cpp))
-> 構造形状をカバーしてきれいに通過しますが、下流側
-> 環境 (HTTPS 経由の実際の `api.openai.com`、glibc リゾルバー)
-> TSan / ASan では、同時リクエスト負荷) は完全ではありません
-> テストスイートから再現可能。 **回避策:**
+> **既知の制限 — ネストされた `io.run()` HTTPサーバーワーカーコールバック内** (issue #16): `asio::io_context.run()` を `httplib::Server::set_chunked_content_provider` (またはそれに相当する、リクエストごとのワーカーコールバックで、それ自体が `Provider::complete_stream_async`のデフォルトブリッジを介して子スレッドを生成するもの) 内にネストすると、一部の glibc / OpenSSL の組み合わせで `getaddrinfo` においてSEGVが発生することが観察されています。ツリー内のテスト ([`tests/test_schema_provider_stream_async_nested_thread.cpp`](../tests/test_schema_provider_stream_async_nested_thread.cpp)) は構造的な形状をカバーしており、問題なくパスしますが、ダウンストリーム環境 (HTTPS経由の実際の `api.openai.com` 、TSan / ASan 下の glibc リゾルバ、同時リクエスト負荷) はテストスイートから完全に再現可能ではありません。**回避策:**
 >
-> 1. **代わりに `co_await provider->complete_async(...)` を使用します。
->    HTTP サーバー コールバック** 内からの `complete_stream_async`、および
->    組み立てられた応答を 1 つの `LLM_TOKEN` イベントとして
->    ヘルパー。トークンタイプの UX は失われます。エンジン + ノード + ツールループの作業
->    端から端まで。これは ProjectDatePop のダウンストリーム `cpp_backend` です
->    今日は使います。
-> 2. **`io.run()` をリクエストごとのコールバックから移動**: 1 つを実行します。
->    専用のワーカー スレッド上の長命 `asio::io_context`
->    エンジン、リクエストごとの作業をエンジンにキューイングし、結果をポストバックします。
->    HTTP サーバーの応答シンクに送信されます。リクエストごとの回避
->    SEGV が相関するネストされた `std::thread` スポーン。
+> 1. **`co_await provider->complete_async(...)` を使用し、`complete_stream_async` の代わりにHTTPサーバーコールバック内から使用し**、組み立てた応答を1つの `LLM_TOKEN` イベントとしてヘルパーから発行します。トークン型付けのUXは失われますが、エンジン＋ノード＋ツールループはエンドツーエンドで動作します。これはProjectDatePopの下流の `cpp_backend` が現在使用しているものです。
+> 2. **`io.run()`をリクエストごとのコールバックの外に移動します**：エンジン用の専用ワーカースレッド上で1つの長命の`asio::io_context`を実行し、リクエストごとの作業をキューに入れ、結果をHTTPサーバーの応答シンクにポストバックします。SEGVと相関するリクエストごとのネストされた`std::thread`スパウンを回避します。
 
 ---
 
-## 8.5。トレース — OpenTelemetry + Phoenix / Langfuse
+## 8.5 トレーシング — OpenTelemetry + Phoenix / Langfuse
 
-ストリーミングと同じコールバック形状、異なるコンシューマ。 OTelを通過
-`engine.run_stream(cfg, cb)` およびあらゆるものへのトレーサー発行コールバック
-`NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT` イベントは
-スパン。
+ストリーミングと同じコールバック形状、異なるコンシューマー。OTelトレーサー発行コールバックを`engine.run_stream(cfg, cb)`に渡すと、すべての`NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT`イベントがスパンになります。
 
-2 つのレイヤーがツリー内で出荷されます。
+2つのレイヤーがツリーに同梱されている:
 
-  - `neograph_engine.tracing.otel_tracer` — ベンダー中立の OTel
-    スパン。スパンは任意の OTel バックエンド (Jaeger、Tempo、Honeycomb、
-    データドッグ）。
-  - `neograph_engine.openinference` — LLM 形状の属性レイヤー
-    同じスパンを *LangSmith スタイルのチャットバブルに変える
-    フェニックス / アライズ / ラングフューズのトレース*:
+  - `neograph_engine.tracing.otel_tracer` — ベンダーニュートラルなOTelスパン。スパンは任意のOTelバックエンド（Jaeger、Tempo、Honeycomb、Datadog）に流れます。
+  - `neograph_engine.openinference` — LLM形状の属性レイヤで、同じスパンをPhoenix / Arize / Langfuseで*LangSmithスタイルのチャットバブルトレース*に変換します：
 
 ```python
 from opentelemetry import trace
@@ -621,89 +498,53 @@ with openinference_tracer(tracer) as cb:
     engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
 ```
 
-Phoenix を 1 回スピンアップします: `docker run -d -p 6006:6006 -p 4317:4317
-アライズフェニックス/フェニックス`。 http://localhost:6006 を開く — トレース
-チェーン (`graph.run` → `node.X` → `llm.complete`) としてレンダリングします。
-プロンプト/応答/トークン数が LLM 詳細ペインに表示されます。
-同じコードで、OTLP エンドポイント URL を Langfuse セルフホストに交換し、
-トレースは同じ形状でそこに表示されます。
+Phoenixを一度起動します：`docker run -d -p 6006:6006 -p 4317:4317
+arizephoenix/phoenix`。http://localhost:6006を開くと、トレースがチェーン（`graph.run` → `node.X` → `llm.complete`）としてレンダリングされ、プロンプト / レスポンス / トークン数がLLM詳細ペインに表示されます。同じコードで、OTLPエンドポイントURLをLangfuseセルフホストに切り替えると、トレースは同じ形状でそこに表示されます。
 
-これは *「NeoGraph には LangSmith がありません」* に対する答えです — あなた
-LangSmith UX (チャットバブル、DAG 階層、トークンコスト) を取得します。
-1 つの Docker コマンドで Phoenix または Langfuse をローカルで実行します。いいえ
-SaaS 契約。トレースごとの料金設定はありません。
+これは *「NeoGraphにはLangSmithがない」* に対する答えです — PhoenixまたはLangfuseを1つのDockerコマンドでローカルに実行することで、LangSmith UX（チャットバブル、DAG階層、トークンコスト）を取得できます。SaaS契約も、トレースごとの価格設定もありません。
 
-属性キーのスキーマについては、`docs/reference-en.md` §10.5 を参照してください。
-`otel_tracer` と `openinference_tracer` の間のトレードオフのメモ。
+`docs/reference-en.md` §10.5で、属性キースキーマと`otel_tracer`、`openinference_tracer`間のトレードオフを確認してください。
 
 ---
 
 <a id="9-common-pitfalls"></a>
-## 9. よくある落とし穴
+## 9.よくある落とし穴
 
-これらはすべて実際のユーザーによってヒットされました。相互参照元
-[`docs/troubleshooting.md`](troubleshooting.md)。
+これらはすべて実際のユーザーが遭遇したものです。[`docs/troubleshooting.md`](troubleshooting.md)から相互参照されています。
 
-### 「私の ReAct ループは 1 回しか実行されません」
+### 「私のReActループが一度だけしか実行されない」
 
-ホイール ≤ 0.1.7 を使用しています。グラフ コンパイラは、
-`conditional_edges`は黙ってブロックします。 0.1.8 以上にアップグレードしてください。で確認してください
-`result.execution_trace == ['llm', 'dispatch', 'llm']` (だけではありません)
-`['llm']`）。
+あなたはwheel ≤ 0.1.7を使用しています。グラフコンパイラが`conditional_edges`ブロックを静かに削除しました。≥ 0.1.8にアップグレードしてください。`result.execution_trace == ['llm', 'dispatch', 'llm']`で検証してください（`['llm']`だけではありません）。
 
-### 「プロバイダーの呼び出しが 60 秒間ハングし、その後エラーが発生します」
+### 「プロバイダーコールが60秒間ハングし、それからエラーになる」
 
-ホイール ≤ 0.1.6 を使用しています。バンドルされた OpenSSL ハードコード RHEL CA パス
-Ubuntu / Debian / macOS には存在しません。 0.1.7 以上にアップグレードしてください
-(インポート時に `SSL_CERT_FILE` を証明書のバンドルに自動設定します) または設定
-手動で`SSL_CERT_FILE`。
+あなたはwheel ≤ 0.1.6を使用しています。バンドルされたOpenSSLは、Ubuntu / Debian / macOSには存在しないRHEL CAパスをハードコードしています。≥ 0.1.7にアップグレードするか（インポート時に`SSL_CERT_FILE`をcertifiのバンドルに自動設定）、`SSL_CERT_FILE`を手動で設定してください。
 
-### 「ファンアウトが予想よりも遅い」
+### 私のfan-outは期待していたよりも遅いです
 
-`compile()` のデフォルトは `set_worker_count(1)` (エンジン所有のスレッドなし)
-プール - ファンアウト ブランチは呼び出し元のエグゼキュータ上でシリアルに実行されます)。のために
-N が一致する実並列処理呼び出し `engine.set_worker_count(N)`
-送信ファンアウト幅、または `engine.set_worker_count_auto()`
-`hardware_concurrency()`。 NeoGraph はワンショットの標準エラー出力も出力します
-オプトインなしでマルチ送信ファンアウトを初めて実行するときに警告する
-プール — これはエラーではなくヒントです。 Python カスタム ノードについては、「GIL」を参照してください。
-小さなファンアウトで競合が発生するため、1 と N の両方でベンチを設定します。
+`compile()` デフォルトは `set_worker_count(1)` （エンジン所有のスレッドプールなし — fan-out ブランチは呼び出し元のエグゼキュータ上で直列に実行される）。実際の並列処理には `engine.set_worker_count(N)` を呼び出し、N を Send の fan-out 幅に合わせるか、 `engine.set_worker_count_auto()` を `hardware_concurrency()`に使用する。NeoGraph はまた、オプトインしたプールなしでマルチ Send の fan-out が初めて実行されたときに、一度だけ stderr 警告を出力する — これはヒントであり、エラーではない。Python カスタムノードは小さな fan-out で GIL の競合が発生するため、1 と N の両方でベンチマークを行うこと。
 
-### 「Python RunResult には .status / .final_state 属性がありません」
+### "Python RunResult に .status / .final_state 属性がない"
 
-Python バインディングはこれらの属性を公開しません。 `result.output`を使用し、
-`result.interrupted`、`result.max_steps_exhausted`、および
-`result.execution_trace`。 C++ 呼び出し元は `RunResult::status()` を使用して、
-`Completed` / `Interrupted` / `StepLimit` ビューを入力しました。の表を参照してください。
-README の「出力の読み方」セクション。
+Pythonバインディングはそれらの属性を公開していません。`result.output`、`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace`を使用してください。C++呼び出し元は、型付きの`Completed` / `Interrupted` / `StepLimit`ビューに`RunResult::status()`を使用できます。[Pythonバインディングガイド](python-binding.md#hitl-and-state)を参照してください。
 
-### 「不明な減速機: <name>」
+### 「不明なリデューサー：<name>」
 
-`overwrite` と `append` の 2 つの減速機が同梱されています。カスタム減速機に必要なもの
-C++ の `ReducerRegistry::register_reducer` (Python フックはまだありません)。
+`overwrite`と`append`の2つのリデューサーが同梱されています。コンパイル前に、C++では`ReducerRegistry::register_reducer`、Pythonでは`ng.ReducerRegistry.register_reducer`を使用してカスタムリデューサーを登録してください。
 
-### 「条件は登録されていますが、条件付きエッジが起動しません」
+### "条件が登録されているのに、条件付きエッジが発火しない"
 
-フォームがローダーが受け入れるフォームであることを確認します (フォーム A またはフォーム B
-[§4](#4-edges--conditional-routing)) — どちらも v0.1.8 以降で動作します。の上
-古いホイールではフォーム B のみが機能します。
+フォームがローダーが受け入れるもの（[§4](#4-edges--conditional-routing)のフォームAまたはフォームB）であることを確認してください — 両方ともv0.1.8以降で動作します。古いwheelでは、フォームBのみが動作します。
 
-### 「execution_trace は開始ノードのみを表示します」
+### "execution_trace が開始ノードのみを表示する"
 
-ルーティング結果が `__end__` になりました。開始ノードからのエッジがないか、
-条件が `routes` にない値を返し、明示的な `"default"` ルートが
-`__end__` を指していないか確認してください。厳格なグラフでは map の順序で
-ルートを選びません。open または出力契約のない条件は `"default"` があれば
-それを使い、なければ source node、条件名、返された label を含むエラーに
-なります。closed 条件が宣言外の label を返した場合も必ずエラーになります。
+ルーティングが`__end__`にフォールスルーしました。最も可能性が高いのは、開始ノードからのエッジが欠落しているか、条件が`routes`マップにない値を返し、明示的な`"default"`ルートが`__end__`を指していることです。厳密なグラフでは、マップの順序によってルートを選択しなくなりました。オープンまたは未指定の条件は、宣言されている場合は`"default"`を使用し、それ以外の場合はエンジンがソースノード、条件、および返されたラベルとともに例外をスローします。クローズド条件は、宣言されたラベルの外側を返す場合、常に例外をスローします。
 
 ---
 
-## 次はどこへ
+## 次のステップ
 
-- [Python examples](../bindings/python/examples/) — 21 自己完結型
-  上記のすべての概念をカバーするスクリプト。
-- [C++ examples](../examples/) — 同じ構造を持つ 36 個のプログラム。
-- [`reference-en.md`](reference-en.md) — 網羅的なクラスごとの API。
-- [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 非同期 / コルーチンの詳細
-  層。
+- [Pythonの例](../bindings/python/examples/) — 上記のすべての概念を網羅する21の自己完結型スクリプト。
+- [C++の例](../examples/) — 同じ構造を持つ36個のプログラム。
+- [`reference-en.md`](reference-en.md) — クラスごとの網羅的なAPI。
+- [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 非同期/コルーチンレイヤーに関する詳細な解説。

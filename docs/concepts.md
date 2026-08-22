@@ -13,9 +13,9 @@ signatures and the public headers under `include/neograph/`).
 
 > **If you've used LangGraph before:** the primitives are intentionally
 > the same — channels with reducers, nodes that emit writes, conditional
-> edges, `Send`, `Command`, checkpoints. The differences are described in
-> [Comparison with LangGraph](../README.md#vs-langgraph) on
-> the README. The narrative below assumes nothing.
+> edges, `Send`, `Command`, checkpoints. The README summarizes NeoGraph's
+> [two runtime layers](../README.md#two-runtime-layers). The narrative below
+> assumes nothing.
 
 ---
 
@@ -663,13 +663,14 @@ contention on small fan-outs, so bench with both 1 and N.
 The Python binding doesn't expose those attributes. Use `result.output`,
 `result.interrupted`, `result.max_steps_exhausted`, and
 `result.execution_trace`. C++ callers can use `RunResult::status()` for the
-typed `Completed` / `Interrupted` / `StepLimit` view. See the table in the
-README's "Reading the output" section.
+typed `Completed` / `Interrupted` / `StepLimit` view. See the
+[Python binding guide](python-binding.md#hitl-and-state).
 
 ### "Unknown reducer: <name>"
 
-Two reducers ship: `overwrite` and `append`. Custom reducers require
-`ReducerRegistry::register_reducer` from C++ (no Python hook yet).
+Two reducers ship: `overwrite` and `append`. Register custom reducers before
+compilation through `ReducerRegistry::register_reducer` in C++ or
+`ng.ReducerRegistry.register_reducer` in Python.
 
 ### "The condition is registered but my conditional edge doesn't fire"
 

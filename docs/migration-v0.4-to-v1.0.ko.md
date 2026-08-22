@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=36f934aaee91b3681ee9fc75420af0dfdb05bde31c855a01258794c489291c25 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=d2b0e6c51e07b5877e07c5768ade91ce2129fec5f6441f92c7f7b8feae6026b9 -->
 # 이전 안내: 기존 8 가상 함수 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -224,8 +224,9 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 C++ 노드에서 사용 가능한 `in.ctx` 필드: `cancel_token`, `usage`, `thread_id`,
 `step`, `stream_mode`, `store`, `resume_value`, `deadline`, `trace_id`. 마지막 두
 필드는 `RunMetadata`에서 설정하며 엔진은 중첩 subgraph까지 보존한다. 체크포인트
-라우팅은 엔진 내부 구현이며 공개 `RunContext` 필드가 아니다. Python은 아직
-`deadline`, `trace_id`를 노출하지 않는다.
+라우팅은 엔진 내부 구현이며 공개 `RunContext` 필드가 아니다. Python은 `trace_id`,
+`run_id`, `model_token_budget`, `has_deadline`, `deadline_remaining_ms`를 노출한다.
+원시 C++ steady-clock 데드라인은 의도적으로 불투명하게 유지된다.
 
 ### `_full` 가상 함수 이전 — `co_return out;` 한 줄로 마무리
 

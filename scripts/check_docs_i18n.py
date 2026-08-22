@@ -37,7 +37,15 @@ MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
 def tracked_markdown() -> list[str]:
     result = subprocess.run(
-        ["git", "ls-files", "*.md"],
+        [
+            "git",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "*.md",
+        ],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -113,6 +121,44 @@ def add_navigation(text: str, navigation: str) -> str:
     lines[tail:tail] = [navigation, ""]
     rendered = "\n".join(lines)
     return rendered + ("\n" if text.endswith("\n") else "")
+
+
+def normalize_navigation(text: str, navigation: str) -> str:
+    """Replace translated/stale language labels while preserving link targets."""
+    targets = re.findall(r"\(([^)]+)\)", navigation)
+    lines = text.splitlines()
+    matches = [
+        index
+        for index, line in enumerate(lines)
+        if targets and all(f"({target})" in line for target in targets)
+    ]
+    if not matches:
+        return add_navigation(text, navigation)
+    lines[matches[0]] = navigation
+    for index in reversed(matches[1:]):
+        del lines[index]
+    rendered = "\n".join(lines)
+    return rendered + ("\n" if text.endswith("\n") else "")
+
+
+def synchronize_metadata(
+    source: str, locale: str, translated: str, manifest: dict
+) -> None:
+    source_text = (ROOT / source).read_text(encoding="utf-8")
+    path = ROOT / translated
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if lines and HEADER_RE.match(lines[0]):
+        lines = lines[1:]
+        if lines and not lines[0]:
+            lines = lines[1:]
+        text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    text = normalize_navigation(text, navigation_line(source, translated, manifest))
+    header = (
+        f"<!-- neograph-i18n: source={source} locale={locale} "
+        f"source_sha256={sha256(source_text)} -->"
+    )
+    path.write_text(f"{header}\n{text}", encoding="utf-8")
 
 
 def markdown_headings(text: str) -> list[tuple[int, int, str]]:
@@ -333,18 +379,34 @@ def main() -> int:
         action="store_true",
         help="insert source-heading anchors into existing translations",
     )
+    parser.add_argument(
+        "--write-metadata",
+        action="store_true",
+        help="refresh translation SHA metadata and normalize language navigation",
+    )
+    parser.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="limit write operations to this canonical source (repeatable)",
+    )
     args = parser.parse_args()
 
     manifest = load_manifest()
     files = tracked_markdown()
     sources = canonical_sources(files, manifest)
+    requested_sources = set(args.source)
+    unknown_sources = sorted(requested_sources - set(sources))
+    if unknown_sources:
+        parser.error(f"unknown canonical sources: {', '.join(unknown_sources)}")
+    write_sources = [source for source in sources if not requested_sources or source in requested_sources]
     strict = args.strict or manifest.get("strict", False)
     tracked = set(files)
     missing = []
     errors = []
 
     if args.write_navigation:
-        for source in sources:
+        for source in write_sources:
             path = ROOT / source
             text = path.read_text(encoding="utf-8")
             updated = add_navigation(text, navigation_line(source, source, manifest))
@@ -352,7 +414,7 @@ def main() -> int:
                 path.write_text(updated, encoding="utf-8")
 
     if args.write_heading_anchors:
-        for source in sources:
+        for source in write_sources:
             source_text = (ROOT / source).read_text(encoding="utf-8")
             for translated in translation_paths(source, manifest).values():
                 path = ROOT / translated
@@ -362,6 +424,13 @@ def main() -> int:
                 updated = add_source_heading_anchors(source_text, text)
                 if updated != text:
                     path.write_text(updated, encoding="utf-8")
+
+    if args.write_metadata:
+        for source in write_sources:
+            for locale, translated in translation_paths(source, manifest).items():
+                path = ROOT / translated
+                if path.exists():
+                    synchronize_metadata(source, locale, translated, manifest)
 
     expected_translations = set()
     for source in sources:

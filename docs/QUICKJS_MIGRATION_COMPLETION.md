@@ -1,5 +1,7 @@
 # QuickJS Migration Completion Runbook
 
+**Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
+
 **Status:** Proposed release-completion procedure. It is not evidence that any
 remaining gate has passed.
 

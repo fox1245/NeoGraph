@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=9e936b9adcdabe02b5173ddcdbea7246c3329915e68958acd7c3726c8e1ad55e -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=26de7309b7f766019fcfd7817d7f697ddb001ae663c127d72fee305abdf2a559 -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-二十八个脚本，端到端覆盖 binding surface。
+二十八个脚本覆盖了整个绑定表面的端到端应用。
 
 ## 设置
 
@@ -12,58 +12,58 @@ pip install neograph-engine python-dotenv
 cp .env.example .env  # edit OPENAI_API_KEY for examples that hit a real LLM
 ```
 
-`_common.py` 会从本目录或任意父目录自动加载 `.env`。需要 API key 的 examples 在缺少 key 时会干净跳过（不会崩溃）。
+`_common.py` 从此目录或任何父目录自动加载`.env`。需要 API 密钥的示例在密钥缺失时会优雅跳过（不会崩溃）。
 
 ## 索引
 
-| 编号 | 文件 | 网络 | 模式 |
+| # | 文件 | 网络 | Pattern |
 |---|------|---------|---------|
-| 01 | [`01_minimal.py`](01_minimal.py) | offline | `GraphNode` 子类 + `engine.run()`。最小有用图。 |
-| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | offline | `Tool` 子类 + 内置 `tool_dispatch`。手写 tool_call（无真实 LLM）。 |
-| 03 | [`03_send_fanout.py`](03_send_fanout.py) | offline | `run(input)` 返回带 `Send` list 的 `NodeResult` + `set_worker_count(4)`。Map-reduce。 |
-| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | offline | `engine.run_async` + 8 个并发 runs 的 `asyncio.gather` + `run_stream_async`。 |
-| 05 | [`05_openai_provider.py`](05_openai_provider.py) | **OpenAI** | `OpenAIProvider` + 内置 `llm_call` node。One-shot completion。 |
-| 06 | [`06_react_agent.py`](06_react_agent.py) | **OpenAI** | ReAct loop：`llm_call` ↔ `tool_dispatch`，带 `has_tool_calls` conditional。 |
-| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | 离线 | 带 mock LLM emitter 的两阶段 propose/approve workflow。 |
+| 01 | [`01_minimal.py`](01_minimal.py) | 离线 | `GraphNode` 子类 + `engine.run()`。最小的可用图形。 |
+| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | 离线 | `Tool` 子类 + 内置 `tool_dispatch`。手工构造的 tool_call（无真实LLM）。 |
+| 03 | [`03_send_fanout.py`](03_send_fanout.py) | 离线 | `run(input)` 返回 `NodeResult` 并带有 `Send` 列表 + `set_worker_count(4)`。映射归并。 |
+| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | 离线 | `engine.run_async` + `asyncio.gather`，共 8 个并发运行 + `run_stream_async`。 |
+| 05 | [`05_openai_provider.py`](05_openai_provider.py) | **OpenAI** | `OpenAIProvider` + 内置 `llm_call` 节点。一次性完成。 |
+| 06 | [`06_react_agent.py`](06_react_agent.py) | **OpenAI** | ReAct 循环:`llm_call` ↔ `tool_dispatch`，带 `has_tool_calls` 条件。 |
+| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | 离线 | 两阶段提出/批准工作流程，使用 mock LLM 发射器。 |
 | 08 | [`08_intent_routing.py`](08_intent_routing.py) | **OpenAI** | 分类器节点 + 条件边 → 数学 / 翻译 / 通用专家。 |
-| 09 | [`09_state_management.py`](09_state_management.py) | offline | `set_checkpoint_store(InMemoryCheckpointStore())` + `get_state` + `fork`。 |
-| 10 | [`10_command_routing.py`](10_command_routing.py) | offline | `run(input)` 返回 `Command(goto_node=…, updates=[…])`。 |
-| 11 | [`11_reflexion.py`](11_reflexion.py) | **OpenAI** | Actor + critic loop，带反思 prompt（Shinn et al. 2023）。 |
-| 12 | [`12_self_ask.py`](12_self_ask.py) | **OpenAI** | Self-Ask 后续问题分解（Press et al. 2022）。 |
-| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | 两个 debaters + judge。Debaters 通过 `Send` fan out。 |
-| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | offline | 将 graph definition 序列化到 `.json` 文件。 |
-| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | offline | 加载 `.json` graph 并运行（14 的 companion）。 |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **OpenAI WS** | Multi-turn Gradio chat，在 `조사해줘 / research / investigate` 时切换到并行 deep-research subgraph。使用 `SchemaProvider("openai_responses", use_websocket=True)`。需要 `pip install gradio`。 |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **OpenAI WS + Crawl4AI + Postgres** | 与 16 相同的 chat shape，但 researchers 会通过本地 Crawl4AI container（`docker run unclecode/crawl4ai`）实际搜索 web，状态持久化在 Postgres（`PostgresCheckpointStore`）。二者都可通过 env vars 选配；缺失时会优雅 fallback。Postgres 路径需用 `-DNEOGRAPH_BUILD_POSTGRES=ON` source-build。 |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True)` — 同一输入的第二次运行会在 0 ms 内 replay cached `NodeResult`，不调用 LLM。Stats 通过 `engine.node_cache_stats()` 查看。 |
-| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | offline | `from neograph_engine import message_stream` — 包装 callback，使 `LLM_TOKEN` events 以 LangChain-shape message dicts（`{role, content, content_so_far, node, metadata}`）到达。 |
-| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | offline | `from neograph_engine.tracing import otel_tracer` — 将 engine events bridge 到 OpenTelemetry spans。自带 ConsoleSpanExporter；可替换为 OTLP 发送到 Jaeger / Tempo / Honeycomb / Datadog。 |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — opt-in HTTP/2（libcurl）transport，对比默认 ConnPool（HTTP/1.1 keep-alive）。在 5-way parallel burst 上 A/B 两者，并打印哪个在 YOUR endpoint 上更快。默认 ConnPool 在 api.openai.com 上更快；当需要 CF-WAF compatibility、经 corporate proxies 降低 TCP fan-out，或需要 HTTP/3 时再切换。 |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | **OpenAI** | Goal-driven self-evolution：agent 运行，对照 JSON-shape goal 评分其输出，并请求 LLM 提出修订后的 graph definition。当 score ≥ 1.0 或达到 max_iters 时 loop 结束。演示 JSON-as-program，其中 modifier 的唯一输出是新的 graph spec。 |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | offline (mock) / **OpenAI** | Per-thread evolving chat agent：持久 multi-turn conversation；每轮之间，agent 的 JSON definition 会基于累计 history 重写。演示 evolution 期间的 checkpoint-resume（prior messages 保留）、`__graph_meta__` audit channel pattern，以及 validator boundary（whitelist node types、required channels、edge connectivity）。通过 deterministic mock provider + heuristic mock evolver，无 API key 也可端到端运行。 |
-| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | offline | The tool gate (#89)：每次 tool call 在 **任何 tool 运行前** 都会咨询 `engine.set_tool_gate(...)`，返回 Allow / Allow-with-rewritten-args / Deny / Interrupt。展示 canonical approval prompt — *"the agent wants to run `rm -rf build/`. Allow?"* — 以及关键点：当 human 决策时，无害的 sibling call **尚未** 运行，因此拒绝确实意味着什么都没发生，批准也不会重新运行它。 |
-| 25 | [`25_async_tools.py`](25_async_tools.py) | offline | Concurrent tools (#96)：使用 `ng.AsyncTool` 而不是 `ng.Tool`，三个 300 ms tools 用 0.30 s 而不是 0.90 s。同一次运行中也测量边界 — 三个 *CPU-bound* tools 花费单个 tool 的 3.2x 时间，因为 Python function 运行时持有 GIL，线程再多也改变不了。Concurrency 是 opt-in，因此现有 stateful tool 不会突然与自己 race。 |
-| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | offline | MCP (#95)：`ng.mcp.MCPClient(url).get_tools()` 拉取 remote tool catalogue，并直接交给 `NodeContext`。它会启动自己的 MCP server，因此无网络也能运行。重复的同名调用默认串行；线程化 demo 仅通过 `ToolExecutionPolicyRegistry` 显式将 `fetch` 标为 Reentrant，然后测量三个 0.4 s HTTP calls 在 0.41 s 内完成。stdio 也会多路复用 JSON-RPC ID，但重叠同时需要该 host policy 和并发 server。 |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | localhost | A2A hosting (#120)：官方 `a2a-sdk` 拥有 JSON-RPC、task state、agent card 和 cancellation。`ProtocolHostAdapter.stream()` 将 engine token events 映射为 chunked A2A artifacts，同时保留 checkpoint context。需要 Python 3.10+ 和 `pip install "neograph-engine[a2a]"`。 |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | stdio | ACP hosting (#120)：stream token updates，为 graph 保留 text/image/audio/resource content blocks，并在设置 `NEOGRAPH_ACP_POSTGRES_URL` 或 `NEOGRAPH_ACP_SQLITE_PATH` 时支持 durable `session/load`。需要 Python 3.10+ 和 `pip install "neograph-engine[acp]"`。 |
+| 09 | [`09_state_management.py`](09_state_management.py) | 离线 | `set_checkpoint_store(InMemoryCheckpointStore())` + `get_state` + `fork`. |
+| 10 | [`10_command_routing.py`](10_command_routing.py) | 离线 | `run(input)` 返回 `Command(goto_node=…, updates=[…])`。 |
+| 11 | [`11_reflexion.py`](11_reflexion.py) | **OpenAI** | Actor + critic 循环与反思提示(Shinn 等人，2023)。 |
+| 12 | [`12_self_ask.py`](12_self_ask.py) | **OpenAI** | Self-Ask 跟进问题分解(Press 等人，2022)。 |
+| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | 双辩论者 + 裁判。辩论者通过 `Send` 进行 fan-out。 |
+| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | 离线 | 将图定义序列化为 `.json` 文件。 |
+| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | 离线 | 加载一个`.json`图并运行它（14的配套）。 |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **OpenAI WS** | 多轮 Gradio 对话，在 `조사해줘 / research / investigate` 上切换到并行深度研究子图。使用 `SchemaProvider("openai_responses", use_websocket=True)`。需要 `pip install gradio`。 |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **OpenAI WS + Crawl4AI + Postgres** | 与16相同的聊天结构，但研究人员实际上通过本地Crawl4AI容器（`docker run unclecode/crawl4ai`）进行网络搜索，并且状态在Postgres（`PostgresCheckpointStore`）中持久化。两者均可通过环境变量可选配置；缺失时优雅降级。使用 `-DNEOGRAPH_BUILD_POSTGRES=ON` 进行源构建以启用Postgres路径。 |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True)` — 对相同输入的第二次运行在0毫秒内重放缓存的`NodeResult`，无需LLM调用。统计信息通过`engine.node_cache_stats()`获取。 |
+| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | 离线 | `from neograph_engine import message_stream` — 包装一个回调，使`LLM_TOKEN`事件以LangChain形状的消息字典（`{role, content, content_so_far, node, metadata}`）形式到达。 |
+| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | 离线 | `from neograph_engine.tracing import otel_tracer` — 将引擎事件桥接到OpenTelemetry spans。附带ConsoleSpanExporter；替换为OTLP以发送到Jaeger / Tempo / Honeycomb / Datadog。 |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — 可选 HTTP/2 (libcurl) 传输，对比默认 ConnPool（HTTP/1.1 keep-alive）。两者均在 5 路并行突发流量下进行 A/B 测试，并打印在您的端点上哪个更快。默认 ConnPool 在 api.openai.com 上更快；当您需要 CF-WAF 兼容性、通过企业代理降低 TCP fan-out，或需要 HTTP/3 时，请切换。 |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | **OpenAI** | 目标驱动的自我进化：智能体运行，将其输出与 JSON 形状的目标进行评分，并请求 LLM 提出修订后的图定义。当分数 ≥ 1.0 或达到 max_iters 时循环结束。演示了 JSON-as-program，其中修改器的唯一输出是新图规范。 |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | **OpenAI** | 每线程进化聊天智能体：持续的多轮对话；在轮次之间，智能体的 JSON 定义根据累积的历史被重写。演示了跨进化的检查点恢复（先前的消息得以保留）、`__graph_meta__` 审计通道模式，以及验证器边界（白名单节点类型、必需通道、边连接）。需要 `OPENAI_API_KEY`；没有它也会干净地退出。 |
+| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | 离线 | 工具门（#89）：`engine.set_tool_gate(...)` 在**任何工具运行之前**对每次工具调用进行咨询，返回 Allow / Allow-with-rewritten-args / Deny / Interrupt。展示了规范的批准提示 — *“智能体想要运行 `rm -rf build/`。允许吗？”* — 并且，关键在于，无害的兄弟调用在人类做决定时**尚未**运行，因此拒绝真的意味着什么都没发生，而批准也不会重新运行它。 |
+| 25 | [`25_async_tools.py`](25_async_tools.py) | 离线 | 并发工具（#96）：`ng.AsyncTool` 代替 `ng.Tool`，三个 300 毫秒的工具用时 0.30 秒而不是 0.90 秒。同时在同一次运行中测量边界 — 三个 *CPU-bound* 工具耗时是一个工具的 3.2 倍，因为 Python 函数在运行时持有 GIL，再多的线程也无法改变这一点。并发是可选的，因此现有有状态工具不会突然与自身产生竞态。 |
+| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | 离线 | MCP (#95)： `ng.mcp.MCPClient(url).get_tools()` 拉取远程工具目录并将其直接交给 `NodeContext`。它启动自己的 MCP 服务器，因此无需网络即可运行。重复的命名调用默认保持串行；线程化演示通过 `fetch` 显式标记为 Reentrant，经由 `ToolExecutionPolicyRegistry`，然后测量三次 0.4 秒的 HTTP 调用在 0.41 秒内完成。stdio 也会复用 JSON-RPC ID，但重叠需要同时具备该主机策略和并发服务器。 |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | 本地主机 | A2A 托管（#120）：官方 `a2a-sdk` 拥有 JSON-RPC、任务状态、智能体卡片和取消功能。`ProtocolHostAdapter.stream()` 将引擎 token 事件映射为分片的 A2A 工件，同时保留检查点上下文。需要 Python 3.10+ 和 `pip install "neograph-engine[a2a]"`。 |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | 标准输入输出 | ACP 托管（#120）：流式传输令牌更新，为图保留文本/图像/音频/资源内容块，并支持持久化 `session/load` 当 `NEOGRAPH_ACP_POSTGRES_URL` 或 `NEOGRAPH_ACP_SQLITE_PATH` 被设置时。需要 Python 3.10+ 和 `pip install "neograph-engine[acp]"`. |
 
-## 为什么 hosting 使用官方 SDKs
+## 为什么托管使用官方 SDK
 
-C++ library 有自己的 `A2AServer` 和 `ACPServer`，但直接暴露这些类会给 Python 用户第二套 protocol implementation，其集成弱于 Python 官方 SDKs。尤其是，官方 SDKs 已经拥有当前 wire-format compatibility、server transports、task 或 session lifecycle，以及 asyncio cancellation。NeoGraph 只提供这些 SDKs 无法提供的部分：一次带 checkpoint 感知的 C++ graph engine 调用。
+C++ 库拥有自己的 `A2AServer` 和 `ACPServer`，但直接暴露这些类会让 Python 用户获得第二个协议实现，且其与 Python 官方 SDK 的集成度更弱。特别是，官方 SDK 已经拥有当前的线格式兼容性、服务器传输、任务或会话生命周期，以及 asyncio 取消机制。NeoGraph 仅提供这些 SDK 无法提供的部分：对 C++ 图引擎的检查点感知调用。
 
-| Item | Decision |
+| 条目 | 决策 |
 |------|----------|
-| C++ feature that appears missing | `A2AServer`、`ACPServer` 及其 lifecycle methods 没有镜像为 Python classes。 |
-| Python alternative | 官方 `a2a-sdk` 1.x 和 `agent-client-protocol` 0.11.x server runtimes。 |
-| NeoGraph integration | `ProtocolHostAdapter` 将 protocol conversation IDs 映射到 `RunConfig.thread_id`，启用 `resume_if_exists`，stream `LLM_TOKEN` events，接受自定义 JSON-safe input payloads，并取消 active asyncio task。 |
-| Dependency policy | 两个 SDKs 都是 optional，因为它们需要 Python 3.10+，而 `neograph-engine` 支持 Python 3.9。安装 `neograph-engine[a2a]`、`neograph-engine[acp]` 或 `neograph-engine[protocols]`。 |
-| Durable ACP sessions | 为 wheel-supported durable backend 设置 `NEOGRAPH_ACP_POSTGRES_URL`。使用 `NEOGRAPH_BUILD_SQLITE=ON` 的 source builds 可设置 `NEOGRAPH_ACP_SQLITE_PATH`。agent 只有在配置其中之一时才宣告 `session/load`；新 session 在第一个 completed prompt 创建 checkpoint 后才可 load。Session IDs 是 server-generated capabilities，checkpoints 使用私有 `acp:` thread namespace。每个 session 保持一个 active agent process；checkpoint stores 不会跨进程序列化 concurrent writers。 |
-| Current limit | ACP editor callbacks（`fs/read_text_file`、terminal calls、permission prompts）目前还不能从共享 NeoGraph Python tool 安全调用：当前 `AsyncTool` 在 worker thread 上运行同步函数，并不携带当前 protocol session ID。伪造 bridge 会冒着调用错误 editor session 的风险。 |
-| Revisit direct bindings when | 用户必须在 Python 中嵌入确切的 C++ server，或者官方 SDK 路径无法保留所需的 NeoGraph cancellation、checkpoint、tracing 或 tool-call behavior。 |
+| 看似缺失的 C++ 功能 | `A2AServer`、`ACPServer`，且它们的生命周期方法未以 Python 类形式镜像。 |
+| Python 替代方案 | Official `a2a-sdk` 1.x 和 `agent-client-protocol` 0.11.x 服务器运行时。 |
+| NeoGraph 集成 | `ProtocolHostAdapter` 将协议会话ID映射到 `RunConfig.thread_id`，启用 `resume_if_exists`，流式传输 `LLM_TOKEN` 事件，接受自定义JSON安全输入载荷，并取消当前活动的asyncio任务。 |
+| 依赖策略 | 两个SDK都是可选的，因为它们需要Python 3.10+，而`neograph-engine`支持Python 3.9。请安装`neograph-engine[a2a]`、`neograph-engine[acp]`或`neograph-engine[protocols]`。 |
+| 持久 ACP 会话 | 为支持wheel的持久后端设置`NEOGRAPH_ACP_POSTGRES_URL`。使用`NEOGRAPH_BUILD_SQLITE=ON`的源码构建可设置`NEOGRAPH_ACP_SQLITE_PATH`。仅在配置了`session/load`时，代理才通告该属性；新会话在首次完成的提示创建检查点后才变为可加载。会话ID是服务器生成的凭证，检查点使用私有`acp:`线程命名空间。每个会话保持一个活动代理进程；检查点存储不跨进程序列化并发写入者。 |
+| 当前限制 | 尚无法从共享的NeoGraph Python工具安全地调用ACP编辑器回调（`fs/read_text_file`、终端调用、权限提示）：今日的`AsyncTool`在工作线程上运行同步函数，且不携带当前协议会话ID。伪造桥接可能错误地调用编辑器会话。 |
+| 重新审视直接绑定，当 | 用户必须在 Python 中嵌入完全相同的 C++ 服务器，否则官方 SDK 路径无法保留所需的 NeoGraph 取消、检查点、追踪或工具调用行为。 |
 
-`ProtocolHostAdapter.run_payload()` 会把任意 JSON-safe value 传给配置的 `input_builder`。默认 `message_input` 会把 rich content blocks 保持为 user message 的 `content`；如果 graph 的 provider 期望其他形状，应传入自定义 builder。`ProtocolHostAdapter.stream()` 先 yield `ProtocolStreamEvent(kind="token", ...)` values，最后恰好 yield 一个 final event。除非 `stream_node` 命名了其 tokens 正好构成最终答案的 graph node，否则 live tokens 会被禁用。这防止 planner/tool-node output 泄漏到 protocol response。asyncio consumer queue 有界（默认 1,024 chunks）；溢出会取消 engine run。Native stream events 会先被调度到 asyncio loop，因此这个 queue 是慢 protocol transport 的 backpressure，而不是对 unbounded native producer 的硬性进程级 memory cap。
+`ProtocolHostAdapter.run_payload()` 将任何 JSON 安全的值通过所配置的 `input_builder` 传递。默认的 `message_input` 将富内容块保留为用户消息的 `content`；如果某个图的提供方期望其他形状，则应传入自定义构建器。`ProtocolHostAdapter.stream()` 产生 `ProtocolStreamEvent(kind="token", ...)` 值，随后紧跟一个最终事件。实时 token 会被禁用，除非 `stream_node` 指定了其 token 恰好构成最终答案的图节点。这可防止规划器/工具节点的输出通过协议响应泄漏。asyncio 消费队列是有界的（默认 1,024 个块）；溢出将取消引擎运行。原生流事件首先调度到 asyncio 事件循环上，因此该队列是针对慢速协议传输的回压，而不是针对无界原生生产者的硬性整个进程级内存上限。
 
-运行任意一个：
+使用以下任一方式运行：
 
 ```bash
 python 01_minimal.py
@@ -71,23 +71,23 @@ python 01_minimal.py
 
 ## 心智模型
 
-从 Python 看，NeoGraph 像从 Python 看 LangGraph：由 nodes、带 reducers 的 channels、通过 `Send` 的 dynamic fan-out、通过 `Command` 的 routing overrides、通过命名 conditions（`route_channel`、`has_tool_calls` 等）的 conditional edges 组成的 graph。相同 primitives，相同 JSON-shaped graph definition。差异在于运行它的东西 — 一个 C++ engine，以每 step 微秒级完成 super-step loop、scheduling 和 checkpointing，而不是 LangGraph 的约 ~600 µs。
+从 Python 视角看，NeoGraph 类似于从 Python 视角看 LangGraph：一个由节点、带归约器的通道、通过 `Send` 实现的动态 fan-out、通过 `Command` 实现的路由覆盖，以及通过命名条件（`route_channel`、`has_tool_calls` 等）实现的边的图。使用相同的原语，相同的 JSON 形状的图定义。区别在于运行它的是什么——一个以每步几微秒执行超步循环、调度和检查点的 C++ 引擎，而 LangGraph 约为 600 µs。
 
-examples 中反复出现三种模式：
+三种模式贯穿于各示例中反复出现：
 
-1. **Python custom nodes**（01, 03, 04, 07, 09, 10, 11, 12, 13）继承 `neograph_engine.GraphNode` 并实现 `run(input)`。从 `input.state` 读取 channels，在存在时使用 `input.stream_cb`，并返回 writes、`Command`、`Send` 或 `NodeResult`。engine 在 GIL handling 下 dispatch 到 Python，因此并发 custom nodes 不会 deadlock。
+1. **Python 自定义节点**（01、03、04、07、09、10、11、12、13）继承 `neograph_engine.GraphNode` 并实现 `run(input)`。从 `input.state` 读取通道，在存在时使用 `input.stream_cb`，并返回写入、`Command`、`Send` 或 `NodeResult`。引擎在持有 GIL 的情况下调度进入 Python，从而并发自定义节点不会出现死锁。
 
-2. **Python tools**（02, 06, 07）继承 `neograph_engine.Tool`，并把实例传入 `NodeContext(tools=[…])`。engine 在 compile time 接管所有权；之后可以丢弃 Python references。
+2. **Python 工具**（02、06、07）继承 `neograph_engine.Tool` 并将实例传入 `NodeContext(tools=[…])`。引擎在编译时接管所有权；之后 Python 引用可以被释放。
 
-3. **Async**（04）— 每个 `*_async` binding 都返回绑定到调用线程 running loop 的 `asyncio.Future`。Stream callbacks 通过 `loop.call_soon_threadsafe` 跳到 loop thread，因此你的 `cb(ev)` 会在 asyncio 期望的位置运行。
+3. **异步**（04）— 每个`*_async`绑定返回绑定到调用线程运行循环的`asyncio.Future`。流回调通过`loop.call_soon_threadsafe`被转移到循环线程上，因此你的`cb(ev)`在asyncio期望的位置运行。
 
-## Graph 定义是 JSON
+## 图定义是 JSON
 
-`GraphEngine.compile(definition, ctx)` 接受你在代码中构造的 Python `dict`，或从文件 `json.loads()` 得到的 `dict` — 形状相同。Examples 14 + 15 展示 round-trip。Custom node *types* 仍需在代码中注册（Python classes 不能编码成 JSON），但 wiring — channels、nodes by type、edges、conditional edges — 是数据。
+`GraphEngine.compile(definition, ctx)` 接受两种形式：一个你在代码中构建的 Python `dict`，或者一个你从文件中 `dict` 的 `json.loads()` —— 两者形状相同。示例 14 和 15 展示了往返过程。自定义节点*类型*仍然需要在代码中注册（Python 类无法编码为 JSON），但连线——通道、按类型区分的节点、边、条件边——是数据。
 
-## 发行版名称 vs. import 名称
+## 发行名称 vs 导入名称
 
-PyPI package 是 **`neograph-engine`**（裸 `neograph` 名称已被 PyPI 上无关项目占用）。Python import name 是 `neograph_engine`：
+PyPI 上的包是 **`neograph-engine`**（裸名称 `neograph` 已在 PyPI 上被无关项目占用）。Python 导入名称为 `neograph_engine`：
 
 ```python
 import neograph_engine as ng

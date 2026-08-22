@@ -11,7 +11,7 @@ const frame = Number(process.argv[3] || 170);
 
 const PORT = Number(process.env.REMOTION_PORT || 45678);
 const serveUrl = await bundle({ entryPoint: abs("src/index.ts") });
-const composition = await selectComposition({ serveUrl, id: "PromoV2", port: PORT });
+const composition = await selectComposition({ serveUrl, id: "PromoV3", port: PORT });
 
 const chromiumOptions = { gl: "swiftshader", headless: true };
 

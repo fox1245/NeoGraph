@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "terms": [
+    {"source": "NeoGraph", "ko": "NeoGraph", "ja": "NeoGraph", "zh-CN": "NeoGraph"},
+    {"source": "GraphEngine", "ko": "GraphEngine", "ja": "GraphEngine", "zh-CN": "GraphEngine"},
+    {"source": "Core", "ko": "Core", "ja": "Core", "zh-CN": "Core"},
+    {"source": "ProgramRuntime", "ko": "ProgramRuntime", "ja": "ProgramRuntime", "zh-CN": "ProgramRuntime"},
+    {"source": "Program", "ko": "Program", "ja": "Program", "zh-CN": "Program"},
+    {"source": "QuickJS", "ko": "QuickJS", "ja": "QuickJS", "zh-CN": "QuickJS"},
+    {"source": "Hook", "ko": "Hook", "ja": "Hook", "zh-CN": "Hook"},
+    {"source": "runtime context", "ko": "런타임 컨텍스트", "ja": "ランタイムコンテキスト", "zh-CN": "运行时上下文"},
+    {"source": "Skill", "ko": "Skill", "ja": "Skill", "zh-CN": "Skill"},
+    {"source": "semantic validation", "ko": "의미 검증", "ja": "意味検証", "zh-CN": "语义验证"},
+    {"source": "admission", "ko": "승인(admission)", "ja": "admission", "zh-CN": "准入(admission)"},
+    {"source": "topology", "ko": "토폴로지", "ja": "トポロジー", "zh-CN": "拓扑"},
+    {"source": "checkpoint", "ko": "체크포인트", "ja": "チェックポイント", "zh-CN": "检查点"},
+    {"source": "replay", "ko": "재생(replay)", "ja": "リプレイ", "zh-CN": "重放"},
+    {"source": "fail closed", "ko": "실패 시 차단", "ja": "フェイルクローズ", "zh-CN": "失败时关闭"},
+    {"source": "fan-out", "ko": "fan-out", "ja": "fan-out", "zh-CN": "fan-out"},
+    {"source": "fan-in", "ko": "fan-in", "ja": "fan-in", "zh-CN": "fan-in"},
+    {"source": "human-in-the-loop", "ko": "Human-in-the-Loop", "ja": "Human-in-the-Loop", "zh-CN": "Human-in-the-Loop"},
+    {"source": "HITL", "ko": "HITL", "ja": "HITL", "zh-CN": "HITL"},
+    {"source": "sub-agent", "ko": "서브에이전트", "ja": "サブエージェント", "zh-CN": "子智能体"}
+  ]
+}

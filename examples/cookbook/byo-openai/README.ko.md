@@ -1,34 +1,26 @@
-<!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=ko source_sha256=837a72c1600b8f89e2a5600d0ea31ad8fb44f043e2e9c11d49ff18551164f306 -->
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
-
+<!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=ko source_sha256=812a1f340ed6b8f92ddd742cc1c8f239265b501fa010c81929825f0973738e38 -->
 # 나만의 OpenAI 클라이언트 가져오기
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-대부분의 프로덕션 Python 사용자는 이미 `openai.OpenAI()` 클라이언트를 보유하고 있습니다.
-자체 재시도, 사용자 지정 전송, 관찰 가능성 후크가 있는 인스턴스
-OpenRouter 라우팅. 이 요리책은 연결 방법을 보여줍니다.
-기존 클라이언트를 사용자 정의 `Provider`로 NeoGraph에 넣습니다.
-NeoGraph의 내장 `OpenAIProvider`.
+대부분의 프로덕션 Python 사용자는 이미 자체 재시도, 사용자 지정 전송, 관찰성 Hook 또는 OpenRouter 라우팅을 갖춘 `openai.OpenAI()` 클라이언트 인스턴스를 보유하고 있습니다. 이 cookbook은 기존 클라이언트를 사용자 지정 `Provider` 으로 NeoGraph에 연결하는 방법을 보여줍니다 — NeoGraph의 기본 제공 `OpenAIProvider`.
 
-비결: NeoGraph의 `Provider`는 v0.2.3+에서 Python 하위 클래스화 가능합니다.
-서브클래스의 `complete(params)`는 그래프 노드(LLMCallNode,
-ReAct 루프 등)은 내장 공급자와 같습니다.
+핵심: NeoGraph의 `Provider`은 v0.2.3 이상에서 Python 하위 클래스화가 가능합니다. 하위 클래스의 `complete(params)`는 내장 공급자와 마찬가지로 그래프 노드(LLMCallNode, ReAct 루프 등) 내부에서 실행됩니다.
 
-## 언제 어느 것을 사용할지
+## 어떤 것을 언제 사용할지
 
-|당신이 원하는|사용|
+| 원하는 것 | 사용하세요 |
 |---|---|
-|"고정 DeepSeek 경로를 OpenRouter로 사용하고 싶습니다"|공식 `openai` SDK를 사용하는 `OpenAISdkProvider`|
-|"재시도/Azure/프록시/후크가 포함된 `openai.OpenAI()`가 이미 설정되어 있습니다."|이 요리책(하위 클래스 `Provider`, 클라이언트에 위임)|
-|"공식 `openai` SDK를 통해 OpenRouter API를 사용하고 있습니다"|고정 DeepSeek 모델과 함께 이 요리책|
-|"테스트에서 LLM를 조롱하고 싶습니다"|결정론적 스텁이 포함된 이 요리책|
+| "OpenRouter를 통해 고정된 DeepSeek 라우트만 사용" | `OpenAISdkProvider` 공식 `openai` SDK와 함께 |
+| "재시도 / Azure / 프록시 / 훅이 설정된 `openai.OpenAI()`를 이미 보유함" | 이 쿡북(`Provider` 하위클래스화, 사용자 클라이언트에 위임) |
+| "공식 `openai` SDK를 통해 OpenRouter API를 사용 중" | 고정된 DeepSeek 모델이 포함된 이 쿡북 |
+| "테스트에서 LLM을 목킹하고 싶음" | 결정적 스텁이 포함된 이 쿡북 |
 
-요점: **NeoGraph의 그래프 엔진은 LLM 호출 방식에 신경 쓰지 않습니다.
-발생** — `params -> ChatCompletion`만 필요합니다.
+핵심: **NeoGraph의 그래프 엔진은 LLM 호출이 어떻게 이루어지는지 신경 쓰지 않습니다** — `params -> ChatCompletion`만 있으면 됩니다.
 
-## 60줄 안에 모든 내용이 담겨있습니다.
+## 60줄로 된 전체 코드
 
-[`hybrid.py`](hybrid.py)를 참조하세요. 주요 모양:
+[`hybrid.py`](hybrid.py)를 참조하세요. 핵심 형태:
 
 ```python
 import neograph_engine as ng
@@ -60,12 +52,9 @@ class OpenAISdkProvider(ng.Provider):
         return "openai-sdk"
 ```
 
-그게 다야. `OpenAISdkProvider(OpenAI(api_key=...))`를
-`NodeContext` 및 `llm_call` 노드를 사용하는 모든 NeoGraph 그래프는 라우팅됩니다.
-SDK를 통해 — 모든 재시도/Azure/관찰 가능성/프록시 유지
-SDK 클라이언트에 연결된 구성입니다.
+이것이 전부입니다. `OpenAISdkProvider(OpenAI(api_key=...))`를 `NodeContext`에 전달하면 `llm_call` 노드를 사용하는 모든 NeoGraph 그래프가 SDK를 통해 라우팅됩니다 — SDK 클라이언트에 연결된 모든 재시도 / Azure / 관측성 / 프록시 구성이 유지됩니다.
 
-## 달리다
+## 실행 ⟦3b22460e100a⟧ 출력:
 
 ```bash
 pip install neograph-engine>=0.2.3 openai
@@ -73,7 +62,7 @@ echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 python hybrid.py
 ```
 
-산출:
+출력:
 ```
 [hybrid] using openai SDK inside NeoGraph 0.2.3 graph
 [hybrid] running one llm_call through the OpenAI SDK provider
@@ -82,39 +71,25 @@ python hybrid.py
 [hybrid] provider.complete() called 1× via openai SDK
 ```
 
-내장된 `llm_call`는 공유 `NodeContext.instructions`를
-시스템 프롬프트. 다양한 그래프 단계가 필요한 경우 사용자 정의 노드 유형을 사용하십시오.
-다른 프롬프트.
+기본 `llm_call`는 공유 `NodeContext.instructions`를 시스템 프롬프트로 사용합니다. 그래프 단계마다 다른 프롬프트가 필요한 경우 사용자 지정 노드 유형을 사용하십시오.
 
-## 당신이 지키는 것
+## 유지하는 것
 
-- `openai.OpenAI()` 클라이언트의 `default_headers`, 재시도 정책,
-사용자 정의 `http_client=httpx.Client(...)`, Azure/프록시 구성.
-- `OpenAIObservabilityCallbacks` / `langfuse` / `helicone` /
-SDK 수준에 연결된 `weights & biases` 통합 —
-모든 통화를 차단합니다.
-- `usage`(토큰 수), 오류, 재시도에 대한 기존 추적입니다.
+- `openai.OpenAI()` 클라이언트의 `default_headers`, 재시도 정책, 커스텀 `http_client=httpx.Client(...)`, Azure / proxy 구성.
+- `OpenAIObservabilityCallbacks` / `langfuse` / `helicone` / `weights & biases` 통합은 SDK 수준에서 연결됩니다 — 모든 호출을 가로챕니다.
+- 기존의 `usage`(토큰 수) 추적, 오류, 재시도.
 
-## 포기하는 것 vs `neograph_engine.llm.OpenAIProvider`
+## `neograph_engine.llm.OpenAIProvider` 대비 포기하는 것
 
-- 기본 HTTP 경로(asio + 연결 풀) — 보다 ~1.5배 빠릅니다.
-SDK 및 GIL 경합이 없습니다. 병목 현상이 OpenAI 호출인 경우
-SDK는 괜찮습니다. 프레임워크 오버헤드인 경우 기본 프레임워크가 승리합니다.
+- 네이티브 HTTP 경로(asio + 연결 풀) — SDK보다 약 1.5배 빠르며 GIL 경합이 전혀 없음. 병목이 OpenAI 호출이라면 SDK로 충분하고, 프레임워크 오버헤드가 문제라면 네이티브 경로가 우세합니다.
 
-## 도구 호출 — 세 가지 작업 패턴
+## 도구 호출 — 세 가지 작동 방식
 
-공급자 트램펄린을 사용하면 `complete()`가 `tool_calls`를 깔끔하게 반환할 수 있습니다.
-현재 **작동하지 않는** 것은 C++ `tool_dispatch` 그래프 노드입니다.
-Python `Tool` 하위 클래스로 다시 호출 — 해당 경로 segfault
-(기존 문제, v0.3에서 추적됨) 오늘날에는 세 가지 패턴이 작동합니다.
+Provider 트램펄린을 통해 `complete()`가 `tool_calls`를 깨끗하게 반환할 수 있습니다. 현재 **작동하지 않는** 부분은 C++ `tool_dispatch` 그래프 노드가 Python `Tool` 하위 클래스를 다시 호출하는 경로입니다. 해당 경로는 세그폴트가 발생합니다(기존 문제, v0.3에서 추적 중). 오늘 작동하는 세 가지 패턴은 다음과 같습니다.
 
-### A. 에이전트 공급자(`byo-openai`에 권장)
+### A. 에이전트형 Provider(`byo-openai`에 권장)
 
-`complete()` **내부**에서 도구 루프를 수행합니다. 사용자의 `openai.OpenAI`
-클라이언트는 이미 도구 호출을 지원합니다. 에이전트 루프를 끝내도록 하세요.
-(Python에서는 호출 → 디스패치 → 결과 → 호출 → 텍스트) 및 반환만
-NeoGraph에 보내는 마지막 보조 메시지입니다. 그래프에는 정확히 하나가 표시됩니다.
-"턴"당 `complete()`, `tool_dispatch` 노드가 필요하지 않습니다.
+툴 루프를 **내부에서** 수행하세요 `complete()`. 사용자의 `openai.OpenAI` 클라이언트는 이미 tool-calling을 지원합니다; 에이전틱 루프(call → dispatch in Python → result → call → text)를 완료하고 NeoGraph에 최종 어시스턴트 메시지만 반환하게 하세요. 그래프는 "turn"당 정확히 하나의 `complete()`를 보며, `tool_dispatch` 노드가 필요하지 않습니다.
 
 ```python
 class AgenticOpenAIProvider(ng.Provider):
@@ -146,28 +121,16 @@ class AgenticOpenAIProvider(ng.Provider):
                                  "content":str(result)})
 ```
 
-트레이드오프: NeoGraph는 중간 단계를 볼 수 없습니다.
-도구 호출), 모든 SDK 동작을 유지하고 디스패치가 없습니다.
-경계 마찰.
+절충: NeoGraph는 중간 단계를 보지 못하지만(도구 호출별 체크포인트가 없음), 모든 SDK 동작을 유지하고 디스패치 경계 마찰이 없습니다.
 
-### B. C++ 도구 + Python 공급자
+### B. C++ 도구 + Python Provider
 
-내장된 C++ 도구(`neograph_engine.mcp`의 `MCPTool`,
-또는 디스패치 경로에 대한 다른 C++ 측 `Tool`) 및 Python
-LLM 호출에 대한 공급자입니다. 그래프의 `tool_dispatch` 노드 호출
-C++ 도구는 괜찮습니다. Python `Tool` 하위 클래스로 다시 호출하는 경우에만
-충돌.
+디스패치 경로에는 내장 C++ 도구(`MCPTool`에서 가져온 `neograph_engine.mcp`, 또는 다른 C++ 측 `Tool`)를 사용하고, LLM 호출에는 Python Provider를 사용한다. 그래프의 `tool_dispatch` 노드는 C++ 도구를 정상적으로 호출할 수 있지만, 이후 Python `Tool` 하위 클래스로의 콜백만 충돌이 난다.
 
-### C. 공급자는 tool_calls를 반환합니다. 사용자 정의 Python 노드 디스패치
+### C. Provider가 tool_calls를 반환합니다. 커스텀 Python 노드가 디스패치합니다.
 
-내장된 `tool_dispatch` 노드를 건너뜁니다. 나만의 글쓰기
-`messages[-1].tool_calls`를 읽고 호출하는 `@ng.node("dispatch")`
-Python 도구를 직접 사용하고 도구 결과 메시지를 작성합니다.
-뒤쪽에. 완전히 Python으로 유지됩니다.
+내장된 `tool_dispatch` 노드를 건너뜁니다. 직접 작성한 `@ng.node("dispatch")` 를 사용하여 `messages[-1].tool_calls`를 읽고, Python 도구를 직접 호출하며, 도구 결과 메시지를 다시 작성합니다. 전적으로 Python으로 유지됩니다.
 
-## A2A + 맞춤 공급자
+## A2A + 커스텀 Provider
 
-이 요리책은
-[ai-assembly cookbook](../ai-assembly/) — 각 멤버의 교체
-모든 SDK 수준을 얻으려면 `OpenAISdkProvider(...)`를 사용하는 공급자
-NeoGraph의 A2A 브리지를 사용하는 동안 모든 페르소나의 동작.
+이 쿡북은 [ai-assembly cookbook](../ai-assembly/)과 자연스럽게 구성됩니다. 각 구성원의 provider를 `OpenAISdkProvider(...)`로 교체하면 NeoGraph의 A2A 브리지를 사용하면서 모든 페르소나에 대해 SDK 수준의 동작을 모두 얻을 수 있습니다.

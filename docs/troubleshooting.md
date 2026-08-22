@@ -611,10 +611,10 @@ remains there as a documented limitation; v0.6+ candidate via an
 
 ### CMake configure: `Could NOT find SQLite3` on Windows
 
-The Windows wheel build sets `-DNEOGRAPH_BUILD_SQLITE=OFF` because
-SQLite isn't ABI-compatible across MSVC runtimes. If you're building
-from source on Windows for your own use, either install SQLite via
-vcpkg or pass `-DNEOGRAPH_BUILD_SQLITE=OFF` explicitly.
+The current Windows wheel enables SQLite and bundles the matching runtime DLL.
+For a custom source build, install SQLite through the same vcpkg/MSVC toolchain.
+If SQLite is intentionally unnecessary, pass `-DNEOGRAPH_BUILD_SQLITE=OFF`;
+do not mix a DLL built for an incompatible MSVC runtime.
 
 ### CMake configure: `Could NOT find CURL` on Linux
 

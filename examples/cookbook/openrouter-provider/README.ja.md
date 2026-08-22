@@ -1,24 +1,19 @@
-# NeoGraph + OpenRouter（固定 DeepSeek）
+<!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ja source_sha256=4d18b0fee54089948ca59063eb6177567e1b5db09a87123125e808bee6889add -->
+# NeoGraph + OpenRouter（ピン留めされた DeepSeek）
 
-**言語:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-NeoGraph のグラフを OpenRouter の固定モデル
-`~deepseek/deepseek-v4-flash-latest` に接続します。同じ API キー、モデル、
-明示的な zero-data-retention (ZDR) provider 優先設定を使う 2 つの
-Provider サーフェスを示します。
+OpenRouter のピン留めされた `~deepseek/deepseek-v4-flash-latest` モデルに対して NeoGraph グラフを実行します。このクックブックは、同じ API キー、モデル、および明示的なゼロデータ保持（ZDR）プロバイダー設定を持つ、等価な2つのプロバイダーサーフェスを示します:
 
-1. 組み込み `OpenAIProvider` で OpenRouter の OpenAI 互換 chat endpoint
-   を呼ぶ (`via_openai_compat.py`)
-2. 正規化された chat リクエストを直接送るカスタム Python `Provider`
-   (`via_http.py`)
+1. 組み込みの `OpenAIProvider` をOpenRouterのOpenAI互換チャットエンドポイント（`via_openai_compat.py`）に対して使用します。
+2. 正規化されたチャットリクエストを直接投稿するカスタムPython `Provider`（`via_http.py`）。
 
-後者は wire contract を明示しながら、NeoGraph の `Provider` trampoline
-が transport に依存しないことを示します。
 
-## パス A — 組み込み Provider
+2番目のパスは、NeoGraphの`Provider`トランポリンがトランスポート非依存である一方、ワイヤー通信の契約を明示的に保つことを示しています。
 
-`OpenAIProvider` は `/v1/chat/completions` を自動的に追加するため、
-`/v1` を含めない OpenRouter の API ベース URL を渡します。
+## Path A — 組み込みプロバイダー
+
+`OpenAIProvider` は `/v1/chat/completions` 自体を追加するため、ベアのOpenRouter APIベースURL（`https://openrouter.ai/api`）を渡してください。`/v1` サフィックスは渡さないでください:
 
 ```python
 from neograph_engine.llm import OpenAIProvider
@@ -30,14 +25,11 @@ provider = OpenAIProvider(
     provider_routing={"zdr": True},
 ```
 
-コード全体は [`via_openai_compat.py`](via_openai_compat.py) にあります。
+[`via_openai_compat.py`](via_openai_compat.py) を参照してください。
 
-## パス B — カスタム直接 HTTP Provider
+## Path B — カスタム直接 HTTP プロバイダー
 
-[`via_http.py`](via_http.py) は `Provider` をサブクラス化し、
-`https://openrouter.ai/api/v1/chat/completions` に POST します。
-`choices[0].message` と token usage を NeoGraph の応答へ写し、
-OpenRouter の ZDR provider 優先設定もリクエストに含めます。
+[`via_http.py`](via_http.py) は `Provider` をサブクラス化し、`https://openrouter.ai/api/v1/chat/completions` に投稿し、`choices[0].message` を `ChatCompletion` にマッピングし、トークン使用量を NeoGraph のレスポンスにコピーします。また、リクエストは OpenRouter に ZDR プロバイダーの優先設定も問い合わせます。
 
 ## 実行
 
@@ -48,12 +40,9 @@ python via_openai_compat.py
 python via_http.py
 ```
 
-どちらも厳密な 1 ノードグラフを構築し、同じ固定 DeepSeek モデルへ
-`llm_call` をルーティングします。system prompt は共有
-`NodeContext.instructions` から供給されます。キーがない場合は明確な
-エラーで終了し、live 経路が暗黙に mock へ切り替わることはありません。
+両方のデモは、厳格な単一ノードグラフを構築し、その`llm_call`を同じ固定されたDeepSeekモデル経由でルーティングします。共有の`NodeContext.instructions`がシステムプロンプトを供給します。キーが欠落している場合は、明確なメッセージとともに終了します。モックプロバイダーがライブプロバイダーのパスを静かに変更することはありません。
 
-## 出力形式
+## 出力形状
 
 ```text
 [openrouter] using ~deepseek/deepseek-v4-flash-latest via OpenAI-compatible path
@@ -61,16 +50,13 @@ python via_http.py
   assistant: Paris is the capital of France.
 ```
 
-実際の応答は変わります。直接 HTTP 経路は `via direct HTTP` を表示し、
-別の算術質問を使います。
+実際の完了は異なる。直接HTTPパスは`via direct HTTP`を出力し、独自の算術問題を使用する。
 
-## 2 つの経路を残す理由
+## なぜ両方のパスを維持するのか？
 
-- パス A は NeoGraph の native HTTP 実装と connection pool を使います。
-- パス B は custom header、transport ポリシー、応答変換をアプリ側で
-  所有する場合の最小例です。
-- 両方が同じ OpenRouter endpoint 系列、API キー、固定 DeepSeek モデルを
-  使うため、Provider サーフェスの比較が意味を持ちます。
+- パスAはNeoGraphのネイティブHTTP実装と接続プーリングを使用する。
+- Path Bは、アプリケーションコードが所有するカスタムヘッダー、転送ポリシー、または応答変換のための最小の例である。
+- 両方のパスは、まったく同じOpenRouterエンドポイントファミリー、APIキー、および固定されたDeepSeekモデルを使用するため、プロバイダーサーフェスの比較は有意義です。
 
-OpenRouter API のリクエスト/レスポンス形式:
+OpenRouter APIのリクエストおよびレスポンスの形状:
 <https://openrouter.ai/docs/api-reference/overview>

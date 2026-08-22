@@ -1,141 +1,93 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ko source_sha256=28ea3137d4e9a60940cf0193feba3c0bb112948387f6e46dcc95360ef28ce6e3 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ko source_sha256=9a8d8defc5b23d66cb6abe96f28e5a3dd82b273a8833a472cf355d9f5b836b35 -->
+# JARVIS 오케스트레이션 벤치마크 — NeoGraph vs LangGraph
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-# JARVIS 오케스트레이션 벤치마크 — NeoGraph 대 LangGraph
-
-
-동일한 토폴로지 미러링(마이크→stt→병합→메모리→라우터→4방향→synth/skip→커밋→tts)
-NeoGraph(C++ 모의 빌드) 및 LangGraph(Python 트윈 `langgraph_twin.py`)에서,
-동일한 제약 조건(`--cpus=2 --memory=2g`) 컨테이너에서 측정합니다.
+NeoGraph(C++ 목업 빌드)와 LangGraph(파이썬 트윈 `langgraph_twin.py`)에서 동일한 토폴로지(mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)를 미러링하고, 동일한 제약 조건(`--cpus=2 --memory=2g`) 컨테이너에서 측정합니다.
 
 ```bash
 OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
-## 과거 측정 결과 (2026-07-05, OpenRouter 전환 전; Groq)
+## 과거 결과(2026-07-05, OpenRouter 마이그레이션 이전; Groq)
 
-|미터법|네오그래프|랭그래프|델타|
+| 메트릭 | NeoGraph | LangGraph | 델타 |
 |---|---|---|---|
-|순수 그래프 overhead/turn (모의 0ms LLM, 200 회전)|**0.38ms**|3.07ms|+2.7ms(8.1×)|
-|Groq real inference/turn(8b 라우터+70b 신디사이저, 20턴)|684ms|706ms|+22ms(~3%)|
-|그로크 p99|775ms|870ms|+95ms(n=20, 노이즈 마진)|
-|콜드 스타트|7.9ms|716ms| ~90× |
-|RSS (모의)|7.5MB|68MB| ~9× |
+| 그래프 순수 오버헤드/턴(목업 0ms LLM, 200턴) | **0.38ms** | 3.07ms | +2.7ms (8.1×) |
+| Groq 실시간 추론/턴(8b 라우터+70b 합성, 20턴) | 684ms | 706ms | +22ms (~3%) |
+| Groq p99 | 775ms | 870ms | +95ms (n=20, 노이즈 마진) |
+| 콜드 스타트 | 7.9ms | 716ms | ~90× |
+| RSS (mock) | 7.5 MB | 68MB | ~9× |
 
 해석:
-- 그래프 엔진 자체는 양쪽에서 LLM에 비해 저렴합니다(0.4ms 대 3ms). Groq 델타 +22ms
-~19ms는 HTTP 클라이언트 스택 차이입니다(langchain-openai httpx+pydantic vs asio).
-- 회전 간 격차는 **성장형**입니다. 추론이 빨라질수록 커집니다. — 10% 이상
-200ms 회전(Cerebras 수준/단일 호출 경로), 로컬 소형 모델(~50ms/call)의 경우 20-30%.
-- 90× 시작 · 9× RSS는 추론 속도와 관련 없는 **고정 간격**입니다 — 즉시
-엣지 Always-On, 콜드 스타트, 멀티 테넌트(100 JARVIS = <1GB)와 관련됩니다.
+- 그래프 엔진 자체는 양측 모두 LLM에 비해 저렴하다(0.4ms 대비 3ms). Groq 델타는 약 19ms 중 +22ms로, HTTP 클라이언트 스택 차이(langchain-openai httpx+pydantic 대비 asio)에서 발생한다.
+- 턴 간 간격은 **성장형(growth-type)** — 추론 속도가 빨라지면 커진다 — 200ms 턴(Cerebras급 / 단일 호출 경로)에서 10%+, 소규모 로컬 모델(~50ms/호출)의 경우 20-30%.
+- 90× startup · 9× RSS는 **고정 격차**로 추론 속도와 무관하다 — 엣지 상시 가동 · 콜드 스타트 · 다중 테넌트(100 JARVIS = <1GB) 환경에서 즉시 관련성이 있다.
 
-## E2E 라운드 — 실제 MCP 도구 왕복 포함(2026-07-05)
+## E2E Round — 실제 MCP 도구 왕복(2026-07-05) 포함
 
 ```bash
 OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 ```
 
-공유 데모 MCP 서버 컨테이너(time/calc/weather) + 24회전 혼합 세트(직접 공구 호출 ·
-병렬 팬아웃 · 채팅 · 메모리 리콜), 각각 2라운드에 대한 ABBA 순서 인터리빙:
+공유 데모 MCP 서버 컨테이너(시간/계산/날씨) + 24턴 혼합 세트(직접 도구 호출 · 병렬 fan-out · 채팅 · 메모리 재생(replay)), 각각 2 라운드 동안이고 ABBA 순서 인터리빙:
 
-|라운드(실행 순서)|평균|p50|최대|메모|
+| 라운드(실행 순서) | 평균 | p50 | 최대 | 메모 |
 |---|---|---|---|---|
-|네오그래프 r1|810ms| 791 | 1052 | |
-|언어 그래프 r1|673ms| 667 | 934 | |
-|언어 그래프 r2|1442ms| 1025 | 3830 |마지막 7턴 2.4~3.8초 - Groq 스로틀 창|
-|네오그래프 r2|689ms| 665 | 983 |LG r2 직후 실행에도 불구하고 안정적|
+| NeoGraph | 810ms | 791 | 1052 |  |
+| langgraph 라운드 1 | 673ms | 667 | 934 |  |
+| GraphEngine | 1442ms | 1025 | 3830 | 지난 7턴 2.4~3.8초 — Groq 제한(스로틀) 구간 |
+| neograph 라운드 2 | 689ms | 665 | 983 | LG R2 직후 실행했음에도 안정적 |
 
-**결론: 이러한 조건(한국→Groq WAN, ~700ms/turn)에서 공급자 측
-분산(라운드 간 ±130~770ms)이 프레임워크 델타를 완전히 삼킵니다.
-(모의 측정 ~3ms + HTTP 스택 ~19ms).** 전환 순서가 승자를 뒤집었습니다 —
-e2e 턴 대기 시간은 프레임워크의 우월성을 결정할 수 없으며 제어된 모의만 확인할 수 있습니다.
-라운드에서는 고정 오버헤드와 startup/memory를 측정합니다. E2E 검증됨: 두 하네스 모두
-실제 도구로 올바르게 작동합니다(라우팅 모드는 21/24, direct/parallel 실제와 일치함).
-왕복), 시작 74ms 대 1944~2483ms, RSS 14MB 대 122MB가 확인되었습니다.
+**결론: 이러한 조건(한국→Groq WAN, 턴당 약 700ms)에서는 제공자 측 분산(라운드 간 ±130~770ms)이 프레임워크 차이(목 측정 약 3ms + HTTP 스택 약 19ms)를 완전히 삼켜버린다.** 실행 순서를 바꾸면 승자도 바뀜 — 종단 간 턴 지연시간으로는 프레임워크 우위를 판별할 수 없으며, 통제된 mock 라운드만이 고정 오버헤드와 시작/메모리를 측정합니다. 종단 간 검증 완료: 두 하네스 모두 실제 도구와 정확히 작동(라우팅 모드 일치 21/24, 직접/병렬 실제 왕복), 시작 시간 74ms vs 1944~2483ms, RSS 14MB vs 122MB 확인됨.
 
-의미: 프레임워크 차이는 **낮은 분산 +
-낮은 절대 대기 시간**(로컬 추론, 동일 데이터 센터 추론)
-"빠른 추론". WAN 전반의 클라우드 추론은 관계없이 네트워크를 지배하게 만듭니다.
-프레임워크의.
+시사점: 프레임워크 차이는 **낮은 분산으로 느 런과 낮은 절대 지연시간**(로컬 추론, 동일 데이터센터 추론)에서만 의미를 갖습니다 — 단순히 “빠른 추론”이 아니라. 클라우드 추론을 WAN으로 거치면 프레임워크와 무관하게 네트워크가 지배적이 됩니다.
 
-## 경계 측정 라운드 — 공급자 분산 제거(2026-07-05)
+## 경계 측정 라운드 — 제공자 분산 제거 (2026-07-05)
 
 ```bash
 OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
-프록시 경계 측정을 통해 E2E의 "분산이 델타를 삼키는" 문제를 해결합니다.
-**호출별 업스트림(WAN+Groq) 시간**을 기록하려면 Groq 앞에 nginx를 배치하고
-잔차만 비교합니다(그래프 + HTTP 클라이언트 직렬화 + 로컬 MCP + 파이프)
-왕복 왕복에서 뺀 후. 통계적 해결 방법이 아님(증가
-ABBA/재시도 횟수) 그러나 노이즈 소스 자체를 측정하고 빼는 결과
-라운드가 다른 Groq 창에 부딪히더라도 흔들리지 마십시오.
+제공자 분산이 “측정값을 삼키는” E2E 문제를 프록시 경계 측정으로 해결: Groq 앞에 nginx를 두어 **호출별 업스트림(WAN+Groq) 시간을 기록**하고, 턴 왕복에서 이를 뺀 나머지(그래프 + HTTP 클라이언트 직렬화 + 로컬 MCP + 파이프)만 비교한다. 통계적 우회(ABBA/재시도 횟수 증가)가 아니라 노이즈 원천 자체를 측정하고 빼는 방식이므로, 라운드가 서로 다른 Groq 구간에 걸쳐도 결과가 흔들리지 않는다.
 
-| |Avg/turn 업스트림|**잔여 p50**|잔여 p90|잔여 최소~최대|
+|  | 턴당 평균 업스트림 | **잔차 p50** | 잔차 p90 | 잔차 min~max |
 |---|---|---|---|---|
-|네오그래프|1613ms|**3.5ms**|19.1ms| 1.9~80.5 |
-|랭그래프|1417ms|**14.7ms**|25.1ms| 10.8~33.3 |
+| NeoGraph | 1613ms | **3.5ms** | 19.1ms | 1.9~80.5 |
+| LangGraph | 1417ms | **14.7ms** | 25.1ms | 10.8~33.3 |
 
-- 원시 벽시계에는 이번에 "LG가 189ms 더 빠릅니다"가 표시됩니다(Groq는 NG 라운드를 더 나쁘게 했습니다)
-창 — 업스트림 평균 +196ms). 잔여 쇼 **NG는 p50 -11.1ms** — 명확함
-잡음 방향에 관계없이 신호를 복원하는 방법을 시연합니다.
-- 잔여 p50은 모의 라운드 예측과 일치합니다(그래프 0.4 대 3.1ms + HTTP 스택 차이) —
-페이로드 교차 검증에 성공했습니다.
-- 콜‐턴 매핑은 **순서 기반**입니다(콜 횟수 확인 = 2×턴 횟수, 로그 순서 = 턴 순서).
-시간 창 매핑에는 다음과 같은 WSL2 벽시계 단계(실행 중 -0.8초 반전으로 측정됨)가 있습니다.
-대체 전용. 드라이버 타임스탬프도 단조로운 앵커에서 파생됩니다.
-- 트랩 노트: Groq(Cloudflare)는 403으로 `Python-urllib` UA를 차단합니다 — 실수하기 쉽습니다
-프록시 문제의 경우. 실제 연기 테스트는 curl/httpx-family UA를 사용합니다.
+- 원시 벽시계 시간은 이번에 "LG가 189ms 더 빠름"을 보여줍니다 (Groq이 NG에 더 나쁜 라운드 시간 창을 제공 — 업스트림 평균 +196ms). 잔차는 **NG p50 −11.1ms** — 측정 노이즈 방향과 무관하게 방법이 신호를 복원함을 보여주는 명확한 연관입니다. (correction: "신호을" → "신호를", "증시" → "증거", and "업스트림 젖요" (garbled) corrected to "업스트림 평균")
+- 잔차 p50은 mock 라운드 예측과 일치함 (그래프 0.4 대 3.1ms + HTTP 스택 차이) — 페이로드 교차 검증 성공.
+- Call↔turn 매핑은 **순서 기반**(호출 수 = 2×turn 수, 로그 순서 = turn 순서)이며, 시간 블록 매핑은 WSL2 wall-clock step(실행 중 −0.8초 역전 측정)을 fallback 전용으로 사용. Driver 타임스탬프도 monotonic anchor에서 파생.
+- 트랩 주의: Groq(Cloudflare)가 `Python-urllib` UA를 403으로 차단합니다 — 프록시 문제로 오인하기 쉽습니다. 실제 스모크 테스트는 curl/httpx 계열 UA를 사용합니다.
 
-## TTFT 라운드 스트리밍 (2026-07-05)
+## 스트리밍 TTFT 라운드 (2026-07-05)
 
-최신 LLM는 모든 스트림을 서비스하므로 벤치마크가 일치합니다. 두 신디 호출 모두 스트리밍으로 변경되었습니다.
-(C++ `invoke(p, on_chunk)`, 랭그래프 `SYNTH_LLM.stream()`),
-드라이버는 `[jarvis:ttft]` 마커를 사용하여 **턴-센드 → 첫 번째 신디사이저 토큰** 시간을 측정합니다.
-nginx는 `proxy_buffering off`를 통해 SSE를 전달하므로 `$upstream_header_time`는
-실제 첫 번째 바이트. 제거하기 위해 라운드당 별도의 로그(mv + `nginx -s reopen`)
-라운드 분할 추측.
+현대 LLM 서비스는 모두 스트리밍하므로 벤치마크도 그에 맞춘다: 두 synth 호출 모두 스트리밍으로 변경됨 (C++ `invoke(p, on_chunk)`, LangGraph `SYNTH_LLM.stream()`), 드라이버는 `[jarvis:ttft]` 마커로 **턴 전송 → 첫 synth 토큰** 시간을 측정. nginx는 `proxy_buffering off`로 SSE를 통과시키므로 `$upstream_header_time`가 실제 첫 바이트입니다. 라운드별 분리 로그 (mv + `nginx -s reopen`) 를 사용하여 라운드 분할 추측을 제거.
 
-| |인지된 TTFT p50|완료 시간 p50|Avg/turn 업스트림|
+|  | 인지된 TTFT p50 | 완료 시간 p50 | 턴당 평균 업스트림 |
 |---|---|---|---|
-|네오그래프|**631ms**|744ms|726ms|
-|랭그래프|**629ms**|723ms|753ms|
+| NeoGraph | **631ms** | 744ms | 726ms |
+| LangGraph | **629ms** | 723ms | 753ms |
 
-- **TTFT는 효과적으로 묶인 것으로 인식됩니다(델타 -2ms).** NeoGraph의 분명히 느린 TTFT
-이전(800 대 603)은 순수한 공급자 분산이었습니다. 이번에는 Groq가 두 가지 모두를 제공했습니다.
-공정한 창(업스트림 726 대 753)으로 격차를 제거합니다. "NG 라운드만 불운" 확인
-번식에 대한 의심.
-- **완료 시간 잔여(순수 프레임워크) 재현**: NeoGraph 4.1ms 대 LangGraph
-14.6ms(이전 프록시 라운드 3.5 대 14.7과 일치) 프레임워크 오버헤드
-결론은 확실하다.
-- **TTFT-residual은 ±tens ms 노이즈 내에서 0입니다**(음수도 나타납니다). 에 비해
-인지된 TTFT 625ms vs 업스트림 합 673ms, 2를 빼는 분해능(±50ms)
-독립 시계(클라이언트 단조 vs nginx 벽시계)가 프레임워크보다 큽니다.
-기여도(밀리초). 즉, **프레임워크 차이는 TTFT 경로의 관찰 한계보다 낮습니다**
-— 총 residual/mock에서만 신호가 노이즈 이상으로 나타납니다.
-- **Streaming benefit**: Perceived TTFT (631) ≪ completion time (744) — user starts hearing
-0.6초 안에 대답하세요. 대기하는 비스트리밍에 비해 체감 속도 향상 확인
-완료를 위해.
+- **인지된 TTFT가 사실상 동일(차이 −2ms).** 이전에 NeoGraph의 TTFT가 더 느렸던 것(800 vs 603)은 순수한 제공자 분산이었음 — 이번에는 Groq가 양쪽에 공정한 윈도우를 제공해(업스트림 726 vs 753) 간격이 사라졌음. "NG 라운드는 단지 불운"이라는 의심이 재현을 통해 확인됨.
+- **완료 시간 잔차(순수 프레임워크) 재현**: NeoGraph 4.1ms vs LangGraph 14.6ms (이전 프록시 라운드 3.5 vs 14.7과 일치). 프레임워크 오버헤드 결론은 확고함.
+- **TTFT-잔차는 ±수십 ms 노이즈 내에서 0입니다** (음수도 나타남). 인지된 TTFT 625ms 대 업스트림 합계 673ms와 비교 시, 두 독립적 클록(클라이언트 모노토닉 vs nginx 벽시계)을 빼는 해상도(±50ms)가 프레임워크 기여도(ms)보다 큽니다. 즉, **프레임워크 차이는 TTFT 경로의 관측 한계 미만입니다** — 신호는 총 잔여/모의에서만 노이즈 위에 나타납니다.
+- **스트리밍 이점**: 인지된 TTFT(631) ≪ 완료 시간(744) — 사용자는 0.6초 만에 답변 듣기를 시작합니다. 완료를 기다리는 비스트리밍 방식보다 인지된 속도 개선이 확인되었습니다.
 
-요약: 프레임워크 순수 성능은 NeoGraph(총 잔여·모의, 재현 가능)를 선호합니다.
-그러나 **TTFT는 스트리밍에 묶여 있고 공급자 분산이 지배적인 것으로 인식됩니다**. Edge/multi-tenant
-(90× 시작 · 9× RSS)은 NeoGraph의 실제 전장으로 남아 있습니다.
+요약: 프레임워크 순수 성능은 NeoGraph가 유리하며(총 잔차·모의(mock), 재현 가능), **TTFT는 스트리밍에서 동률이며 공급자 분산이 지배적입니다**. 엣지/멀티테넌트(시작 90배·RSS 9배)는 여전히 NeoGraph의 실제 전장입니다.
 
 ## 공정성 조건
 
-- 프롬프트(persona.txt 공유) · 결정 검증(채팅 다운그레이드) · 메모리 형식(JsonFileStore) ·
-축어적 가드 · stdout 마커가 동일합니다. 프레임워크와 언어만 다릅니다.
-- LangGraph 측은 관용적 스택(langgraph + langchain-openai)을 사용합니다.
-- 측정은 컨테이너 내부 `driver.py`(stdin 주입 → `[jarvis:tts]` 마커 왕복)입니다.
+- 프롬프트(persona.txt 공유) · 결정 검증(채팅 다운그레이드) · 메모리 형식(JsonFileStore) · 원문 보호 · stdout 마커 동일. 프레임워크와 언어만 다릅니다.
+- LangGraph 쪽은 관용적 스택(langgraph + langchain-openai)을 사용합니다.
+- 측정은 컨테이너 내부 측정 `driver.py` (stdin 주입 → `[jarvis:tts]` 마커 왕복).
 
 ## 파일
 
-- `langgraph_twin.py` — LangGraph 쌍(동일한 토폴로지·프로토콜, 실제 도구 호출을 통해)
-MCP_URL가 설정된 경우 공식 mcp SDK 영구 세션)
-- `driver.py` / `analyze.py` — 측정 · 비교표
+- `langgraph_twin.py` — LangGraph 트윈(동일 토폴로지·프로토콜, MCP_URL이 설정되면 공식 mcp SDK 영구 세션을 통한 실제 도구 호출)
+- `driver.py` / `analyze.py` — 측정 · 비교 표
 - `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — 벤치마크 이미지
-- `run_bench.sh`(코어) / `run_bench_e2e.sh`(실제 도구 E2E) — 러너
+- `run_bench.sh`(Core) / `run_bench_e2e.sh`(실제 도구 E2E) — 실행기
 - `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — 턴 세트
-- `../config-bench/` — 빈 카탈로그(채팅 경로 고정) /
-`../config-bench-e2e/` — 공유 MCP 서버 카탈로그
+- `../config-bench/` — 빈 카탈로그(채팅 경로 고정됨) / `../config-bench-e2e/` — 공유 MCP 서버 카탈로그

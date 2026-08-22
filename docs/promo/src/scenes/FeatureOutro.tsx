@@ -11,15 +11,15 @@ import { Kicker } from "../parts";
 // Scenes 5 + 6 merged so the chip grid → outro panel move is continuous
 // (matches the original, where the chips slide up as the panel rises).
 const CHIPS = [
-  "FAN-OUT",
-  "CHECKPOINTS",
-  "HITL",
-  "TIME-TRAVEL",
-  "STREAMING",
-  "SUBGRAPHS",
-  "MCP",
-  "A2A",
-  "MULTI-LLM",
+  "DURABLE PROGRAMS",
+  "TOPOLOGY SWAP",
+  "SUB-AGENTS",
+  "MANDATORY HOOKS",
+  "RUNTIME CONTEXT",
+  "SKILL INJECTION",
+  "HITL + REPLAY",
+  "PYTHON = C++",
+  "MCP · A2A · ACP",
 ];
 
 const COLW = 420;
@@ -58,7 +58,7 @@ export const FeatureOutro: React.FC<{ durationInFrames: number }> = ({
     <AbsoluteFill style={{ opacity: sceneOpacity }}>
       <div style={{ opacity: kickerOp }}>
         <Kicker centered top={120}>
-          ALL BUILT IN · NO ADAPTERS · NO PLUGIN BOILERPLATE
+          FAST CORE · DURABLE CONTROL · VERIFIED EVOLUTION
         </Kicker>
       </div>
 
@@ -166,7 +166,7 @@ export const FeatureOutro: React.FC<{ durationInFrames: number }> = ({
             color: "#7E8AA0",
           }}
         >
-          MIT · PYTHON 3.9 → 3.13 · LINUX / MACOS / WINDOWS · 397 TESTS GREEN
+          MIT · C++20 · PYTHON 3.9 → 3.13 · LINUX / MACOS / WINDOWS
         </div>
       </div>
     </AbsoluteFill>

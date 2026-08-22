@@ -1,33 +1,27 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=0972b9d4c384152233869c6375839d3a0469e17124fb375a7352ed453ce486ae -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3d95cddd2a9d9ff0c7b8028968a5bfab4c44b404af3eff0115f8edfb25a7f1cc -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
+进入示例之前请先阅读本文。它按照您自己构建心智模型的顺序来建立该模型：图 → 通道 → 节点 → 边 → fan-out → 路由覆盖 → 检查点 → 流式处理。
 
+代码示例采用 Python 侧编写，因为其更简洁；所有内容均与 C++ API 一一对应（有关类签名，请参阅 [`reference-en.md`](reference-en.md) 以及 `include/neograph/` 下的公共头文件）。
 
-在深入示例之前先阅读一遍本文。它按照你自己构建思维模型的顺序构建思维模型：图→通道→节点→边→扇出→路由覆盖→检查点→流。
-
-代码示例是 Python 端的，因为它们更简洁；一切都 1:1 映射到 C++ API（类签名见 [`reference-en.md`](reference-en.md)，公开头文件位于 `include/neograph/`）。
-
-> **如果你用过 LangGraph：** 这里的基本原语有意保持相同：
-> 带归约器的通道、发出写入的节点、条件边、`Send`、`Command`、
-> 检查点。差异见 README 的
-> [与 LangGraph 对比](../README.md#vs-langgraph)。
-> 下面的叙述不假设你已有背景。
+> **如果你之前用过 LangGraph：** 这些原语有意保持一致——带 reducer 的通道、发出写入的节点、条件边、`Send`、`Command`、检查点。README 总结了 NeoGraph 的[两个运行时层](../README.md#two-runtime-layers)。下面的叙述不假设任何前提。
 
 ---
 
 ## 目录
 
-（第 8.5 节在 v0.6.0 中添加 —`Tracing — OpenTelemetry + Phoenix / Langfuse`。编号标题保持 1-9，以保持外部文档链接稳定； 8.5 位于流式传输和常见陷阱之间。）
+（第 8.5 节在 v0.6.0 中添加——`Tracing — OpenTelemetry + Phoenix / Langfuse`。编号标题保持 1-9 以保持外部文档链接稳定；8.5 位于 Streaming 和 Common pitfalls 之间。）
 
 
-1. [大局观](#1-the-big-picture)
-2. [通道和归约器](#2-channels--reducers)
+1. [整体概览](#1-the-big-picture)
+2. [通道与 reducer](#2-channels--reducers)
 3. [节点](#3-nodes)
-4. [边和条件路由](#4-edges--conditional-routing)
-5. [Send — 动态扇出](#5-send--dynamic-fan-out)
-6. [命令-路由覆盖+状态补丁](#6-command--routing-override--state-patch)
+4. [边与条件路由](#4-edges--conditional-routing)
+5. [Send — 动态 fan-out](#5-send--dynamic-fan-out)
+6. [Command — 路由覆盖 + 状态补丁](#6-command--routing-override--state-patch)
 7. [检查点、中断、HITL](#7-checkpoints-interrupts-hitl)
 8. [流式事件](#8-streaming-events)
 9. [常见陷阱](#9-common-pitfalls)
@@ -35,18 +29,18 @@
 ---
 
 <a id="1-the-big-picture"></a>
-## 1. 大局观
+## 1. 总体概览
 
-一个 NeoGraph **图**有四件事：
+一个 NeoGraph **图**由四部分组成：
 
-|事物|它是什么|定义为|
+| 部分 | 它是什么 | 由……定义 |
 |---|---|---|
-|**通道**|处于共享状态的命名槽。每个都有一个归约器，定义新写入如何与现有值结合。| `definition["channels"]` |
-|**节点**|读取状态、发出写入的函数（以及可选的`Send` / `Command`）。| `definition["nodes"]` |
-|**边**|静态下一个节点指针。| `definition["edges"]` |
-|**条件边**|谓词驱动的路由——根据状态选择几个下一个节点之一。| `definition["conditional_edges"]` |
+| **通道** | 共享状态中的命名槽位。每个都有一个归约器，定义新写入如何与现有值组合。 | `definition["channels"]` |
+| **节点** | 读取状态、发出写入（并可选择`Send` / `Command`）的函数。 | `definition["nodes"]` |
+| **边** | 静态下一节点指针。 | `definition["edges"]` |
+| **条件边** | 谓词驱动的路由——基于状态从多个下一节点中选择一个。 | `definition["conditional_edges"]` |
 
-执行是一个**超级步循环**：
+执行是一个**超步循环**：
 
 ```
 1. ready_set = nodes routed from __start__
@@ -57,14 +51,14 @@
    d. plan_next_step → new ready_set
 ```
 
-超级步是并行性、检查点和流事件的单位。可以“立即”运行的两个节点是相同的超级步；当步骤结束时，他们观察到相同的输入状态，并且他们的写入通过归约器组合。
+超步是并行、检查点和流式事件的单位。两个可以在“现在”同时运行的节点属于同一个超步；它们观察到相同的输入状态，其写入在步骤结束时通过归约器组合。
 
 ---
 
 <a id="2-channels--reducers"></a>
-## 2. 通道和归约器
+## 2. 通道与归约器
 
-每个状态都存在于一个命名通道中。通道跨节点和跨超级步持续存在；节点通过写入来进行通信。
+每一份状态都存在于一个命名通道中。通道跨节点和超步持久存在；节点通过写入通道进行通信。
 
 ### 定义通道
 
@@ -78,28 +72,23 @@
 
 ### 内置归约器
 
-|归约器|新的写入语义|典型用途|
+| 归约器 | 新写入语义 | 典型用途 |
 |---|---|---|
-| `"overwrite"` |新值替换旧值。最后写入者在并行写入中获胜。|单值暂存（当前节点、当前问题、路由提示）。|
-| `"append"` |新列表（必须是列表！）连接到现有列表。顺序：先上一步的值，此步骤按节点执行顺序写入附加内容。|对话消息、搜索结果、扇出集合。|
+| `"overwrite"` | 新值替换旧值。并行写入时后写者胜。 | 单值暂存（当前节点、当前问题、路由提示）。 |
+| `"append"` | 新列表（必须是列表！）被级联到现有列表。顺序：先前步骤的值在前，本步骤的写入按节点执行顺序追加。 | 对话消息、搜索结果、fan-out 收集。 |
 
->两个归约器都注册在`ReducerRegistry::ReducerRegistry()`
->引擎启动时（[`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)）。
->自定义归约器通过 C++ 注册`ReducerRegistry::register_reducer(name, fn)`
->或来自 Python（自 v0.1.9 起）：
+> 两个 reducer 都在引擎启动时于 `ReducerRegistry::ReducerRegistry()` 中注册（[`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)）。自定义 reducer 通过 C++ 的 `ReducerRegistry::register_reducer(name, fn)` 或 Python（自 v0.1.9 起）注册：
 >
 > ```python
 > ng.ReducerRegistry.register_reducer("sum",
 >     lambda current, incoming: (current or 0) + incoming)
 > ```
 >
->Python 可调用运行在GIL;并发发送扇出
->以与 Python 自定义节点相同的方式对其进行序列化。重新注册
->名称取代了以前的归约器。
+> Python 可调用对象在 GIL 下运行；并发 Send fan-out 会像 Python 自定义节点一样在其上串行化。重新注册名称会替换之前的 reducer。
 
 ### 写入通道
 
-一个节点返回一个列表`ChannelWrite`s:
+节点返回一个 `ChannelWrite` 列表：
 
 ```python
 return [
@@ -108,9 +97,9 @@ return [
 ]
 ```
 
-值的形态必须与归约器匹配：
-- `"append"`→ 必须是一个列表（将被连接）。
-- `"overwrite"`→ 任意JSON- 可序列化的值。
+值的形状必须与 reducer 匹配：
+- `"append"` → 必须是列表（将被拼接）。
+- `"overwrite"` → 任何可 JSON 序列化的值。
 
 ### 从节点读取状态
 
@@ -121,31 +110,31 @@ def run(self, input):
     ...
 ```
 
-`state.get(channel)`返回通道的当前值，或者`None`如果通道存在但尚未写入。对于聊天消息的键入访问，`state.get_messages()`返回`list[ChatMessage]`（解析自`messages`通道）——内部使用`llm_call`。
+`state.get(channel)` 返回通道的当前值，如果通道存在但尚未被写入，则返回 `None`。对于聊天消息的类型化访问，`state.get_messages()` 返回 `list[ChatMessage]`（从 `messages` 通道解析）——由 `llm_call` 内部使用。
 
 ### 版本
 
-每个通道都承载一个单调的`version`数字。引擎使用它来进行检查点比较和`state.channel_version(name)`检查API。你通常不会直接阅读它。
+每个通道携带一个单调递增的 `version` 编号。引擎将其用于检查点差异比较和 `state.channel_version(name)` 检查 API。你通常不会直接读取它。
 
 ---
 
 <a id="3-nodes"></a>
 ## 3. 节点
 
-注册节点类型的三种方法，按控制顺序递增：
+注册节点类型的三种方式，按控制程度递增排列：
 
 ### 3.1 内置节点
 
-| `type`（在JSON）|它的作用|配置|
+| `type`（JSON 格式） | 功能 | 配置 |
 |---|---|---|
-| `llm_call` |调用 `provider->complete_async(messages, tools)`并将助理消息附加到`messages`。|读`provider`, `model`, `instructions`, `tools`从`NodeContext`。|
-| `tool_dispatch` |查看最新的助理消息`tool_calls`，通过 `Tool::execute` 执行每个调用, 附加`{role: "tool", tool_call_id, content}`结果。|读`tools`从`NodeContext`。|
-| `intent_classifier` | LLM将用户意图分类为 N 个标签之一，并将所选标签写入`__route__`。与 `route_channel` 条件配合使用。| `extra_config: {labels, prompt_template}` |
-| `subgraph` |将另一个图嵌入为单个节点。内部状态通过配置的键重新映射进行映射。| `extra_config: {graph_def, input_keys, output_keys}` |
+| `llm_call` | 调用 `provider->complete_async(messages, tools)` 并将助手消息追加到 `messages`。 | 读取`provider`、`model`、`instructions`、`tools`自`NodeContext`。 |
+| `tool_dispatch` | 查看最新助手消息的 `tool_calls`，通过 `Tool::execute` 执行每一项，追加 `{role: "tool", tool_call_id, content}` 结果。 | 读取 `tools` 从 `NodeContext`. |
+| `intent_classifier` | LLM 将用户意图分类为 N 个标签之一，并将所选标签写入 `__route__`。与 `route_channel` 条件配对使用。 | `extra_config: {labels, prompt_template}` |
+| `subgraph` | 将另一个图嵌入为单个节点。内部状态通过配置的键映射进行映射。 | `extra_config: {graph_def, input_keys, output_keys}` |
 
-### 3.2 的`@ng.node`装饰器（仅限 Python）
+### 3.2 `@ng.node` 装饰器（仅限 Python）
 
-定义只写节点的最短方法：
+定义只写节点的最短方式：
 
 ```python
 @ng.node("greet")
@@ -155,11 +144,11 @@ def greet_node(state):
         [{"role": "assistant", "content": f"Hello, {name}!"}])]
 ```
 
-修饰函数必须返回`list[ChannelWrite]`（或者`None`，视为`[]`）。它不能发射`Send`或者`Command`- 对于那些，子类`GraphNode`。
+被装饰的函数必须返回一个 `list[ChannelWrite]`（或 `None`，视为 `[]`）。它不能发出 `Send` 或 `Command`——对于这些情况，请继承 `GraphNode`。
 
-### 3.3 完整`GraphNode`子类
+### 3.3 完整的 `GraphNode` 子类
 
-覆盖`run(input)`以实现完全控制。它在 v0.4.0 中引入，是 v0.9.0 以后唯一的自定义节点入口点——一个方法，一个签名：
+重写 `run(input)` 以获得完全控制。它于 v0.4.0 中引入，并且从 v0.9.0 起是唯一的自定义节点入口点——一个方法，一个签名：
 
 ```python
 class Researcher(ng.GraphNode):
@@ -183,17 +172,13 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python 在 `input.ctx` 上暴露 `cancel_token`、`thread_id`、`step`、`stream_mode`、
-`store` 和 `resume_value`。C++ 调用方可以在 `RunMetadata` 中设置 `deadline` 和
-`trace_id`，引擎会将它们传播到嵌套 subgraph。这两个字段目前仍未暴露给 Python 绑定。
+Python 暴露了 `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`，以及 `resume_value` 在 `input.ctx`上。C++ 调用者可以在 `deadline` 和 `trace_id` 上设置 `RunMetadata`；引擎会将它们传播到嵌套子图中。这两个字段尚未通过 Python 绑定暴露。
 
-你也可以返回裸 `list[ChannelWrite]`当你不需要的时候`Send`或者`Command`— 绑定将其提升到`NodeResult`自动地。
+您也可以返回一个裸的 `list[ChannelWrite]` 当您不需要 `Send` 或 `Command` — 绑定时会自动将其提升为一个 `NodeResult` 。
 
->**从 v0.3.x 迁移：** 已移除的 v0.4 之前多入口节点 API 只有一种替代方式：
->覆盖 `run(input)`。从 `input.state` 读取状态，非 None 时通过
->`input.stream_cb` 发出令牌，并从 `input.ctx.cancel_token` 读取取消令牌。
+> **从 v0.3.x 迁移：** 已移除的 pre-v0.4 多入口节点 API 有一个替代方案：重写 `run(input)`。从 `input.state` 读取状态，当非 None 时通过 `input.stream_cb` 发出令牌，并从 `input.ctx.cancel_token` 读取取消令牌。
 
-注册类型，以便JSON loader 可以实例化它：
+注册该类型，以便JSON加载器可以实例化它：
 
 ```python
 ng.NodeFactory.register_type(
@@ -202,11 +187,11 @@ ng.NodeFactory.register_type(
 )
 ```
 
-工厂看到`(name, per-node config, NodeContext)`因此同一个类可以用不同的配置以多个名称实例化。
+工厂会看到 `(name, per-node config, NodeContext)`，因此同一个类可以在多个名称下以不同配置实例化。
 
-### 3.4 工具（单独的概念，由 `tool_dispatch` 使用）
+### 3.4 工具（独立概念，由 `tool_dispatch` 使用）
 
-`Tool`不是一个节点——它是供 `tool_dispatch` 调用的对象。子类`ng.Tool`，重写三个方法，将实例传入`NodeContext(tools=[…])`：
+`Tool` 不是节点——它是 `tool_dispatch` 调用的东西。继承 `ng.Tool`，重写三个方法，将实例传入 `NodeContext(tools=[…])`：
 
 ```python
 class CalcTool(ng.Tool):
@@ -215,12 +200,12 @@ class CalcTool(ng.Tool):
     def execute(self, args):  return str(args["x"] * 2)
 ```
 
-引擎在编译时获得工具列表的所有权——之后你的本地引用可能会被删除。
+引擎在编译时获得工具列表的所有权——你的本地引用之后可以释放。
 
 ---
 
 <a id="4-edges--conditional-routing"></a>
-## 4. 边和条件路由
+## 4. 边与条件路由
 
 ### 静态边
 
@@ -232,11 +217,11 @@ class CalcTool(ng.Tool):
 ]
 ```
 
-来自同一源节点的多个边呈扇形散开（每个后继者都进入下一个超级步的就绪集）。从一个超级步到同一目标的两条边将重复数据删除到目标的一次执行。
+来自同一源节点的多条边fan-out（每个后继者进入下一个超级步骤的ready集合）。从一个超级步骤到同一目标的两条边会去重为对目标的一次执行。
 
 ### 条件边
 
-条件边运行**命名条件**，并从 `routes` 映射中选择下一个节点：
+条件边运行一个**命名条件**，并从 `routes` 映射中选择下一个节点：
 
 ```python
 "conditional_edges": [
@@ -248,14 +233,14 @@ class CalcTool(ng.Tool):
 ]
 ```
 
-条件名称解析为`ConditionFn`已在引擎中注册。内置两个条件：
+条件名称解析为引擎中注册的`ConditionFn`。两个作为内置项提供：
 
-|条件|返回|何时使用|
+| 条件 | 返回值 | 何时使用 |
 |---|---|---|
-| `has_tool_calls` | `"true"`如果最新的助手消息非空`tool_calls`; `"false"`否则。| ReAct循环 — 继续调度工具，直到LLM 停止请求。|
-| `route_channel` |无论字符串中是什么`__route__`通道;回落至`"default"`。|配对`intent_classifier`用于显式意图路由。|
+| `has_tool_calls` | `"true"` 如果最新的助手消息具有非空的 `tool_calls`; `"false"` 否则。 | ReAct 循环 — 持续调度工具，直到LLM停止请求。 |
+| `route_channel` | `__route__`通道中的任何字符串；回退到`"default"`。 | 与`intent_classifier`配对使用，以实现显式意图路由。 |
 
-自定义条件通过 C++ 注册`ConditionRegistry::register_condition(name, fn)`或来自 Python（自 v0.1.9 起）：
+自定义条件通过C++的`ConditionRegistry::register_condition(name, fn)`或Python（自v0.1.9起）注册：
 
 ```python
 def is_long(state):
@@ -265,11 +250,11 @@ def is_long(state):
 ng.ConditionRegistry.register_condition("is_long", is_long)
 ```
 
-可调用对象接收实时 `GraphState`（所以`state.get(channel)`和`state.get_messages()`工作）并且必须返回与条件边之一匹配的字符串`routes`键。
+可调用对象接收实时的`GraphState`（因此`state.get(channel)`和`state.get_messages()`可以工作），并且必须返回一个与条件边的`routes`键之一匹配的字符串。
 
-### 两种等效形式 — 均自 v0.1.8 起生效
+### 两种等效形式——自 v0.1.8 起均可用
 
-条件边可能位于`edges`数组（带有`condition`字段）**或**在单独的`conditional_edges`块。两种形式均被接受；选择更清晰的一个：
+条件边可以位于`edges`数组内部（带有`condition`字段）**或**在单独的`conditional_edges`块中。两种形式都被接受；选择更清晰的一种：
 
 ```python
 # Form A — top-level (LangGraph parity, recommended for Python)
@@ -283,17 +268,14 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 ]
 ```
 
->**历史：** 之前，形式 A 已被图形编译器默默删除
->v0.1.8——README每个 Python 示例都使用了它，所以ReAct循环
->退化为单次 LLM 调用。已在提交中修复`e23a523`。如果你
->在 ≤ 0.1.7 的轮子上看到这个，升级。
+> **历史：** 在v0.1.8之前，形式A被图编译器静默丢弃——README和每个Python示例都使用它，因此ReAct循环退化为单次LLM调用。在提交`e23a523`中修复。如果你在≤0.1.7的wheel上看到此问题，请升级。
 
 ---
 
 <a id="5-send--dynamic-fan-out"></a>
-## 5.Send — 动态扇出
+## 5. 发送 — 动态fan-out
 
-`Send`适用于下一步节点数量取决于状态的情况。经典用法：将搜索主题列表拆分为 N 个并行的研究人员调用。
+`Send`适用于下一步节点数量取决于状态的情况。经典用法：将搜索主题列表拆分为N个并行的研究者调用。
 
 ```python
 class Planner(ng.GraphNode):
@@ -305,15 +287,15 @@ class Planner(ng.GraphNode):
         )
 ```
 
-引擎的`run_sends_async`实例化`researcher`每个 `Send`，每个都有自己的`state.get("topic")`，并通过 `asio::experimental::make_parallel_group` 并行运行它们。
+引擎的 `run_sends_async` 实例化 `researcher` 每个 `Send`一次，每个都有其自己的 `state.get("topic")`，并通过 `asio::experimental::make_parallel_group` 并行运行它们。
 
 ### 心智模型
 
-`Send(target, payload)`是“实例化`target`使用此状态补丁并将其添加到就绪集中”。在目标看到之前，有效负载将作为状态写入应用`state`。
+`Send(target, payload)`是“用此状态补丁实例化`target`并将其添加到就绪集合”。在目标看到`state`之前，负载作为状态写入被应用。
 
-并行组完成后，下一个超级步的路由来自每个Send 生成的任务的传出边（或其`Command.goto`，如果它发出了一个）。
+并行组完成后，下一个超步的路由来自每个 Send 派生的任务的外出边（或如果它发出了一个 `Command.goto`，则来自该边）。
 
-### 常见形态：扇出 5、扇入到摘要器
+### 常见形态：fan-out 5，fan-in至汇总器
 
 ```
 planner ─┬─ Send("researcher", {topic: "A"})  ─┐
@@ -323,13 +305,13 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
          └─ Send("researcher", {topic: "E"})  ─┘
 ```
 
-`researcher`的出边就是`{"from": "researcher", "to": "summarizer"}`— 与静态边相同的重复数据删除规则，因此摘要器运行一次。
+`researcher` 的出边就是 `{"from": "researcher", "to": "summarizer"}` —— 与静态边相同的去重规则，因此 summarizer 只运行一次。
 
-### 工作器数量调优
+### 工作线程数调优
 
-`build()`默认为`EngineConfig::worker_count == 1`— 没有引擎拥有的线程池，扇出分支在协程自己的执行器上内联调度。这是一条无分配的快速路径，对于顺序图来说成本低廉，对于保持非线程安全状态的节点来说是安全的。
+`build()` 默认为 `EngineConfig::worker_count == 1` —— 无引擎拥有的线程池，fan-out 分支在协程自身的执行器上内联分发。这是一条零分配快速路径，对顺序图成本低廉，且对持有非线程安全状态的节点是安全的。
 
-对于真正的并行性，请明确选择加入池。准确选择 N 来匹配你的扇出宽度，或使用`set_worker_count_auto()`使用 `hardware_concurrency()`（回退为 4）：
+要实现真正的并行，请显式选择加入一个池。精确选择 N 以匹配您的 fan-out 宽度，或使用 `set_worker_count_auto()` 来获取 `hardware_concurrency()`（回退值为 4）：
 
 ```python
 engine.set_worker_count(5)           # match a 5-way Send
@@ -337,14 +319,14 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-当多发送（或多输出边）扇出在没有选择加入池的情况下运行时，NeoGraph发出一次性 stderr 警告，因此静默串行案例不会悄悄溜过。使用`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`如果你有意驱动串行扇出（例如，worker=1 快速路径的基准）。
+当多 Send（或多出边）fan-out 在未选择线程池的情况下运行时，NeoGraph 会发出一次性 stderr 警告，使静默串行的情况不会在雷达下溜走。若你有意驱动串行 fan-out（例如对 worker=1 快速路径进行基准测试），可用 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` 抑制该警告。
 
 ---
 
 <a id="6-command--routing-override--state-patch"></a>
-## 6.Command — 路由覆盖 + 状态补丁
+## 6. Command — 路由覆盖 + 状态补丁
 
-`Command`让节点决定下一步去哪里，并且在相同的返回值中改变状态。它绕过常规的传出边。
+`Command` 允许节点在同一个返回值中决定下一步去向并变更状态。它绕过常规出边。
 
 ```python
 class Evaluator(ng.GraphNode):
@@ -367,30 +349,28 @@ class Evaluator(ng.GraphNode):
             )
 ```
 
-### 何时使用命令与条件边
+### Command与条件边的使用场景
 
-- **条件边**：路由取决于状态谓词
-不需要节点逻辑。更干净、声明式。
-- **命令**：路由取决于最自然编写的逻辑
-节点内部——多标准评分、内容检查、重试决策。也是原子地更新状态并选择下一个节点的唯一方法。
+- **条件边**：路由依赖于不需要使用节点逻辑的状态谓词。更清晰、声明式。
+- **Command**：路由依赖于最自然地在节点内部编写的逻辑 — 多标准评分、内容检查、重试决策。也是原子性更新状态并同时选择下一个节点的唯一方式。
 
-### 扇入下的最后写入者获胜
+### fan-in 下后写者胜出
 
-如果多个命令在同一个超级步中触发（很少见 - 仅当多个并行组兄弟发出它们时才可能），则最后一个获胜。该顺序由并行组完成确定，这是不确定的——围绕这一点进行设计，确保最多有一个兄弟发出`Command`。
+若多个 Command 在同一超级步骤中触发（罕见 —— 仅当多个并行组兄弟节点发出时可能发生），则最后一个生效。顺序由并行组完成情况决定，这是非确定性的 —— 设计时应确保最多一个兄弟节点发出 `Command`。
 
 ---
 
 <a id="7-checkpoints-interrupts-hitl"></a>
-## 7.检查点、中断、HITL
+## 7. 检查点、中断、HITL
 
-### 设置检查点存储
+### 设置检查点存储库
 
 ```python
 engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 # or: engine.set_checkpoint_store(ng.PostgresCheckpointStore(...))   # if built with PG
 ```
 
-附加存储后，每个超级步都会向关键的存储写入一个检查点`(thread_id, checkpoint_id)`。`RunResult.checkpoint_id`字段是最新的。
+附加存储后，每个超级步骤都会以 `(thread_id, checkpoint_id)` 为键向存储写入一个检查点。`RunResult.checkpoint_id` 字段是最新的一个。
 
 ### 静态中断点
 
@@ -399,7 +379,7 @@ engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 "interrupt_after":  ["llm"],       # pause after, before routing
 ```
 
-引擎返回 `RunResult`，其中 `interrupted=True` 且设置了 `interrupt_node`。恢复：
+引擎返回一个 `RunResult`，其中 `interrupted=True` 和 `interrupt_node` 已设置。要恢复：
 
 ```python
 result = await engine.resume_async(thread_id="t1",
@@ -407,31 +387,31 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-### 动态中断通过`NodeInterrupt`
+### 通过 `NodeInterrupt` 进行动态中断
 
-从节点体内抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、保留状态、返回`RunResult`在抛出节点处中断 - 相同的恢复API。
+从节点主体内部抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、持久化状态、返回一个在抛出节点处中断的 `RunResult` —— 使用相同的恢复 API。
 
-当暂停的决定取决于中间节点输出时很有用（例如“LLM是否产生了值得展示给人类的内容？”）。
+当暂停决策取决于中间节点输出时非常有用（例如“LLM 是否产生了值得展示给人类的东西？”）。
 
 ### 时间旅行
 
-`engine.fork(thread_id, from_checkpoint_id)`返回一个从过去的检查点开始的新线程。对于“如果我的回答不同会怎样”分支很有用。
+`engine.fork(thread_id, from_checkpoint_id)` 返回一个从过去检查点开始的新线程。适用于“如果我当时回答不同会怎样”的分支。
 
 ---
 
 <a id="8-streaming-events"></a>
 ## 8. 流式事件
 
-`run_stream` / `run_stream_async`当事件触发时调用回调。模式是可进行“或”运算的位掩码：
+`run_stream` / `run_stream_async` 在事件触发时调用回调。模式是可按位 OR 的位掩码：
 
-|模式|发出|
+| 模式 | 触发 |
 |---|---|
 | `EVENTS` | `NODE_START`, `NODE_END`, `INTERRUPT` |
-| `TOKENS` | `LLM_TOKEN`对于来自 a 的每个流式令牌`Provider` |
-| `DEBUG` | `__routing__`显示下一个准备就绪的事件|
-| `VALUES` | `__state__`每个超级步后具有完整状态的事件|
-| `UPDATES` | `CHANNEL_WRITE`每个 `ChannelWrite` 事件 |
-| `ALL` |上述全部|
+| `TOKENS` | `LLM_TOKEN` 针对来自 `Provider` 的每个流式令牌 |
+| `DEBUG` | `__routing__` 事件，显示下一就绪集合 |
+| `VALUES` | `__state__` 事件，包含每个超级步骤后的完整状态 |
+| `UPDATES` | `CHANNEL_WRITE` 每个 `ChannelWrite` 的事件 |
+| `ALL` | 以上所有 |
 
 ```python
 def cb(event):
@@ -443,10 +423,9 @@ engine.run_stream(
     cb)
 ```
 
->**注意：**`event.node_name`（不是`event.node`）。 C++ 结构体字段
->是`node_name`; pybind 保留原始名称。
+> **注意：** `event.node_name`（而非 `event.node`）。C++ 结构体字段为 `node_name`；pybind 保留原始名称。
 
-对于聊天型流式传输（LangChain- 与增量兼容的消息字典`content_so_far`），使用助手：
+对于聊天形式的流式传输（兼容 LangChain 的消息字典，带有增量 `content_so_far`），请使用辅助函数：
 
 ```python
 from neograph_engine import message_stream
@@ -457,9 +436,9 @@ engine.run_stream(
     message_stream(lambda chunk: print(chunk["content"], end="", flush=True)))
 ```
 
-### `asio::io_context.run()`放置位置 (C++)
+### `asio::io_context.run()` 放置（C++）
 
-驱动`engine.run_stream_async()`从 C++ 开始，外部`asio::io_context.run()`应该从应用程序的主线程（或任何已通过正常进程启动路径初始化的长寿命线程）调用。经测试良好的形态：
+当从 C++ 驱动 `engine.run_stream_async()` 时，外部 `asio::io_context.run()` 应从应用程序的主线程（或任何已通过正常进程启动路径初始化的长生命周期线程）调用。已验证良好的形态：
 
 ```cpp
 // Main-thread driver — what examples/40 and the SchemaProvider tests use.
@@ -482,43 +461,21 @@ std::thread t([&]() {
 t.join();
 ```
 
->**已知限制——嵌套`io.run()`里面一个HTTP服务器工作器
->回调**（问题#16): 嵌套`asio::io_context.run()`里面一个
-> `httplib::Server::set_chunked_content_provider`（或同等
->每个请求的工作器回调本身通过以下方式生成子线程
-> `Provider::complete_stream_async`的默认网桥）已被观察到
->到SEGV在`getaddrinfo`在一些 glibc / OpenSSL 组合上。这
->仓库内测试
->（[`tests/test_schema_provider_stream_async_nested_thread.cpp`](../tests/test_schema_provider_stream_async_nested_thread.cpp)）
->覆盖结构形态并正常通过，但下游
->环境（真实的`api.openai.com`超过HTTPS, glibc 解析器
->在 TSan / ASan 下，并发请求负载）并不详尽
->能由测试套件完全复现。 **解决方法：**
+> **已知限制——在HTTP服务器工作线程回调中嵌套`io.run()`**（问题#16）：如果嵌套执行`asio::io_context.run()`，并将其置于`httplib::Server::set_chunked_content_provider`内部，或者置于通过`Provider::complete_stream_async`默认桥接创建子线程的等效逐请求工作线程回调中，某些glibc/OpenSSL组合会在`getaddrinfo`中出现SEGV。仓库内测试（[`tests/test_schema_provider_stream_async_nested_thread.cpp`](../tests/test_schema_provider_stream_async_nested_thread.cpp)）覆盖了这一结构并能稳定通过，但测试套件无法完整复现下游环境中的真实HTTPS `api.openai.com`、TSan/ASan下的glibc解析器以及并发请求负载。**解决方法：**
 >
->1. **使用`co_await provider->complete_async(...)`而不是
->    `complete_stream_async`从里面HTTP服务器回调**，以及
->将组装好的回复作为一个发出`LLM_TOKEN`事件来自
->辅助函数。令牌输入用户体验丢失；引擎+节点+工具循环工作
->端到端。这就是ProjectDatePop的下游`cpp_backend`
->今天使用。
->2. **移动`io.run()`在每个请求回调之外**：运行一个
->长期存在的`asio::io_context`在专用工作线程上
->引擎，将每个请求的工作排队，将结果发回
->进入HTTP服务器的响应接收器。避免了每个请求
->嵌套的`std::thread`产生SEGV相关联。
+> 1. **在 HTTP 服务器回调内部使用 `co_await provider->complete_async(...)` 而非 `complete_stream_async`**，并从辅助函数中将组装好的回复作为单个 `LLM_TOKEN` 事件发出。令牌类型 UX 会丢失；引擎 + 节点 + 工具循环可端到端工作。这是 ProjectDatePop 的下游 `cpp_backend` 目前使用的方案。
+> 2. **将 `io.run()` 移出每请求回调**：在专用工作线程上为引擎运行一个长生命周期 `asio::io_context`，将每请求工作排队到其上，并将结果发布回 HTTP 服务器的响应接收器。避免与 SEGV 相关的每请求嵌套 `std::thread` 生成。
 
 ---
 
-## 8.5。追踪 — OpenTelemetry + Phoenix / Langfuse
+## 8.5. 追踪——OpenTelemetry + Phoenix / Langfuse
 
-与流式传输相同的回调形态，不同的消费者。将 OTel 跟踪器发射回调传递到`engine.run_stream(cfg, cb)`和每`NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT`事件成为一个span。
+与流式传输相同的回调形态，不同的消费者。将 OTel 追踪器发射回调传入 `engine.run_stream(cfg, cb)`，每个 `NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT` 事件都会成为跨度。
 
-仓库内提供两层：
+两个层级随货内置：
 
-  - `neograph_engine.tracing.otel_tracer`— 供应商中立的 OTel
-span。 Span 流向任何 OTel 后端（Jaeger、Tempo、Honeycomb、Datadog）。
-  - `neograph_engine.openinference` — LLM-shape属性层
-将相同的span变成 Phoenix / Arize / Langfuse 中的 *LangSmith 风格聊天气泡 trace*：
+  - `neograph_engine.tracing.otel_tracer` — 供应商中立的 OTel 跨度。跨度流向任何 OTel 后端（Jaeger、Tempo、Honeycomb、Datadog）。
+  - `neograph_engine.openinference` — LLM 形态属性层，可将相同的跨度在 Phoenix / Arize / Langfuse 中转换为 *LangSmith 风格的聊天气泡追踪*：
 
 ```python
 from opentelemetry import trace
@@ -541,54 +498,53 @@ with openinference_tracer(tracer) as cb:
     engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
 ```
 
-启动一次 Phoenix：`docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix`。打开http://localhost:6006— trace呈现为一条链（`graph.run` → `node.X` → `llm.complete`），提示/响应/令牌计数可见LLM详细信息窗格。相同的代码，交换一下OTLP端点 URL对于 Langfuse 自托管，trace以相同的形态显示在那里。
+启动一次 Phoenix：`docker run -d -p 6006:6006 -p 4317:4317
+arizephoenix/phoenix`。打开 http://localhost:6006 — 追踪呈现为链（`graph.run` → `node.X` → `llm.complete`），提示词 / 响应 / token 计数在 LLM 详情面板中可见。相同代码，将 OTLP 端点 URL 替换为 Langfuse 自托管，追踪即以相同形状显示在那里。
 
-这就是*的答案”NeoGraph没有LangSmith“* — 你得到LangSmith用户体验（聊天气泡，DAG通过使用一个 Docker 命令在本地运行 Phoenix 或 Langfuse 来实现层次结构、令牌成本）。没有 SaaS 合同，没有按跟踪定价。
+这就是对*“NeoGraph没有LangSmith”*的回应——你可以通过一条Docker命令本地运行Phoenix或Langfuse来获得LangSmith的UX（聊天气泡、DAG层级、token成本）。无需SaaS合约，无单次追踪计费。
 
-看`docs/reference-en.md`§10.5 属性键模式和之间的权衡说明`otel_tracer`和`openinference_tracer`。
+参见 `docs/reference-en.md` §10.5 了解属性键模式以及 `otel_tracer` 与 `openinference_tracer` 之间的权衡说明。
 
 ---
 
 <a id="9-common-pitfalls"></a>
 ## 9. 常见陷阱
 
-这些都是真实用户所击中的；交叉引用自 [`docs/troubleshooting.md`](troubleshooting.md)。
+这些均已被真实用户遇到；从 [`docs/troubleshooting.md`](troubleshooting.md) 交叉引用。
 
 ### “我的ReAct循环只运行一次”
 
-你的wheel 包 ≤ 0.1.7。图形编译器删除了`conditional_edges`默默地阻止。升级至 ≥ 0.1.8。验证与`result.execution_trace == ['llm', 'dispatch', 'llm']`（不仅`['llm']`）。
+你使用的是 wheel ≤ 0.1.7。图编译器静默丢弃了 `conditional_edges` 块。升级到 ≥ 0.1.8。使用 `result.execution_trace == ['llm', 'dispatch', 'llm']` 验证（不仅仅是 `['llm']`）。
 
-### “提供者调用挂起 60 秒，然后出现错误”
+### “Provider调用挂起60秒然后报错”
 
-你的wheel 包 ≤ 0.1.6。捆绑的 OpenSSL 硬编码RHELUbuntu / Debian / macOS 上不存在的 CA 路径。升级到 ≥ 0.1.7（自动设置`SSL_CERT_FILE`到导入时的 certifi 捆绑包）或设置`SSL_CERT_FILE`手动。
+你使用的是 wheel ≤ 0.1.6。捆绑的 OpenSSL 硬编码了 RHEL CA 路径，这些路径在 Ubuntu / Debian / macOS 上不存在。升级到 ≥ 0.1.7（导入时自动将 `SSL_CERT_FILE` 设置为 certifi 的捆绑包）或手动设置 `SSL_CERT_FILE`。
 
-### “我的扇出比我预期的要慢”
+### “我的fan-out比我预期的要慢”
 
-`compile()`默认为`set_worker_count(1)`（没有引擎拥有的线程池 - 扇出分支在调用者的执行器上串行运行）。对于真正的并行调用`engine.set_worker_count(N)`其中 N 与你的发送扇出宽度匹配，或者`engine.set_worker_count_auto()`使用 `hardware_concurrency()`。NeoGraph第一次在没有选择加入池的情况下运行多发送扇出时，还会打印一次性 stderr 警告 - 这是一个提示，而不是错误。 Python自定义节点参见GIL小扇出的争用，因此 1 和 N 都进行基准测试。
+`compile()` 默认为 `set_worker_count(1)` （无引擎拥有的线程池——fan-out 分支在调用方的执行器上串行运行）。如需真正的并行，请调用 `engine.set_worker_count(N)` ，其中 N 与您的 Send fan-out 宽度匹配，或 `engine.set_worker_count_auto()` 用于 `hardware_concurrency()`。NeoGraph 还会在首次多 Send fan-out 在未选择加入池的情况下运行时，向 stderr 打印一次性警告——这是提示，而非错误。Python 自定义节点在小型 fan-out 上会遇到 GIL 争用，因此请同时使用 1 和 N 进行基准测试。
 
-### “PythonRunResult没有 .status / .final_state 属性”
+### “Python RunResult 没有 .status / .final_state 属性”
 
-Python 绑定不会公开这些属性。使用`result.output`, `result.interrupted`, `result.max_steps_exhausted`， 和`result.execution_trace`。 C++ 调用者可以使用`RunResult::status()`对于打字的`Completed` / `Interrupted` / `StepLimit`视图。请参阅表中的README的“读取输出”部分。
+Python绑定不暴露这些属性。请使用`result.output`、`result.interrupted`、`result.max_steps_exhausted`和`result.execution_trace`。C++调用方可使用`RunResult::status()`获得类型化的`Completed` / `Interrupted` / `StepLimit`视图。参见[Python绑定指南](python-binding.md#hitl-and-state)。
 
-### “未知归约器：<name>”
+### “Unknown reducer: <name>”
 
-内置两个归约器：`overwrite`和`append`。自定义归约器需要`ReducerRegistry::register_reducer`来自 C++（还没有 Python 钩子）。
+内置两个reducer：`overwrite`和`append`。请在编译前通过C++的`ReducerRegistry::register_reducer`或Python的`ng.ReducerRegistry.register_reducer`注册自定义reducer。
 
-### “条件已注册，但我的条件边未触发”
+### “条件已注册，但我的条件边没有触发”
 
-验证该形式是 loader 接受的形式（来自 [§4 的形式 A 或形式 B](#4-edges--conditional-routing)) — 两者都从 v0.1.8 开始工作。对于较旧的wheel 包，只有形式 B 适用。
+验证表单是加载器接受的表单（[§4](#4-edges--conditional-routing) 中的表单 A 或表单 B）— 自 v0.1.8 起两者均可用。在较旧的 wheel 上，仅表单 B 可用。
 
-### “execution_trace 仅显示起始节点”
+### execution_trace 只显示起始节点
 
-路由结果变成了`__end__`。请检查起始节点是否缺少边，或条件是否返回了`routes`中不存在的值，而显式的`"default"`路由又指向`__end__`。严格图不再按 map 顺序选择路由：开放条件或未声明输出契约的条件会使用显式`"default"`；若未声明该路由，则错误信息会包含 source node、条件名和返回的 label。封闭条件返回声明范围外的 label 时也一定报错。
+路由回退至`__end__`。最可能的原因是起始节点缺少边，或者您的条件返回了不在`routes`映射中的值，且显式`"default"`路由指向`__end__`。严格图不再按映射顺序选择路由：开放或未指定的条件在声明时使用`"default"`，否则引擎会抛出包含源节点、条件和返回标签的错误。封闭条件若返回其声明标签之外的值，则始终抛出错误。
 
 ---
 
 ## 下一步去哪里
 
-- [Python 示例](../bindings/python/examples/)— 21 个独立的
-涵盖上述每个概念的脚本。
-- [C++ 示例](../examples/)— 36 个具有相同结构的程序。
-- [`reference-en.md`](reference-en.md)— 逐类详尽 API。
-- [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)— 深入探讨异步/协程
-层。
+- [Python 示例](../bindings/python/examples/) — 21 个自包含脚本，涵盖上述所有概念。
+- [C++ 示例](../examples/) — 36 个结构相同的程序。
+- [`reference-en.md`](reference-en.md) — 逐类详尽的 API。
+- [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 深入探讨异步/协程层。

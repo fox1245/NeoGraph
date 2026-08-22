@@ -1,27 +1,24 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=19709bb07c36265ac28bd757009fd525505ef7bcd930e8d1b5ee6b763c4ff454 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=e52a150fd89075b66a0022d867def85dca59b234e1fc2e664a953c21f6625b10 -->
 # JARVIS — 语音驱动的元编排器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-> 零云依赖，运行在单台 Raspberry Pi 上。
-> 麦克风是 Tony，NeoGraph 是 JARVIS，工具和专家是 JARVIS 的下属。
+> 云端零依赖，单台树莓派即可运行。
+> 麦克风是Tony，NeoGraph是JARVIS，工具/专家是JARVIS的下属。
 
-本 cookbook **不是**“语音 TTS 示例”。它演示 NeoGraph 的
-多代理基本能力 — MCP 工具、双向 A2A、异步并行、Store 记忆、
-ReAct 子图 — 如何用一句语音**编织在一起**。
+本手册**不是**一个“语音TTS示例”。它展示了NeoGraph的多智能体原语——MCP工具、双向A2A、异步并行、Store记忆、ReAct子图——**通过一条语音无缝编织在一起**。
 
-## 为什么这是 JARVIS
+## 为什么这是JARVIS
 
-电影里的 JARVIS 不只是带语音 TTS 的聊天机器人。JARVIS 同时做五件事：
+电影中的JARVIS不仅仅是一个带语音TTS的聊天机器人。JARVIS同时做五件事：
 
-1. 在 Tony 说完之前抓住意图 — **快速意图分类**
-2. 能直接回答就直接回答，否则委托给下属 — **4 路路由**
-3. 同时收集多条信息 — **并行扇出**
-4. 记得昨天的对话 — **长期记忆**
-5. 可以被其他 JARVIS / 系统调用 — **双向 A2A**
+1. 在Tony说完之前捕捉意图——**快速意图分类**
+2. 能直接回答就回答，否则委托给下属——**4路路由**
+3. 同时收集多条信息——**并行fan-out**
+4. 记住昨天的对话——**长期记忆**
+5. 可以被其他JARVIS/系统调用——**双向A2A**
 
-所以本 cookbook 的核心是**图的形状**，不是语音。语音只是
-输入/输出外壳；真正创造“JARVIS 感”的是 NeoGraph 的编排引擎。
+因此本手册的核心是**拓扑**，而非语音。语音只是输入/输出外壳；创造“JARVIS感”的是NeoGraph的编排引擎。
 
 ## 完整图
 
@@ -55,15 +52,13 @@ ReAct 子图 — 如何用一句语音**编织在一起**。
                                    (in detected language)     miniaudio
 ```
 
-## 两个目录 JSON 文件 — JARVIS 的“我能做什么”
+## 两个目录JSON文件——JARVIS的“我能做什么”
 
-JARVIS 启动时会读取两个文件并构建能力列表。
-**这意味着你可以在不重新编译代码的情况下增加/移除能力。**
+当JARVIS启动时，它会读取两个文件并构建其能力清单。**这意味着你可以无需重新编译代码即可添加/移除能力。**
 
 ### `config/mcp_catalog.json` — 工具
 
-这是 JARVIS 可以直接调用的函数型工具列表。
-每个条目对应一个 MCP server（HTTP 或 stdio）。
+JARVIS可以直接调用的函数型工具列表。每个条目对应一个MCP服务器（HTTP或stdio）。
 
 ```json
 {
@@ -86,13 +81,11 @@ JARVIS 启动时会读取两个文件并构建能力列表。
 }
 ```
 
-启动时，它会对每个 MCP server 调用 `get_tools()` → 合并 tool definitions，
-并把它们作为“可用工具”注入 router 的 system prompt。
+启动时，它在每个MCP服务器上调用`get_tools()` → 合并工具定义并将其作为“可用工具”注入路由器的系统提示中。
 
 ### `config/agent_registry.json` — 专家（A2A）
 
-JARVIS 可以把整项任务委托给这些子代理。每个都作为 A2A endpoint
-运行在独立进程/机器中。
+JARVIS可以将整个任务委托给这些子智能体。每个子智能体作为独立进程/机器上的A2A端点运行。
 
 ```json
 {
@@ -113,14 +106,11 @@ JARVIS 可以把整项任务委托给这些子代理。每个都作为 A2A endpo
 }
 ```
 
-启动时，它会从每个 URL 请求 `AgentCard` → 只激活那些有响应的代理。
-**关键技巧**：任何遵循 A2A 标准的外部代理 — 不管是别人写的 Python
-A2A bot、另一个 NeoGraph 实例等 — 只要把 URL 加到这个 JSON，
-就能成为 JARVIS 的下属。
+启动时，它向每个URL请求`AgentCard` → 仅激活那些响应的端点。**关键技巧**：任何遵循A2A标准的外部智能体——无论是别人制作的Python A2A机器人、另一个NeoGraph实例，还是其他——只需将其URL添加到此JSON中，即可成为JARVIS的下属。
 
-## Router（意图分类）— JARVIS 的大脑
+## 路由器（意图分类）——JARVIS的大脑
 
-对固定的 DeepSeek 模型（`~deepseek/deepseek-v4-flash-latest`）进行一次调用会返回：
+对固定的DeepSeek模型（`~deepseek/deepseek-v4-flash-latest`）进行一次调用返回：
 
 ```json
 {
@@ -131,59 +121,46 @@ A2A bot、另一个 NeoGraph 实例等 — 只要把 URL 加到这个 JSON，
 }
 ```
 
-- `chat` — 不使用工具或委托。Synthesizer 使用自己的知识 + 对话记忆直接回答。
-  问候、自我介绍、闲聊、“我之前说了什么？”这类对话回忆。如果 router
-  发明了目录中不存在的工具/代理，验证阶段会降级到此 mode。
-- `direct` — 单次工具调用。如果结果很简单（`"3:30 PM"`），用 `skip_synthesis=true`
-  跳过合成，直接进入 TTS。**很快。**
-- `delegate` — 完全委托给 `delegate_to` 指向的 A2A endpoint。
-  拿到结果后，只为语音合成一行摘要。
-- `parallel` — 多个 `tool_calls`。使用 NeoGraph 的 `make_parallel_group`
-  同时执行，归约器把结果组合后交给 Synthesizer。
+- `chat`——无工具或委托。合成器使用其自身知识加对话记忆直接作答。问候、自我介绍、闲聊、“我之前说了什么”式的对话回忆。如果路由器从目录中凭空生成目录中不存在的工具/智能体，校验阶段会降级到此模式。
+- `direct` — 单个工具调用。如果结果简单（`"3:30 PM"`），跳过合成，直接使用`skip_synthesis=true`进入TTS。**快速。**
+- `delegate` — 完全委托给由`delegate_to`指向的A2A端点。获取结果后，仅为语音合成一行摘要。
+- `parallel` — 多个`tool_calls`。使用NeoGraph的`make_parallel_group`同时执行，归约器(reducer)结合结果用于合成器。
 
-### 为什么分离 Router 和 Synthesizer
+### 为何将路由器与合成器分离
 
-如果所有东西都通过一个大型 LLM + ReAct，每轮会花 1-3 秒，直接毁掉 JARVIS 感。
-- Router：小模型，约 200ms，单个 JSON
-- Synthesizer：大模型，约 800-1500ms，单条自然语言响应
-- 如果工具提供即时答案，跳过 synthesizer → 响应约 500ms 开始
+通过一个大型LLM配合ReAct运行所有内容，每轮需要1-3秒，会破坏JARVIS的体验感。
+- 路由器：小型模型，约200毫秒，单个JSON
+- 合成器：大型模型，约800-1500毫秒，单个自然语言响应
+- 如果工具提供即时答案，跳过合成器 → 响应约在500ms内开始
 
-电影中 JARVIS 的快速响应节奏来自这种分离。
+电影JARVIS中快速的响应时机正是来自于这种分离。
 
-## Memory (`Store`)
+## 记忆（`Store`）
 
-每轮开始时，`memory_lookup` node 从 NeoGraph `Store` 拉取最近 N 轮 + 用户偏好
-（`tony.prefers.language=ko`、`tony.last_topic=...`）。
+在每轮开始时， `memory_lookup` 节点从 NeoGraph 中拉取最近 N 轮对话 + 用户偏好（`tony.prefers.language=ko`, `tony.last_topic=...`） `Store`.
 
-每轮结束时，JARVIS 会把响应 + Tony 的发言 + 已用工具推入 Store。
-下一轮的 router 就可以解析“我前面提到的那个东西”这类指代。`JsonFileStore`
-会持久化到文件 — 重启后仍能记得。空轮次（STT 失败 / 噪声）不会提交，
-以防记忆污染。`prefs.native_lang` 维护估计出的母语
-（语言一致性）。
+在每一轮结束时，JARVIS将响应、Tony的话语以及使用的工具推送到Store。下一轮的路由器可以解析诸如“我之前提到的那个东西”之类的引用。`JsonFileStore`持久化到文件——跨重启保持记忆。空轮（STT失败/噪声）被排除在提交之外，以防止记忆污染。`prefs.native_lang`维护估算的母语（语言一致性）。
 
-## 双向 A2A — JARVIS 调用别人，也被别人调用
+## 双向A2A——JARVIS呼叫与被呼叫
 
-- **调用别人**：通过来自 `agent_registry.json` 的 `A2AClient` 委托给专家。
-- **被别人调用**：JARVIS 自身暴露一个 `A2AServer`（端口 8200）。
-  - 外部系统可以通过 `POST /v1/messages` 向 JARVIS 发送文本消息。
+- **调用**：通过`A2AClient`从`agent_registry.json`委托给专家。
+- **被呼叫**：JARVIS自身暴露一个`A2AServer`（端口8200）。
+  - 外部系统可以通过`POST /v1/messages`向JARVIS发送文本消息。
   - 移动应用、其他 NeoGraph 实例，甚至另一个 JARVIS 都可以调用它。
-  - 文本输入会跳过麦克风/STT 阶段，直接进入 router。
+  - 文本输入跳过麦克风/STT阶段，直接进入路由器。
 
-**JARVIS 到 JARVIS 通信演示**：Home JARVIS (8200) ↔ Office JARVIS (8201)。
-“从办公室 JARVIS 获取今天的会议纪要” → Home JARVIS 通过 A2A 调用 Office JARVIS
-→ 响应通过语音传递给 Tony。
+**JARVIS到JARVIS通信演示**：家庭JARVIS（8200）↔ 办公室JARVIS（8201）。“从办公室JARVIS获取今天的会议纪要”→ 家庭JARVIS通过A2A呼叫办公室JARVIS → 响应以语音方式传达给用户。
 
-## 后台触发器（主动）
+## 后台触发器（主动式）
 
-一个独立异步图在后台运行：
-- 定时器（每 5 分钟检查日历）
-- 外部事件（家庭传感器、收到邮件）
+一个独立的异步图在后台运行：
+- 定时器（每5分钟检查日历一次）
+- 外部事件（家庭传感器、邮件接收）
 - 外部 A2A 调用
 
-当事件发生时，它会把消息注入 JARVIS 的主图 → JARVIS 会在 Tony 询问前开口。
-("Sir, meeting in 10 minutes.")
+当事件发生时，它会向JARVIS的主图注入一条消息 → JARVIS在托尼提问之前开口。（“先生，10分钟后有会议。”）
 
-完全使用 NeoGraph 的 `27_async_concurrent_runs.cpp` 模式。
+完全使用NeoGraph的`27_async_concurrent_runs.cpp`模式。
 
 ## 目录结构
 
@@ -211,7 +188,7 @@ jarvis/
 └── docs/architecture.md          Detailed node-by-node graph explanation
 ```
 
-## 构建 / 运行
+## 构建/运行
 
 ```bash
 # 1. Download models (whisper-large-v3-turbo ~1.6GB + supertonic + silero VAD)
@@ -236,60 +213,45 @@ JARVIS_MIC=1 bash scripts/run_jarvis.sh config-demo/real-tools
 python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ```
 
-实时 provider 固定为使用 DeepSeek 模型的 OpenRouter，由 `.env` 中的
-`OPENROUTER_API_KEY` 启用。没有 key 时使用 MockProvider（echo）离线运行。
+实时提供程序固定为 OpenRouter，并带有固定的 DeepSeek 模型和 `OPENROUTER_API_KEY`（位于 `.env` 中）。如果没有密钥，它将使用 MockProvider（回显）离线运行。
 
 ## 语音栈详情
 
 ### 实时麦克风（miniaudio + Silero VAD）
-`JARVIS_MIC=1` 或配置 `use_microphone:true`。采集工作线程在 512-sample window
-上运行 Silero VAD，用于检测语音开始/结束（200ms 预滚，500ms 静音结束）。
-**背压**：推理期间丢弃采集内容，以阻止 TTS 回声、过期发言
-和起始噪声。设备故障（WSL2 麦克风断开等）会自动回退到 stdin。
-调优：`JARVIS_VAD_THRESHOLD`（默认 0.5），观察：`JARVIS_MIC_DEBUG=1`。
+`JARVIS_MIC=1` 或配置 `use_microphone:true`。Capture 捕获 worker 线程在 512-sample 窗口上运行 Silero VAD，检测语音开始/结束（200ms 预滚动，500ms 静默结束）。**背压**：推理期间丢弃捕获的音频，阻止 TTS 回声、过时话语和启动噪声。设备故障（例如 WSL2 麦克风断开）时自动回退到 stdin。调优：`JARVIS_VAD_THRESHOLD`（默认 0.5），观察：`JARVIS_MIC_DEBUG=1`。
 
-### STT — 两个选项（通过配置 `stt.type` 切换）
-- **`whisper_stt`**（默认）: whisper.cpp。`language:"auto"` 自动检测 99 种语言
-  → **用说话者的语言回答并 TTS**。**语言一致性**：在 store.prefs 中维护母语，
-  这样短发言被误识别为外语时不会突然切换（需要持续误识别才会切换）。
-- **`moonshine_stt`**: Moonshine-tiny ONNX（27M，与 supertonic 共享 ORT）。
-  边缘端、低延迟、韩语风格。特定语言模型，所以语言固定。
+### STT — 两个选项（通过配置`stt.type`切换）
+- **`whisper_stt`**（默认）：whisper.cpp。`language:"auto"`自动检测99种语言 → **以说话者的语言进行回答和TTS**。**语言一致性**：在store.prefs中保持母语，因此被误识别为外语的短话语不会突然切换（需要一致的误识别才能切换）。
+- **`moonshine_stt`**：Moonshine-tiny ONNX（27M，与supertonic共享ORT）。边缘、低延迟、韩语风格。特定语言模型，因此语言是固定的。
 
-### GPU 加速（whisper.cpp ROCm/HIP）
-捆绑的 whisper.cpp 是仅 CPU 版本 — large 在 CPU 上需要约 32s（11s 音频片段）。AMD GPU
-（gfx1201=R9700，ROCm≥7.2）运行 `bash scripts/build_whisper_hip.sh` 做 GGML_HIP
-构建 → **约 7s（4.5×）**。run_jarvis.sh 会自动加载 ROCm runtime 和 WSL dxg。
+### GPU加速（whisper.cpp ROCm/HIP）
+捆绑的whisper.cpp仅为CPU — 大型模型在CPU上大约需要32秒（11秒片段）。AMD GPU（gfx1201=R9700，ROCm≥7.2）运行`bash scripts/build_whisper_hip.sh`以进行GGML_HIP构建 → **约7秒（4.5×）**。run_jarvis.sh自动加载ROCm运行时和WSL dxg。
 
-## 基准测试 — NeoGraph vs LangGraph (`bench/`)
+## 基准测试 — NeoGraph vs LangGraph（`bench/`）
 
-在 LangGraph（Python 对照版 `langgraph_twin.py`）中镜像相同拓扑
-（麦克风→STT→合并→记忆→router→4 路→合成/跳过→提交→TTS），
-并在相同约束（`--cpus=2 --memory=2g`）容器中测量。
+在LangGraph（Python孪生`langgraph_twin.py`）中镜像相同的拓扑（mic→stt→merge→memory→router→4-way→synth/skip→commit→tts），在相同约束（`--cpus=2 --memory=2g`）容器中测量。
 
 ```bash
 OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
-## 实现状态
+## 实施状态
 
-**完全可用** — 已在真实硬件上验证 OpenRouter DeepSeek 的实时语音单轮。
-麦克风→VAD→STT→router→4-way→synth→TTS 全链路 +
+**完全可用** — 已在真实硬件上验证实时语音单轮运行（OpenRouter DeepSeek）。麦克风→VAD→STT→路由器→4路→合成→TTS完整链路 +
 
-已知限制 / 下一版本：
-- **不支持打断** — TTS 播放期间的发言会通过背压丢弃
-  （v2 将加入 cancel token）。
-- **未应用流式 STT** — 发言完成后批量转录。Moonshine v2
-  ergodic encoder 逐块流式处理是下一个候选。
-- **多说话人 · 长记忆压缩** — 单说话人假设，24 轮限制。
-- **后台触发器（主动）** — 已设计但未实现。
+已知限制 / 下一版本。
+- **不支持打断（Barge-in）** — TTS播放期间的语音通过背压被丢弃（将在v2中添加取消令牌）。
+- **未应用流式STT** — 在语音段结束后进行批量转录。Moonshine v2遍历编码器逐块流式处理是下一个候选方案。
+- **多说话人·长记忆压缩** — 单一说话人假设，24轮限制。
+- **后台触发（主动触发）** — 已设计但未实现。
 
 ## 许可证 / 外部依赖
 
-| 库 | 许可证 | 作用 |
+| 库 | 许可证 | 角色 |
 |---|---|---|
-| [supertonic](https://github.com/supertone-inc/supertonic) | MIT | TTS（99M，ONNX，31 种语言） |
-| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | STT（99 种语言自动检测，CPU/ROCm） |
-| [Moonshine](https://github.com/moonshine-ai/moonshine) | MIT | 边缘端 STT 选项（27M ONNX） |
-| [miniaudio](https://github.com/mackron/miniaudio) | MIT-0 / 公有领域 | 麦克风采集 + 扬声器播放 |
+| [supertonic](https://github.com/supertone-inc/supertonic) | MIT | TTS（99M，ONNX，31种语言） |
+| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | STT（99种语言自动检测，CPU/ROCm） |
+| [Moonshine](https://github.com/moonshine-ai/moonshine) | MIT | Edge STT 选项（27M ONNX） |
+| [miniaudio](https://github.com/mackron/miniaudio) | MIT-0 / 公共领域 | 麦克风采集 + 扬声器播放 |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | 语音开始/结束检测（ONNX） |
 | ONNX Runtime | MIT | supertonic·moonshine·VAD 推理 |

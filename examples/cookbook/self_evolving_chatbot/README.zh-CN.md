@@ -1,20 +1,20 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=0c6d156e7378f114498c63578e7981c6401394ada5684fc924fb72ec7c867849 -->
-# 自演化聊天机器人
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=14c932ce835be59435fe30b831344894d899490a1478a3bd34f442e9113414da -->
+# 自进化聊天机器人
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**chatbot harness 会在运行时根据用户行为重塑 *自己的* 拓扑。这个能力是 NeoGraph 独有的；LangGraph 无法在运行时重塑 graph。**
+**该聊天机器人框架会在运行时根据用户行为重塑*其自身*的拓扑。此能力为 NeoGraph 独有；LangGraph 无法在运行时重塑图结构。**
 
-这是 [multi_tenant_chatbot](../multi_tenant_chatbot/) cookbook 的自然扩展 — 那个示例的 customer harness 是 *固定的*，这个示例会 *演化*。同样的 compile cache + thread_id isolation，再加一个 LLM judge step。
+[multi_tenant_chatbot](../multi_tenant_chatbot/) cookbook 的自然扩展——前者客户框架*固定*，后者*进化*。使用相同的编译缓存 + thread_id 隔离，并增加一步 LLM 评判。
 
-## 两个 Demo
+## 两个演示
 
-| 文件 | 场景 | 成本 | 总耗时 |
+| 文件 | 场景 | 成本 | 实际耗时 |
 |---|---|---|---|
-| [server.cpp](server.cpp) | Alice 1 人 × 5 turns — 最小演化机制 demo | ~$0.003 | 16 s |
-| [server_multi.cpp](server_multi.cpp) | **5 个客户 × 5 turns — 每个都有独立演化时间线 + 涌现聚类** | ~$0.02 | 7 min |
+| [server.cpp](server.cpp) | Alice 1 人 × 5 轮——最小进化机制演示 | ~$0.003 | 16 秒 |
+| [server_multi.cpp](server_multi.cpp) | **5 位客户 × 5 轮——各自独立的进化时间线 + 涌现式聚类** | ~$0.02 | 7 分钟 |
 
-构建 / 运行（两者）：
+构建 / 运行（两者均可）：
 
 ```bash
 cmake --build build --target cookbook_self_evolving_chatbot cookbook_self_evolving_chatbot_multi
@@ -22,26 +22,26 @@ cmake --build build --target cookbook_self_evolving_chatbot cookbook_self_evolvi
 ./build/cookbook_self_evolving_chatbot_multi   # multi (5 customers)
 ```
 
-## 为什么只有 NG 能做到
+## 为何只有 NG 能做到
 
-| 尝试 | LangGraph | NeoGraph |
+| 尝试方案 | LangGraph | NeoGraph |
 |---|---|---|
-| 每个客户不同 harness | ❌ StateGraph = Python object | ✅ graph_def JSON 行 |
-| harness 在运行时重塑自身 | ❌ 模块 reload + in-flight state 丢失 | **✅ 一次 DB UPDATE + 下一请求编译新 engine** |
-| 1000 个客户的 1000 个不同 graph | ❌ 每客户一个进程 = 80 GB | ✅ 一个进程 / 不同形状 cache |
-| 涌现聚类发现 | N/A | **✅ graph_def hash 分布 = 客户行为聚类** |
+| 每位客户使用不同的框架 | ❌ StateGraph = Python 对象 | ✅ graph_def JSON 行 |
+| Harness 在运行时重塑自身 | ❌ 模块重载 + 运行中状态丢失 | **✅ 一次数据库 UPDATE + 下次请求时重新编译引擎** |
+| 1000 个客户的 1000 个不同图 | ❌ 每个客户一个进程 = 80 GB | ✅ 单进程 / 独立形状缓存 |
+| 涌现式集群发现 | N/A | ✅ graph_def 哈希分布 = 客户行为集群 |
 
-LangChain/LangGraph 的 StateGraph 是 Python class instance — pickle 也会捆绑 import path；运行时重塑 node/edge 需要 Python module reload，in-flight conversation state 会丢失。**NG 的 graph-as-JSON 意味着演化 = 修改一次 JSON。**
+LangChain/LangGraph 的 StateGraph 是 Python 类实例 — pickle 同时捆绑导入路径，运行时节点/边重塑需要 Python 模块重载，运行中对话状态丢失。**NG 的图即 JSON 意味着演进 = 一次 JSON 修改。**
 
-## 核心机制
+## Core 机制
 
-每个 turn 结束时，OpenRouter 的固定 DeepSeek 模型作为 LLM judge 查看 conversation history + current topology，并用一个词回答最适合的形态：
+在每个回合结束时，固定的DeepSeek模型通过OpenRouter充当LLM评判者：它查看对话历史+当前拓扑，并用一个词回应最合适的方案：
 
-- `simple` — 1 次 LLM 调用，简短直接回答（适合 factual Q）
-- `reflexive` — 3 次 LLM 调用（draft → critique → final）（适合追求准确性）
-- `fanout` — 3 个并行 LLM perspectives → merge（适合多视角需求）
+- `simple` — 1 次 LLM 调用，简短直接回答（适用于事实性提问）
+- `reflexive` — 3 次 LLM 调用（初稿 → 批评 → 终稿）（适用于追求准确性的场景）
+- `fanout` — 3 个并行 LLM 视角 → 合并（适用于多视角需求）
 
-如果判断不同，就原地更新 customer DB 的 graph_def。下一 turn 使用新拓扑 — **0 deploy，0 restart，in-flight state preserved**。
+若判定不一致，则就地更新客户数据库的 graph_def。下一轮使用新的拓扑——**0 部署、0 重启，运行中状态得以保留**。
 
 ```cpp
 std::string suggested = llm_judge_topology(
@@ -55,9 +55,9 @@ if (suggested != customer.topology_name) {
 }
 ```
 
-## Demo 1 — Alice 1 人（server.cpp）
+## 演示 1——Alice 1 人（server.cpp）
 
-5 个 turns 中逐渐演化。用户自然地从事实型问题转向多视角问题，harness 跟随 simple → fanout 演化。
+历经 5 轮逐步演化。用户自然地从事实性问题→多视角问题过渡，harness 遵循 简单→fan-out 的演化。
 
 ```
 ── Turn 1 [topology=simple] ──
@@ -80,19 +80,19 @@ Evolution timeline:
   Turn 3:  fanout   (evolved)
 ```
 
-## Demo 2 — Multi-Customer（server_multi.cpp）⭐
+## 演示 2——多客户（server_multi.cpp）⭐
 
-**真正的影响在这里。** 5 个客户展现不同的行为模式，每个都有独立演化时间线。这是涌现聚类发现 demo。
+**真正的影响在这里。** 5 个客户展现出不同的行为模式，各自拥有独立的演化时间线。演示涌现式集群发现。
 
-每个客户的行为模式假设 + 实际结果：
+每个客户的行为模式假设与实际结果：
 
 | 客户 | 行为模式 | 假设 | 实际演化 | 验证 |
 |---|---|---|---|---|
-| **alice** | 渐进（事实型 → 多视角） | 中途 fanout | `simple → fanout(t3)` | ✅ |
-| **bob** | 只问事实型问题（“What is X?” × 5） | 保持 simple | `simple` 全部 5 个 turns | ✅ |
-| **charlie** | 追求准确性（“verify your answer”） | reflexive | `simple → reflexive(t1)` 立即发生 | ✅ |
-| **david** | 从一开始就“compare X vs Y multi-angle” | 快速 fanout | `simple → fanout(t1)` 立即发生 | ✅ |
-| **eve** | 混合（事实型 ↔ 多视角 ↔ 谨慎摇摆） | 摇摆风险 | `simple → fanout(t2) → reflexive(t4) → fanout(t5)` **摇摆** | ✅ |
+| **alice** | 渐进式（事实性→多视角） | 中途 fan-out | `simple → fanout(t3)` | ✅ |
+| **bob** | 仅事实性问题（"X 是什么？" × 5） | 简单的维护 | `simple` 全部 5 轮 | ✅ |
+| **charlie** | 追求准确性（“验证你的答案”） | 反射式 | `simple → reflexive(t1)` 立即 | ✅ |
+| **david** | 一开始就“从多角度对比X与Y” | 快速fan-out | `simple → fanout(t1)` 立即 | ✅ |
+| **eve** | 混合（事实型 ↔ 多视角 ↔ 谨慎振荡） | 振荡风险 | `simple → fanout(t2) → reflexive(t4) → fanout(t5)` **振荡** | ✅ |
 
 ### 汇总结果
 
@@ -115,17 +115,17 @@ Compile cache size:  3   ← 5 customers → 3 distinct engine
 
 ### 关键观察
 
-1. **行为模式假设 4/5 被准确验证** — 人类预测的演化路径与 LLM judge 的实际演化决定完全匹配。也就是说，**LLM judge 能可靠检测用户意图转移**。
+1. **行为模式假设4/5准确验证** — 人类预测的演化路径与LLM 审判者的实际演化决策完全契合。即 **LLM 审判者能可靠且无偏见地检测用户的意图转换。**
 
-2. **实际观察到 Eve 的摇摆 ⚠️** — 话语序列 [事实型 → 多视角 → 事实型 → 谨慎 → 事实型] 会导致拓扑在 [simple → fanout → fanout(maintain) → reflexive → fanout] 之间摆动。**需要防抖保护**，这点已由数据验证（需要 cooldown 或 hysteresis 增强）。
+2. **实际观测到Eve的振荡 ⚠️** — 话语序列 [事实 → 多角度 → 事实 → 谨慎 → 事实] 导致拓扑振荡 [简单 → fan-out → fan-out(保持) → 反身 → fan-out]。**需要防抖动保护**，须由数据验证（冷却或滞后增强）。
 
-3. **涌现聚类发现** — 5 个客户的多样 utterance pattern 自然分类为 **3 个拓扑 cluster**。Compile cache size = 3 = distinct cluster count。
+3. **涌现式集群发现** — 5位客户的多样话语模式自然归类为 **3个拓扑集群**。编译缓存大小 = 3 = 不同集群数量。
 
-   **这是真正有趣的涌现性质** — NG 的 graph-as-data 自然成为客户行为聚类发现机制。graph_def distribution = customer behavior 的 essential cluster shape。
+**这是真正有趣的涌现属性** — NG的图即数据天然成为客户行为集群发现机制。graph_def分布 = 客户行为的本质集群形状。
 
-4. **内存效率** — 5 个客户 → 3 个 engines。2 个客户的 engine memory 通过 cache sharing 节省。**放大到 1000 个客户时，如果 distinct shapes 收敛到 ~10，engine memory 几乎保持常数 → 真实 1000+ customer multi-tenant 可装进一个进程。**
+4. **内存效率** — 5 客户 → 3 引擎。通过缓存共享节省 2 个客户的(引擎)内存。**扩展至 1000 客户，如果不同形状收敛至约 10 个，引擎内存保持近常量 → 真实 1000+ 客户多租户可容纳于单进程。**
 
-5. **顺序模拟只需 7 分钟总耗时** — 生产中每个客户独立，因此可以并行。5 个客户并行 = ~1.5 分钟 + compile cache 可安全并发访问（`std::shared_mutex`），所以无 race。
+5. **顺序模拟仅需 7 分钟墙钟时间** — 生产环境中，每个客户独立，因此可并行。5 个客户并行 ≈ 1.5 分钟 + 编译缓存并发访问安全(`std::shared_mutex`)，因此无竞态。
 
 ## 生产场景 — 实际实现
 
@@ -155,7 +155,7 @@ CREATE TABLE customer_sessions (
 );
 ```
 
-每个请求的处理流程：
+每个请求处理流程：
 
 ```cpp
 auto& cust    = db.fetch_customer(customer_id);  // graph_def + topology_name
@@ -180,18 +180,20 @@ if (turn % EVAL_INTERVAL == 0) {
 
 ## 未来扩展
 
-- **防摇摆保护** — 处理 eve case。如果最近 N turns 内已演化，则 lockout；或使用 hysteresis（如果当前 topology 不比下一候选低 N%，就不切换）。
-- **LLM 生成 graph_def** — 当前从 3 个预定义拓扑中选择。更大胆地说，LLM 可以从零生成 graph_def JSON。请参考 [`the-beast/`](../the-beast/) cookbook 中的模型编写拓扑及编译/验证门控。
-- **并行客户处理** — 顺序 demo 7 分钟，按客户并行 = ~1.5 分钟。直接使用 `asio::thread_pool` + compile cache。
-- **A/B 框架** — 同时为同一客户运行 2 个拓扑，根据响应满意度决定赢家。按 graph_id sticky split。
-- **CheckpointStore 集成** — Postgres + 上述 SQL schema，面向真实生产可用。
-- **自适应演化频率** — 根据 customer history stability 调整 eval-interval（stable = every 10 turns，unstable = every turn）。
+- **防抖动保护(anti-oscillation guard)** — 处理边缘情况。若在最近 N 轮中已演进，则锁定；或采用滞回（若当前拓扑不比下一个候选者低 N%，则不更改）。
+- **LLM生成的graph_def** — 当前从 3 个预定义拓扑中选择。更雄心勃勃的方案是，LLM 可以完全生成 graph_def JSON。[`the-beast/`](../the-beast/) 菜谱演示了相同的模型作者拓扑及编译/验证门控。
+- **并行客户处理** — 顺序演示 7 分钟，按客户并行 = 约 1.5 分钟。直接使用 `asio::thread_pool` + 编译缓存。
+- **A/B框架** — 同时对同一客户运作 2 个拓扑，按响应满意度决定胜者。以 graph_id 粘性分配。
+- **CheckpointStore 集成** — Postgres + 上述 SQL schema，用于真实生产就绪。
+- **自适应演进速率** — 根据客户历史稳定性调整评估间隔（稳定 = 每 10 轮，不稳定 = 每轮）。
 
-## 核心信息
+## Core
 
-> **自演化 + 多租户组合才是 NG 的真正本质。** “AI agent
-> that builds itself” 这个愿景可以通过 NG 的 graph-as-data paradigm **实际落地**。
-> LLM 输出自己的 harness → DB UPDATE → 立即应用 — 对 LangGraph 的 StateGraph-as-Python model 来说这条路径关闭，NG 是这个市场中 **唯一玩家**。
+> **自演进 + 多租户组合是 NG (NeoGraph) 的真正本质。**“AI 代理
+> “自我构建”的系统借助NG的图即数据范式**切实可行**。
+> LLM 输出其自身的 harness → 数据库更新 → 立即应用 — 形成闭环路径，用于
+> 相比 LangGraph 的 StateGraph-as-Python 模型，NG 是**该市场中唯一的玩家**。
 >
-> *“5 个客户 × 5 个 turns = 19 MB / 3 个不同 engine / 涌现聚类发现 / 摇摆诊断。
-> 这是走向真实自改进多租户 agent 基础设施的起点。”*
+> *“5 个客户 × 5 轮 = 19 MB / 3 个互引擎 / 涌现簇
+> /发现 / 振荡诊断。这是真实自我改进多租户智能体架构的起点
+> *基石。”*

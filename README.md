@@ -1,8 +1,8 @@
 <p align="center">
   <h1 align="center">NeoGraph</h1>
   <p align="center">
-    <strong>The C++ graph agent engine — with Python bindings.</strong><br>
-    LangGraph-level capabilities · 5&nbsp;µs engine overhead · one static binary that fits a Raspberry&nbsp;Pi.
+    <strong>A fast C++ graph runtime with a durable programmable agent control plane.</strong><br>
+    Static Core execution when latency matters. QuickJS Programs, sub-agents, Hooks, runtime context, and verified topology evolution when control matters.
   </p>
 </p>
 
@@ -16,287 +16,190 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
-  <a href="#use-from-a-cmake-project">CMake</a> &middot;
+  <a href="#two-runtime-layers">Architecture</a> &middot;
   <a href="#python">Python</a> &middot;
-  <a href="docs/concepts.md">Concepts</a> &middot;
   <a href="examples/README.md">Examples</a> &middot;
-  <a href="docs/troubleshooting.md">Troubleshooting</a> &middot;
-  <a href="docs/reference-en.md">API Reference</a> &middot;
-  <a href="#vs-langgraph">vs LangGraph</a>
+  <a href="docs/reference-en.md">C++ Reference</a> &middot;
+  <a href="docs/python-binding.md">Python Reference</a>
 </p>
 
 ---
 
 <p align="center">
-  <a href="docs/videos/neograph-promo.mp4">
-    <img src="docs/images/neograph-promo.gif" alt="NeoGraph promo — 5µs engine overhead, 5.5MB RSS at 10K concurrent, 1.2MB static binary, fits Raspberry Pi" width="900">
+  <a href="docs/videos/neograph-promo-v3.mp4">
+    <img src="docs/images/neograph-promo-v3.gif" alt="NeoGraph — generated Programs, semantic admission, runtime topology, Hooks, context and Python parity" width="900">
   </a>
 </p>
 
-## What is NeoGraph?
+## What NeoGraph is today
 
-NeoGraph is a **C++20 graph-based agent orchestration engine** that brings
-LangGraph-level capabilities to C++. Define agent workflows as JSON, execute
-them with parallel fan-out, checkpoint state for time-travel debugging and
-human-in-the-loop, and plug in any LLM provider — all without Python.
+NeoGraph has two deliberately separate execution layers:
 
-```cpp
-#include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/graph/react_graph.h>
+| Layer | Use it for | Contract |
+|---|---|---|
+| **GraphEngine / Core** | Fixed or host-selected graphs, low overhead, embedded deployment | Immutable compiled topology; C++ nodes execute through Pregel-style super-steps |
+| **ProgramRuntime / QuickJS** | Runtime control, child Programs, structured concurrency, topology replacement and migration | Immutable Program generations; durable typed commands; journaled transitions and replay |
 
-auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = "sk-...", .default_model = "gpt-4o-mini"
-});
-auto engine = neograph::graph::create_react_graph(provider, std::move(tools));
+The model never receives compiler, catalog, credential, migration, or authority-granting access. Generated source follows:
 
-neograph::graph::RunConfig config;
-config.input = {{"messages", json::array({{{"role","user"},{"content","Hello!"}}})}};
-auto result = engine->run(config);
+```text
+proposal → reserve → compile → semantic validate → admit → publish → migrate or spawn
 ```
 
-The agent above is really just JSON the engine executes — swap the JSON, get a
-different agent (see [`docs/concepts.md`](docs/concepts.md)):
-
-```json
-{
-  "schema_version": 1,
-  "channels": { "messages": {"reducer": "append"}, "__route__": {"reducer": "overwrite"} },
-  "nodes": {
-    "planner":    {"type": "llm_call"},
-    "researcher": {"type": "tool_dispatch"},
-    "classifier": {"type": "intent_classifier", "routes": ["deep_dive", "summarize"]}
-  },
-  "edges": [
-    {"from": "__start__", "to": "planner"},
-    {"from": "planner", "condition": "has_tool_calls",
-     "routes": {"true": "researcher", "false": "classifier"}},
-    {"from": "researcher", "to": "planner"},
-    {"from": "classifier", "condition": "route_channel",
-     "routes": {"deep_dive": "__end__", "summarize": "__end__"}}
-  ]
-}
-```
-
-**NeoGraph is the only graph agent engine for C++.** If you're building agents
-for robotics, embedded systems, games, high-frequency trading, or anywhere
-Python isn't an option — this is it.
-
-## The four axes
-
-Each row is one command away — no setup, no API key except the live-LLM variants.
-
-|   | Axis | Measured | Detail |
-|---|---|---|---|
-| ⚡ | **Performance** | 5 µs engine overhead · 10 K concurrent in 5.5 MB · p99 7 µs @ 10 K (1 CPU sandbox) | [performance deep-dive](docs/performance-deep-dive.md) |
-| 🧬 | **Self-evolution** | LLM judge → `graph_def` hot-swap · 5 customer → 3 emergent topology clusters | [self_evolving_chatbot](examples/cookbook/self_evolving_chatbot/) |
-| 🔌 | **Embedded-ready** | 1.2 MB stripped static binary · `libc.so.6` only · runs on RPi Zero 2W | [embedded / robotics](docs/performance-deep-dive.md#what-the-numbers-mean-for-embedded--robotics) |
-| 🪶 | **Lightweight** | 2 direct wheel deps · 1 K-customer multi-tenant → 29 MB · t2.micro-friendly | [multi_tenant_chatbot](examples/cookbook/multi_tenant_chatbot/) |
-
-### Benchmarks
-
-Matched-topology, zero-I/O engine overhead — just node dispatch + state writes +
-reducer calls (µs/iter, lower is better):
-
-| Framework | `seq` (3-node) | `par` (fan-out 5) | vs. NeoGraph |
-|---|--:|--:|--:|
-| **NeoGraph master** | **5.0 µs** | **11.8 µs** | 1× |
-| Haystack 2.28 | 144 µs | 290 µs | 29× |
-| pydantic-graph 1.85 | 236 µs | 286 µs | 47× |
-| LangGraph 1.1.9 | 657 µs | 2,349 µs | 131× |
-| LlamaIndex 0.14 | 1,780 µs | 4,684 µs | 356× |
-| AutoGen 0.7.5 | 3,209 µs | 7,293 µs | 642× |
-
-At N=10,000 concurrent (1 CPU / 512 MB sandbox): NeoGraph 52 ms / 7 µs p99 /
-5.5 MB · LangGraph 23.4 s / 416 MB · LlamaIndex & AutoGen OOM-killed.
-Full matrix + methodology: [`docs/performance-deep-dive.md`](docs/performance-deep-dive.md)
-· [`benchmarks/README.md`](benchmarks/README.md).
+A rejected proposal cannot publish a `ProgramVersion`, and its dynamic-compile budget is not restored. See [Strict Runtime Interposition](docs/STRICT_RUNTIME_INTERPOSITION.md) and [DSL capability evaluation](docs/DSL_CAPABILITY_EVAL.md).
 
 ## Quick Start
 
-**Requirements** — C++20 compiler (GCC 13.3 core-green; GCC 14.2+ / Clang 18+ /
-MSVC 2022 for everything), CMake 3.16+, Python 3 (build-time codegen). With
-default options the configure step also requires the OpenSSL, SQLite3, libpq,
-and libcurl **development** packages (runtime `.so`s alone won't satisfy
-`find_package`):
-
-```bash
-# Ubuntu / Debian
-sudo apt install libssl-dev libsqlite3-dev libpq-dev libcurl4-openssl-dev
-# macOS (SQLite ships with the system)
-brew install openssl libpq curl
-```
-
-Don't need Postgres / SQLite checkpoints or the HTTP/2 backend? Skip the
-packages and configure with `-DNEOGRAPH_BUILD_POSTGRES=OFF
--DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF` instead.
-
-**Platforms** — Linux x86_64 **GA** (reference, 429/429 ctest, sanitizer-clean);
-macOS arm64, Linux ARM64, Windows MSVC 2022 **beta**. Per-platform rationale in
-[`CHANGELOG.md`](CHANGELOG.md).
+### C++ Core
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build
-cmake --build build -j$(nproc)
-
-# Run an example — no API key needed:
-./build/example_custom_graph      # mock ReAct agent
-./build/example_parallel_fanout   # parallel fan-out/fan-in
-./build/example_send_command      # dynamic Send + Command routing
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build --parallel
+./build/example_core_quickstart
 ```
 
-Run against a real LLM — every API-using example auto-loads `.env` from the cwd
-(bundled `cppdotenv`):
+The complete source is [examples/62_core_quickstart.cpp](examples/62_core_quickstart.cpp). It registers one C++ node, compiles a strict graph, runs it, and reads a typed channel.
+
+Enable the programmable control plane when needed:
 
 ```bash
-echo "OPENAI_API_KEY=sk-..." > .env
-./build/example_react_agent
+cmake -S . -B build-program \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build-program --parallel
+./build-program/example_program_quickstart
 ```
 
-## Use from a CMake project
+See [examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp) and the [QuickJS authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md).
 
-`pip install` is Python-only (no C++ headers). For C++, `FetchContent` behaves
-like `pip install` for CMake:
+## Two runtime layers
 
-```cmake
-include(FetchContent)
-FetchContent_Declare(NeoGraph
-    GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
-    GIT_TAG        master)
-# Optional: trim heavy components you don't need.
-set(NEOGRAPH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(NEOGRAPH_BUILD_PYBIND   OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(NeoGraph)
+### GraphEngine / Core
 
-add_executable(my_agent main.cpp)
-target_link_libraries(my_agent PRIVATE neograph::core neograph::llm neograph::a2a)
-```
+- static and conditional edges, cycles, barriers, `Send` fan-out and `Command` routing;
+- checkpoint/resume, exact-checkpoint resume, fork, state history, HITL and `NodeInterrupt`;
+- synchronous and coroutine APIs, streaming, cancellation and token accounting;
+- graph-wide and per-node retry policies, jitter and bounded reusable node caching;
+- custom registries, providers, tools, MCP, A2A and ACP integration;
+- safe-point capture and shape-preserving GraphEngine generation migration.
 
-That's the whole integration. New to it? The
-[**5 common first-30-minutes traps**](docs/troubleshooting.md) (channel accessor
-shape, the `neograph::graph::` sub-namespace, the `<httplib.h>` OpenSSL macro,
-the GCC 13 coroutine ICE, …) will save you a debugging session. Full build
-options and CMake targets: [`docs/reference-en.md`](docs/reference-en.md).
+### ProgramRuntime / QuickJS
+
+- standard JavaScript computation in bounded QuickJS `define()` and generator `main(input)`;
+- sealed commands: `callCore`, `spawn`, `await`, `all`, `parallel`, `race`, `quorum`, `emit`, `checkpoint`, `cancelScope`, and admitted host capabilities;
+- immutable Program bundles, versions, catalogs, admission profiles and policy snapshots;
+- durable command journals, exact replay, child lineage, nonrenewable budgets and process recovery;
+- checkpoint replacement and restricted live GraphEngine topology migration;
+- host-owned semantic validation before admission of generated Programs.
+
+The installed JavaScript surface is machine-readable through `javascript_authoring_capability_manifest()` and checked against the actual QuickJS bindings in CI.
+
+## Runtime safety and context
+
+NeoGraph moves important behavior outside model discretion:
+
+- immutable RAW message history and `ContextEpoch` selection;
+- derived context, required Skills and hard constraints;
+- conservative transformation receipts that preserve required artifacts exactly;
+- mandatory lifecycle Hooks over native, stdio, or HTTP execution backends;
+- provider dispatch and terminal-outcome receipts;
+- durable runtime developer instructions and admitted topology transitions.
+
+NeoGraph guarantees construction, admission, dispatch, and evidence boundaries. It does not claim an LLM attended to every token.
 
 ## Python
 
-The same C++ engine, `pip`-installable and driven from a notebook, Gradio, or
-FastAPI service:
+The Python package uses the same C++ engine and now includes the Program, Hook, strict-context, runtime-policy, and SQLite durability surfaces:
 
 ```bash
 pip install neograph-engine
 ```
 
+### Five-second demo (no API key)
+
 ```python
 import neograph_engine as ng
+
+@ng.node("greet")
+def greet(state):
+    return [ng.ChannelWrite(
+        "messages",
+        [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}],
+    )]
 
 definition = {
     "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "demo",
-    "channels": {"messages": {"reducer": "append"}},
-    "nodes":    {"llm": {"type": "llm_call"}},
-    "edges":    [{"from": ng.START_NODE, "to": "llm"},
-                 {"from": "llm", "to": ng.END_NODE}],
+    "channels": {
+        "name": {"reducer": "overwrite"},
+        "messages": {"reducer": "append"},
+    },
+    "nodes": {"greet": {"type": "greet"}},
+    "edges": [
+        {"from": ng.START_NODE, "to": "greet"},
+        {"from": "greet", "to": ng.END_NODE},
+    ],
 }
+
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-result = engine.run(ng.RunConfig(thread_id="t1", input={"messages": [...]}))
+result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
+print(result.output["channels"]["messages"]["value"])
 ```
 
-20 wheels + sdist per release (Linux x86_64/aarch64, macOS arm64, Windows x64 ·
-Python 3.9–3.13). Full guide — ReAct with a real LLM, async, custom reducers,
-the LangGraph-divergence list, observability, Docker-free deploy:
-[`docs/python-binding.md`](docs/python-binding.md).
+Python additionally exposes:
 
-## Features
+- `RetryPolicy`, per-node runtime overrides, `RunMetadata`, exact `resume_from`, and reusable cache scope;
+- `ProgramSource`, `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`, handles and results;
+- mandatory `HookRuntime` callbacks and fail-closed lifecycle delivery;
+- `RuntimeContextRequirements`, `ContextTransformReceipt`, SQLite durable context/dispatch stores, and `StrictRuntimeProfile`.
 
-**Core engine (`neograph::core`)** — JSON-defined graphs (no recompile to change
-a workflow) · Pregel super-step execution with cycles · parallel fan-out/fan-in ·
-`Send` (dynamic fan-out) + `Command` (routing+state override) · checkpointing +
-HITL (`interrupt_before/after`, `resume()`, `NodeInterrupt`) · `get_state` /
-`update_state` / `fork` / time-travel · retry policies · stream modes · subgraphs ·
-intent routing · cross-thread `Store` · custom nodes via `NodeFactory` ·
-async-native (`run_async` / `run_stream_async`) · cooperative `CancelToken` ·
-history compaction · per-node cache · `NodeFactory::export_schema()` (drives the
-version-locked visual editor). Built-in **OpenInference tracer**, no extra link.
+See [Python binding guide](docs/python-binding.md) and [Python examples](bindings/python/examples/README.md).
 
-**LLM providers (`neograph::llm`)** — `OpenAIProvider` (OpenAI/Groq/Together/
-vLLM/Ollama — any OpenAI-compatible API) · `SchemaProvider` (Claude, Gemini, or
-any custom vendor via JSON schema) · ReAct `Agent` loop with streaming.
+## Build configuration
 
-**Integrations** — MCP client (`neograph::mcp`, HTTP + stdio) · local MCP server
-(`neograph::mcp_server`, stdio) · opt-in Streamable HTTP server
-(`neograph::mcp_http_server`) · SQLite Harness records
-(`neograph::mcp_sqlite`) · compiler-backed multi-worker
-[Harness MCP](docs/HARNESS_MCP.md) · Agent-to-Agent
-(`neograph::a2a`, server + client + caller node) · Agent Client Protocol
-(`neograph::acp`, editor-driven) · gRPC service (`neograph::grpc`, opt-in) ·
-async HTTP/HTTPS/WS + SSE (`neograph::async`).
+Core-only users do not pay for Program or QuickJS:
 
-**Durable state** — `PostgresCheckpointStore`, `SqliteCheckpointStore`, and
-`InMemoryCheckpointStore` behind one `CheckpointStore` interface (all
-Python-bound), plus `SqliteHarnessRecordStore` for immutable Harness artifacts
-and restart-safe run records. Lock-free `RequestQueue` + `AsyncTool` in
-`neograph::util`.
+```bash
+cmake -S . -B build-core \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF
+```
 
-**Strict runtime interposition** — immutable RAW history and ContextEpochs ·
-required Skill and hard-constraint injection · provider request and terminal
-outcome receipts · mandatory event-driven Hooks over native, stdio, or HTTP ·
-verified context transformation · durable runtime developer instructions ·
-bounded reserve-before-compile Program synthesis. See
-[`docs/STRICT_RUNTIME_INTERPOSITION.md`](docs/STRICT_RUNTIME_INTERPOSITION.md).
+Important options:
 
-`NEOGRAPH_BUILD_MCP` remains the compatibility umbrella for both MCP roles.
-Use `NEOGRAPH_BUILD_MCP_CLIENT` or `NEOGRAPH_BUILD_MCP_SERVER` for a narrow
-build; the stdio server-only target does not require `neograph::async` or
-OpenSSL. Enable `NEOGRAPH_BUILD_MCP_HTTP_SERVER` explicitly for remote HTTP.
+| Option | Purpose |
+|---|---|
+| `NEOGRAPH_BUILD_PROGRAM` | Durable Program values, catalog, runtime, lineage and migration |
+| `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program authoring and generator commands |
+| `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python extension |
+| `NEOGRAPH_BUILD_SQLITE` | SQLite checkpoint, context, Hook and provider-receipt stores |
+| `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL checkpoint and Program persistence components |
+| `NEOGRAPH_BUILD_MCP_CLIENT` / `SERVER` | MCP client and server roles |
+| `NEOGRAPH_BUILD_A2A` / `ACP` / `GRPC` | Optional protocol integrations |
 
-Full capability list and the 55+ runnable examples:
-[`examples/README.md`](examples/README.md).
+Use the narrow CMake target matching your deployment: `neograph::core`, `neograph::llm`, `neograph::program`, `neograph::mcp`, `neograph::a2a`, or another enabled component.
 
-## Architecture
+## Verification
 
-`GraphEngine` is a thin super-step orchestrator delegating to four
-purpose-built, independently unit-tested classes:
+The repository runs deterministic C++ and Python suites, Program replay/migration probes, DSL capability fixtures, documentation/i18n checks, sanitizers, and optional live-model evaluations. Benchmark claims belong in [benchmarks](benchmarks/README.md) and the dated [performance report](docs/performance-deep-dive.md), not as timeless API guarantees.
 
-- **`GraphCompiler`** — pure `JSON → CompiledGraph` parser.
-- **`Scheduler`** — signal-dispatch routing + barrier accumulation.
-- **`NodeExecutor`** — retry loop, parallel fan-out (`asio::make_parallel_group`), `Send` dispatch.
-- **`CheckpointCoordinator`** — save / resume / pending-writes behind a `(store, thread_id)` façade.
+## Documentation
 
-`neograph::core` has zero network dependencies (`yyjson` + header-only `asio`);
-`httplib` stays PRIVATE to `llm`/`mcp` and is never exposed to your code. Two
-concurrency models ship out of the box — thread-per-agent (sync) and
-coroutine-async (thousands of agents on one `asio::io_context`). Details:
-[`docs/reference-en.md` §7b](docs/reference-en.md#7b-engine-internals) ·
-[`docs/concurrency.md`](docs/concurrency.md) · [`docs/ASYNC_GUIDE.md`](docs/ASYNC_GUIDE.md).
-
-## vs LangGraph
-
-| | LangGraph (Python) | NeoGraph (C++) |
-|---|---|---|
-| Engine | StateGraph | GraphEngine |
-| Checkpointing / HITL / fork / time-travel | Yes | Yes (+ `NodeInterrupt`) |
-| Parallel fan-out | Static | `make_parallel_group` (+ opt-in `asio::thread_pool`) |
-| Send / Command | Yes | `NodeResult::sends` / `::command` |
-| Multi-LLM | LangChain required | `SchemaProvider` built-in (3 vendors) |
-| MCP | Separate impl | Built-in |
-| Runtime / memory | Python GIL · ~300 MB+ | C++20 coroutines + asio · ~10 MB |
-| Edge / embedded | Not possible | Raspberry Pi, Jetson, IoT |
-
-Same multi-tenant shape LangGraph needs a *process per customer* for (StateGraph
-is a Python object), NeoGraph serves from one process as graph-as-JSON — the
-[multi-tenant](examples/cookbook/multi_tenant_chatbot/) and
-[self-evolving](examples/cookbook/self_evolving_chatbot/) cookbooks show why.
-
-## Acknowledgments
-
-Inspired by [LangGraph](https://github.com/langchain-ai/langgraph),
-[agent.cpp](https://github.com/mozilla-ai/agent.cpp),
-[asio](https://think-async.com/Asio/) (the 3.0 engine runtime), and
-[Clay](https://github.com/nicbarker/clay).
+- [Concepts](docs/concepts.md)
+- [C++ reference](docs/reference-en.md)
+- [Python binding](docs/python-binding.md)
+- [Concurrency and cancellation](docs/concurrency.md)
+- [Async guide](docs/ASYNC_GUIDE.md)
+- [Harness MCP](docs/HARNESS_MCP.md)
+- [QuickJS public authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Strict runtime interposition](docs/STRICT_RUNTIME_INTERPOSITION.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Examples](examples/README.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+MIT — see [LICENSE](LICENSE). Third-party notices: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

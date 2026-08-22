@@ -1,5 +1,7 @@
 # Strict Runtime Interposition
 
+**Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
+
 NeoGraph's strict runtime path moves mandatory context, lifecycle Hooks, and
 provider dispatch evidence out of model discretion. It is additive: legacy
 direct provider calls still exist for trusted embedding, while a

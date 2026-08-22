@@ -1,28 +1,17 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=737ef3eca8ce61e6c56b52473e9a4369b3c1ee2a54dae21dae71873452355232 -->
-# 野兽 — 生成·进化·回滚
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=c70c7b805d11a43a76fb1402e0b7ab7160eea9d0b9137fc779776b717d66c453 -->
+# The Beast — 生成 · 演化 · 回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-> 一个自我进化的代理，编写自己的执行框架，并在
-> strict Core 编译器，并通过检查点机制倒回其执行。
-> **生成。进化了。倒回。野兽依然存在。**
+> 一个自我进化的智能体，它将自己的harness编写为严格的Core JSON，在Core编译器下进化它，并通过检查点器回退其执行。**生成。进化。回退。野兽仍在。**
 
-大多数“代理框架”都可以让您“构建”图。野兽做了三件事
-静态执行框架无法做到的事情——所有这三个都是**真实的、离线的和
-在这个程序中具有确定性**（无 API 密钥）：
+大多数“智能体框架”让你*构建*一个图。The Beast 能做到任何静态 harness 无法做到的三件事——而且这三件事都是**真实的、离线的、确定性的**，全部包含在这一程序中（无需 API 密钥）：
 
-1. **在运行时生成**一个新的执行框架，并在执行之前证明它是一致的
-   单节点运行。
-2. 使用编译器本身，使用真正的变异运算符来**演进**它
-   作为适应度门控。
-3. **通过以下方式将正在运行的执行框架回滚到任何先前的超级步骤
-   检查点机制——真正的时间旅行，而不是重播。
+1. **在运行时生成**一个新的 harness，并在任何节点运行之前证明其一致性。
+2. 使用真实的变异算子**演化**它，以编译器本身作为适应度门槛。
+3. 通过检查点机制将正在运行的 harness **回滚**到任意先前超级步骤——这是真正的时间旅行，而非重放。
 
-这只是安全的，因为在 NeoGraph 中，执行框架是 **数据** — 一种拓扑
-JSON 中描述（问题 #56）——strict Core 编译器（问题 #75）可以
-*在运行之前证明执行框架是一致的*。把它拿走，然后“一个代理
-自己写图的”只是一台生产破图的机器。
-编译器将怪物从负担变成了范畴。
+这之所以安全，仅仅是因为在 NeoGraph 中，一个 harness 就是**数据**——用严格 Core JSON 描述的拓扑（issue #56）——并且 Core 编译器可以在 harness 运行*之前*证明其一致性。严格 Core JSON 是一种互换工件，而非第二源语言。编译器才是将这份“怪兽”从负债转变为类别定义的力量。
 
 ## 运行它
 
@@ -33,8 +22,8 @@ $ ./build/cookbook_the_beast
 
 ```
 ── ACT I · generate a harness, prove it coherent ──
-  ACCEPTED — strict gates passed. Core lockfile nodes: s1_n s2_n s3_n
-  (strict Core JSON expanded away: strict Core JSON retained.)
+  ACCEPTED — strict compile and validation gates passed. Core nodes: s1_n s2_n s3_n
+  (strict Core JSON is already the canonical interchange representation.)
 
 ── ACT II · evolve the harness (compiler = fitness) ──
   generations: 4 · offspring: 36 · survived compile gate: 36 · rejected (invalid, never run): 0
@@ -55,62 +44,36 @@ $ ./build/cookbook_the_beast
 
 Generated. Evolved. Rewound. The Beast remains.
 ```
-## 第一幕 — 生成 + 门
 
-The Beast 直接用 strict Core JSON 的显式节点和边编写执行框架，并使其依次
-通过编译和验证门。一个执行框架
-任何门失败的都会被**丢弃**。
+## 第一幕 —— 生成 + 门控
 
-| 门控 | API | 捕获的问题 |
+The Beast 直接以严格的 Core JSON 形式编写一个 harness，并按顺序强制其通过编译器与验证关卡。未能通过任何关卡的 harness 将被**丢弃**。
+
+| 关卡 | API | 捕获 |
 |---|---|---|
-| **1. 编译 + TV** | `GraphCompiler::compile`（严格，`schema_version: 1`）+`verify_roundtrip` | 未知键会产生硬错误，并验证规范化的 strict Core JSON。 |
-| **2. 编译 + TV** | `GraphCompiler::compile`（严格，`schema_version: 1`）+`verify_roundtrip` |拼写错误或不受支持的键是*硬错误*（已消费键核算），而不是无声丢弃。 翻译验证然后断言`canon(source) == canon(compile(source).to_json())`——编译器不能悄悄地重新连接任何东西。 |
-| **2. 验证** | `GraphValidator::validate` |该图的**含义**：悬空边（E3）、永远不会发射的障碍（E8）、不完整的路由表（E10）、通道效应违规（E4/E6）。 |
+| **1. 编译 + TV** | `GraphCompiler::compile` (严格, `schema_version: 1`) + `verify_roundtrip` | 拼写错误或不支持的键是*硬错误*（已消费键记账），而不是静默丢弃。翻译验证断言 `canon(source) == canon(compile(source).to_json())`。 |
+| **2. 验证** | `GraphValidator::validate` | 图**意味着**什么：悬空边（E3）、永远无法触发的屏障（E8）、不完整路由映射（E10）、通道效应违例（channel-effect violations）（E4/E6）。 |
 
-种子是三个显式节点，组成核心链 `s1_n → s2_n → s3_n`。
+种子包含三个显式节点，作为核心链 `s1_n → s2_n → s3_n` 连接。
 
-## 第二幕——进化（编译器是适应度函数）
+## 第二幕 — 进化（编译器即适应度函数）
 
-`neograph::graph::evolve()`（问题#80）运行**真正的变异算子**
-种子上方 — `toggle_conditional_edge`、`toggle_barrier`、`add_edge`、`remove_edge`。
-每个后代都首先通过**编译门控**：无效的后代死亡
-零成本死亡，完全不执行。拒绝率本身就是一种健康
-衡量算子的指标。
+`neograph::graph::evolve()` (issue #80) 在种子上运行**真实的变异算子** — `toggle_conditional_edge`、`toggle_barrier`、`add_edge` 和 `remove_edge`。每个后代首先通过**编译门**：无效后代免费消亡，从不执行。拒绝率本身是算子健康度的指标。
 
-关键的设计选择：突变空间是**strict Core（M4），而不是原始空间
-JSON**，因此后代在结构上是有效的*通过构造* - 这是
-为什么这里的拒绝计数是0。门是安全网，使
-无约束的进化是安全的，并且它始终武装在每个子代上。
+变异空间是有界的严格 Core 拓扑，而非源语言。后代保持规范互换表示形式，而编译门槛对每个子代始终保持启用。
 
-每次运行都会通过 `to_json(result)` 发出可区分的谱系：
-个体的父代、世代、突变和核心锁定文件。那
-谱系**是**进化规模的回滚面——提交
-它，差异它，恢复整整一代。
+每次运行通过 `to_json(result)` 发出可差异化的谱系：每个个体的父代、世代、变异和核心锁文件。该谱系**就是**进化尺度上的回退表面 — 提交它、差异比较它、回退整个世代。
 
-## 第三幕 — 回滚（时间旅行检查点机制）
+## 第三幕 — 回滚（检查点时间漫游）
 
-幸存的执行框架是由 `InMemoryCheckpointStore` 衍生出来的
-通过`EngineConfig::checkpoint_store`附上。引擎快照
-每个超级步骤结束时的状态。然后：
+存活的测试框架在启动时附带一个 `InMemoryCheckpointStore` 通过 `EngineConfig::checkpoint_store`进行连接。引擎在每个超级步骤结束时对状态进行快照。之后：
 
-- `store->list("beast-run")`返回完整的时间线——你可以*看到*
-  `trail` 每一步增长一个节点。
-- `store->load_by_id(earlier.id)` **恢复**准确的通道状态
-  更早的一步。演示从 `["s1_n","s2_n","s3_n"]` 回滚到
-  `["s1_n","s2_n"]` — 后面的步骤确实消失了。这是
-  `load_by_id` / `load_latest` 时间旅行，同样的机械HITL
-  中断/恢复和线程分叉是建立在其基础上的。
+- `store->list("beast-run")` 返回完整时间线 — 你可以*看到* `trail` 每一步增长一个节点。
+- `store->load_by_id(earlier.id)` **恢复**较早步骤的精确通道状态。演示从 `["s1_n","s2_n","s3_n"]` 回退到 `["s1_n","s2_n"]` — 后续步骤真正消失。这是 `load_by_id` / `load_latest` 时间旅行，与 HITL 中断/恢复和线程分叉所基于的机制相同。
 
-## 上线——模型实际上编写了执行框架
+## 进入现场演示——模型实际编写 harness
 
-`the_beast.cpp` 离线（存根作者）。 [`the_beast_live.cpp`](the_beast_live.cpp)
-是真实的：现场LLM已交付`NodeFactory::export_schema()`
-（该引擎构建接受的确切调色板 - 它不会漂移，因为它
-*是*引擎的架构，请参阅[`../../52_export_schema.cpp`](../../52_export_schema.cpp))
-并要求在 strict Core JSON编写一个执行框架。无论它返回什么
-经历同样的三道门控制；拒绝门的诊断
-直接反馈到对话中并且模型重写 -
-真正的自我修复循环。
+`the_beast.cpp` 是离线的（存根作者）。[`the_beast_live.cpp`](the_beast_live.cpp) 是真实的东西：一个实时 LLM 被交给 `NodeFactory::export_schema()`（此引擎构建接受的精确调色板 — 它不能漂移，因为它*就是*引擎的模式，参见 [`../../52_export_schema.cpp`](../../52_export_schema.cpp)）并被要求以严格的 Core JSON 编写测试框架。无论它返回什么，都经过相同的编译器和验证门；在拒绝时，诊断信息直接反馈到对话中，模型重写 — 一个真正的自我修复循环。
 
 ```console
 $ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
@@ -118,22 +81,16 @@ $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
-`the_beast_live.cpp` 将 `~deepseek/deepseek-v4-flash-latest` 固定为
-`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`。
-验证时，OpenRouter 将 Morph 的数据中心列为 US，并将该模型/提供商端点
-列为支持 ZDR。这是严格的提供商选择，而不是 OpenRouter 的区域内数据
-驻留保证；其目前文档化的区域内保证是企业级 EU 路由。如果 Morph 的合格
-端点不可用，请求会失败，而不会将提示发送给其他提供商。
+`the_beast_live.cpp` 将 `~deepseek/deepseek-v4-flash-latest` 固定到 `provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`。在验证时，OpenRouter 将 Morph 的数据中心列为美国，并将该模型/提供商端点列为支持 ZDR。这是严格的提供商选择，而非 OpenRouter 的区域驻留保证：其文档化的区域驻留保证目前是企业 EU 路由。如果 Morph 的合格端点不可用，请求将失败，而不是将提示发送到不同的提供商。
 
-实时 cookbook 将提供商超时设为 180 秒：该推理模型的 4,000-token
-生成预算可以正当地超过通用的 60 秒默认值。
+实时 cookbook 将其提供方超时设置为 180 秒：此推理模型 4,000 个令牌的生成预算合理地超过了通用的 60 秒默认设置。
 
 
 
 ```
 ── Attempt #1: asking the model to write a harness ──
   model returned 663 chars of JSON.
-  ACCEPTED — all strict gates passed.
+  ACCEPTED — strict compile and validation gates passed.
   Core lockfile nodes: r_stage c_stage s_stage
 
 ── Spawning the model's harness (checkpointed) ──
@@ -143,40 +100,21 @@ $ ./build/cookbook_the_beast_live                  # optional: pass a task strin
 
 The model wrote it. The compiler proved it. The Beast ran it.
 ```
-**实时运行显示了什么**（DeepSeek v4 flash）：作者*coherent*
-首次尝试跨线性管道（菱形扇出）时的执行框架 /
-屏障扇入和条件路由器 - 自我修复循环已启动
-但有能力的模型很少会出错。大门仍然值得保留
-lint：他们标记了菱形 (E9) 上缺少障碍且无法到达
-路由器（E7）上的处理程序作为警告。重点不在于型号
-经常失败；就是当它这样做时，它无法获得损坏的执行框架
-经过编译器**——创造力是无限的，连贯性是经过验证的。
 
-这里的节点是确定性的 `beast_node` 工作人员，因此实时运行成本
-一次LLM通话（创作）并免费执行；将它们交换为
-`llm_call`，每个节点也成为实时呼叫。
+**实时运行所展示的情况**（DeepSeek v4 flash）：它在一次尝试中就为线性流水线、菱形 fan-out/屏障 fan-in 以及条件路由器生成了*连贯的*测试支架——自我修复循环已启用，但能力强的模型很少触发它。门控仍然发挥了 lint 的作用：它们以警告的形式标记了菱形结构中缺少屏障（E9）和路由器上不可达的处理程序（E7）。重点不在于模型经常失败；而在于**一旦失败，它就无法让损坏的测试支架通过编译器**——创造力无边界，连贯性可验证。
 
-## Copy Ninja — 将经验证的本地 capability 变为图节点
+这里的节点是确定性的 `beast_node` 工作者，因此实时运行花费一次 LLM 调用（编写）并免费执行；将它们替换为 `llm_call`，每个节点也变成实时调用。
 
-[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) 将一条狭窄的
-capability-to-harness 路径做成了可执行示例；它不会把 A2A Card 变成代码。
+## 复制 Ninja——验证过的本地能力成为图节点
 
-1. 合成 loopback 服务器公开一个 well-known Agent Card。collector 只执行
-   这一次 GET，绝不会跟随 Card 声明的 RPC URL。
-2. `AgentCardCandidateCompiler` 生成不可变的 **unadmitted** descriptor，
-   排除 free-form Card text、endpoint、credential 和可执行 source。
-3. 独立提供的 digest-pinned behavioral profile 验证唯一的
-   `copy-ninja.hello-world-echo.v1` template，然后将它 materialize 为
-   本地 `CopyNinjaNode`。
-4. live Beast 只能编写两个 channel、一个 node 的 topology。常规的
-   compile/round-trip → validate 门控之后，第四个 local-binding
-   gate 要求 `__start__` 与 `__end__` 之间恰好有一个
-   `copy_ninja_local`。
+[`the_beast_copy_ninja.cpp`](the_beast_copy_ninja.cpp) 使一条狭窄的能力到工具链的路径可执行。它**不会**将 A2A 卡片变成代码：
 
-调用者的 prompt 被刻意排除在 LLM message 之外：模型只编写 topology，
-只有 local graph 消费 prompt。只要合成 source server 观察到一次 RPC，
-运行就会失败。这只是一个固定 local behavior 的证据，**不是** source-code
-transfer、delegation、admission 或一般 behavioral equivalence 的证据。
+1. 一个合成的回环服务器暴露一个众所周知的 Agent Card；采集过程精确执行该 GET 请求，并且从不跟随卡片通告的 RPC URL；
+2. `AgentCardCandidateCompiler` 产生一个不可变的、**未准入(admission)**的描述符，排除自由形式的卡片文本、端点、凭据和可执行源代码；
+3. 一个独立提供的、摘要固定的行为配置文件验证唯一的 `copy-ninja.hello-world-echo.v1` 模板，然后将其物化为本地 `CopyNinjaNode`；并且
+4. 实时Beast仅编写一个双通道、单节点拓扑。正常的严格编译/往返 → 验证门先运行；随后第四个本地绑定门要求恰好 `copy_ninja_local` 在 `__start__` 与 `__end__` 之间。
+
+调用者的提示词被刻意排除在 LLM 消息之外：由模型生成拓扑，而图的本地部分单独消费提示词。如果合成的源服务器观察到任何 RPC，运行也会失败。这是对单一固定本地行为[的证明]，而**不是**源代码传输、委托、准入(admission)或通用行为等效性。
 
 ```console
 $ cmake -S . -B build -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_A2A=ON
@@ -184,26 +122,18 @@ $ cmake --build build --target cookbook_the_beast_copy_ninja
 $ ./build/cookbook_the_beast_copy_ninja "Grace"
 ```
 
-在 2026-08-08 的实际运行中，authoring model 第一次尝试即通过全部四个
-gate。graph 以 1 次 discovery GET、0 次 source-agent RPC 返回
-`Hello, World! I have received your request (Grace)`。
+2026-08-08 观察到的实时结果：作者模型首次尝试即通过全部四个门控；图返回 `Hello, World! I have received your request (Grace)`，包含一次发现 GET 和零次源智能体 RPC。
 
-## Apex — 执行框架吞噬了工具
+## Apex — 装备吞噬工具
 
-Stub-worker 演示证明生成的执行框架是*一致的*，但是
-该执行框架自身从不执行实际动作。 [`the_beast_apex.cpp`](the_beast_apex.cpp) 是
-真正的杀器：模型收到一个**工具目录**并被要求编写一个
-ReAct 代理 — `llm_call` ⇄ `tool_dispatch` 在 `has_tool_calls` 上循环。
-它所编写的执行框架经过一致性门控验证，然后**与
-工具绑定**（`ctx.tools` + `engine->own_tools`）。生成的代理
-自行决定调用哪些工具以及何时调用。
+存根工作线程演示证明生成的工具链是*连贯的*，但工具链从不行动。[`the_beast_apex.cpp`](the_beast_apex.cpp) 才是怪物：模型被交给一个**工具目录**并要求编写一个 ReAct 智能体 — `llm_call` ⇄ `tool_dispatch` 在 `has_tool_calls` 上循环。它编写的工具链经过连贯性门控，然后**以绑定工具的方式生成**（`ctx.tools` + `engine->own_tools`）。生成的智能体随后自行决定调用哪些工具以及何时调用。
 
 ```console
 $ cmake --build build --target cookbook_the_beast_apex
 $ ./build/cookbook_the_beast_apex "What is 23 * 19, and the weather in Seoul?"
 ```
-真正的运行——自我修复循环真正启动，然后自主运行
-工具调用：
+
+一次真实运行 — 自修复循环真实触发，随后自主调用工具：
 
 ```
 Tool catalog offered: calculator get_weather
@@ -227,31 +157,19 @@ Tool catalog offered: calculator get_weather
 
 The model wrote the agent. The compiler proved it. The agent ate the tools.
 ```
-这就是整个论文的一次运行：模型幻觉了 `nodes`
-模式两次（添加`id`，然后`name`键），以及严格编译器的
-**已消费键统计拒绝了两者** — 诊断返回到
-谈话在第三次尝试时就自行修复了。然后
-由机器编写、经过编译器验证的代理运行实时 ReAct 循环并调用
-两个工具自主。创造力是无限的，工具的使用是自主的，
-**一致性是不容谈判的。**
 
-## Forge — 当它缺少工具时，它会编写一个
+这就是整个论点的一次运行：模型两次幻觉出一个 `nodes` 模式（先添加 `id`，再添加 `name` 键），而严格编译器的**已消耗键核算拒绝了这两次** — 诊断信息回到对话中，它在第三次尝试时自我修复。然后机器编写、编译器证明的智能体运行了一个实时 ReAct 循环并自主调用了两个工具。创造力无界，工具使用自主，**连贯性不可妥协。**
 
-[`the_beast_forge.cpp`](the_beast_forge.cpp)是顶点加工具
-供应链。给定一个任务，它：
+## 熔炉——“当缺少工具时，它编写一个”
 
-1. **DISCOVER** — 生成一个现成 MCP stdio 服务器并列出其工具
-   真正的 MCP 协议（`MCPClient::get_tools`）。
-2. **FORGE**——针对任务需要但目录缺乏的能力，
-   架构师 LLM **编写了一个 Python MCP 服务器**来实现它；我们
-   将其具体化到磁盘，启动它，然后**重新发现**新工具
-   通过MCP。 （如果生成的服务器初始化失败，则进行自我修复。）
-3. **作者** — 在 *组合* 目录上编写 ReAct 代理；三
-   一如既往的门+自我修复。
-4. **SPAWN** — 绑定每个发现的*和*伪造工具并运行
-   代理，自主调用它们。
+[`the_beast_forge.cpp`](the_beast_forge.cpp) 是顶点加上工具供应链。给定一个任务，它：
 
-真实的运行 - 模型编写了缺少的工具并且代理使用了它：
+1. **发现** — 生成一个标准 MCP stdio 服务器并通过真实 MCP 协议列出其工具（`MCPClient::get_tools`）。
+2. **锻造（FORGE）** —— 对于任务需要但目录中缺失的能力，架构师 LLM **编写一个实现该能力的 Python MCP 服务**；我们将其物化到磁盘、启动它，并通过 MCP **重新发现**新工具。（如果生成的服务初始化失败，会自我修复。）
+3. **创作（AUTHOR）** —— 基于*合并后的*目录编写一个 ReAct 智能体；一如既往地设置三道关卡 + 自我修复。
+4. **生成（SPAWN）** —— 绑定所有已发现*和*锻造的工具并运行该智能体，由后者自主调用这些工具。
+
+一次真实运行 —— 模型编写了缺失的工具，智能体也确实使用了它：
 
 ```
 ── DISCOVER · stock MCP server ──
@@ -273,59 +191,32 @@ The model wrote the agent. The compiler proved it. The agent ate the tools.
 
 It discovered tools, forged the missing one, and used them all.
 ```
-两个实时 MCP 子流程（一个股票，一个是 Beast 编写的*本次运行*），一个
-每个都有真正的`tools/list`，一个真正的ReAct循环。只有创作模型是
-远程。
 
-### 它也可以定义自定义*节点*吗？
+两个实时 MCP 子进程（一个是标准的，一个是 Beast 在*本次运行*中编写的），每个上有一个真实的 `tools/list`，一个真实的 ReAct 循环。只有作者模型是远程的。
 
-老实说：NeoGraph 节点 **类型** 是通过注册的 C++ 类
-`NodeFactory::register_type` — 你不能 JIT 编译一个全新的原子
-运行时的 C++ 节点类型。但其意图通过三种方式得以体现
-野兽*可以*从数据中驱动：
+### 它还能定义自定义*节点*吗？
 
-- **复合节点** — strict Core 的 `explicit nodes` / `explicit edges` (M4) 让模型
-  纯粹在数据中定义可重用的节点/拓扑单元；这正是
-  `the_beast.cpp` 的种子所做的事。
-- **递归** — `subgraph`节点将整个执行框架嵌入为一个节点，
-  因此 Beast 创作的执行框架可以包含 Beast 创作的子执行框架
-  （N级自包含扩展）。
-- **通过代码自定义行为** — 上面的锻造模式*是*运行时
-  模型创作的行为：它编写的工具成为可调度的
-  单位。同样的技巧可以推广到通用的 `script_node` 类型（一个
-  预注册的 C++ 节点，执行模型编写的代码），这是
-  获得此能力的诚实方式：让模型在数据中定义其逻辑。“LLM定义其逻辑的新原子节点”。
+老实说：NeoGraph 节点**类型**是通过 `NodeFactory::register_type` 注册的 C++ 类 — 你无法在运行时 JIT 编译一个全新的原子 C++ 节点类型。但意图通过 Beast *可以*从数据驱动的三种方式得到覆盖：
 
-真正不可能做到的一件事是发出新的*编译期 C++ 节点类*；模型需要专业化的一切
-行为已经存在于编译器的数据/脚本/子图面中
-盖茨。
+- **复合节点** — 显式 Core 节点和边让模型纯粹以数据定义可复用的拓扑单元；这正是 `the_beast.cpp` 的种子所做的。
+- **递归** — 一个`subgraph`节点将整个harness嵌入为一个节点，因此由Beast编写的harness可以包含由Beast编写的子harness（N级自我增殖）。
+- **通过代码实现自定义行为** — 上述forge模式*就是*由模型编写的运行时行为：它编写的工具成为一个可调度的单元。同样的技巧可以推广到通用的`script_node`类型（一个预注册的C++节点，执行模型编写的代码），这是获得“由LLM定义逻辑的新原子节点”的正道。
 
-## 脚本 — 通用墨盒（模型编写的节点逻辑 + 流程）
+真正被排除在外的就是运行时生成新的*编译C++节点类*；模型因需定制行为所依赖的一切都位于编译器已代管的数据/脚本/子图界面上。
 
-上面的每个变体都允许模型作者*工具*（叶功能）。
-[`the_beast_script.cpp`](the_beast_script.cpp)让它创作**节点逻辑
-— 包括工具绝对无法实现的控制流（`goto`）
-express.** `script_node` 是一个预编译的 C++ 节点，其配置包含
-模型编写的Python；在`run()`处，它向节点传递通道状态并且
-将代码返回的任何内容 — `{writes, goto, sends}` — 应用于
-图。该模型定义了节点的行为*和*图的流程，在
-数据，无需重新编译。
+## 脚本 —— 通用弹药筒（模型编写的节点逻辑 + 流程）
 
-一致性是不容谈判的。该脚本在配置中声明其契约
-（`reads` / `writes` / `goto_targets`）；执行框架通过三个strict Core
-门加上野兽层**合约检查**（声明的写入必须是
-声明渠道； goto 目标必须是真实节点）加上 **运行时
-拒绝声明之外的任何写入/转到的包装器**。那
-恢复 Beast 层的效果/路线保证，**零变化
-NeoGraph 核心** — 附加且向后兼容。
+上述每个变体都让模型编写*工具*（叶子能力）。[`the_beast_script.cpp`](the_beast_script.cpp)让它编写**节点逻辑——包括工具根本无法表达的控制流（`goto`）。** `script_node`是一个预编译的C++节点，其配置携带模型编写的Python；在`run()`时，它将通道状态交给节点，并将代码返回的任何内容——`{writes, goto, sends}`——应用到图中。模型在数据中定义节点的行为*和*图的流程，无需重新编译。
+
+一致性仍然不可妥协。脚本在配置中声明其契约（`reads` / `writes` / `goto_targets`）；harness通过严格的Core编译器/验证门 PLUS 一个Beast层**契约检查**（声明的写入必须是已声明的通道；goto目标必须是真实节点）PLUS 一个**运行时包装器**，拒绝任何超出声明的写入/goto。这在不改变NeoGraph核心的情况下恢复了Beast层的效果/路由保证——是增量的且向后兼容的。
 
 ```console
 $ cmake --build build --target cookbook_the_beast_script
 $ ./build/cookbook_the_beast_script --selftest   # offline, no API key
 $ ./build/cookbook_the_beast_script              # live: DeepSeek writes the node logic
 ```
-实时运行——模型编写了一个计数器循环，其控制流是它自己的
-`goto`：
+
+实况运行——模型编写了一个计数器循环，其控制流是它自己的`goto`：
 
 ```
 ── Attempt #1: model writes node logic ──
@@ -338,70 +229,38 @@ $ ./build/cookbook_the_beast_script              # live: DeepSeek writes the nod
   trace: tick -> tick -> tick -> END
   final counter = 3  (the model's goto logic ran the loop, contract-enforced)
 ```
-`tick` 之外没有静态边：循环存在只是因为
-模型的 Python 返回 `{"goto": "tick"}` 直到计数器达到 3，然后
-`{"goto": "__end__"}`。 `--selftest`从一个运行相同的机制
-没有 API 密钥的预置执行框架，因此 CI 可以离线使用它。
 
-**边界（诚实）。**编译器证明图的*形状*；的
-合约证明了节点的*表面契约*（它可能的通道/目标）
-触摸）；只有脚本的*内部逻辑*未经证实——受
-`timeout` 在子流程上，`max_steps` 在运行上。跑步
-模型编写的代码是任意代码执行：对于本地来说很好，
-用户驱动的cookbook，但生产需要一个沙箱
-口译员。这是一个 **构建选项**，默认情况下关闭：
+从`tick`没有静态边：循环之所以存在，仅仅是因为模型的Python在计数器达到3之前返回`{"goto": "tick"}`，然后返回`{"goto": "__end__"}`。`--selftest`从无API密钥的预置harness运行相同的机制，因此CI可以离线执行它。
 
-Sandboxed-api 通过 FetchContent 嵌入效果不佳，因此链接预先构建的树
-（在选项上方的 CMake 注释中构建配方）：
+**边界（诚实的）。** 编译器证明图的*形状*；契约证明节点的*表面*（它可以接触哪些通道/目标）；只有脚本的*内部逻辑*未被证明——受子进程上的`timeout`和运行上的`max_steps`约束。运行模型编写的代码是任意代码执行：对于本地、用户驱动的cookbook来说没问题，但生产环境希望在解释器周围加沙箱。这是一个**构建选项**，默认关闭：
+
+Sandboxed-api 通过 FetchContent 嵌入效果不佳，因此请链接预构建的树（构建配方在选项上方的 CMake 注释中给出）：
 
 ```console
 $ cmake -S . -B build -DNEOGRAPH_BEAST_SANDBOX=ON -DSANDBOX2_SRC=/path/to/sandboxed-api
 $ cmake --build build --target cookbook_the_beast_script
 ```
-有了它，Python 就可以在 Google **Sandbox2** 下运行——它自己的
-user/pid/mount/net 命名空间，只读 FS 视图，仅限于
-解释器 + 两个工作文件，以及 CPU/wall/file rlimits。需求
-`libcap-dev`、`libunwind-dev`，C++20 工具链；在 Linux/WSL2 上验证。
 
-**从效果契约合成的 Seccomp 策略。** Python 的系统调用
-足迹太大，无法安全列入许可名单，因此保留默认操作
-宽松 — 但节点声明的*功能*减去系统调用：a
-声明没有 `"net"` 能力的节点具有 `socket`/`connect`/`bind`/…
-seccomp 阻塞 (EPERM)；无`"exec"`能力块`execve`/`execveat`。
-该保单*源自已声明的合同*，而不是手写的。这个
-已通过负面测试进行验证 - **相同** python，在**相同**下
-沙箱，仅声明的上限不同：
+开启后，Python在Google **Sandbox2**下运行——它自己的用户/pid/挂载/网络命名空间，一个只读的文件系统视图，仅限于解释器加两个工作文件，以及CPU/墙钟/文件rlimit。需要`libcap-dev`、`libunwind-dev`、C++20工具链；已在Linux/WSL2上验证。
+
+**从效果契约合成的Seccomp策略。** Python的系统调用足迹太大，无法安全地白名单化，因此默认操作保持许可——但节点声明的*能力*减去系统调用：一个声明无`"net"`能力的节点具有`socket`/`connect`/`bind`/…被seccomp阻止（EPERM）；无`"exec"`能力则阻止`execve`/`execveat`。该策略*从声明的契约推导*，而非手写。这已通过一个负向测试验证——**相同的**python，在**相同的**沙箱下，仅因声明的cap不同而不同：
 
 ```
 caps=[]     (no net cap): {"socket": "SOCKET_BLOCKED:EPERM"}   # seccomp denies the syscall itself
 caps=[net]  (net cap):    {"socket": "SOCKET_CREATED"}         # capability grants it
 ```
-因此它不仅仅是网络命名空间：没有 `net` 上限，
-`socket()` *系统调用*失败（网络顶部的深度防御）。诚实
-范围：这是**容器级 + 合约派生的 seccomp 块列表**，
-不是完整的系统调用允许列表 - 通过未阻止的系统调用进行内核利用是
-仍然没有被收容。更严格的每个节点白名单（以及基于能力的
-秘密调解）是记录在案的下一步。
 
-## 进化——模因（达尔文+拉马克）
+所以这不仅仅是网络命名空间：没有`net`cap时，`socket()`*系统调用*失败（在netns之上进行纵深防御）。诚实的范围：这是**容器级 + 契约派生的seccomp黑名单**，不是完整的系统调用白名单——通过未阻止的系统调用进行的内核利用仍然无法被遏制。更严格的每节点白名单（以及基于能力的秘密中介）是文档化的下一步。
 
-离线的 `the_beast.cpp` 有意设置 `run_evaluation=false`，因此只按结构有效性
-进行选择。通用 evolution API 也可以执行任务，并将输出与预期通道值进行精确比较。
+## 演化——模因（达尔文式 + 拉马克式）
 
-[`the_beast_evolve.cpp`](the_beast_evolve.cpp) 则使用连续距离指标，使接近目标的
-结果能够继续改进，而不是都落入通用评分器的同一个输出不匹配类别。
+离线的`the_beast.cpp`故意设置`run_evaluation=false`，因此其选择仅是结构性的。通用演化API也可以执行任务并评分精确的期望通道值。
 
-- **任务**（真正的任务，输出评分 - 不是结构代理）：
-  组装一个计算目标数字的算术管道。五操作
-  节点存在 - `add2(+2) add3(+3) mul5(*5) mul2(*2) sub1(-1)` - 每个读取
-  `acc` 通道（init 0），应用其操作，将其写回。执行框架的
-  答案是执行后`acc`所成立的内容； **适应度=
-  `-(|acc - 20|)`**。 *拓扑*（哪些操作运行，按什么顺序）
-  决定了数量，因此不断发展的接线也会不断发展计算。
-- **达尔文**：随机重新布线（`all_operators()`）+选择
-  测得的输出 — 跌跌撞撞地接近 20。
-- **拉马克**：LLM进行算术，连接一条达到 20 的链
-  准确地说，并将获得的溶液作为可遗传的种子注入。
+[`the_beast_evolve.cpp`](the_beast_evolve.cpp)使用自定义的连续距离度量：接近命中可以朝着数值目标改进，而不是接收通用评分器的单一输出不匹配类别。
+
+- **任务**（一个真实的任务，按输出评分——而非结构性代理）：组装一个计算目标数字的算术流水线。存在五个操作节点——`add2(+2) add3(+3) mul5(*5) mul2(*2) sub1(-1)`——每个节点读取`acc`通道（初始值为0），应用其操作，然后写回。测试框架的答案就是`acc`在执行后所持有的值；**适应度 = `-(|acc - 20|)`**。*拓扑*（哪些操作运行，以什么顺序）决定了数字，因此演化连线即演化计算。
+- **达尔文式**：随机重新连线（`all_operators()`）+ 按测量输出进行选择——跌跌撞撞地逼近20。
+- **拉马克式：** LLM 进行运算逻辑，接入一条精确命中 20 的链路，并将那个获取的方案作为可遗传的种子注入。
 
 ```console
 $ ./build/cookbook_the_beast_evolve --darwin-only   # offline, deterministic
@@ -418,32 +277,16 @@ gen 3  [Lamarckian] LLM refinement acc=20  fitness -0  → injected (heritable)
        Solved via Lamarckian injection.
 champion: acc=20, origin 'LLM'. The winner is a Lamarckian acquired trait ...
 ```
-对比就是重点：**盲目突变跌跌撞撞地走向了
-目标**（第9代5→10→24→19→20，通过尝试计算数量）；
-**LLM进行算术** - `(0+2)*5*2 = 20` - 并直接跳至
-注射时的答案。因为获得的解决方案成为
-可遗传的冠军（`origin 'LLM'`），是拉马克式的；盲目变异+
-选择是达尔文式的；运行两者是一种模因算法。
 
-诚实的说明：纯粹的达尔文主义是经过离线验证和确定性的。的
-拉马克 LLM 调用 (deepseek-v4-flash) **偶尔不稳定** —
-流式回复有时会返回无法解析的结果，在这种情况下，运行
-日志`[Lamarckian] LLM returned no parseable harness`和达尔文主义
-进行回合；最后一行报告了冠军的*实际*起源，
-拉马克式的胜利从来都没有发生过。
+对比正是关键所在：**盲目变异跌跌撞撞地逼近目标**（第9代时5→10→24→19→20，通过试错计算出数字）；**LLM则做算术**——`(0+2)*5*2 = 20`——并在被注入时直接跳到答案。因为该习得解成为可遗传的冠军（`origin 'LLM'`），这是拉马克式的；盲目变异+选择是达尔文式的；同时运行两者则是模因算法。
 
-## Gate-eval — 一致性门控真的健全吗？
+诚实的说明：纯达尔文式已离线验证且是确定性的。拉马克式LLM调用（deepseek-v4-flash）**偶尔不稳定**——流式回复有时返回不可解析的内容，此时运行记录`[Lamarckian] LLM returned no parseable harness`并由达尔文式承担该轮；最终行报告冠军的*实际*来源，绝不报告未发生的拉马克式胜利。
 
-Beast 的整个安全论点是静态验证器是一个*健全的*
-coherence oracle：错误意味着执行框架确实会出现错误
-运行时；没有错误就代表运行了。这是**断言的，而不是测量的**——
-每个审稿人问的第一件事。
+## 门评估——coherence gate 真的健壮吗？
 
-[`the_beast_gate_eval.cpp`](the_beast_gate_eval.cpp) 对其进行测量。它运行一个
-通过验证器标记拓扑语料库（预测结果）并且
-通过引擎（地面实况）和交叉检查。离线、确定性、
-无密钥 — `exit 0` 当且仅当每个判决都匹配执行时，所以 **CI 可以启动
-健全性**。
+Beast 的整个安全论证在于，静态验证器是一个*健全的*一致性预言机：ERROR 表示测试装置在运行时确实会错误；无错误则表示它可以执行。这是**断言而不是测量**——即每位评审者在追问的第一件事。
+
+[`the_beast_gate_eval.cpp`](the_beast_gate_eval.cpp)对其进行度量。它将一个带标签的拓扑语料库通过验证器（预测判定）和引擎（真实结果）运行，并进行交叉核对。离线、确定性、无密钥——`exit 0`当且仅当每个判定都与执行匹配，因此**CI可以基于健全性进行门控**。
 
 ```console
 $ ./build/cookbook_the_beast_gate_eval
@@ -455,27 +298,16 @@ E7-unreachable(warn)     | ok             | CLEAN   | yes   # a warning does NOT
 E10-empty-routes         | ERROR:E10      | not run | yes   # dispatch is UB by design — the gate stops it
 runtime cross-check: 4/4 cases where the validator's verdict matched execution.
 ```
+
 被测属性：
 
-> 验证器报告错误 ⟹ 执行时图出现故障；
-> 验证器报告没有错误 ⟹ 图执行干净。
+> 验证器报告ERROR⟹图在执行时出错；验证器报告无错误⟹图干净执行。
 
-第一行是*健全性*（运行干净的带有错误标记的图将是
-健全性漏洞）；带有警告标志的图运行干净，显示了大门
-不*过度*拒绝。 E10/E8 级错误仅可判定 — 运行
-空路由映射取消引用`rend()`（UB），这正是错误
-门的存在是为了防止，所以它被检查但不被执行。这是一个
-演示语料库，并没有详尽地涵盖每一个诊断——但它
-将“大门完好无损”从一句口号变成了经过深思熟虑、CI 强制实施的 4/4。
+第一行是*健全性*（一个被标记错误的图却干净运行将是健全性漏洞）；一个被标记警告的图干净运行则表明门控不会*过度*拒绝。E10/E8类错误仅作判定——运行空路由映射会解引用`rend()`（UB），这正是门控存在所要防止的故障，因此它被检查但不执行。这是一个演示语料库，并非每个诊断的穷尽覆盖——但它将“门控是健全的”从口号变成了可测量的、CI强制的4/4。
 
-## Gate-fuzz——大规模的保证及其边界
+## Gate-fuzz — 该保证及其边界，规模化实现
 
-[`the_beast_gate_fuzz.cpp`](the_beast_gate_fuzz.cpp)将gate_eval从5推入
-手工标记的案例到数千个模糊的案例——但诚实。天真的举动
-（模糊 N 图，打印精度 1.0）将是戏剧：**引擎重新运行
-编译时的验证器并抛出任何错误**，因此“验证器错误⟹
-发动机故障”是真的*通过构造*。所以该程序衡量两件事
-实际上信息丰富：
+[`the_beast_gate_fuzz.cpp`](the_beast_gate_fuzz.cpp)将gate_eval从5个手工标记的案例扩展到数千个模糊测试的案例——但诚实地做。天真的做法（模糊测试N个图，打印精度1.0）将是作秀：**引擎在编译时重新运行验证器并在任何错误时抛出异常**，因此“验证器错误⟹引擎故障”*按构造*为真。因此该程序度量两件真正有信息量的事情：
 
 ```console
 $ ./build/cookbook_the_beast_gate_fuzz 2>/dev/null   # lint → stderr
@@ -487,48 +319,19 @@ LAYER 2 — a node that LIES about its effect contract (500 mutants):
   runtime GraphState guard FAULTED (backstop caught it): 500/500
 CI gate (Layer 1: 0 disagreements over 2000; Layer 2: runtime backstops 100%): PASS
 ```
-- **第 1 层 — 规模一致性。** 使用随机模糊连贯种子
-  结构突变（悬空边→E3，未声明的写入→E4，孤儿作家，
-  下降沿 → E7 *警告*，额外有效沿）。编译器有超过 2000 个突变体
-  门和引擎永远不会不一致。这不是一个健全的*发现*（这是
-  部分是通过构造）——这是一个**回归保证**：如果未来发生变化
-  使静态门和运行时出现分歧，这会失败。
-- **第 2 层 — 边界。** 门信任每个节点声明的 **效果
-  合同**。 *谎言*的节点 — 声明 `writes:["out"]` 但实际写入
-  运行时未声明的 `phantom` 通道 — 驶过静态门
-  (500/500)，并且**运行时`GraphState`写保护**捕获每一个
-  (500/500)。这不是门错误；而是错误。这是设计好的分工。
 
-结果是一份“精确”的保证声明，比一份更诚实的保证
-可疑的完美混淆矩阵：**静态门相对于
-诚实的合约，为不诚实的合约提供运行时保障**——第 1 层和
-第 2 层每个 CI 强制执行。
+- **Layer 1 — 大规模一致性。** 使用随机结构变异器对 coherent seed 进行模糊测试（悬空边 → E3，未声明写入 → E4，悬空写入器，丢弃边 → E7 *警告*，额外有效边）。在超过 2000 个变异体上，编译器门控与引擎从未产生分歧。这并非健全性 *发现*（部分上是由构造保证的）——而是一个**回归保证**：如果未来的变更使静态门控与运行时产生分歧，此测试将失败。
+- **第2层——边界。** 门控信任每个节点声明的**效果契约**。一个*撒谎*的节点——声明`writes:["out"]`但实际上在运行时写入未声明的`phantom`通道——能通过静态门控（500/500），而**运行时`GraphState`写保护**捕获每一个（500/500）。这不是门控的缺陷；这是设计好的分工。
 
-正式同伴，[`SOUNDNESS.md`](SOUNDNESS.md)，*证明*了这一点：一小步
-超步执行的语义，效果格`(𝒫(Chan), ⊆)`，门为
-良构性判断`⊢ G ok`，以及进步定理（过门图
-在诚实合同下永远不会导致故障），并且诚实假设被证明是必要的
-运行时写保护作为其故障停止后备。每个场所都经过检查
-针对发动机源； `gate_eval`/`gate_fuzz` 是模型的保真度
-检查。这里的两个执行框架是该文档的 Cor 6.4 和 Prop 6.5，运行。
+结果是：对保证条款的*精确*陈述，比起一份完美得可疑的混淆矩阵更为诚实——**静态门控相对于诚实的契约而言是可靠的，对于不诚实的契约则有运行时兜底** — 第1层和第2层各自由 CI 强制执行。
 
-## Baldwin — 模因会盲目吗？继承重要吗？
+形式化配套文档[`SOUNDNESS.md`](SOUNDNESS.md)*证明*了这一点：超步执行的小步语义、效果格`(𝒫(Chan), ⊆)`、作为良构性判定的门控`⊢ G ok`，以及一个Progress定理（在诚实契约下通过门控的图永不出错），其中诚实性假设被证明是必要的，运行时写保护是其失败即停止的后备。每个前提都对照引擎源码检查；`gate_eval`/`gate_fuzz`是模型的保真度检查。这里的两个测试框架是该文档推论6.4和命题6.5的运行实例。
 
-`evolve`变体显示达尔文突变+拉马克LLM注射。
-每个审稿人提出的更尖锐的研究问题：**是否有一项任务
-盲目进化和一次性求解器都停滞不前，但模因组合
-获胜——你继承学到的特质*如何*改变结果
-文献预测？**（Whitley 1994；Hinton & Nowlan 1987。）
+## Baldwin — 模因是否胜过盲选，继承是否重要？
 
-[`the_beast_baldwin.cpp`](the_beast_baldwin.cpp)是那个实验，跑完了
-真正的 NeoGraph 执行框架。基因组是仿射管道的布线；每个
-舞台致力于终身学习的op **或左塑料（`?`）**
-解决。适应度度是运行时**组装的执行框架的签名 - 并且
-启动交叉检查证明快速分析适合度等于编译的适合度
-引擎有 200 种拓扑（与 Gate-Eval 相同）。风景是
-**欺骗性**：宽阔的诱饵山 (0.85) 随处可见，还有一个狭窄的、
-**无梯度**全局HIGH原（1.0）仅*学习* - 搜索
-塑料基因跨越的邻域——可以找到。
+`evolve`变体展示了达尔文式变异+拉马克式LLM注入。每个评审者提出的更尖锐的研究问题是：**是否存在一个任务，盲目进化和一次性求解器都停滞，但模因组合获胜——并且*如何*继承习得特征是否以文献预测的方式改变结果？**（Whitley 1994；Hinton & Nowlan 1987。）
+
+[`the_beast_baldwin.cpp`](the_beast_baldwin.cpp)就是那个实验，在真实的NeoGraph测试框架上运行。基因组是仿射流水线的连线；每个阶段被提交给一个操作**或保持可塑（`?`）**以供终身学习来解决。适应度是**运行时的组装测试框架**的签名——而启动交叉检查证明快速解析适应度在200个拓扑上与编译引擎相等（与gate-eval相同的纪律）。该景观是**欺骗性的**：一个广泛可见的诱饵山丘（0.85），以及一个狭窄的、**无梯度**的全局平台（1.0），只有*学习*——它搜索由可塑基因张成的邻域——才能找到。
 
 ```console
 $ ./build/cookbook_the_beast_baldwin          # offline, deterministic, no key
@@ -539,49 +342,19 @@ engine/analytic cross-check: 200/200 topologies execute exactly as modeled → r
 CI gate (blind Darwin near the 25% chance floor, learners assimilate >65% by a
   >25-pt margin, faithful fitness): PASS
 ```
-关于适应性*是什么*的注释：每个基因组都会编译成真正的 NeoGraph
-拓扑和交叉检查证明引擎运行了其中 200 个
-分析模型预测——*基材*是真实的、忠实执行的
-执行框架。遗传算法优化的“目标”是一个具有欺骗性的汉明景观
-接线（动态的受控测试台），而不是原始执行
-输出。这两个事实都被清楚地陈述而不是模糊不清。
 
-遵循不同标准的两个发现：
+关于适应度*是什么*的说明：每个基因组都编译为真实的 NeoGraph 拓扑，交叉验证证明引擎运行了 200 个这样的拓扑，且结果与分析模型预测完全一致——*底层*是一个真实、忠实执行的测试平台。遗传算法优化的*目标*是布线上的一个欺骗性 Hamming 景观（用于研究动态的可控测试台），而非原始执行输出。这两个事实都被明确陈述，而非模糊处理。
 
-1. **模因盲目击败（稳健——CI门控）。** 盲目的达尔文进化论
-   只同化了全局约 25%——机会下限——因为HIGH原有
-   没有已提交空间梯度，因此选择会跟随诱饵并被捕获。
-   学习暴露HIGH原并吸收它~75%。门断言
-   *边际*（意味着超过 24 个种子），不是每次运行的阈值计数，因为
-   每次运行的计数由初始运气推动； 25% 与 75% 的利润率是稳定的
-   信号。
-2. **鲍德温控制（测量 - 从未门控）。**鲍德温（不继承
-   习得性状）与拉马克（将其写入基因组）：此处 **74% vs 78%**
-   全局——拉马克稍微领先，这是景观上的“预期”结果
-   这是欺骗性的，但不是对抗性的（回写的速度超过了它的速度）
-   多样性成本）。惠特利的**逆转**（鲍德温>拉马克）需要一个
-   特别是对抗性的景观；这个简单的两峰结构并不
-   有力地展示它，这是**诚实地报道的，而不是侥幸。**
-   （这确实很微妙：带有基于指数的平局决胜规则的早期版本
-   *似乎*显示了逆转——一个神器。选择边界处的联系
-   现在被每个种子随机抽签打破并**在扫描过程中取平均值**，并且
-   ~74-vs-78 排序在种子库中是稳定的；明显的逆转确实
-   无法在该修复中幸存。）
+两项发现，按不同标准衡量：
 
-这是审稿人要求的结果的诚实形式：强有力的主张
-（学习引导的进化解决了盲目进化无法解决的问题）被测量和
-CI 强制执行；微妙的主张（非继承优于继承）是经过衡量的
-并按原样报告，并明确指出而不是隐藏负面结果。
+1. **模因式胜过盲目式（稳健——CI 门控）。** 盲目的达尔文式进化对全局的把握仅约 25%——即随机基线——因为平台区没有已提交空间的梯度，因此选择会跟随诱饵并被困住。学习暴露了平台区并将其把握约 75%。门控断言*差值*（24 个种子的均值），而非每次运行的阈值计数，因为每次运行的计数受初始化运气影响；25% 对 75% 的差值才是稳定信号。
+2. **Baldwin式对照组（已测量——从不门控）**。Baldwin（不继承学习到的trait）vs Lamarck（将学习到的trait写入基因组）：这里全局 **74% vs 78%** — Lamarckian 略微领先，这是*预期*的结果，因为该拓扑具有欺骗性但并非对抗性（写回的速度超过其多样性代价）。Whitley的**逆转**（Baldwin > Lamarck）需要特定的对抗性拓扑；这个简单的双峰构造无法鲁棒地展示这一点，并且这是**如实报告，而非调优出的偶然结果。**（这确实很微妙：早期版本使用基于索引的平局决胜*似乎*显示出逆转——一个伪象。选择边界处的平局现在通过每个种子的随机抽取来打破，并在整个扫描中取均值**，且 ~74-vs-78 的顺序在各种种子基底上稳定；表观逆转在该修复后未能存续。）
 
-## Baldwin-adv — 对抗性景观 + 真正的爬山学习
+This is the honest shape of the result the reviewers asked for: the robust claim (learning-guided evolution solves what blind evolution cannot) 已经 measurement 并CI外强制 enforced; the delicate claim (non-inheritance)优于 inheritance) 已测量并 reported as-is, 其中负结果被命名，而非隐藏。
 
-[`the_beast_baldwin_adv.cpp`](the_beast_baldwin_adv.cpp) 锐化两侧
-之前的实验。学习现在**真正的本地搜索**（多次重启
-越过可塑性基因达到局部最优——离散模拟
-炼油厂的，以及LLM插入的插槽），风景真的很美
-**对抗性**：一座宽阔的诱饵山，其梯度点*远离*一个小山，
-陡峭的全局球。盲目的已提交空间搜索不属于机会层——它
-沿着诱饵梯度积极地**欺骗**。
+## Baldwin-adv —— adversarial environment + real hill-climbing learner
+
+[`the_beast_baldwin_adv.cpp`](the_beast_baldwin_adv.cpp) 使先前实验的两端都更加锐利。学习现在成为**真正的局部搜索**（在可塑性基因上进行多次重启爬山直至局部最优——这是精炼器的离散类比，也是LLM插入的槽位），而景观是真正**对抗性**的：一个宽阔的诱饵山丘，其梯度指向*远离*一个狭小陡峭的全局球体。盲目的固定空间搜索并非处于机会下限——它正沿着诱饵梯度被主动**欺骗**。
 
 ```console
 $ ./build/cookbook_the_beast_baldwin_adv        # offline, deterministic, no key
@@ -590,36 +363,16 @@ $ ./build/cookbook_the_beast_baldwin_adv        # offline, deterministic, no key
   Lamarckian | committed → global  98%   decoy   1%
 CI gate (blind deceived onto decoy >50%, both learners solve >60%, faithful): PASS
 ```
-- **模因≫盲目（稳健，CI门控）。**达尔文被诱饵欺骗
-  （~5% 全局/~92% 诱饵）；学习发现全局球只有一个基因组
-  不能（76-98%）。这是比HIGH原“更强”的分离——盲区
-  基线被误导，而不仅仅是盲目的。跨种子基地稳定（达尔文 2-5%，
-  学习者 76-98%）。
-- **鲍德温 vs 拉马克：逆转不会重现。** 拉马克
-  回写以稳定的优势获胜（98% vs 76%）。一个参数扫过
-  发现整个可到达/不可到达边界（30 多个配置，三次扫描）**没有
-  制度**，其中非继承有力地击败了回写：当全局是
-  可达，回写速度占主导地位；如果不是，则两者都会失败，只有一个
-  边（~3-4 分）鲍德温多样性边。这是诚实的经验答案
-  到“惠特利的鲍德温>拉马克逆转是否在执行框架上重现
-  拓扑？” — **不**，在这个离散的政权中，程序是这么说的
-  命名的机制。 （惠特利的反转建立在*连续*
-  具有实值局部搜索的多模态函数；离散拓扑-遗传算法
-  这里就不展示了。）
 
-## Baldwin-llm — 模型是学习算子
+- **Memetic ≫ blind（稳健，CI 门控）。** Darwin 被诱骗到诱饵目标（全局约5% / 诱饵约92%）；学习能找到单个基因组无法找到的全局球（76-98%）。这是一个*更强*的区分，超越了平台期——盲基线是被误导，而不仅仅是盲目。在种子基座上稳定（Darwin 2-5%，学习者76-98%）。
+- **Baldwin 对 Lamarck：反转无法复现。** Lamarck 写回以稳定优势获胜（98% 对 76%）。对全部可达/不可达边界的参数扫描（30+ 配置，三次扫描）发现 **没有任何机制区间** 中非继承性能稳健地击败写回：当全局可达时，写回的速度占优；当不可达时，两者都失败，仅存在 Baldwin 多样性约 3-4 个百分点的边际优势。这是对“Whitley 的 Baldwin > Lamarck 反转能否在 harness 拓扑上复现”这一问题诚实的经验性回答——**不能**，在这个离散机制中，程序以点名机制的方式给出了这一结论。（Whitley 的反转是在 *连续* 多模态函数上以实值局部搜索确立的；此处的离散拓扑-GA 并未呈现该现象。）
 
-上面的机械学习者（随机猜测、爬山）始终是*槽*
-一个LLM精炼器插入。 [`the_beast_baldwin_llm.cpp`](the_beast_baldwin_llm.cpp)
-将其插入模型实际上可以推理的任务：填充`?`阶段
-算术流水线的一部分，因此`acc`达到目标。 **学习运算符是
-模型**（它为`?`阶段选择操作）；适应度是集合体
-执行框架*运行*。鲍德温/拉马克的切换变得字面意思：
+## Baldwin-llm — 模型本身即学习算子
 
-- **Baldwinian** 对模型的填充进行评分，但保留基因 `?` — 模型必须
-  下一代**再次**咨询。学习不是遗传的。
-- **拉马克**将填充写入基因组 - `?` 被提交。
-  获得的性状是**可遗传的**；无需再次查阅该模型。
+上述机械学习器（随机猜测、爬山）始终是LLM精炼器插入的*槽位*。[`the_beast_baldwin_llm.cpp`](the_beast_baldwin_llm.cpp) 将其插入，在一个模型实际能够推理的任务上：填充算术流水线的`?`阶段，使`acc`达到目标。**学习算子就是模型**（它为`?`阶段选择操作）；适应度是组装好的测试框架*运行*的结果。Baldwin/Lamarck切换变得字面化：
+
+- **Baldwin式**对模型的填充进行评分，但保持基因`?`——模型必须在下一代**再次**被咨询。学习不被继承。
+- **Lamarck式**将填充写入基因组——`?`变得承诺化。获得的性状是**可遗传的**；模型无需再次被咨询。
 
 ```console
 $ ./build/cookbook_the_beast_baldwin_llm       # oracle learner (default, offline)
@@ -631,31 +384,16 @@ $ ./build/cookbook_the_beast_baldwin_llm       # oracle learner (default, offlin
     gen 3: … committed genes 24/24 | learner calls 0      # banked; no re-learning
 total learner invocations: Baldwin 23 vs Lamarck 5  (Lamarck banked its way to fewer)
 ```
-可观察到的差异不是适应性（都达到了目标），而是**基因组
-经济**：拉马克将学习者的工作存入遗传（基因被提交，调用
-降至零）；鲍德温重新学习每一代（基因保持可塑性，呼吁
-保持HIGH位）。使用确定性 **oracle** 学习器（默认）离线运行，或者
-`--llm` 与 `OPENROUTER_API_KEY` 使**模型**成为学习者 - 其中
-如果这些调用是真正的 API 调用，那么遗传实际上就是
-为模型支付一次费用和每一代都支付费用之间的区别。这是
-“模型的修正是否可以遗传？”的具体含义— 显示为
-跟踪，未断言。 （`--llm`路径需要网络；它回退到
-oracle 并记录任何调用/解析失败，因此演示始终完成。）
 
-## 小说家 — 前提输入，轻小说长度`.txt`输出
+可观察的差异不是适应度（两者都达到目标），而是**基因组经济性**：Lamarck将学习者的工作存入遗传（基因承诺化，调用降至零）；Baldwin每代重新学习（基因保持可塑性，调用保持高位）。离线运行使用确定性**预言机**学习者（默认），或使用`--llm`配合`OPENROUTER_API_KEY`使**模型**成为学习者——在这种情况下，这些调用是真实的API调用，而遗传性字面上就是支付模型一次与每代支付模型之间的区别。这就是"模型的修复是否变得可遗传？"的具体含义——以轨迹展示，而非断言。（`--llm`路径需要网络；它回退到预言机并在任何调用/解析失败时记录日志，因此演示始终完成。）
 
-最简单且真正实用的写作执行框架，以及诚实的形态
-“小说家”理念：给它一个前提，拿回一整本轻小说
-手稿为纯文本。 [`the_beast_novelist.cpp`](the_beast_novelist.cpp) 是
-**迷失在中间**问题的具体呈现——一个长篇故事*不是*在单个大上下文中
-写成的。这是一个关于**显式故事状态**的小图：
+## Novelist——输入一个前提，输出一篇轻小说长度的`.txt`
 
-渠道：前提·大纲·圣经·摘要·书籍·idx·总计
+最简单的真正有用的写作框架，也是"NovelWriter"理念的诚实形式：给它一个前提，得到整篇轻小说大小的手稿作为纯文本。[`the_beast_novelist.cpp`](the_beast_novelist.cpp) 是**中间丢失**问题的具体解药——一个长故事*不是*在单个巨大上下文中写成的。它是一个基于**显式故事状态**的小图：
 
-所以每一章都是根据紧凑的外部化状态生成的**新鲜的**
-（大纲节拍、故事圣经、连续摘要）而不是重新阅读 60k
-字符。该模型永远不必“记住”小说中的角色是谁 -
-它读取`bible`通道。
+    channels:  premise · outline · bible · summary · book · idx · total
+
+因此每章都是**针对紧凑的外部化状态全新生成**（大纲节拍、故事圣经、运行摘要），而不是重新阅读6万字符。模型永远不必*记住*小说中某个角色是谁——它读取`bible`通道。
 
 ```console
 $ ./build/cookbook_the_beast_novelist "a librarian's returned books whisper futures" 12
@@ -665,22 +403,10 @@ harness passed the coherence gate. writing (live — this takes a few minutes)�
 done — 51k characters across 12 chapters.
 manuscript: /abs/path/novel_12ch.txt
 ```
-该图是`__start__ → planner → writer ⟲`：`planner`将前提变成
-大纲+初始圣经； `writer`将章节`idx`写入`book`并且
-**更新`summary`和`bible`**，以便下一次迭代保持基础，然后
-**使用 `Command` goto** 进行自循环，直到 `idx+1 == total`。效果契约已
-声明，因此**一致性门控在写入一个词之前就证明了接线的正确性** —
-每个故事状态通道都被实际消耗，没有悬空的阶段。
 
-**批量生成、批量进化——每章风格各异。**每一章
-实际上是一个独立的子代理（每次`writer`调用仅基于
-共享的故事状态）。为了防止各章雷同，作者为每章发展了一种
-每章 **风格基因组** — 5 维风格空间中的一个点（POV · 紧张 · 情绪 ·
-镜头·步调，480种组合）。它运行一个迷你 GA（`baldwin`模因循环，
-针对*品种*而不是目标）：一批候选基因组进化为
-最大化 **新颖性**（即与已用风格的距离） - 那么获胜者是
-提交并推入`styles_used`，因此下一章被迫远离
-它。离线样式跟踪是确定性的并且明显变化：
+该图是`__start__ → planner → writer ⟲`：`planner`将前提转化为大纲+初始圣经；`writer`将章节`idx`写入`book`并**更新`summary`和`bible`**，使下一次迭代保持有据可依，然后**使用`Command` goto自循环**直至`idx+1 == total`。效果契约被声明，因此**一致性门在写出一个字之前证明布线**——每个故事状态通道都被实际消费，没有悬空阶段。
+
+**批量生成，批量进化——每章有独特感觉。** 每章实际上是一个隔离的子智能体（一次全新的`writer`调用，仅由共享故事状态作为基础）。为防止它们读起来相同，写作者为每章进化一个**风格基因组**——5维风格空间中的一个点（视角·时态·情绪·镜头·节奏，480种组合）。它运行一个迷你GA（`baldwin`模因循环，目标是*多样性*而非目标值）：一批候选基因组进化以最大化**新颖性**——与已用风格的距离——然后胜者被承诺并推入`styles_used`，使下一章被压力推离它。离线时风格轨迹是确定性的且明显多样：
 
 ```console
   … chapter 1/8  [style: epistolary/journal, present tense, melancholic, dialogue-driven, brisk]
@@ -688,29 +414,13 @@ manuscript: /abs/path/novel_12ch.txt
   … chapter 4/8  [style: first-person, past tense, melancholic, kinetic action, staccato]
   … chapter 6/8  [style: close third-person, present tense, cold and clinical, kinetic, slow-burn]
 ```
-新颖性搜索最大限度地提升独特性（它不能*保证*每个维度
-都不同）——诚实的表述，已足以打破单一模型在长篇写作中语调单一的局限。
 
-离线（无密钥）**确定性存根**规划者/编写者运行*完全相同的
-图*，因此管道——状态线程编排、goto 循环、累加、
-`.txt`输出——无需网络即可验证； `OPENROUTER_API_KEY`切换为
-真实模型的散文。诚实的范围：门控证明了*数据通路*
-（故事状态通道的接线和线程编排），而不是*散文质量*——叙事质量是
-模型的工作；结构之外的连续性可以由一个检查器节点
-（运行时后停止模式）来承载，这是最自然的下一步。
+新颖性搜索最大化差异性（它并不*保证*每个维度都不同）——诚实，且足以打破单模型长文本的单调声音失败。
 
-## 暴露的边缘问题
+离线（无密钥）时，**确定性桩**规划器/写作者运行*完全相同*的图，因此流水线——状态线程化、goto循环、累积、`.txt`输出——无需网络即可验证；`OPENROUTER_API_KEY`替换为模型以生成真实散文。诚实的范围：门证明*管道*（故事状态已布线和线程化），而非*散文*——叙事质量是模型的工作，超出结构的连续性将是一个检查器节点（运行时后盾模式），留作明显的下一个待添加节点。
 
-- **E6 在 `trail`** 上“已写入但从未读取”被作为 lint 发出 — 并且它
-  是*正确*：`trail`是终端输出通道，没有下游
-  *节点*消耗；只有主机通过`RunResult::channel`读回它。
-  验证器对图的通道表面非常精确，而不是
-  错了。故意保持可见以显示效果分析的工作情况。
-- **序列化检查点状态是通道包装的**
-  (`channel_values["channels"]["trail"]["value"]`)，不平坦——演示的
-  `channel_of()` 助手将其打开。相同形状`RunResult::channel`
-  读。
-- 核心锁文件通过阐述保留了`schema_version: 1`，这
-  是选择 Gate 2 进入严格模式的原因 - 在 strict Core JSON进行创作
-  绝不默默降级一致性保证进化循环
-  取决于。
+## 暴露的摩擦
+
+- **E6 "已写但从未被读" 在`trail`上**作为lint发出——而且它是*正确的*：`trail`是一个终端输出通道，没有下游*节点*消费它；只有宿主通过`RunResult::channel`读回它。验证器在精确处理图的通道表面，而非出错。故意保持可见以展示效果分析在工作。
+- **序列化检查点是通道包装的**（`channel_values["channels"]["trail"]["value"]`），而非扁平结构——演示中的`channel_of()`辅助函数会将其解包。`RunResult::channel`读取时采用相同结构。
+- 核心锁文件在整个验证过程中保持`schema_version: 1`，这使规范交换表示保持严格，并防止演化循环静默降低其一致性保证。

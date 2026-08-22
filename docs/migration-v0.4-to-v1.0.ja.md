@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=36f934aaee91b3681ee9fc75420af0dfdb05bde31c855a01258794c489291c25 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=d2b0e6c51e07b5877e07c5768ade91ce2129fec5f6441f92c7f7b8feae6026b9 -->
 # 移行ガイド: レガシー 8 仮想メソッド → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -249,8 +249,9 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 `thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`deadline`、
 `trace_id`。最後の 2 つは `RunMetadata` で設定し、エンジンはネストした
 subgraph まで保持します。チェックポイントの経路はエンジン内部であり、公開
-`RunContext` フィールドではありません。Python は `deadline` と `trace_id` を
-まだ公開していません。
+`RunContext` フィールドではありません。Python は `trace_id`、`run_id`、
+`model_token_budget`、`has_deadline`、`deadline_remaining_ms` を公開します。
+生のC++ steady-clockデッドラインは意図的に非公開のままです。
 
 ### `_full` 仮想メソッドの移行 — 1 行で `co_return out;` で終了
 

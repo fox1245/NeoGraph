@@ -1,5 +1,7 @@
 # Model-generated QuickJS Program synthesis evidence
 
+**Languages:** [English](model-program-synthesis-evidence.md) | [한국어](model-program-synthesis-evidence.ko.md) | [日本語](model-program-synthesis-evidence.ja.md) | [简体中文](model-program-synthesis-evidence.zh-CN.md)
+
 - Status: bounded PoC verified
 - Observed: 2026-08-21
 - Model: `deepseek/deepseek-v4-flash-0731` through OpenRouter

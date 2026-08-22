@@ -246,8 +246,9 @@ Fields of `in.ctx` available to C++ nodes are: `cancel_token`, `usage`,
 `thread_id`, `step`, `stream_mode`, `store`, `resume_value`, `deadline`, and
 `trace_id`. Set the latter two on `RunMetadata`; the engine preserves them
 through nested subgraphs. Checkpoint routing remains internal to the engine,
-not a public `RunContext` field. Python does not expose `deadline` or `trace_id`
-yet.
+not a public `RunContext` field. Python exposes `trace_id`, `run_id`,
+`model_token_budget`, `has_deadline`, and `deadline_remaining_ms`; the raw C++
+steady-clock deadline remains intentionally opaque.
 
 ### Migrating `_full` virtuals — finish with `co_return out;` in one line
 

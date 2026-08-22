@@ -1,37 +1,28 @@
-<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=018efba21b0004352a4b23c8947e0d18299157eb31070d941304799863f60d82 -->
-# 最小限の MCP — fastmcp、SDK、API キーなし
+<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=aabe3dcc4da8e46fba45ac72d14b3c3a206736c485bd63248eb40c1abf57404e -->
+# 最小限のMCP — fastmcpなし、SDKなし、APIキーなし
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-このリポジトリ (03 / 20 / 21 / 22) 内の他のすべての MCP サンプルは MCP をラップしています
-`OPENROUTER_API_KEY` と、ほとんどの MCP を必要とする ReAct ループ内のクライアント
-チュートリアルでは、`pip install fastmcp` (約 60 個のパッケージをプルします) を前提としています。
-サーバー側で。これには有益な事実が隠されています。
+このリポジトリの他のMCPの例（03 / 20 / 21 / 22）はすべて、固定のOpenRouter DeepSeekモデルを使用するReActループ内にMCPクライアントをラップするものであり、また、ほとんどのMCPチュートリアルは、`pip install fastmcp`（約60パッケージをpullする）をサーバー側に導入することを前提としています。これによって、便利な事実が隠されています:
 
-> **NeoGraph の組み込み MCP クライアントは、ピア側には何も必要ありません。
-> ワイヤープロトコルを話すプロセス - それ自身の側には何もありません
-> `libneograph_mcp` を除く (すでにバイナリ内にあります)。**
+> **NeoGraphの組み込みMCPクライアントは、ピア側にはワイヤプロトコルを話すプロセス以外に何も必要としない。**
+> ワイヤプロトコルを話すプロセスであり、自身の側には何も必要としません。
+> を除く（`libneograph_mcp` には既に含まれている）。**
 
-このクックブックでは、可能な限り最小のセットアップでそれを証明しています。
+このクックブックは、最小限の構成でそれを証明する：
 
-- **サーバー**: [`min_stdio_server.py`](min_stdio_server.py) — 約 60 行
-  pure-stdlib Python スクリプト。 `fastmcp`、`mcp` SDK、pip インストールはありません。
-  改行区切りの JSON-RPC を stdin/stdout 上で通信し、公開します。
-  3 つのツール (`get_current_time`、`calculate`、`get_weather`)。
-- **クライアント**: [`client_harness.cpp`](client_harness.cpp) — を生成します
-  サーバーをサブプロセスとして実行し、`initialize` → `tools/list` →
-  `tools/call`、結果を出力します。 **LLM も API キーもありません。**
+- **サーバー**: [`min_stdio_server.py`](min_stdio_server.py) — 約60行の純粋なstdlib Pythonスクリプト。`fastmcp` なし、`mcp` SDKなし、pip installなし。stdin/stdout上の改行区切りJSON-RPCを話し、3つのツール（`get_current_time`、`calculate`、`get_weather`）を公開します。
+- **クライアント**: [`client_harness.cpp`](client_harness.cpp) — サーバーをサブプロセスとして起動し、`initialize` → `tools/list` → `tools/call` を実行して、結果を出力します。**LLMなし、APIキーなし。**
 
 ## 実行してください
 
-ビルド ディレクトリから (`-DNEOGRAPH_BUILD_MCP=ON` でビルドされます。
-例としてデフォルトでオンになっています):
+ビルドディレクトリから（`-DNEOGRAPH_BUILD_MCP=ON` でビルド済み。これは例ではデフォルトでオン）：
 
 ```bash
 ./cookbook_minimal_mcp python3 ../examples/cookbook/minimal-mcp/min_stdio_server.py
 ```
 
-期待される出力:
+期待される出力：
 
 ```
 [*] Spawning stdio MCP server: python3 .../min_stdio_server.py
@@ -49,27 +40,14 @@
 [*] 3/3 MCP tool calls succeeded (no LLM, no fastmcp)
 ```
 
-`65537` は、呼び出しが実際にサーバーに到達し、評価されたことを証明します。
-それは缶詰の文字列ではありません。
+`65537` は、呼び出しが実際にサーバーに到達し、そこで評価されたことを証明します — それは固定文字列ではありません。
 
-## なぜこれが重要なのか
+## これが重要な理由
 
-- **軽量、両面。** 「バッテリーが付属」という主張は真実です。
-  NeoGraph は MCP を静的にリンクするため、個別のパッケージはありません。
-  インストールし、ドリフトする可能性のある依存関係はありません。 *ピア* サーバーは次のようになります。
-  標準ライブラリが許す限り小さい - エッジデバイス、CI、または次の場合に便利です。
-  フレームワークを使用せずに、いくつかのローカル ツールを公開したいだけです。
-- **ピアに依存しない。** `min_stdio_server.py` を任意の実行可能ファイルに置き換えます。
-  標準入出力 (Go バイナリ、Rust サーバー、fastmcp、
-  公式SDK）。 C++ 側は決して変わりません。
-- **キーフリー プロトコル テスト。** ループ内に LLM がないため、これは
-  これは、MCP サーバーのスモークテストを行う最速の方法でもあります。
-  配線前の `tools/list` および `tools/call` の形状は正しい
-  エージェントに。
+- **軽量、両面とも。**「バッテリー同梱」という主張は現実的です：NeoGraphはMCPを静的にリンクするため、別途インストールするパッケージもなく、ドリフトし得る依存関係もありません。*ピア*サーバーはstdlibが許可する限り小さくできます — エッジデバイス、CI、またはフレームワークなしでローカルツールをいくつか公開したい場合に便利です。
+- **ピア非依存。** `min_stdio_server.py`を、stdio上でMCPを話す任意の実行可能ファイル（Goバイナリ、Rustサーバー、fastmcp、公式SDK）に置き換えます。C++側は決して変更されません。
+- **キーフリープロトコルテスト。** ループ内にLLMがないため、これはエージェントに配線する前に、MCPサーバーの `tools/list` と `tools/call` の形状が正しいことをスモークテストする最も速い方法でもあります。
 
-## エージェントに接続する
+## エージェントへの組み込み
 
-ラウンドトリップが機能したら、`client.get_tools()` をグラフ ノードに渡します。
-(ツールは通常の `neograph::Tool` インスタンスです) そのため、LLM は以下を呼び出すことができます。
-ReAct ループを介してそれらを実行します — [`examples/03_mcp_agent.cpp`](../../03_mcp_agent.cpp) を参照
-そのステップのために。
+ラウンドトリップが動作したら、`client.get_tools()`をグラフノード（ツールは通常の`neograph::Tool`インスタンスです）に渡して、LLMが ReAct ループを介して呼び出せるようにします — そのステップについては[`examples/03_mcp_agent.cpp`](../../03_mcp_agent.cpp)を参照してください。

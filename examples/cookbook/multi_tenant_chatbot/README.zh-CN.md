@@ -1,31 +1,34 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=8baffd5ea72da3575627014a32aaaf9257b389214daebaf2c5336633f74ff996 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
 # 多租户聊天机器人服务器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**一个进程同时为 N 个客户提供 N 种不同 agent 拓扑。** 测量：1000 个并发真实 OpenAI 调用 / 6 个客户 / 3 种拓扑 / **峰值 29 MB / 0 个错误**。
+**一个进程同时为N个客户提供N种不同的智能体拓扑。** 测量结果：1000个并发真实OpenAI调用 / 6个客户 / 3种拓扑 / **峰值29 MB / 0错误**。
 
-> “怎样运行一个 chatbot SaaS，其中 100 个客户各自使用不同的 agent harness — ReAct、Plan&Execute、fanout、reflexive……？”
+> “如何运行一个聊天机器人SaaS，让100个客户各自使用不同的
+> 智能体框架——ReAct、Plan&Execute、fan-out、reflexive……？”
 >
-> LangGraph 答案：每个客户启动一个进程。100 个客户 = 100 个进程 = ~8 GB + supervisord/k8s。
+> LangGraph答案：每个客户启动一个进程。100个客户 = 100个进程 =
+> 约8 GB + supervisord/k8s。
 >
-> NeoGraph 答案：**把每个客户的一行 graph_def JSON 放进 DB，每个编译 cache entry 一份，然后就结束。** 每个进程 <30 MB。
+> NeoGraph答案：**将每个客户的graph_def JSON行放入数据库，
+> 一个编译缓存条目，就完成了。** 每个进程占用不到30 MB。
 
-这个 cookbook 是该结构的可运行最小实现。
+本手册是该结构的一个可运行的最小实现。
 
 ## 场景
 
-6 个客户使用 3 种不同拓扑：
+6个客户使用3种不同的拓扑：
 
-| 客户 | 拓扑 | 形状 | 每请求 LLM 调用 |
+| 客户 | 拓扑 | 形状 | LLM调用/请求 |
 |---|---|---|---|
-| alice, bob | **simple** | `start → respond → end` | 1 |
+| alice, bob | simple | `start → respond → end` | 1 |
 | charlie, david | **reflexive** | `start → draft → critique → final → end` | 3 |
 | eve, frank | **fanout** | `start → [perspective_a, _b, _c] → merge → end` | 3（并行） |
 
-每个客户的 graph_def 都以内联 JSON 定义，但真实生产环境会直接把它作为 Postgres `customer_graphs.graph_def JSONB` 行存储。
+每个客户的 graph_def 都以内联 JSON 定义，但真实生产环境会直接将其存储为 Postgres `customer_graphs.graph_def JSONB` 行。
 
-核心代码流程（[server.cpp](server.cpp:140-176)）：
+Core 代码流程（[server.cpp](server.cpp:140-176)）：
 
 ```cpp
 class CompileCache {
@@ -60,101 +63,102 @@ cfg.input     = user_message;
 auto result   = engine->run(cfg);
 ```
 
-共享同一 topology 的客户会共享 engine instances。客户 graph 修改会改变 hash，从而触发新的 engine compile + cache。
+共享相同拓扑的客户共享引擎实例。客户图修改会改变哈希值，触发新的引擎编译和缓存。
 
-## 构建 / 运行
+## 构建/运行
 
-### Mock provider 版本（零外部依赖）
+### 模拟提供程序版本（无外部依赖）
 
 ```bash
 cmake --build build --target cookbook_multi_tenant_mock
 ./build/cookbook_multi_tenant_mock
 ```
 
-无需 OpenAI key 即可运行。测量 NG engine 容量（1000 个并发请求 / compile cache 命中率 / 内存）。
+无需 OpenAI 键即可工作。衡量 NG engine capacity（1000 并发请求 / 编译缓存命中率 / 内存）。
 
-### Live LLM 版本（OpenRouter DeepSeek）
+### 实时 LLM 版本（OpenRouter DeepSeek）
 
 ```bash
-# repo 根目录的 .env 必须包含 OPENROUTER_API_KEY
+# .env must contain OPENROUTER_API_KEY at repo root
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
 ```
 
-**成本取决于 provider 和用量**（2330 次调用均经过固定 DeepSeek 路由）。
+**成本 ≈ 提供商相关**（通过固定的 DeepSeek 路由进行 2330 次调用）。
 
-## 测量
+## 测量值
 
-| 方面 | Mock 1000 请求 | Live 100 请求 | **Live 1000 请求** |
+| 方面 | 模拟 1000 个请求 | 实时 100 个请求 | **实时 1000 个请求** |
 |---|---|---|---|
-| 成功 / 错误 | 1000 / 0 | 100 / 0 | **1000 / 0** ⭐ |
-| 总耗时 | 5 ms | 11.5 s | 50.2 s |
-| 平均延迟 | 39 µs | 1.58 s | 1.4 s |
-| 最大延迟 | 2.99 ms | 9.33 s | 14.4 s |
+| 正常 / 错误 | 1000 / 0 | 100 / 0 | **1000 / 0** ⭐ |
+| 实际耗时 | 5 毫秒 | 11.5 秒 | 50.2 秒 |
+| 平均延迟 | 39 微秒 | 1.58 秒 | 1.4 秒 |
+| 最大延迟 | 2.99 毫秒 | 9.33 秒 | 14.4 秒 |
 | 吞吐量 | 200K RPS | 8.67 RPS | **19.9 RPS** |
-| **Peak RSS** | **5.25 MB** | **21.9 MB** | **29.25 MB** |
-| Compile cache 命中率 | 99.7% | 94% | **99.4%** |
-| 不同 engine 数 | 3 | 6 | 6 |
-**测量环境**：WSL2 / 32-thread asio thread pool / single host /
-真实 OpenRouter DeepSeek API 调用。
+| **峰值RSS** | **5.25 MB** | **21.9 MB** | **29.25 MB** |
+| 编译缓存命中率 | 99.7% | 94% | **99.4%** |
+| 不同的引擎 | 3 | 6 | 6 |
+
+**测量环境**：WSL2 / 32线程 asio 线程池 / 单主机 / 真实 OpenRouter DeepSeek API 调用。
 
 关键数字：
 
-- **1000 个并发 in-flight LLM coroutine + connection memory cost ≈ 29 MB**。100 req → 1000 req 增加 +7 MB ⇒ 每个额外 connection 约 ~8 KB。来自 asio coroutine + httplib SSL connection pool 的组合。
-- **1000 并发下 0 errors** — NG 无需 retry 就能平稳吸收 rate-limit / network jitter / TLS handshake jitter。Provider-side throttle 可以用 `RateLimitedProvider` wrapper 加强。
-- **Cache hit rate 99.4%** — 只要 topology count 不变，即使客户更多也保持 hit rate。**1000 customer scenario memory 也保持 ~30 MB**。
+- **1000个并发在途 LLM 协程 + 连接内存成本约 29 MB**。100 请求 → 1000 请求增加 +7 MB ⇒ 每个额外连接约 8 KB。asio 协程 + httplib SSL 连接池的组合。
+- **1000 并发时零错误** — NG 优雅地吸收速率限制 / 网络抖动 / TLS 握手抖动而无需重试。可以用 `RateLimitedProvider` 包装器增强提供商侧限流。
+- **缓存命中率 99.4%** — 即使客户更多，只要拓扑数量保持不变，命中率也能维持。**1000 客户场景内存也保持在约 30 MB**。
 
-## LangGraph 对比 — 真实含义
+## LangGraph 对比 — 真实意义
 
-尝试用 LangGraph 实现同一多租户场景会碰到这些瓶颈：
+使用 LangGraph 尝试相同的多租户场景会遇到这些瓶颈：
 
 | 方面 | NeoGraph | LangGraph 估算 |
 |---|---|---|
-| 一个进程中 N 个客户 × N 种拓扑 | **可以**（29 MB / 1000 请求） | 不可以 — StateGraph 是 Python object，序列化/存储很别扭（pickle 会捆绑 import path） |
-| 客户特定拓扑变更 | 一行 DB UPDATE | 代码 PR → CI → 部署周期 |
-| 版本隔离（customer A 的 v1/v2 graph 共存） | 添加 `graph_versions` 行 | Python namespace 冲突，需要 hack |
-| 多进程强制要求 | 不需要 | Customer = process 是常见模式 |
-| 内存（6 个客户） | 29 MB | 6 × ~80 MB = 480 MB（LG idle baseline） |
-| 内存（1000 个客户） | ~30 MB（cache unchanged） | **~80 GB**（每客户一个进程） |
-| 运维基础设施 | 一个 binary | gunicorn / supervisord / k8s + 进程编排 |
+| N个客户 × N个拓扑在一个进程中 | **是**（29 MB / 1000 次请求） | 否 — StateGraph 是 Python 对象，序列化/存储不便（pickle 捆绑导入路径） |
+| 客户特定的拓扑变更 | 一次数据库行更新 | 代码 PR → CI → 部署周期 |
+| 版本隔离（客户 A 的 v1/v2 图共存） | 添加`graph_versions`行 | Python 命名空间冲突，需要变通方案 |
+| 多进程强制 | 不必要 | 客户 = 进程常见模式 |
+| 内存（6 个客户） | 29 MB | 6 × ~80 MB = 480 MB（LG 空闲基线） |
+| 内存（1000 位客户） | ~30 MB（缓存不变） | **~80 GB**（每位客户一个进程） |
+| 运营基础设施 | 单一二进制文件 | gunicorn / supervisord / k8s + 进程编排 |
 
-**每进程 30 MB vs 80 GB。** 2700× 差异是真实 multi-tenant chatbot SaaS 运维的核心。
+**每个进程 30 MB vs 80 GB。** 2700× 的差异是真正多租户聊天机器人 SaaS 运营的核心。
 
-## 实际场景 — 能扩到多远
+## 实际场景——它能走多远
 
-`t2.micro`（1 vCPU / 1 GB RAM，~$0.01/hour）上可行的场景：
+在 `t2.micro`（1 vCPU / 1 GB RAM，约 $0.01/小时）上可行的场景：
 
-| 场景 | NG 内存估算 | t2.micro 上可行吗？ |
+| 场景 | NG 内存估算 | 在 t2.micro 上可行？ |
 |---|---|---|
-| 100 concurrent active in-flight LLM + 100 customers × 3 topologies | ~10 MB | ✅ 充足，剩余 ~990 MB |
-| 1000 concurrent in-flight + 1000 customers × 10 topologies | ~30 MB | ✅ 充足，剩余 ~970 MB |
-| 10,000 concurrent in-flight + 10,000 customers × 100 topologies | ~85 MB | ✅ 充足，剩余 ~915 MB |
-| 100,000 concurrent in-flight + … | ~800 MB | ⚠️ RAM 几乎用完 |
+| 100 个并发在途 LLM 请求 + 100 位客户 × 3 种拓扑 | ~10 MB | ✅ 充足，剩余约 990 MB |
+| 1000 个并发在途请求 + 1000 个客户 × 10 个拓扑 | 约 30 MB | ✅ 充足，剩余约 970 MB |
+| 10,000 个并发在途请求 + 10,000 个客户 × 100 个拓扑 | 约 85 MB | ✅ 充足，剩余约 915 MB |
+| 100,000 个并发在途请求 + ... | 约 800 MB | ⚠️ 内存几乎用尽 |
 
-* 假设：每个 connection ~8 KB + 每个 compile-cache entry ~10 KB + 5 MB base。
+* 假设：每个连接约 8 KB + 每个编译缓存条目约 10 KB + 5 MB 基础
 
-当然，t2.micro 的 1 vCPU 和 OpenAI tier RPM limits 是 *throughput* 上限；**关键点是边际客户成本约为 0**。
+当然，OpenRouter 速率限制是吞吐量的上限；**要点是边际客户成本约为 0**。
 
-> LangGraph 在 1 GB 的 t2.micro 上服务 100 个客户 = 100 个进程 =
-> 需要 8 GB → 实例本身无法启动。**需要 m5.2xlarge（32 GB，~$0.38/hour）。**
+> LangGraph 在 t2.micro 1 GB 上，100 个客户 = 100 个进程 =
+> 需 8 GB → 实例本身无法启动。**需 m5.2xlarge (32 GB, 约 $0.38/小时) 。**
 >
-> 同一任务用 NG = **单个 t2.micro（$0.01/hour）。38× 基础设施成本差异。**
-当然，OpenRouter rate limit 是吞吐量上限。
+> 使用 NG 完成相同任务 = **单个 t2.micro（$0.01/小时）。38× 基础设施
+> 成本差异。**
+
 ## 热切换演示
 
-`server.cpp` 末尾展示了将 alice 的 topology 从 `simple` → `fanout` 原地更改，并立即处理下一次请求。0 deploy cycle，0 restart。真实生产中会是客户在 web UI 中编辑 graph JSON → DB save → 下一次请求使用新 topology。
+`server.cpp` 结束处展示了 alice 的拓扑从 `simple` → `fanout` 的就地变更，并立即处理下一个请求。0 个部署周期，0 次重启。真实生产环境会是客户在 Web UI 中编辑图 JSON → 数据库保存 → 下一个请求使用新拓扑。
 
-## 未来增强
+## 未来增强功能
 
-- **CheckpointStore 集成** — 当前每个请求都把 history 作为输入传入。有了 Postgres CheckpointStore 后，可按 thread_id 自动持久化。
-- **固定 Provider** — 每个 customer 使用同一个 OpenRouter DeepSeek 模型；
-  `NodeContext::provider` 仍可携带 customer-specific context。
-- **A/B 实验框架** — 通过 graph_def hash + customer_id sticky split 分流。可直接扩展该代码模式。
-- **Streaming + cancel integration** — 客户端断开时中止 outbound LLM socket。直接接入 NG 的 `RunConfig::cancel_token`。
+- **CheckpointStore 集成** — 当前每次请求将历史记录作为输入传入。借助 Postgres CheckpointStore，可按 thread_id 自动持久化。
+- **固定 Provider** — 每个客户 PR都使用相同的 OpenRouter DeepSeek 模型；`NodeContext::provider` 仍可携带客户特定上下文。
+- **流式响应** — `run(input)` 与 `input.stream_cb` 结合SSE实现token级流式传输。直接使用NG的`run(NodeInput)`路径及流回调。
+- **A/B 实验框架** — 通过_graph_def 哈希值 + customer_id 固定分拆实现流量拆分。直接扩展代码模式。Code pattern ⟪P4804b8b29a4- 直接复用已有模式。
+- **360 页** **流式处理+取消集成** — 客户端断开时中止出站 LLM socket。直接接线 NG 的 `RunConfig::cancel_token`。
 
-## 核心信息
+## Core
 
-> *“6000 个客户 × 3 种拓扑 = 29 MB。编辑一行 JSON = 不部署即可热切换。
-> 1000 个并发真实 OpenAI 调用下 0 个错误。单台 t2.micro 即可运行。”*
+> *6000 个客户 × 3 种拓扑 = 29 MB。编辑一行 JSON = 热替换，无需部署。
+> 0 个错误在 1000 并发 real OpenAI 调用下。可在单 t2.micro 上运行。
 
-这一行可能比性能数字（`5.5 MB L3 fit / 1024 worker idle 31 MB`）更能体现 NeoGraph 的影响力卖点。
+这一行可能是NeoGraph比性能数据更有影响力的卖点(`5.5 MB L3 fit / 1024 worker idle 31 MB`)。

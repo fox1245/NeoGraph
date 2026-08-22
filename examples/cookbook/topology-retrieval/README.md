@@ -1,5 +1,7 @@
 # Local topology retrieval
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 This NeoGraph cookbook demonstrates the candidate-selection path that precedes
 topology reuse, P1 migration, handoff replacement, or DSL synthesis:
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=36f934aaee91b3681ee9fc75420af0dfdb05bde31c855a01258794c489291c25 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=d2b0e6c51e07b5877e07c5768ade91ce2129fec5f6441f92c7f7b8feae6026b9 -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -239,8 +239,9 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 C++ 节点可用的 `in.ctx` 字段包括：`cancel_token`、`usage`、`thread_id`、
 `step`、`stream_mode`、`store`、`resume_value`、`deadline` 和 `trace_id`。
 后两个字段由 `RunMetadata` 设置，且引擎会在嵌套 subgraph 中保留它们。检查点
-路由是引擎内部实现，不是公开的 `RunContext` 字段。Python 目前仍不暴露
-`deadline` 或 `trace_id`。
+路由是引擎内部实现，不是公开的 `RunContext` 字段。Python 已公开 `trace_id`、
+`run_id`、`model_token_budget`、`has_deadline` 和 `deadline_remaining_ms`；原始的
+C++ steady-clock截止时间则有意保持不透明。
 
 ### 迁移 `_full` 虚函数 — 在一行内以 `co_return out;` 结束
 

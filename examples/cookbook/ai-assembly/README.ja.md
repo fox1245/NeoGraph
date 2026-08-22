@@ -1,21 +1,13 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=4fc02b6c921618283b005ec1a6e8819e815c28840f34ad72b347d1ad86ff4e4b -->
-# AI国会
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=4922ec93b98cf57b8a7fc967e471974122e6b7608a53fc5f1b826cb01f3fd9b8 -->
+# AI国民議会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**新しい NeoGraph ユーザー**として構築されたおもちゃのデモ — すべての API の選択は
-公開ドキュメント (README、github の例、Doxygen) を読んで作成されました。
-NeoGraph のソースを開く必要はありません。ポイントは 2 つあります。
-A2A が実際の複数ペルソナのシナリオで機能することを証明し、
-新人の C++ 開発者は途中でぶつかる摩擦。
+**NeoGraphの新規ユーザーとして**構築されたおもちゃのデモ — すべてのAPI選択は、NeoGraphのソースを開くことなく公開ドキュメント（README、githubの例、Doxygen）を読むことで行われました。目的は2つあります：A2Aが実際のマルチペルソナシナリオで機能することを証明すること、そして、まったく新しいC++開発者が途中で直面する摩擦を浮き彫りにすることです。
 
-## 何をするのか
+## 動作
 
-国会議員4名がそれぞれ異なる港に座っており、
-それぞれが個別のペルソナプロンプトで支えられた A2A エンドポイントで、
-固定 DeepSeek モデルを使う同じ OpenRouter ルートです。議長は別プログラムで、
-NeoGraph の `A2AClient` を介して全メンバーへ法案を並行配信し、
-返信から投票を解析して結果を宣言します。
+国民議会の4人の議員が別々のポートに座り、それぞれが個別のペルソナプロンプトと、固定されたDeepSeekモデル用の同じOpenRouterルートに支えられたA2Aエンドポイントです。議長（国民議会議長）は独立したプログラムであり、NeoGraphの`A2AClient`を介して法案をすべての議員に並行してブロードキャストし、各議員の返信から投票を解析し、結果を宣言します。
 
 ```
                           ┌──────────────────┐
@@ -30,15 +22,11 @@ NeoGraph の `A2AClient` を介して全メンバーへ法案を並行配信し�
        (PersonaNode → OpenRouter DeepSeek, persona-specific system prompt)
 ```
 
-各メンバーは 1 ノードの NeoGraph (`__start__ → persona → __end__`) です。
-`a2a::A2AServer` の背後で提供されます。グラフは `prompt` チャネルを読み取り、
-`response` チャネルを書き込みます。 A2Aサーバーのデフォルト
-`GraphAgentAdapter` は、JSON-RPC 経由でそれらを表示します。
+各メンバーは、`__start__ → persona → __end__`の背後で提供される1ノードのNeoGraph（`a2a::A2AServer`）です。このグラフは`prompt`チャネルを読み取り、`response`チャネルに書き込みます。A2Aサーバーのデフォルトの`GraphAgentAdapter`は、これらをJSON-RPC経由で公開します。
 
-## ライブトランスクリプト (DeepSeek via OpenRouter、2026-04-29)
+## ライブ議事録（OpenRouter経由のDeepSeek、2026-04-29）
 
-ビル: [`bills/basic_income.txt`](bills/basic_income.txt) — ユニバーサル
-ベーシックインカム、月額50万ウォン、財源は土地+炭素+累進税。
+ビル：[`bills/basic_income.txt`](bills/basic_income.txt) — ユニバーサルベーシックインカム、月50万ウォン、土地・炭素・累進課税で資金調達。
 
 ```
 [Speaker of the National Assembly] Bill submission: [National Basic Income Law]
@@ -52,12 +40,9 @@ NeoGraph の `A2AClient` を介して全メンバーへ法案を並行配信し�
 [Speaker of the National Assembly] Tie vote — the bill is rejected (custom).
 ```
 
-各ペルソナの推論は、当事者が表明した価値観を真に追跡します。
-それはフレームワークが行っていることではありません。OpenAI が個別の機能を尊重しているだけです。
-システム プロンプトは表示されますが、アセンブリの仕組み (並行 A2A、投票集計、
-Discovery) は純粋な NeoGraph です。
+各ペルソナの推論は、自分の政党の表明された価値観を真に追跡します。それはフレームワークの仕業ではなく、ピン留めされたモデルがそれぞれ異なるシステムプロンプトに従うためです。ただし、アセンブリのメカニクス（並列A2A、投票集計、発見）は純粋なNeoGraphです。
 
-## ビルド + 実行 (NeoGraph ツリー内)
+## ビルド＋実行（NeoGraphツリー内で）
 
 ```bash
 # from NeoGraph repo root; A2A and LLM are optional build components
@@ -74,10 +59,11 @@ echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-メンバーサーバーは OpenRouter を呼び出すため、`OPENROUTER_API_KEY` と
-ネットワーク接続が必要です。コンパイル自体はオフラインで検証できます。
+メンバーサーバーはライブのOpenRouter呼び出しを行います。`OPENROUTER_API_KEY`とネットワークアクセスが必要です。コンパイル自体はオフラインです。
 
-## Python スピーカー バリアント (v0.2.1+、クロスランゲージ A2A)
+## Pythonスピーカーバリアント（v0.2.1+、クロス言語A2A）
+
+同じスピーカーロジックを、約100行のPythonで、同じC++メンバーサーバーに対して実行—これにより、A2Aプロトコルが言語をクリーンに橋渡しすることが証明されます。
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
@@ -88,59 +74,40 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-Python A2A バインディング (`neograph_engine.a2a`) は v0.2.1 で出荷されます。
-サーバー側 (グラフを A2A エンドポイントとして公開) は現在も C++ のみです。
+Python A2A バインディング（`neograph_engine.a2a`）は v0.2.1 で提供される。サーバー側（graph-as-A2A-endpoint）は今のところ C++ のみのままである。
 
-## 摩擦ジャーナル — 新人 NeoGraph ユーザーがつまずいたもの
+## 摩擦ジャーナル — 新しい NeoGraph ユーザーがつまずいた点
 
-### 1. A2A は C++ のみでした — Python バインディングはそれを公開しませんでした (v0.2.1 で修正)
 
-`pip install neograph-engine` は動作しますが、v0.2.1 より前の `neograph_engine`
-`A2AClient` / `AgentCard` はエクスポートされませんでした。 v0.2.1 では、
-`neograph_engine.a2a` サブモジュール (クライアント + AgentCard + タスク/メッセージ/
-Part/TaskState/Role) — 上記の Python スピーカーのバリアントを参照してください。
+ビルド中に判明した粗雑なエッジを以下に示す。**4 件すべて v0.2.1 で修正** — 記録としてここに残しておく。
 
-**サーバー側バインディングは依然として C++ のみです**。 A2Aサーバーには
-v0.3 のフォローアップである GIL 対応のライフサイクル コントラクト。
+### 1. A2AはC++専用だった — Pythonバインディングがそれを公開していなかった（v0.2.1で修正済み）
 
-### 2. システムがインストールされていない / ホイールにヘッダーがない (README v0.2.1 で修正)
+`pip install neograph-engine` は動作しますが、pre-v0.2.1の`neograph_engine`は`A2AClient` / `AgentCard`をエクスポートしていませんでした。v0.2.1では`neograph_engine.a2a`サブモジュール（client + AgentCard + Task/Message/Part/TaskState/Role）を追加しています — 上記のPythonスピーカー変種を参照してください。
 
-README に「CMake プロジェクトから NeoGraph を使用する」セクションが追加されました。
-`FetchContent_Declare` パターンを示しています。この料理本も生きています
-NeoGraph ツリー内にあるため、何もせずに直接 `add_executable` できます。
-外部依存関係 — スタンドアロン バリアントでは FetchContent が使用されます。
+**サーバーサイドのバインディングはまだC++専用です**。A2AServerにはGIL対応のライフサイクルコントラクトが必要であり、これはv0.3のフォローアップです。
 
-### 3. `OpenAIProvider::create()` `unique_ptr` 対 `shared_ptr` (v0.2.1 で修正)
+### 2. システムインストールなし／ホイール内にヘッダーなし（README v0.2.1で修正済み）
 
-`OpenAIProvider::create_shared(cfg)` が追加されました — を返します
-`shared_ptr<Provider>` を直接使用するため、きれいにキャプチャされます。
-`NodeFactory` クロージャ。クックブックの ~133 行目で使用されています。
-`member_server.cpp`。
+READMEに「Using NeoGraph from your CMake project」というセクションが追加され、`FetchContent_Declare`パターンを示しています。このクックブックはNeoGraphツリー内にも存在するため、外部依存なしで`add_executable`を直接実行できます。スタンドアロン版はFetchContentを使用します。
 
-### 4. `.env` 自動ロードは A2A 子プロセスに伝播しません (v0.2.1 で文書化)
+### 3. `OpenAIProvider::create()` `unique_ptr` vs `shared_ptr` (v0.2.1で修正)
 
-`cppdotenv::auto_load_dotenv()` は、を呼び出すバイナリ内で動作します。
-ただし、子サーバーをフォークするランチャー スクリプトは `source .env` でなければなりません
-まず親シェル内で。現在文書化されているのは、
-[`docs/troubleshooting.md`](../../../docs/troubleshooting.md)以下
-「ソースからビルド」。
+`OpenAIProvider::create_shared(cfg)` が追加されました — 直接 `shared_ptr<Provider>` を返すため、`NodeFactory` クロージャへきれいに取り込まれます。クックブックは `member_server.cpp` の約133行目でこれを使用しています。
 
-### 5. スムーズに機能したこと (肯定的なメモ)
+### 4. `.env` autoload が A2A 子プロセスに伝播しない（v0.2.1 で文書化済み）
 
-- `A2AServer::start_async` + 自動ポート (`port=0`) は痛みがありませんでした。
-- AgentCard 検出 (`fetch_agent_card`) は正常に動作しました - マニュアルはありません
-  HTTPが必要です。
-- `std::async` 先物からの同時 `send_message_sync` — いいえ
-  クライアント側のロック、共有セッション状態なし。 A2A仕様 /
-  NeoGraph はどちらも並列クライアント要求を完全に処理します。
-  箱。
-- 自由形式の韓国語テキストの `parse_vote` 正規表現は、モデルが次のように機能するため機能します。
-  尋ねられた場合は、確実に `vote: support/oppose/abstain` を尊重します。ペルソナの出力
-  フォーマット内にとどまるため、これは 5 行の集計関数になりました。
-- ツリー内の CMake ビルドは自己完結しています。上記のように
-  `NEOGRAPH_BUILD_A2A=ON` と `NEOGRAPH_BUILD_LLM=ON` を指定してください。
+`cppdotenv::auto_load_dotenv()`はそれを呼び出すバイナリ内で動作しますが、子サーバーをフォークするランチャースクリプトは、最初に親シェルで`source .env`を実行する必要があります。現在は[`docs/troubleshooting.md`](../../../docs/troubleshooting.md)の「Build from source」に記載されています。
 
-## ファイル
+### 5. スムーズに機能した点（肯定的なメモ）
+
+- `A2AServer::start_async` + auto-port (`port=0`) は問題ありませんでした。
+- AgentCardの発見（`fetch_agent_card`）は、手動のHTTPを必要とせずにそのまま機能しました。
+- 並行 `send_message_sync` からの `std::async` フューチャー — クライアント側のロックなし、共有セッション状態なし。A2A仕様 / NeoGraph はどちらも並行クライアントリクエストを追加設定なしでクリーンに処理します。
+- `parse_vote`正規は自由形式韓国語テキストで機能します。モデルが要求された際に`vote: support/oppose/abstain`を確実に尊重するためです。パーソナの出力がフォーマット内に収まることで、5行の集計関数となりました。
+- ツリー内CMakeビルドは自己完結型です。上記のように`NEOGRAPH_BUILD_A2A=ON`と`NEOGRAPH_BUILD_LLM=ON`で設定してください。
+
+## Files
 
 ```
 ai-assembly/
@@ -158,6 +125,6 @@ ai-assembly/
     └── run_session.sh          # spin up 4 members + run speaker
 ```
 
-## ライセンス
+## License
 
-MIT、NeoGraphと同じ。
+MIT、NeoGraphと同様。

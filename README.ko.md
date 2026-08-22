@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=6c67c286aae76e1f4dcc6a25b9e04af02b9d362083721bce943f3fddb381b168 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=6ba467cfa403c387e0a433c35a7d0002d1579850b8820d50544b399c8cadb239 -->
 <p align="center">
-  <h1 align="center">NeoGraph</h1>
+<h1 align="center">NeoGraph</h1>
   <p align="center">
-    <strong>C++ 그래프 에이전트 엔진 — Python 바인딩 포함.</strong><br>
-    LangGraph 수준의 기능 · 5&nbsp;µs 엔진 오버헤드 · 라즈베리파이에 맞는 단일 정적 바이너리.
+<strong>빠른 C++ 그래프 런타임으로, 내구성 있는 프로그래머블 에이전트 제어 플레인을 갖춘다.</strong><br>
+지연 시간이 중요할 때는 정적 Core 실행. 제어가 중요할 때는 QuickJS Programs, 서브에이전트, Hooks, 런타임 컨텍스트, 검증된 토폴로지 진화.
   </p>
 </p>
 
@@ -16,219 +16,193 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">빠른 시작</a> &middot;
-  <a href="#use-from-a-cmake-project">CMake</a> &middot;
-  <a href="#python">Python</a> &middot;
-  <a href="docs/concepts.md">개념</a> &middot;
-  <a href="examples/README.md">예제</a> &middot;
-  <a href="docs/troubleshooting.md">문제 해결</a> &middot;
-  <a href="docs/reference-en.md">API 참조</a> &middot;
-  <a href="#vs-langgraph">vs LangGraph</a>
+<a href="#quick-start">빠른 시작</a> &middot;
+<a href="#two-runtime-layers">아키텍처</a> &middot;
+<a href="#python">Python</a> &middot;
+<a href="examples/README.md">예제</a> &middot;
+<a href="docs/reference-en.md">C++ 참조</a> &middot;
+<a href="docs/python-binding.md">Python 참조</a>
 </p>
 
 ---
 
 <p align="center">
-  <a href="docs/videos/neograph-promo.mp4">
-    <img src="docs/images/neograph-promo.gif" alt="NeoGraph 프로모션 — 5µs 엔진 오버헤드, 10K 동시에서 5.5MB RSS, 1.2MB 정적 바이너리, 라즈베리파이 적합" width="900">
+  <a href="docs/videos/neograph-promo-v3.mp4">
+    <img src="docs/images/neograph-promo-v3.gif" alt="NeoGraph — generated Programs, semantic admission, runtime topology, Hooks, context and Python parity" width="900">
   </a>
 </p>
 
-## NeoGraph란?
+## 오늘날 NeoGraph가 무엇인지
 
-NeoGraph는 LangGraph 수준의 기능을 C++로 제공하는 **C++20 그래프 기반 에이전트 오케스트레이션 엔진**입니다. 에이전트 워크플로를 JSON으로 정의하고, 병렬 팬아웃으로 실행하며, 시간 여행 디버깅과 인간 개입(HITL)을 위한 상태를 체크포인트할 수 있습니다. LLM 제공자도 자유롭게 연결할 수 있으며 Python 없이 사용할 수 있습니다.
+NeoGraph에는 의도적으로 분리된 두 개의 실행 계층이 있습니다:
 
-```cpp
-#include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/graph/react_graph.h>
+| 계층 | 용도로 사용하십시오 | 계약 |
+|---|---|---|
+| **GraphEngine / Core** | 고정 또는 호스트 선택 그래프, 낮은 오버헤드, 임베디드 배포 | 불변 컴파일 토폴로지; C++ 노드는 Pregel 스타일 슈퍼스텝을 통해 실행됩니다 |
+| **ProgramRuntime / QuickJS** | 런타임 제어, 하위 Program, 구조적 동시성, 토폴로지 교체 및 마이그레이션 | 불변 Program 세대; 지속형 타입 명령; 저널링된 전환 및 재생(replay) |
 
-auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = "sk-...", .default_model = "gpt-4o-mini"
-});
-auto engine = neograph::graph::create_react_graph(provider, std::move(tools));
+모델은 컴파일러, 카탈로그, 자격 증명, 마이그레이션 또는 권한 부여 액세스를 절대 받지 않습니다. 생성된 소스는 다음과 같습니다:
 
-neograph::graph::RunConfig config;
-config.input = {{"messages", json::array({{{"role","user"},{"content","Hello!"}}})}};
-auto result = engine->run(config);
+```text
+proposal → reserve → compile → semantic validate → admit → publish → migrate or spawn
 ```
 
-위 에이전트는 실제로 엔진이 실행하는 JSON일 뿐이다 — JSON을 바꾸면 다른 에이전트가 된다 ([`docs/concepts.md`](docs/concepts.md) 참조):
-
-```json
-{
-  "schema_version": 1,
-  "channels": { "messages": {"reducer": "append"}, "__route__": {"reducer": "overwrite"} },
-  "nodes": {
-    "planner":    {"type": "llm_call"},
-    "researcher": {"type": "tool_dispatch"},
-    "classifier": {"type": "intent_classifier", "routes": ["deep_dive", "summarize"]}
-  },
-  "edges": [
-    {"from": "__start__", "to": "planner"},
-    {"from": "planner", "condition": "has_tool_calls",
-     "routes": {"true": "researcher", "false": "classifier"}},
-    {"from": "researcher", "to": "planner"},
-    {"from": "classifier", "condition": "route_channel",
-     "routes": {"deep_dive": "__end__", "summarize": "__end__"}}
-  ]
-}
-```
-
-**NeoGraph는 C++을 위한 유일한 그래프 에이전트 엔진이다.** 로보틱스, 임베디드 시스템, 게임, 고빈도 트레이딩, Python이 선택지가 아닌 모든 곳에서 에이전트를 만든다면 — 바로 이것이다.
-
-## 네 축
-
-각 항목은 명령 한 번으로 확인할 수 있습니다. 라이브 LLM 예제만 API 키가 필요합니다.
-
-|   | 축 | 측정값 | 상세 |
-|---|---|---|---|---|
-| ⚡ | **성능** | 5 µs 엔진 오버헤드 · 10 K 동시에 5.5 MB · p99 7 µs @ 10 K (1 CPU 샌드박스) | [성능 심층 분석](docs/performance-deep-dive.md) |
-| 🧬 | **자기 진화** | LLM 평가자 → `graph_def` 실시간 교체 · 5명 고객 → 3개 창발 토폴로지 군집 | [self_evolving_chatbot](examples/cookbook/self_evolving_chatbot/) |
-| 🔌 | **내장형 준비** | 1.2 MB 제거된 정적 바이너리 · `libc.so.6`만 · RPi Zero 2W에서 실행 | [임베디드 / 로보틱스](docs/performance-deep-dive.md#what-the-numbers-mean-for-embedded--robotics) |
-| 🪶 | **가벼움** | 2개 직접 wheel 의존성 · 1K-고객 멀티 테넌트 → 29 MB · t2.micro 친화적 | [multi_tenant_chatbot](examples/cookbook/multi_tenant_chatbot/) |
-
-### 벤치마크
-
-동일 토폴로지, I/O 없는 엔진 오버헤드 — 순수 노드 디스패치 + 상태 쓰기 + 리듀서 호출 (µs/반복, 낮을수록 좋음):
-
-| 프레임워크 | `seq` (3-노드) | `par` (팬아웃 5) | vs. NeoGraph |
-|---|--:|--:|--:|
-| **NeoGraph master** | **5.0 µs** | **11.8 µs** | 1× |
-| Haystack 2.28 | 144 µs | 290 µs | 29× |
-| pydantic-graph 1.85 | 236 µs | 286 µs | 47× |
-| LangGraph 1.1.9 | 657 µs | 2,349 µs | 131× |
-| LlamaIndex 0.14 | 1,780 µs | 4,684 µs | 356× |
-| AutoGen 0.7.5 | 3,209 µs | 7,293 µs | 642× |
-
-N=10,000 동시 (1 CPU / 512 MB 샌드박스): NeoGraph 52 ms / 7 µs p99 / 5.5 MB · LangGraph 23.4 s / 416 MB · LlamaIndex & AutoGen OOM-종료.
-전체 행렬 + 방법론: [`docs/performance-deep-dive.md`](docs/performance-deep-dive.md) · [`benchmarks/README.md`](benchmarks/README.md).
+거부된 제안은 `ProgramVersion`를 게시할 수 없으며, 동적 컴파일 예산도 복원되지 않습니다. [엄격한 런타임 개입](docs/STRICT_RUNTIME_INTERPOSITION.md) 및 [DSL 기능 평가](docs/DSL_CAPABILITY_EVAL.md)를 참조하십시오.
 
 <a id="quick-start"></a>
 ## 빠른 시작
 
-**요구사항** — C++20 컴파일러(GCC 13.3은 코어만 지원하며, 전체 기능에는 GCC 14.2+ / Clang 18+ / MSVC 2022 권장), CMake 3.16+, Python 3(빌드 시 코드 생성). 기본 옵션으로 구성하려면 OpenSSL, SQLite3, libpq, libcurl **개발** 패키지도 필요합니다. 런타임 `.so`만으로는 `find_package`를 충족할 수 없습니다.
-
-```bash
-# Ubuntu / Debian
-sudo apt install libssl-dev libsqlite3-dev libpq-dev libcurl4-openssl-dev
-# macOS (SQLite ships with the system)
-brew install openssl libpq curl
-```
-
-Postgres / SQLite 체크포인트나 HTTP/2 백엔드가 필요 없다면 해당 패키지를 설치하지 않고 `-DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF`로 구성하세요.
-
-**플랫폼** — Linux x86_64 **GA** (기준, 429/429 ctest, 새니타이저 깨끗); macOS arm64, Linux ARM64, Windows MSVC 2022 **beta**. 플랫폼별 근거는 [`CHANGELOG.md`](CHANGELOG.md).
+### C++ Core
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build
-cmake --build build -j$(nproc)
-
-# Run an example — no API key needed:
-./build/example_custom_graph      # mock ReAct agent
-./build/example_parallel_fanout   # parallel fan-out/fan-in
-./build/example_send_command      # dynamic Send + Command routing
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build --parallel
+./build/example_core_quickstart
 ```
 
-실제 LLM에 대해 실행 — API를 사용하는 모든 예제는 현재 디렉터리의 `.env`를 자동으로 불러온다 (내장 `cppdotenv`):
+전체 소스는 [examples/62_core_quickstart.cpp](examples/62_core_quickstart.cpp)에 있습니다. C++ 노드 하나를 등록하고, 엄격한 그래프를 컴파일하고, 실행하고, 타입이 지정된 채널을 읽습니다.
+
+필요할 때 프로그래밍 가능한 제어 평면을 활성화합니다:
 
 ```bash
-echo "OPENAI_API_KEY=sk-..." > .env
-./build/example_react_agent
+cmake -S . -B build-program \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build-program --parallel
+./build-program/example_program_quickstart
 ```
 
-<a id="use-from-a-cmake-project"></a>
-## CMake 프로젝트에서 사용
+[examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp) 및 [QuickJS 작성 경계](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)를 참조하십시오.
 
-`pip install`은 Python 전용 (C++ 헤더 없음). C++의 경우 `FetchContent`가 CMake의 `pip install`처럼 동작:
+<a id="two-runtime-layers"></a>
+## 두 가지 런타임 계층
 
-```cmake
-include(FetchContent)
-FetchContent_Declare(NeoGraph
-    GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
-    GIT_TAG        master)
-# Optional: trim heavy components you don't need.
-set(NEOGRAPH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(NEOGRAPH_BUILD_PYBIND   OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(NeoGraph)
+### GraphEngine / Core
 
-add_executable(my_agent main.cpp)
-target_link_libraries(my_agent PRIVATE neograph::core neograph::llm neograph::a2a)
-```
+- 정적 및 조건부 엣지, 사이클, 배리어, `Send` fan-out 및 `Command` 라우팅;
+- 체크포인트/재개, 정확한 체크포인트 재개, 포크, 상태 기록, HITL 및 `NodeInterrupt`;
+- 동기 및 코루틴 API, 스트리밍, 취소 및 토큰 회계;
+- 그래프 전체 및 노드별 재시도 정책, 지터 및 경계 있는 재사용 가능 노드 캐싱;
+- 사용자 정의 레지스트리, 공급자, 도구, MCP, A2A 및 ACP 통합;
+- 안전 지점 캡처 및 형태 보존 GraphEngine 생성 마이그레이션;
 
-통합은 이것이 전부다. 처음이라면? [**처음 30분에 걸리는 5가지 함정**](docs/troubleshooting.md) (채널 접근자 모양, `neograph::graph::` 하위 네임스페이스, `<httplib.h>` OpenSSL 매크로, GCC 13 코루틴 ICE, …)이 디버깅 시간을 아껴줄 것이다. 전체 빌드 옵션과 CMake 대상: [`docs/reference-en.md`](docs/reference-en.md).
+### ProgramRuntime / QuickJS
+
+- 제한된 QuickJS `define()` 및 생성기 `main(input)`에서의 표준 JavaScript 계산;
+- 봉인된 명령: `callCore`, `spawn`, `await`, `all`, `parallel`, `race`, `quorum`, `emit`, `checkpoint`, `cancelScope` 및 승인된 호스트 기능;
+- 불변 Program 번들, 버전, 카탈로그, 승인(admission) 프로필 및 정책 스냅샷;
+- 지속적 명령 저널, 정확한 재생(replay), 자식 계보, 비갱신 예산 및 프로세스 복구;
+- 체크포인트 교체 및 제한된 라이브 GraphEngine 토폴로지 마이그레이션;
+- 생성된 Program의 승인(admission) 전 호스트 소유 의미 검증.
+
+설치된 JavaScript 표면은 `javascript_authoring_capability_manifest()`을 통해 기계 판독 가능하며 CI에서 실제 QuickJS 바인딩과 대조하여 확인됩니다.
+
+## 런타임 안전 및 컨텍스트
+
+NeoGraph는 중요한 동작을 모델 재량 밖으로 이동시킵니다:
+
+- 불변 RAW 메시지 기록 및 `ContextEpoch` 선택;
+- 파생 컨텍스트, 필수 Skill 및 하드 제약 조건;
+- 필수 아티팩트를 정확히 보존하는 보수적 변환 영수증;
+- 네이티브, stdio 또는 HTTP 실행 백엔드에 대한 필수 수명주기 Hook;
+- 공급자 디스패치 및 최종 결과 영수증;
+- 지속적인 런타임 개발자 지침 및 승인된 토폴로지 전환.
+
+NeoGraph는 구성, 승인(admission), 디스패치 및 증거 경계들을 보장합니다. LLM이 모든 토큰에 주의를 기울였다고 주장하지 않습니다.
 
 ## Python
 
-같은 C++ 엔진을 `pip` 설치 가능하고, 노트북, Gradio, FastAPI 서비스에서 구동:
+Python 패키지는 동일한 C++ 엔진을 사용하며 이제 Program, Hook, 엄격한 컨텍스트, 런타임 정책 및 SQLite 지속성 표면을 포함합니다:
 
 ```bash
 pip install neograph-engine
 ```
 
+### 5초 데모 (API 키 불필요)
+
 ```python
 import neograph_engine as ng
+
+@ng.node("greet")
+def greet(state):
+    return [ng.ChannelWrite(
+        "messages",
+        [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}],
+    )]
 
 definition = {
     "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "demo",
-    "channels": {"messages": {"reducer": "append"}},
-    "nodes":    {"llm": {"type": "llm_call"}},
-    "edges":    [{"from": ng.START_NODE, "to": "llm"},
-                 {"from": "llm", "to": ng.END_NODE}],
+    "channels": {
+        "name": {"reducer": "overwrite"},
+        "messages": {"reducer": "append"},
+    },
+    "nodes": {"greet": {"type": "greet"}},
+    "edges": [
+        {"from": ng.START_NODE, "to": "greet"},
+        {"from": "greet", "to": ng.END_NODE},
+    ],
 }
+
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-result = engine.run(ng.RunConfig(thread_id="t1", input={"messages": [...]}))
+result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
+print(result.output["channels"]["messages"]["value"])
 ```
 
-배포당 20개 wheel + sdist (Linux x86_64/aarch64, macOS arm64, Windows x64 · Python 3.9–3.13). 전체 안내 — 실제 LLM으로 ReAct, 비동기, 사용자 정의 리듀서, LangGraph 차이점 목록, 관측 가능성, Docker 없는 배포: [`docs/python-binding.md`](docs/python-binding.md).
+Python은 추가로 다음을 노출합니다:
 
-## 기능
+- `RetryPolicy`, 노드별 런타임 재정의, `RunMetadata`, 정확한 `resume_from` 및 재사용 가능한 캐시 범위;
+- `ProgramSource`, `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`, 핸들 및 결과;
+- 필수 `HookRuntime` 콜백 및 실패 시 차단 수명주기 전달;
+- `RuntimeContextRequirements`, `ContextTransformReceipt`, SQLite 영속 컨텍스트/디스패치 저장소, 및 `StrictRuntimeProfile`.
 
-**핵심 엔진 (`neograph::core`)** — JSON 정의 그래프 (워크플로 변경 시 재컴파일 불필요) · Pregel 슈퍼스텝 실행 (순환 포함) · 병렬 팬아웃/팬인 · `Send` (동적 팬아웃) + `Command` (라우팅+상태 덮어쓰기) · 체크포인트 + HITL (`interrupt_before/after`, `resume()`, `NodeInterrupt`) · `get_state` / `update_state` / `fork` / 시간 여행 · 재시도 정책 · 스트림 모드 · 서브그래프 · 의도 라우팅 · 스레드 간 `Store` · `NodeFactory`를 통한 사용자 정의 노드 · 비동기 네이티브 (`run_async` / `run_stream_async`) · 협력적 `CancelToken` · 이력 압축 · 노드별 캐시 · `NodeFactory::export_schema()` (버전 고정 비주얼 편집기 구동). 내장 **OpenInference 추적기**, 별도 링크 불필요.
+[Python 바인딩 가이드](docs/python-binding.md) 및 [Python 예제](bindings/python/examples/README.md)를 참조하십시오.
 
-**LLM 제공자 (`neograph::llm`)** — `OpenAIProvider` (OpenAI/Groq/Together/vLLM/Ollama — 모든 OpenAI 호환 API) · `SchemaProvider` (Claude, Gemini, 또는 JSON 스키마를 통한 모든 사용자 정의 벤더) · 스트리밍이 포함된 ReAct `Agent` 루프.
+## 빌드 구성
 
-**통합** — MCP 클라이언트 (`neograph::mcp`, HTTP + stdio) · 로컬 MCP 서버 (`neograph::mcp_server`, stdio) · 선택적 Streamable HTTP 서버 (`neograph::mcp_http_server`) · SQLite Harness 레코드 (`neograph::mcp_sqlite`) · 컴파일러 기반 다중 작업자 [Harness MCP](docs/HARNESS_MCP.md) · Agent-to-Agent (`neograph::a2a`, 서버 + 클라이언트 + 호출자 노드) · Agent Client Protocol (`neograph::acp`, 편집기 구동) · gRPC 서비스 (`neograph::grpc`, 선택적) · 비동기 HTTP/HTTPS/WS + SSE (`neograph::async`).
+Core 전용 사용자는 Program 또는 QuickJS 비용을 지불하지 않습니다:
 
-**영속 상태** — 하나의 `CheckpointStore` 인터페이스 뒤에 `PostgresCheckpointStore`, `SqliteCheckpointStore`, `InMemoryCheckpointStore` (모두 Python 바인딩), 그리고 변경 불가능한 Harness 아티팩트와 재시작 안전 실행 레코드를 위한 `SqliteHarnessRecordStore`. `neograph::util`에 잠금 없는 `RequestQueue` + `AsyncTool`.
+```bash
+cmake -S . -B build-core \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF
+```
 
-`NEOGRAPH_BUILD_MCP`는 두 MCP 역할의 호환성 우산으로 유지. 좁은 빌드에는 `NEOGRAPH_BUILD_MCP_CLIENT` 또는 `NEOGRAPH_BUILD_MCP_SERVER` 사용; stdio 서버 전용 대상은 `neograph::async`나 OpenSSL이 필요 없음. 원격 HTTP에는 `NEOGRAPH_BUILD_MCP_HTTP_SERVER`를 명시적으로 활성화.
+주요 옵션:
 
-전체 기능 목록과 55개 이상의 실행 가능한 예제: [`examples/README.md`](examples/README.md).
+| 옵션 | 용도 |
+|---|---|
+| `NEOGRAPH_BUILD_PROGRAM` | 내구성 있는 Program 값, 카탈로그, 런타임, 계보 및 마이그레이션 |
+| `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program 작성 및 생성기 명령 |
+| `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python 확장 |
+| `NEOGRAPH_BUILD_SQLITE` | SQLite 체크포인트, 컨텍스트, Hook 및 공급자 영수증 저장소 |
+| `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL 체크포인트 및 Program 영속성 구성 요소 |
+| `NEOGRAPH_BUILD_MCP_CLIENT` / `SERVER` | MCP 클라이언트 및 서버 역할 |
+| `NEOGRAPH_BUILD_A2A` / `ACP` / `GRPC` | 선택적 프로토콜 통합 |
 
-## 아키텍처
+배포 환경에 맞는 좁은 CMake 대상을 사용하십시오: `neograph::core`, `neograph::llm`, `neograph::program`, `neograph::mcp`, `neograph::a2a`, 또는 기타 활성화된 구성 요소.
 
-`GraphEngine`은 네 개의 목적별, 독립적으로 단위 테스트된 클래스에 위임하는 얇은 슈퍼스텝 조율자:
+## 검증
 
-- **`GraphCompiler`** — 순수 `JSON → CompiledGraph` 파서.
-- **`Scheduler`** — 신호 디스패치 라우팅 + 장벽(barrier) 누적.
-- **`NodeExecutor`** — 재시도 루프, 병렬 팬아웃 (`asio::make_parallel_group`), `Send` 디스패치.
-- **`CheckpointCoordinator`** — `(store, thread_id)` 파사드 뒤의 저장 / 재개 / 대기 쓰기.
+저장소는 결정적 C++ 및 Python 스위트, Program 재생(replay)/마이그레이션 프로브, DSL 기능 픽스처, 문서/i18n 검사, 새니타이저, 그리고 선택적 라이브 모델 평가를 실행합니다. 벤치마크 주장은 [benchmarks](benchmarks/README.md)와 날짜가 표시된 [performance report](docs/performance-deep-dive.md)에 속하며, 시대를 초월한 API 보장으로서가 아닙니다.
 
-`neograph::core`는 네트워크 의존성이 전혀 없다 (`yyjson` + 헤더 전용 `asio`); `httplib`은 `llm`/`mcp`에 PRIVATE으로 유지되며 사용자 코드에 절대 노출되지 않는다. 두 가지 동시성 모델이 기본 제공 — 스레드-당-에이전트 (동기)와 코루틴-비동기 (하나의 `asio::io_context`에 수천 에이전트). 상세: [`docs/reference-en.md` §7b](docs/reference-en.md#7b-engine-internals) · [`docs/concurrency.md`](docs/concurrency.md) · [`docs/ASYNC_GUIDE.md`](docs/ASYNC_GUIDE.md).
+## 문서
 
-## vs LangGraph
-
-| | LangGraph (Python) | NeoGraph (C++) |
-|---|---|---|
-| 엔진 | StateGraph | GraphEngine |
-| 체크포인트 / HITL / fork / 시간 여행 | 예 | 예 (+ `NodeInterrupt`) |
-| 병렬 팬아웃 | 정적 | `make_parallel_group` (+ 선택적 `asio::thread_pool`) |
-| Send / Command | 예 | `NodeResult::sends` / `::command` |
-| 다중 LLM | LangChain 필요 | `SchemaProvider` 내장 (3개 벤더) |
-| MCP | 별도 구현 | 내장 |
-| 런타임 / 메모리 | Python GIL · ~300 MB+ | C++20 코루틴 + asio · ~10 MB |
-| 엣지 / 임베디드 | 불가능 | 라즈베리파이, Jetson, IoT |
-
-LangGraph가 *고객당 프로세스*를 필요로 하는 동일한 멀티 테넌트 모양(StateGraph는 Python 객체)을 NeoGraph는 graph-as-JSON으로 하나의 프로세스에서 제공 — [multi-tenant](examples/cookbook/multi_tenant_chatbot/)와 [self-evolving](examples/cookbook/self_evolving_chatbot/) 쿡북이 그 이유를 보여준다.
-
-## 감사의 말
-
-[LangGraph](https://github.com/langchain-ai/langgraph), [agent.cpp](https://github.com/mozilla-ai/agent.cpp), [asio](https://think-async.com/Asio/) (3.0 엔진 런타임), [Clay](https://github.com/nicbarker/clay)에서 영감을 얻었다.
+- [개념](docs/concepts.md)
+- [C++ 참조](docs/reference-en.md)
+- [Python 바인딩](docs/python-binding.md)
+- [동시성 및 취소](docs/concurrency.md)
+- [비동기 가이드](docs/ASYNC_GUIDE.md)
+- [Harness MCP](docs/HARNESS_MCP.md)
+- [QuickJS 공개 작성 경계](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [엄격한 런타임 인터포지션](docs/STRICT_RUNTIME_INTERPOSITION.md)
+- [문제 해결](docs/troubleshooting.md)
+- [예시](examples/README.md)
 
 ## 라이선스
 
-MIT — [LICENSE](LICENSE) 참조. 서드파티: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+MIT — [라이선스](LICENSE) 참조. 타사 고지 사항: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

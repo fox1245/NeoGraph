@@ -8,7 +8,7 @@ import {
 import { COLORS, FONT_MONO } from "../theme";
 import { Kicker, SubHeader } from "../parts";
 
-// Scene 3 — the ReAct pipeline. Rebuilt so every connector is anchored
+// Scene 3 — the generated-Program admission pipeline. Every connector is anchored
 // to the actual box edges (right-mid → left-mid), the row is evenly
 // spaced and centered with no overlap, and the loop-back arc starts
 // and ends exactly on the box top edges.
@@ -20,10 +20,10 @@ type NodeDef = { id: string; label: string; x: number; w: number };
 
 // Explicit widths sized to the mono labels; even 150px gaps; centred.
 const NODES: NodeDef[] = [
-  { id: "start", label: "START", x: 175, w: 220 },
-  { id: "llm", label: "llm_call", x: 545, w: 300 },
-  { id: "tool", label: "tool_dispatch", x: 995, w: 400 },
-  { id: "end", label: "END", x: 1545, w: 200 },
+  { id: "start", label: "PROPOSAL", x: 120, w: 280 },
+  { id: "llm", label: "COMPILE", x: 540, w: 280 },
+  { id: "tool", label: "SEMANTIC GATE", x: 960, w: 420 },
+  { id: "end", label: "ADMIT", x: 1520, w: 260 },
 ];
 
 const right = (n: NodeDef) => n.x + n.w;
@@ -177,7 +177,7 @@ export const ReactGraph: React.FC<{ durationInFrames: number }> = ({
   return (
     <AbsoluteFill style={{ opacity: sceneOpacity }}>
       <Kicker>ENGINE IN MOTION</Kicker>
-      <SubHeader top={210}>REACT LOOP · SEQUENTIAL · ~5US / NODE</SubHeader>
+      <SubHeader top={210}>GENERATED PROGRAMS · FAIL CLOSED BEFORE EXECUTION</SubHeader>
 
       <svg
         width={1920}
@@ -202,7 +202,7 @@ export const ReactGraph: React.FC<{ durationInFrames: number }> = ({
           );
         })}
 
-        {/* ReAct loop-back: tool_dispatch top → llm_call top */}
+        {/* Diagnostic repair loop: semantic gate top → compiler top */}
         <path
           d={arcPath}
           fill="none"

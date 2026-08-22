@@ -4,8 +4,8 @@
   "private": true,
   "description": "Remotion source for the NeoGraph promo videos (docs/videos/*.mp4, docs/images/*.gif). Committed so it is never lost again.",
   "scripts": {
-    "render": "remotion render PromoV2 ../videos/neograph-promo-v2.mp4 --codec=h264",
-    "still": "remotion still PromoV2 out/still.png",
+    "render": "remotion render PromoV3 ../videos/neograph-promo-v3.mp4 --codec=h264",
+    "still": "remotion still PromoV3 out/still.png",
     "studio": "remotion studio"
   },
   "dependencies": {
