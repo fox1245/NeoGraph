@@ -652,12 +652,16 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
             if (!operation.contains("child_binding") || !operation["child_binding"].is_string() ||
                 operation["child_binding"].get<std::string>().empty())
                 return fail("spawn child binding is missing or malformed", id, "child_binding");
-            const bool directly_joined =
-                std::any_of(operations.begin(), operations.end(), [&](const auto& candidate) {
-                    return candidate.second["op"] == "await" && candidate.second.contains("body") &&
-                           candidate.second["body"].is_string() &&
-                           candidate.second["body"].template get<std::string>() == id;
-                });
+            bool directly_joined = false;
+            for (const auto& candidate : operations) {
+                if (candidate.second["op"] == "await" &&
+                    candidate.second.contains("body") &&
+                    candidate.second["body"].is_string() &&
+                    candidate.second["body"].get<std::string>() == id) {
+                    directly_joined = true;
+                    break;
+                }
+            }
             if (!directly_joined)
                 return fail("spawn is not directly joined by await", id, "child_binding");
             has_execution = true;
