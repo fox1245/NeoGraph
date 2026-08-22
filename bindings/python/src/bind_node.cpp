@@ -45,6 +45,9 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -536,8 +539,7 @@ void init_node(py::module_& m) {
     // cancel_token (so they can pass it explicitly to
     // provider.complete instead of relying on the smuggling thread-local),
     // step (super-step counter), thread_id (RunConfig.thread_id), and
-    // stream_mode, store, and resume_value. C++ RunMetadata can also supply
-    // deadline and trace_id; those remain intentionally unbound in Python.
+    // stream_mode, store, resume_value, and RunMetadata fields.
     py::class_<RunContext>(m, "RunContext",
         "Per-run dispatch metadata threaded by the engine. New nodes "
         "read this from ``input.ctx`` inside their ``run(input)`` "
@@ -555,6 +557,24 @@ void init_node(py::module_& m) {
             "top of each super-step iteration.")
         .def_readonly("thread_id", &RunContext::thread_id,
             "Mirrors ``RunConfig.thread_id``.")
+        .def_readonly("run_id", &RunContext::run_id,
+            "Durable Program run identity supplied through RunMetadata.")
+        .def_readonly("trace_id", &RunContext::trace_id,
+            "Trace correlator supplied through RunMetadata.")
+        .def_readonly("model_token_budget", &RunContext::model_token_budget)
+        .def_property_readonly("budget_cancel_token",
+            [](const RunContext& c) -> py::object {
+                return c.budget_cancel_token ? py::cast(c.budget_cancel_token) : py::none();
+            })
+        .def_property_readonly("has_deadline",
+            [](const RunContext& c) { return c.deadline.has_value(); })
+        .def_property_readonly("deadline_remaining_ms",
+            [](const RunContext& c) -> py::object {
+                if (!c.deadline) return py::none();
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    *c.deadline - std::chrono::steady_clock::now()).count();
+                return py::int_(std::max<std::int64_t>(0, remaining));
+            })
         .def_property_readonly("stream_mode",
             [](const RunContext& c) {
                 return static_cast<uint8_t>(c.stream_mode);

@@ -70,6 +70,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <string>
@@ -379,6 +380,59 @@ void init_graph(py::module_& m) {
         "Internal: cancel-safe peer of Future.set_exception. No-op "
         "when the future is already done/cancelled.");
 
+    // ── Runtime policy and metadata ──────────────────────────────────────
+    py::class_<RetryPolicy>(m, "RetryPolicy",
+        "Runtime retry policy. It can be installed after compile and "
+        "overridden per node; graph-definition retry_policy remains the "
+        "declarative default.")
+        .def(py::init<>())
+        .def_readwrite("max_retries", &RetryPolicy::max_retries)
+        .def_readwrite("initial_delay_ms", &RetryPolicy::initial_delay_ms)
+        .def_readwrite("backoff_multiplier", &RetryPolicy::backoff_multiplier)
+        .def_readwrite("max_delay_ms", &RetryPolicy::max_delay_ms)
+        .def_readwrite("jitter_pct", &RetryPolicy::jitter_pct);
+
+    py::enum_<CacheScope>(m, "CacheScope")
+        .value("Execution", CacheScope::Execution)
+        .value("Reusable", CacheScope::Reusable);
+
+    py::class_<RunMetadata>(m, "RunMetadata",
+        "Invocation metadata copied into RunContext. timeout_ms becomes an "
+        "absolute monotonic deadline when assigned.")
+        .def(py::init([](py::object timeout_ms,
+                         std::string trace_id,
+                         std::string run_id,
+                         std::string owner_scope,
+                         std::shared_ptr<CancelToken> budget_cancel_token) {
+            RunMetadata value;
+            if (!timeout_ms.is_none()) {
+                const auto timeout = timeout_ms.cast<std::uint64_t>();
+                value.deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(timeout);
+            }
+            value.trace_id = std::move(trace_id);
+            value.run_id = std::move(run_id);
+            value.owner_scope = std::move(owner_scope);
+            value.budget_cancel_token = std::move(budget_cancel_token);
+            return value;
+        }),
+        py::arg("timeout_ms") = py::none(),
+        py::arg("trace_id") = "",
+        py::arg("run_id") = "",
+        py::arg("owner_scope") = "",
+        py::arg("budget_cancel_token") = nullptr)
+        .def_readwrite("trace_id", &RunMetadata::trace_id)
+        .def_readwrite("run_id", &RunMetadata::run_id)
+        .def_readwrite("owner_scope", &RunMetadata::owner_scope)
+        .def_readwrite("budget_cancel_token", &RunMetadata::budget_cancel_token)
+        .def_property_readonly("has_deadline",
+            [](const RunMetadata& value) { return value.deadline.has_value(); })
+        .def("set_timeout_ms", [](RunMetadata& value, std::uint64_t timeout) {
+            value.deadline = std::chrono::steady_clock::now() +
+                             std::chrono::milliseconds(timeout);
+        })
+        .def("clear_deadline", [](RunMetadata& value) { value.deadline.reset(); });
+
     // ── RunConfig ────────────────────────────────────────────────────────
     // ── UsageAccumulator (issue #88) ─────────────────────────────────────
     //
@@ -425,6 +479,8 @@ void init_graph(py::module_& m) {
             [](RunConfig& c, py::object v) { c.input = py_to_json(v); })
         .def_readwrite("max_steps",        &RunConfig::max_steps)
         .def_readwrite("stream_mode",      &RunConfig::stream_mode)
+        .def_readwrite("model_token_budget", &RunConfig::model_token_budget,
+            "Hard model-token ceiling enforced by budget-aware nodes. Zero disables it.")
         .def_readwrite("resume_if_exists", &RunConfig::resume_if_exists,
             "Opt-in: when True and a checkpoint store is configured, "
             "engine.run/run_async/run_stream loads the latest checkpoint "
@@ -817,14 +873,17 @@ void init_graph(py::module_& m) {
             "Raises ``RuntimeError`` on bad shape.")
 
         .def("run",
-            [](GraphEngine& self, const RunConfig& cfg) {
+            [](GraphEngine& self, const RunConfig& cfg, py::object metadata) {
                 // Release the GIL for the entire run. Built-in node
                 // types do no Python callbacks; concurrent runs from
                 // other Python threads stay live.
+                std::optional<RunMetadata> owned_metadata;
+                if (!metadata.is_none()) owned_metadata = metadata.cast<RunMetadata>();
                 py::gil_scoped_release release;
-                return self.run(cfg);
+                return owned_metadata ? self.run(cfg, *owned_metadata) : self.run(cfg);
             },
             py::arg("config"),
+            py::arg("metadata") = py::none(),
             "Run the graph synchronously to completion (or interrupt).")
 
         .def("set_store",
@@ -887,6 +946,10 @@ void init_graph(py::module_& m) {
              "survive run() and resume(); configure before concurrent use. "
               "Pass None to restore the conservative process-default policy.")
 
+        .def("set_hook_runtime", &GraphEngine::set_hook_runtime,
+             py::arg("runtime"), py::keep_alive<1, 2>(),
+             "Install the host-owned mandatory lifecycle Hook runtime. Pass None to clear it.")
+
         .def("set_runtime_interposition",
              &GraphEngine::set_runtime_interposition,
              py::arg("controller"),
@@ -914,6 +977,25 @@ void init_graph(py::module_& m) {
             "Until now only ``resume_async`` was bound, so answering an "
             "approval prompt meant standing up an asyncio loop to do it "
             "(issue #94).")
+
+        .def("resume_from",
+            [](GraphEngine& self,
+               RunConfig config,
+               std::string checkpoint_id,
+               py::object resume_value,
+               py::object metadata) {
+                json value = resume_value.is_none() ? json() : py_to_json(resume_value);
+                RunMetadata owned_metadata;
+                if (!metadata.is_none()) owned_metadata = metadata.cast<RunMetadata>();
+                py::gil_scoped_release release;
+                return self.resume_from(std::move(config), std::move(checkpoint_id),
+                                        std::move(value), {}, std::move(owned_metadata), {});
+            },
+            py::arg("config"),
+            py::arg("checkpoint_id"),
+            py::arg("resume_value") = py::none(),
+            py::arg("metadata") = py::none(),
+            "Resume from exactly checkpoint_id. Never substitutes a newer checkpoint.")
 
         .def("run_stream",
             [](GraphEngine& self,
@@ -1083,9 +1165,23 @@ void init_graph(py::module_& m) {
             "serially on a single thread until this (or set_worker_count(N)) "
             "is called explicitly. Must be called before any run().")
 
+        .def("set_retry_policy", &GraphEngine::set_retry_policy,
+            py::arg("policy"),
+            "Install the runtime default retry policy after compile.")
+
+        .def("set_node_retry_policy", &GraphEngine::set_node_retry_policy,
+            py::arg("node_name"), py::arg("policy"),
+            "Override the runtime retry policy for one node.")
+
         .def("set_node_cache_enabled",
-             py::overload_cast<const std::string&, bool>(&GraphEngine::set_node_cache_enabled),
+            [](GraphEngine& self, const std::string& node_name, bool enabled,
+               CacheScope scope) {
+                CacheKeyPolicy policy;
+                policy.scope = scope;
+                self.set_node_cache_enabled(node_name, enabled, std::move(policy));
+            },
             py::arg("node_name"), py::arg("enabled"),
+            py::arg("scope") = CacheScope::Execution,
             "Opt a node into result caching. The executor hashes the "
             "input state and replays a cached NodeResult on hit, "
             "skipping the node's run(input) entirely. Off by default — "
@@ -1093,7 +1189,8 @@ void init_graph(py::module_& m) {
             "effects). Streaming runs (run_stream) bypass the cache "
             "for the affected node because cached hits cannot replay "
             "LLM_TOKEN events. Cache entries are execution-local; cross-run "
-            "reuse is available only through the C++ CacheKeyPolicy API.")
+            "Pass CacheScope.Reusable only for a node proven independent of "
+            "tenant, provider, Store, tools, credentials, and resume context.")
 
         .def("clear_node_cache", &GraphEngine::clear_node_cache,
             "Drop all cached NodeResults. Per-node enable state is "

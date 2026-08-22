@@ -67,6 +67,21 @@ from ._neograph import (
     ToolExecutionPolicy,
     ToolExecutionPolicyRegistry,
     ToolExecutionController,
+    HookPhase,
+    HookDelivery,
+    HookFailureMode,
+    HookIdempotency,
+    HookPredicateKind,
+    RuntimeEventField,
+    HookInputMapperKind,
+    ToolEffectClass,
+    HookPredicate,
+    HookInputMapper,
+    HookDefinitionData,
+    HookDefinition,
+    HookRuntime,
+    HookBoundaryBlocked,
+    create_hook_runtime,
 
     # Long-term memory across conversations (#97)
     Store,
@@ -110,13 +125,19 @@ from ._neograph import (
     ContextArtifactPutResult,
     ContextHistoryRange,
     ContextStore,
+    DurableContextStore,
     InMemoryContextStore,
     ContextBudgetBlocked,
+    RuntimeContextRequirements,
     RuntimeTurnAssembler,
+    ContextTransformReceiptData,
+    ContextTransformReceipt,
+    validate_context_transform_receipt,
     ProviderDispatchReceiptData,
     ProviderDispatchReceipt,
     ProviderDispatchReceiptPutResult,
     ProviderDispatchOutcomePutResult,
+    ProviderDispatchState,
     ProviderDispatchOutcomeReceiptData,
     ProviderDispatchOutcomeReceipt,
     ProviderDispatchReceiptStore,
@@ -124,6 +145,7 @@ from ._neograph import (
     InMemoryProviderDispatchReceiptStore,
     ControlledProvider,
     RuntimeInterpositionController,
+    StrictRuntimeProfile,
 
     Artifact,
     ArtifactEvent,
@@ -159,7 +181,10 @@ from ._neograph import (
     # Engine
     GraphEngine,
     RunConfig,
+    RunMetadata,
     RunResult,
+    RetryPolicy,
+    CacheScope,
     UsageAccumulator,
     CheckpointPhase,
     Checkpoint,
@@ -179,6 +204,30 @@ from ._neograph import (
     END_NODE,
 )
 
+# Optional Program / QuickJS control plane. Wheels enable it; Core-only source
+# builds may intentionally compile it out.
+try:
+    from ._neograph import (  # noqa: F401
+        ProgramSourceKind,
+        ExecutionGuarantee,
+        ProgramTerminalStatus,
+        ProgramRunBudget,
+        ProgramUsage,
+        ProgramSource,
+        ProgramRegistrySnapshot,
+        ProgramRegistryBuilder,
+        ProgramBundle,
+        ProgramCompiler,
+        ProgramVersion,
+        ProgramResult,
+        ProgramHandle,
+        LocalProgramHost,
+        javascript_authoring_capability_manifest,
+    )
+    _HAVE_PROGRAM = True
+except ImportError:
+    _HAVE_PROGRAM = False
+
 # PostgresCheckpointStore is only present when the binding was built
 # with -DNEOGRAPH_BUILD_POSTGRES=ON. The PyPI wheel builds it on supported
 # platforms after bundling libpq; source builds can enable it explicitly.
@@ -197,7 +246,11 @@ except ImportError:
 # checkpoint store — survives between separate process invocations
 # sharing the same DB path, with no DB server to provision.
 try:
-    from ._neograph import SqliteCheckpointStore  # noqa: F401
+    from ._neograph import (  # noqa: F401
+        SqliteCheckpointStore,
+        SQLiteContextStore,
+        SQLiteProviderDispatchReceiptStore,
+    )
     _HAVE_SQLITE = True
 except ImportError:
     _HAVE_SQLITE = False
@@ -581,13 +634,19 @@ __all__ = [
     "ContextArtifactPutResult",
     "ContextHistoryRange",
     "ContextStore",
+    "DurableContextStore",
     "InMemoryContextStore",
     "ContextBudgetBlocked",
+    "RuntimeContextRequirements",
     "RuntimeTurnAssembler",
+    "ContextTransformReceiptData",
+    "ContextTransformReceipt",
+    "validate_context_transform_receipt",
     "ProviderDispatchReceiptData",
     "ProviderDispatchReceipt",
     "ProviderDispatchReceiptPutResult",
     "ProviderDispatchOutcomePutResult",
+    "ProviderDispatchState",
     "ProviderDispatchOutcomeReceiptData",
     "ProviderDispatchOutcomeReceipt",
     "ProviderDispatchReceiptStore",
@@ -595,6 +654,7 @@ __all__ = [
     "InMemoryProviderDispatchReceiptStore",
     "ControlledProvider",
     "RuntimeInterpositionController",
+    "StrictRuntimeProfile",
     "Artifact",
     "ArtifactEvent",
     "ArtifactEventKind",
@@ -630,6 +690,21 @@ __all__ = [
     "ToolExecutionPolicy",
     "ToolExecutionPolicyRegistry",
     "ToolExecutionController",
+    "HookPhase",
+    "HookDelivery",
+    "HookFailureMode",
+    "HookIdempotency",
+    "HookPredicateKind",
+    "RuntimeEventField",
+    "HookInputMapperKind",
+    "ToolEffectClass",
+    "HookPredicate",
+    "HookInputMapper",
+    "HookDefinitionData",
+    "HookDefinition",
+    "HookRuntime",
+    "HookBoundaryBlocked",
+    "create_hook_runtime",
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",
@@ -637,6 +712,9 @@ __all__ = [
     "node",
     "GraphEngine",
     "RunConfig",
+    "RunMetadata",
+    "RetryPolicy",
+    "CacheScope",
     "UsageAccumulator",
     "RunResult",
     "CheckpointPhase",
@@ -656,7 +734,30 @@ if _HAVE_POSTGRES:
     __all__.append("PostgresCheckpointStore")
 
 if _HAVE_SQLITE:
-    __all__.append("SqliteCheckpointStore")
+    __all__.extend([
+        "SqliteCheckpointStore",
+        "SQLiteContextStore",
+        "SQLiteProviderDispatchReceiptStore",
+    ])
+
+if _HAVE_PROGRAM:
+    __all__.extend([
+        "ProgramSourceKind",
+        "ExecutionGuarantee",
+        "ProgramTerminalStatus",
+        "ProgramRunBudget",
+        "ProgramUsage",
+        "ProgramSource",
+        "ProgramRegistrySnapshot",
+        "ProgramRegistryBuilder",
+        "ProgramBundle",
+        "ProgramCompiler",
+        "ProgramVersion",
+        "ProgramResult",
+        "ProgramHandle",
+        "LocalProgramHost",
+        "javascript_authoring_capability_manifest",
+    ])
 
 # Streaming helpers — pure-Python, no C++ side. Re-exported here so a
 # `from neograph_engine import message_stream` import works alongside

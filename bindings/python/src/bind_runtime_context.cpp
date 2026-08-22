@@ -1,9 +1,16 @@
 #include "json_bridge.h"
 
 #include <neograph/context_store.h>
+#include <neograph/context_transform.h>
 #include <neograph/controlled_provider.h>
+#include <neograph/graph/engine.h>
 #include <neograph/runtime_interposition_controller.h>
 #include <neograph/runtime_turn_assembler.h>
+#include <neograph/strict_runtime.h>
+
+#ifdef NEOGRAPH_PYBIND_HAS_SQLITE
+#include <neograph/sqlite_runtime_stores.h>
+#endif
 
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
@@ -126,6 +133,15 @@ void init_runtime_context(py::module_& m) {
     py::class_<ContextArtifact> artifact(m, "ContextArtifact");
     artifact.def_static("create", &ContextArtifact::create).def_static("parse", &ContextArtifact::parse)
         .def_property_readonly("kind", &ContextArtifact::kind).def_property_readonly("producer_id", &ContextArtifact::producer_id)
+        .def_property_readonly("source_digest", &ContextArtifact::source_digest)
+        .def_property_readonly("source_feed_id", &ContextArtifact::source_feed_id)
+        .def_property_readonly("covers_from_sequence", &ContextArtifact::covers_from_sequence)
+        .def_property_readonly("covers_through_sequence", &ContextArtifact::covers_through_sequence)
+        .def_property_readonly("media_type", &ContextArtifact::media_type)
+        .def_property_readonly("placement", &ContextArtifact::placement)
+        .def_property_readonly("priority", &ContextArtifact::priority)
+        .def_property_readonly("required", &ContextArtifact::required)
+        .def_property_readonly("content_digest", &ContextArtifact::content_digest)
         .def_property_readonly("content", [](const ContextArtifact& v) { return json_to_py(v.content()); });
     bind_identity_methods(artifact);
 
@@ -138,7 +154,12 @@ void init_runtime_context(py::module_& m) {
     py::class_<ContextEpoch> epoch(m, "ContextEpoch");
     epoch.def_static("create", &ContextEpoch::create).def_static("parse", &ContextEpoch::parse)
         .def_property_readonly("run_id", &ContextEpoch::run_id).def_property_readonly("sequence", &ContextEpoch::sequence)
-        .def_property_readonly("feed_id", &ContextEpoch::feed_id).def_property_readonly("raw_window_digest", &ContextEpoch::raw_window_digest)
+        .def_property_readonly("predecessor_id", &ContextEpoch::predecessor_id)
+        .def_property_readonly("feed_id", &ContextEpoch::feed_id)
+        .def_property_readonly("raw_from_sequence", &ContextEpoch::raw_from_sequence)
+        .def_property_readonly("raw_through_sequence", &ContextEpoch::raw_through_sequence)
+        .def_property_readonly("raw_window_digest", &ContextEpoch::raw_window_digest)
+        .def_property_readonly("artifact_ids", &ContextEpoch::artifact_ids)
         .def_property_readonly("guarantee_profile", &ContextEpoch::guarantee_profile);
     bind_identity_methods(epoch);
 
@@ -154,7 +175,15 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("mandatory_input_tokens", &ContextAssemblyReceiptData::mandatory_input_tokens);
     py::class_<ContextAssemblyReceipt> receipt(m, "ContextAssemblyReceipt");
     receipt.def_static("create", &ContextAssemblyReceipt::create).def_static("parse", &ContextAssemblyReceipt::parse)
-        .def_property_readonly("normalized_request_digest", &ContextAssemblyReceipt::normalized_request_digest);
+        .def_property_readonly("context_epoch_id", &ContextAssemblyReceipt::context_epoch_id)
+        .def_property_readonly("normalized_request_digest", &ContextAssemblyReceipt::normalized_request_digest)
+        .def_property_readonly("message_window_digest", &ContextAssemblyReceipt::message_window_digest)
+        .def_property_readonly("artifact_ids", &ContextAssemblyReceipt::artifact_ids)
+        .def_property_readonly("required_skill_artifact_ids", &ContextAssemblyReceipt::required_skill_artifact_ids)
+        .def_property_readonly("raw_from_sequence", &ContextAssemblyReceipt::raw_from_sequence)
+        .def_property_readonly("raw_through_sequence", &ContextAssemblyReceipt::raw_through_sequence)
+        .def_property_readonly("estimated_input_tokens", &ContextAssemblyReceipt::estimated_input_tokens)
+        .def_property_readonly("mandatory_input_tokens", &ContextAssemblyReceipt::mandatory_input_tokens);
     bind_identity_methods(receipt);
 
     py::class_<ContextStoreFeed>(m, "ContextStoreFeed").def(py::init<>())
@@ -173,17 +202,69 @@ void init_runtime_context(py::module_& m) {
         .def("hydrate_history", &ContextStore::hydrate_history)
         .def("put_artifact", &ContextStore::put_artifact)
         .def("get_artifact", &ContextStore::get_artifact);
+    py::class_<DurableContextStore, ContextStore,
+               std::shared_ptr<DurableContextStore>>(m, "DurableContextStore");
     py::class_<InMemoryContextStore, ContextStore, std::shared_ptr<InMemoryContextStore>>(m, "InMemoryContextStore")
         .def(py::init<>()).def("append_history", &InMemoryContextStore::append_history)
         .def("history_head", &InMemoryContextStore::history_head).def("snapshot_history", &InMemoryContextStore::snapshot_history)
         .def("hydrate_history", &InMemoryContextStore::hydrate_history).def("put_artifact", &InMemoryContextStore::put_artifact)
         .def("get_artifact", &InMemoryContextStore::get_artifact);
 
+#ifdef NEOGRAPH_PYBIND_HAS_SQLITE
+    py::class_<SQLiteContextStore, DurableContextStore,
+               std::shared_ptr<SQLiteContextStore>>(m, "SQLiteContextStore")
+        .def(py::init<std::string>(), py::arg("database_path"));
+#endif
+
+    py::class_<RuntimeContextRequirements>(m, "RuntimeContextRequirements")
+        .def(py::init<>())
+        .def_readwrite("required_artifact_ids",
+                       &RuntimeContextRequirements::required_artifact_ids)
+        .def_readwrite("required_skill_artifact_ids",
+                       &RuntimeContextRequirements::required_skill_artifact_ids);
+
+    py::class_<ContextTransformReceiptData>(m, "ContextTransformReceiptData")
+        .def(py::init<>())
+        .def_readwrite("source_context_epoch_id",
+                       &ContextTransformReceiptData::source_context_epoch_id)
+        .def_readwrite("transformer_identity",
+                       &ContextTransformReceiptData::transformer_identity)
+        .def_readwrite("input_artifact_ids",
+                       &ContextTransformReceiptData::input_artifact_ids)
+        .def_readwrite("output_artifact_ids",
+                       &ContextTransformReceiptData::output_artifact_ids)
+        .def_readwrite("preserved_required_artifact_ids",
+                       &ContextTransformReceiptData::preserved_required_artifact_ids);
+    py::class_<ContextTransformReceipt> transform(m, "ContextTransformReceipt");
+    transform
+        .def_static("create", &ContextTransformReceipt::create)
+        .def_static("parse", &ContextTransformReceipt::parse)
+        .def_property_readonly("source_context_epoch_id",
+                               &ContextTransformReceipt::source_context_epoch_id)
+        .def_property_readonly("transformer_identity",
+                               &ContextTransformReceipt::transformer_identity)
+        .def_property_readonly("input_artifact_ids",
+                               &ContextTransformReceipt::input_artifact_ids)
+        .def_property_readonly("output_artifact_ids",
+                               &ContextTransformReceipt::output_artifact_ids)
+        .def_property_readonly("preserved_required_artifact_ids",
+                               &ContextTransformReceipt::preserved_required_artifact_ids);
+    bind_identity_methods(transform);
+    m.def("validate_context_transform_receipt",
+          &validate_context_transform_receipt);
+
     py::register_exception<ContextBudgetBlocked>(m, "ContextBudgetBlocked");
     py::class_<RuntimeTurnAssembler>(m, "RuntimeTurnAssembler")
         .def(py::init([](std::shared_ptr<ContextStore> store, std::vector<std::string> skills, std::uint64_t budget) {
             return std::make_unique<RuntimeTurnAssembler>(*store, std::move(skills), budget);
         }), py::arg("store"), py::arg("static_required_skill_artifact_ids") = std::vector<std::string>{}, py::arg("max_input_tokens") = 0,
+            py::keep_alive<1, 2>())
+        .def(py::init([](std::shared_ptr<ContextStore> store,
+                         std::uint64_t budget,
+                         RuntimeContextRequirements requirements) {
+            return std::make_unique<RuntimeTurnAssembler>(
+                *store, budget, std::move(requirements));
+        }), py::arg("store"), py::arg("max_input_tokens"), py::arg("requirements"),
             py::keep_alive<1, 2>())
         .def("assemble", [](const RuntimeTurnAssembler& self, std::string owner, const ContextEpoch& active_epoch,
                               CompletionParams params, bool stream) {
@@ -228,6 +309,15 @@ void init_runtime_context(py::module_& m) {
         .def(py::init<>())
         .def("settle", &InMemoryProviderDispatchReceiptStore::settle)
         .def("outcome", &InMemoryProviderDispatchReceiptStore::outcome);
+#ifdef NEOGRAPH_PYBIND_HAS_SQLITE
+    py::class_<SQLiteProviderDispatchReceiptStore,
+               DurableProviderDispatchReceiptStore,
+               std::shared_ptr<SQLiteProviderDispatchReceiptStore>>(
+        m, "SQLiteProviderDispatchReceiptStore")
+        .def(py::init<std::string>(), py::arg("database_path"))
+        .def("settle", &SQLiteProviderDispatchReceiptStore::settle)
+        .def("outcome", &SQLiteProviderDispatchReceiptStore::outcome);
+#endif
 
     py::class_<ControlledProvider>(m, "ControlledProvider")
         .def(py::init<std::shared_ptr<Provider>, std::shared_ptr<ProviderDispatchReceiptStore>, std::string>(),
@@ -242,7 +332,68 @@ void init_runtime_context(py::module_& m) {
              py::keep_alive<1, 2>(), py::keep_alive<1, 3>(), py::keep_alive<1, 4>())
         .def("activate", &RuntimeInterpositionController::activate).def("clear", &RuntimeInterpositionController::clear)
         .def_property_readonly("active", &RuntimeInterpositionController::active)
-        .def("invoke", &RuntimeInterpositionController::invoke, py::arg("params"), py::arg("on_chunk") = StreamCallback{});
+        .def("set_hook_runtime", &RuntimeInterpositionController::set_hook_runtime,
+             py::arg("runtime"), py::keep_alive<1, 2>())
+        .def("invoke", [](RuntimeInterpositionController& self,
+                           CompletionParams params,
+                           py::object on_chunk) {
+            StreamCallback callback;
+            std::shared_ptr<py::function> held;
+            if (!on_chunk.is_none()) {
+                held = std::shared_ptr<py::function>(
+                    new py::function(on_chunk.cast<py::function>()),
+                    [](py::function* value) {
+                        py::gil_scoped_acquire acquire;
+                        delete value;
+                    });
+                callback = [held](const std::string& chunk) {
+                    py::gil_scoped_acquire acquire;
+                    (*held)(chunk);
+                };
+            }
+            py::gil_scoped_release release;
+            return self.invoke(std::move(params), std::move(callback));
+        }, py::arg("params"), py::arg("on_chunk") = py::none());
+
+    py::class_<StrictRuntimeProfile, std::shared_ptr<StrictRuntimeProfile>>(
+        m, "StrictRuntimeProfile")
+        .def(py::init([](std::shared_ptr<Provider> provider,
+                         std::shared_ptr<DurableContextStore> context_store,
+                         std::shared_ptr<DurableProviderDispatchReceiptStore> dispatch_store,
+                         std::shared_ptr<HookRuntime> hook_runtime,
+                         std::string provider_binding_identity,
+                         std::uint64_t max_input_tokens,
+                         std::vector<std::string> required_context_artifact_ids,
+                         std::vector<std::string> required_skill_artifact_ids) {
+            return std::make_shared<StrictRuntimeProfile>(StrictRuntimeProfileConfig{
+                std::move(provider), std::move(context_store), std::move(dispatch_store),
+                std::move(hook_runtime), std::move(provider_binding_identity),
+                max_input_tokens, std::move(required_context_artifact_ids),
+                std::move(required_skill_artifact_ids)});
+        }),
+        py::arg("provider"), py::arg("context_store"), py::arg("dispatch_store"),
+        py::arg("hook_runtime"), py::arg("provider_binding_identity"),
+        py::arg("max_input_tokens"),
+        py::arg("required_context_artifact_ids") = std::vector<std::string>{},
+        py::arg("required_skill_artifact_ids") = std::vector<std::string>{},
+        py::keep_alive<1, 2>(), py::keep_alive<1, 3>(),
+        py::keep_alive<1, 4>(), py::keep_alive<1, 5>())
+        .def("activate", &StrictRuntimeProfile::activate)
+        .def("clear", &StrictRuntimeProfile::clear)
+        .def_property_readonly("active", &StrictRuntimeProfile::active)
+        .def("attach", &StrictRuntimeProfile::attach, py::arg("engine"),
+             py::keep_alive<2, 1>())
+        .def("invoke", [](const StrictRuntimeProfile& self,
+                           CompletionParams params) {
+            auto controller = self.interposition();
+            py::gil_scoped_release release;
+            return controller->invoke(std::move(params));
+        }, py::arg("params"),
+             "Invoke through this profile's strict context, Hook, and receipt boundary.")
+        .def_property_readonly("interposition", &StrictRuntimeProfile::interposition)
+        .def_property_readonly("hooks", &StrictRuntimeProfile::hooks)
+        .def_property_readonly("context_store", &StrictRuntimeProfile::context_store)
+        .def_property_readonly("dispatch_store", &StrictRuntimeProfile::dispatch_store);
 }
 
 }  // namespace neograph::pybind

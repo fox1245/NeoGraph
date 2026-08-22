@@ -147,6 +147,7 @@ cmake.args = [
     "-G", "Ninja",
     "-DBUILD_SHARED_LIBS=ON",
     "-DNEOGRAPH_BUILD_PYBIND=ON",
+    "-DNEOGRAPH_BUILD_PROGRAM=ON",
     "-DNEOGRAPH_BUILD_LLM=ON",
     # ON since #95: the Python MCP binding is useless if `pip install`
     # ships a wheel that compiled it out. Marginal size cost is small —
@@ -157,7 +158,7 @@ cmake.args = [
     # bundle libpq.{so,dylib,dll} + its transitive deps into the wheel so
     # `neograph_engine.PostgresCheckpointStore` works on a fresh
     # `pip install` without requiring system libpq.
-    "-DNEOGRAPH_BUILD_SQLITE=OFF",
+    "-DNEOGRAPH_BUILD_SQLITE=ON",
     "-DNEOGRAPH_BUILD_EXAMPLES=OFF",
     "-DNEOGRAPH_BUILD_TESTS=OFF",
     "-DNEOGRAPH_BUILD_BENCHMARKS=OFF",

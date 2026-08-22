@@ -1,11 +1,9 @@
 // Capabilities that existed in C++ and were simply unreachable from Python — the
 // Store subsystem and the graph validator (issue #97).
 //
-// Not here, deliberately: RetryPolicy. The issue listed it as a gap and the
-// issue was wrong. A graph definition already carries `"retry_policy": {...}`
-// and the engine already honours it from Python; binding a RetryPolicy *class*
-// would give one concept two homes. test_retry_policy_already_works_from_the_definition
-// pins the capability instead, so nobody re-files it.
+// Runtime RetryPolicy and per-node overrides live in bind_graph.cpp. A topology
+// definition can still declare the graph-wide default, while the bound class
+// exposes the distinct post-compile and per-node C++ configuration surface.
 
 #include "json_bridge.h"
 

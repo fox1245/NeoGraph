@@ -91,6 +91,7 @@ def test_runtime_context_canonical_roundtrip_and_profiles_are_public():
     assert {ng.RuntimeGuaranteeProfile.Legacy,
             ng.RuntimeGuaranteeProfile.Recorded,
             ng.RuntimeGuaranteeProfile.Strict}
+    assert ng.ProviderDispatchState.Succeeded.name == "Succeeded"
 
 
 def test_context_store_raw_append_snapshot_and_hydrate_roundtrip():
@@ -143,3 +144,65 @@ def test_controller_retains_shared_provider_and_store_dependencies():
     gc.collect()
     assert all(ref() is not None for ref in refs)
     controller.clear()
+
+
+def test_context_transform_receipt_preserves_required_skill_identity():
+    skill_data = ng.ContextArtifactData()
+    skill_data.kind = ng.ContextArtifactKind.RequiredSkill
+    skill_data.producer_id = "python-skill-loader"
+    skill_data.source_digest = _sha("d")
+    skill_data.source_feed_id = ""
+    skill_data.covers_from_sequence = 0
+    skill_data.covers_through_sequence = 0
+    skill_data.media_type = "text/markdown"
+    skill_data.required = True
+    skill_data.content = {"text": "Always run the verifier."}
+    skill = ng.ContextArtifact.create(skill_data)
+
+    epoch_data = ng.ContextEpochData()
+    epoch_data.run_id = "transform-run"
+    epoch_data.sequence = 1
+    epoch_data.raw_window_digest = _sha("e")
+    epoch_data.artifact_ids = [skill.id]
+    epoch_data.guarantee_profile = ng.RuntimeGuaranteeProfile.Strict
+    epoch = ng.ContextEpoch.create(epoch_data)
+
+    receipt_data = ng.ContextTransformReceiptData()
+    receipt_data.source_context_epoch_id = epoch.id
+    receipt_data.transformer_identity = _sha("f")
+    receipt_data.input_artifact_ids = [skill.id]
+    receipt_data.output_artifact_ids = [skill.id]
+    receipt_data.preserved_required_artifact_ids = [skill.id]
+    receipt = ng.ContextTransformReceipt.create(
+        receipt_data, epoch, [skill], [skill]
+    )
+
+    ng.validate_context_transform_receipt(receipt, epoch, [skill], [skill])
+    assert receipt.preserved_required_artifact_ids == [skill.id]
+
+
+def test_strict_runtime_profile_uses_sqlite_durable_stores(tmp_path):
+    provider = _Provider()
+    contexts = ng.SQLiteContextStore(str(tmp_path / "strict-context.sqlite3"))
+    receipts = ng.SQLiteProviderDispatchReceiptStore(
+        str(tmp_path / "strict-dispatch.sqlite3")
+    )
+    hooks = ng.create_hook_runtime([], {})
+    profile = ng.StrictRuntimeProfile(
+        provider,
+        contexts,
+        receipts,
+        hooks,
+        _sha("a"),
+        1024,
+    )
+    profile.activate(
+        "owner", _epoch(contexts, ng.RuntimeGuaranteeProfile.Strict)
+    )
+
+    assert profile.active
+    params = ng.CompletionParams(model="model")
+    assert profile.invoke(params).message.content == "ok"
+    assert provider.calls == 1
+    profile.clear()
+    assert not profile.active

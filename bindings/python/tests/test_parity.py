@@ -15,11 +15,9 @@ Three of them, and they are not the same kind of thing:
   - **GraphValidator** turns "it threw at compile()" into a report you can read
     before you run anything.
 
-NOT here, deliberately: `RetryPolicy`. The issue listed it, and the issue was
-wrong — a graph definition already carries `"retry_policy": {...}` and the engine
-already honours it from Python. Binding a RetryPolicy *class* would give one
-concept two homes. `test_retry_policy_already_works_from_the_definition` pins
-that it works, so nobody re-files this.
+`RetryPolicy` now covers the separate runtime configuration surface: install a
+default after compile, override one node, and configure jitter. The topology's
+`"retry_policy"` remains the declarative graph-wide default.
 """
 
 import time
@@ -302,13 +300,7 @@ def test_an_unknown_node_type_still_throws():
 # ── The one the issue got wrong ─────────────────────────────────────────────
 
 def test_retry_policy_already_works_from_the_definition():
-    """#97 listed RetryPolicy as a gap. It is not one.
-
-    A graph definition carries `"retry_policy": {...}` and the engine honours it
-    — from Python, today, with no class bound. Binding a RetryPolicy class would
-    give one concept two homes, so this test exists instead: it proves the
-    capability is there, so nobody re-files the gap.
-    """
+    """The declarative graph-wide policy remains supported."""
     attempts = {"n": 0}
 
     class Flaky(ng.GraphNode):
@@ -340,3 +332,88 @@ def test_retry_policy_already_works_from_the_definition():
 
     assert attempts["n"] == 3
     assert result.output["channels"]["result"]["value"] == "ok"
+
+
+def test_runtime_retry_policy_and_per_node_override_match_cpp():
+    attempts = {"n": 0}
+
+    class Flaky(ng.GraphNode):
+        def run(self, _input):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise RuntimeError("transient")
+            return [ng.ChannelWrite("result", "ok")]
+
+        def get_name(self):
+            return "work"
+
+    ng.NodeFactory.register_type("flaky_runtime_policy", lambda *_a: Flaky())
+    definition = {
+        "name": "retry_runtime_policy",
+        "channels": {"result": {"reducer": "overwrite"}},
+        "nodes": {"work": {"type": "flaky_runtime_policy"}},
+        "edges": [
+            {"from": ng.START_NODE, "to": "work"},
+            {"from": "work", "to": ng.END_NODE},
+        ],
+    }
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext())
+    policy = ng.RetryPolicy()
+    policy.max_retries = 2
+    policy.initial_delay_ms = 0
+    policy.backoff_multiplier = 1.0
+    policy.max_delay_ms = 0
+    policy.jitter_pct = 0.25
+    engine.set_node_retry_policy("work", policy)
+
+    result = engine.run(ng.RunConfig(thread_id="runtime-retry"))
+
+    assert attempts["n"] == 3
+    assert result.output["channels"]["result"]["value"] == "ok"
+
+
+def test_run_metadata_and_model_budget_reach_python_nodes():
+    observed = {}
+
+    class Inspect(ng.GraphNode):
+        def run(self, input):
+            observed.update({
+                "trace_id": input.ctx.trace_id,
+                "run_id": input.ctx.run_id,
+                "has_deadline": input.ctx.has_deadline,
+                "model_token_budget": input.ctx.model_token_budget,
+            })
+            return []
+
+        def get_name(self):
+            return "inspect"
+
+    ng.NodeFactory.register_type("inspect_run_metadata", lambda *_a: Inspect())
+    definition = {
+        "name": "metadata",
+        "nodes": {"inspect": {"type": "inspect_run_metadata"}},
+        "edges": [
+            {"from": ng.START_NODE, "to": "inspect"},
+            {"from": "inspect", "to": ng.END_NODE},
+        ],
+    }
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext())
+    config = ng.RunConfig(thread_id="metadata-thread")
+    config.model_token_budget = 321
+    metadata = ng.RunMetadata(timeout_ms=5000, trace_id="trace-python", run_id="run-python")
+
+    engine.run(config, metadata)
+
+    assert observed == {
+        "trace_id": "trace-python",
+        "run_id": "run-python",
+        "has_deadline": True,
+        "model_token_budget": 321,
+    }
+    assert metadata.has_deadline
+    metadata.clear_deadline()
+    assert not metadata.has_deadline
+
+
+def test_exact_resume_surface_is_exposed():
+    assert hasattr(ng.GraphEngine, "resume_from")

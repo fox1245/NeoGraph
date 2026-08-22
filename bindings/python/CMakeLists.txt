@@ -72,7 +72,16 @@ pybind11_add_module(_neograph
     src/bind_node.cpp
     src/bind_parity.cpp
     src/bind_runtime_context.cpp
+    src/bind_hooks.cpp
 )
+
+# Program / QuickJS control plane. The wheel enables this so Python can author,
+# compile, admit, and execute the same immutable Programs as C++.
+if(TARGET neograph::program)
+    target_sources(_neograph PRIVATE src/bind_program.cpp)
+    target_link_libraries(_neograph PRIVATE neograph::program)
+    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_PROGRAM)
+endif()
 
 # MCP client (Model Context Protocol). Bound only when neograph::mcp was
 # built; surfaces as `neograph_engine.mcp.MCPClient` (issue #95). The wheel
