@@ -10,14 +10,27 @@
 #include <neograph/graph/sqlite_checkpoint.h>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <string>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 using namespace neograph::graph;
 using json = neograph::json;
 
 namespace {
+
+int current_process_id() {
+#ifdef _WIN32
+    return ::_getpid();
+#else
+    return ::getpid();
+#endif
+}
 
 // Build a Checkpoint whose channel_values matches GraphState::serialize().
 Checkpoint make_state_cp(const std::string& thread_id,
@@ -305,11 +318,12 @@ TEST_F(SqliteCheckpointTest, NestedJsonRoundTrips) {
 // fs file, not just :memory:. Uses a tmpfile path that's cleaned up
 // after the test.
 TEST(SqliteCheckpointTest_File, FileBackedRoundTrip) {
-    std::string path = "/tmp/neograph_test_" +
-                       std::to_string(::geteuid()) + "_" +
-                       std::to_string(std::chrono::steady_clock::now()
-                                          .time_since_epoch().count()) +
-                       ".db";
+    const auto filename =
+        "neograph_test_" + std::to_string(current_process_id()) + "_" +
+        std::to_string(std::chrono::steady_clock::now()
+                           .time_since_epoch().count()) +
+        ".db";
+    std::string path = (std::filesystem::temp_directory_path() / filename).string();
     // RAII cleanup so an early ASSERT_* doesn't orphan /tmp files.
     // Pre-fix this only ran on the happy path (after the assertions).
     struct PathCleanup {

@@ -1368,6 +1368,7 @@ TEST(HarnessProgramCutover, ReconnectsExactSqliteProgramRunAfterServiceDestructi
         EXPECT_EQ(reconnected.at("status"), "completed");
         EXPECT_EQ(reconnected.at("run_id"), run_id);
     }
+    fixture.config.record_store.reset();
     std::filesystem::remove(path);
 }
 TEST(HarnessProgramCutover, ReconnectsInterruptedSqliteRunAndContinuesExactCheckpoint) {
@@ -1413,6 +1414,7 @@ TEST(HarnessProgramCutover, ReconnectsInterruptedSqliteRunAndContinuesExactCheck
         EXPECT_EQ(completed.at("status"), "completed") << completed.dump();
     }
     EXPECT_EQ(fixture.calls.load(), 2);
+    fixture.config.record_store.reset();
     std::filesystem::remove(path);
 }
 
@@ -1477,6 +1479,7 @@ TEST(HarnessProgramCutover, ReconnectsSqlitePendingEffectWithCheckpointAndJourna
         EXPECT_EQ(await_terminal(service, run_id).at("status"), "completed");
     }
     EXPECT_EQ(fixture.calls.load(), 2);
+    fixture.config.record_store.reset();
     std::filesystem::remove(path);
 }
 
@@ -1504,39 +1507,43 @@ TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneWinnerAndOneDis
     auto second_config = fixture.config;
     second_config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
-    neograph::mcp::HarnessService first(fixture.config, nullptr, fixture.resources);
-    neograph::mcp::HarnessService second(second_config, nullptr, fixture.resources);
+    {
+        neograph::mcp::HarnessService first(fixture.config, nullptr, fixture.resources);
+        neograph::mcp::HarnessService second(second_config, nullptr, fixture.resources);
 
-    const auto started = first.start({{"request", request()}});
-    const auto run_id  = started.at("run_id").get<std::string>();
-    ASSERT_EQ(await_terminal(first, run_id).at("status"), "input_required");
-    ASSERT_EQ(second.get(run_id).at("status"), "input_required");
+        const auto started = first.start({{"request", request()}});
+        const auto run_id  = started.at("run_id").get<std::string>();
+        ASSERT_EQ(await_terminal(first, run_id).at("status"), "input_required");
+        ASSERT_EQ(second.get(run_id).at("status"), "input_required");
 
-    std::promise<void> ready;
-    auto               gate        = ready.get_future().share();
-    const auto         resume_once = [&](neograph::mcp::HarnessService& service, bool approved) {
-        gate.wait();
-        try {
-            const auto accepted = service.resume({{"run_id", run_id},
-                                                  {"call_id", "resume-race-1"},
-                                                  {"result", {{"approved", approved}}}});
-            return accepted.at("accepted").get<bool>() ? 1 : -1;
-        } catch (const neograph::program::ProgramDiagnosticError& error) {
-            const auto& code = error.diagnostic().code;
-            return code == "P_RESUME_CONFLICT" || code == "P_RESUME_STATE" ? 0 : -2;
-        }
-    };
-    auto first_resume  = std::async(std::launch::async, [&] { return resume_once(first, true); });
-    auto second_resume = std::async(std::launch::async, [&] { return resume_once(second, false); });
-    ready.set_value();
-    const int first_result  = first_resume.get();
-    const int second_result = second_resume.get();
-    EXPECT_EQ(first_result + second_result, 1);
-    ASSERT_TRUE(first_result == 1 || second_result == 1);
-    auto&      winner    = first_result == 1 ? first : second;
-    const auto completed = await_terminal(winner, run_id);
-    EXPECT_EQ(completed.at("status"), "completed") << completed.dump();
-    EXPECT_EQ(fixture.calls.load(), 2);
+        std::promise<void> ready;
+        auto               gate        = ready.get_future().share();
+        const auto         resume_once = [&](neograph::mcp::HarnessService& service, bool approved) {
+            gate.wait();
+            try {
+                const auto accepted = service.resume({{"run_id", run_id},
+                                                      {"call_id", "resume-race-1"},
+                                                      {"result", {{"approved", approved}}}});
+                return accepted.at("accepted").get<bool>() ? 1 : -1;
+            } catch (const neograph::program::ProgramDiagnosticError& error) {
+                const auto& code = error.diagnostic().code;
+                return code == "P_RESUME_CONFLICT" || code == "P_RESUME_STATE" ? 0 : -2;
+            }
+        };
+        auto first_resume  = std::async(std::launch::async, [&] { return resume_once(first, true); });
+        auto second_resume = std::async(std::launch::async, [&] { return resume_once(second, false); });
+        ready.set_value();
+        const int first_result  = first_resume.get();
+        const int second_result = second_resume.get();
+        EXPECT_EQ(first_result + second_result, 1);
+        ASSERT_TRUE(first_result == 1 || second_result == 1);
+        auto&      winner    = first_result == 1 ? first : second;
+        const auto completed = await_terminal(winner, run_id);
+        EXPECT_EQ(completed.at("status"), "completed") << completed.dump();
+        EXPECT_EQ(fixture.calls.load(), 2);
+    }
+    second_config.record_store.reset();
+    fixture.config.record_store.reset();
     std::filesystem::remove(path);
 }
 
@@ -1562,39 +1569,44 @@ TEST(HarnessProgramCutover, CrossArtifactForkReadsSourceTransitionsAndForwardsPe
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
-    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    {
+        neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
 
-    const auto source_artifact = service.compile(request());
-    ASSERT_TRUE(source_artifact.at("ok").get<bool>());
-    auto target_request                          = request();
-    target_request["budgets"]["timeout_seconds"] = 1;
-    const auto target_artifact                   = service.compile(target_request);
-    ASSERT_TRUE(target_artifact.at("ok").get<bool>()) << target_artifact.dump();
-    ASSERT_NE(source_artifact.at("artifact_id"), target_artifact.at("artifact_id"));
+        const auto source_artifact = service.compile(request());
+        ASSERT_TRUE(source_artifact.at("ok").get<bool>());
+        auto target_request                          = request();
+        // This test verifies exact cross-artifact fork state, not timeout
+        // behavior. Leave enough wall time for loaded Debug/parallel CTest runs.
+        target_request["budgets"]["timeout_seconds"] = 10;
+        const auto target_artifact                   = service.compile(target_request);
+        ASSERT_TRUE(target_artifact.at("ok").get<bool>()) << target_artifact.dump();
+        ASSERT_NE(source_artifact.at("artifact_id"), target_artifact.at("artifact_id"));
 
-    const auto source_started = service.start({{"artifact_id", source_artifact.at("artifact_id")}});
-    const auto source_run_id  = source_started.at("run_id").get<std::string>();
-    const auto source_paused  = await_terminal(service, source_run_id);
-    ASSERT_EQ(source_paused.at("status"), "input_required") << source_paused.dump();
-    const auto checkpoint_id =
-        source_paused.at("checkpoint").at("checkpoint_id").get<std::string>();
+        const auto source_started = service.start({{"artifact_id", source_artifact.at("artifact_id")}});
+        const auto source_run_id  = source_started.at("run_id").get<std::string>();
+        const auto source_paused  = await_terminal(service, source_run_id);
+        ASSERT_EQ(source_paused.at("status"), "input_required") << source_paused.dump();
+        const auto checkpoint_id =
+            source_paused.at("checkpoint").at("checkpoint_id").get<std::string>();
 
-    const auto fork_started = service.start({{"fork",
-                                              {{"source_run_id", source_run_id},
-                                               {"checkpoint_id", checkpoint_id},
-                                               {"artifact_id", target_artifact.at("artifact_id")},
-                                               {"call_id", "fork-input-1"},
-                                               {"result", {{"approved", true}}}}}});
-    ASSERT_TRUE(fork_started.at("started").get<bool>()) << fork_started.dump();
-    EXPECT_EQ(fork_started.at("execution_mode"), "compatible_fork");
-    EXPECT_EQ(fork_started.at("artifact_id"), target_artifact.at("artifact_id"));
-    EXPECT_EQ(fork_started.at("source_run_id"), source_run_id);
-    EXPECT_EQ(fork_started.at("source_checkpoint_id"), checkpoint_id);
+        const auto fork_started = service.start({{"fork",
+                                                  {{"source_run_id", source_run_id},
+                                                   {"checkpoint_id", checkpoint_id},
+                                                   {"artifact_id", target_artifact.at("artifact_id")},
+                                                   {"call_id", "fork-input-1"},
+                                                   {"result", {{"approved", true}}}}}});
+        ASSERT_TRUE(fork_started.at("started").get<bool>()) << fork_started.dump();
+        EXPECT_EQ(fork_started.at("execution_mode"), "compatible_fork");
+        EXPECT_EQ(fork_started.at("artifact_id"), target_artifact.at("artifact_id"));
+        EXPECT_EQ(fork_started.at("source_run_id"), source_run_id);
+        EXPECT_EQ(fork_started.at("source_checkpoint_id"), checkpoint_id);
 
-    const auto forked = await_terminal(service, fork_started.at("run_id").get<std::string>());
-    EXPECT_EQ(forked.at("status"), "completed") << forked.dump();
-    EXPECT_EQ(forked.at("result").at("outcome"), "ok");
-    EXPECT_EQ(fixture.calls.load(), 2);
+        const auto forked = await_terminal(service, fork_started.at("run_id").get<std::string>());
+        EXPECT_EQ(forked.at("status"), "completed") << forked.dump();
+        EXPECT_EQ(forked.at("result").at("outcome"), "ok");
+        EXPECT_EQ(fixture.calls.load(), 2);
+    }
+    fixture.config.record_store.reset();
     std::filesystem::remove(path);
 }
 

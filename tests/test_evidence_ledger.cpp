@@ -6,11 +6,23 @@
 #include <filesystem>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
 using namespace neograph::research;
+
+int current_process_id() {
+#ifdef _WIN32
+    return ::_getpid();
+#else
+    return ::getpid();
+#endif
+}
 
 SourceIdentity make_source(std::string id = "source-1") {
     SourceIdentity source;
@@ -393,7 +405,8 @@ TEST_F(EvidenceLedgerTest, ConflictingClaimsCoexistAndSelectReconciliation) {
 
 TEST(EvidenceLedgerPersistence, ReopensTasksAndCommittedEvidence) {
     const auto path = std::filesystem::temp_directory_path()
-                    / ("neograph-evidence-ledger-" + std::to_string(::getpid()) + ".sqlite");
+                    / ("neograph-evidence-ledger-" +
+                       std::to_string(current_process_id()) + ".sqlite");
     std::filesystem::remove(path);
     {
         SqliteEvidenceLedger ledger(path.string());
@@ -419,7 +432,8 @@ TEST(EvidenceLedgerPersistence, ReopensTasksAndCommittedEvidence) {
 
 TEST(EvidenceLedgerPersistence, DurableBoardBudgetSurvivesRestart) {
     const auto path = std::filesystem::temp_directory_path()
-                    / ("neograph-evidence-board-" + std::to_string(::getpid()) + ".sqlite");
+                    / ("neograph-evidence-board-" +
+                       std::to_string(current_process_id()) + ".sqlite");
     std::filesystem::remove(path);
     {
         SqliteEvidenceLedger ledger(path.string());
