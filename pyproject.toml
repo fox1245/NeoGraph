@@ -237,7 +237,7 @@ skip   = "*-musllinux_* *_i686 pp*"
 # resolves to the source tree path inside the cibw container.
 test-requires = ["pytest"]
 test-command  = """\
-python -c "import neograph_engine; print('cibw smoke version:', neograph_engine.__version__)" && \
+python -c "import pathlib, sqlite3, tempfile; import neograph_engine as ng; ng.SQLiteContextStore(str(pathlib.Path(tempfile.mkdtemp()) / 'smoke.sqlite3')); print('cibw smoke version:', ng.__version__, 'preloaded sqlite:', sqlite3.sqlite_version)" && \
 python -m pytest -q {project}/bindings/python/tests/\
 """
 
@@ -326,9 +326,13 @@ environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\
 # every directory to its search list, and skips re-bundling DLLs
 # it finds there. That's exactly the behaviour we want — the
 # engine .dlls are already where they need to be at import time.
+# `--with-mangle` still rewrites their external dependency names. Without it,
+# a preloaded system `sqlite3.dll` wins by basename before the bundled vcpkg
+# build and can crash inside `sqlite3_open_v2`.
 repair-wheel-command = """\
 pip install delvewheel && \
 python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
+  --with-mangle \
   --add-path C:\\\\vcpkg\\\\installed\\\\x64-windows\\\\bin\
 """
 
