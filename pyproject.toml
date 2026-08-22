@@ -340,7 +340,7 @@ archs = ["arm64"]
 build = "cp39-*"
 test-command = """\
 python -c "import neograph_engine; print('cibw smoke version:', neograph_engine.__version__)" && \
-lldb --batch -o run -o "process continue" -o "thread backtrace all" -- \
+lldb --batch -o run -o "process continue" -k "thread backtrace all" -- \
   python -X faulthandler -m pytest -vv -s \
   {project}/bindings/python/tests/test_program.py::test_local_program_host_compiles_admits_and_executes_program_runtime\
 """
