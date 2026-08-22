@@ -122,6 +122,7 @@ immutable ProgramSynthesisProposal
   -> durable host reservation receipt
   -> bounded QuickJS compilation
   -> proposal capability/effect closure check
+  -> host-owned semantic contract validation
   -> ordinary ProgramCatalog admission
   -> immutable ProgramSynthesisReceipt
 ```
@@ -129,16 +130,19 @@ immutable ProgramSynthesisProposal
 The reservation must show an exact decrement of one nonrenewable
 `max_dynamic_compiles` unit and may not increase any other budget. Reservation
 happens before compilation, so rejected source does not receive its compile unit
-back. The gateway never activates, binds, migrates, or spawns its result. Those
-remain separate host decisions through existing Program APIs.
+back. Semantic validation is mandatory and runs after compilation but before the
+admission resolver. Its immutable receipt binds the proposal, reservation,
+compiled bundle, validator identity, semantic contract identity, verdict, and
+evidence digest. A rejected verdict exposes typed evidence and cannot publish a
+`ProgramVersion`. The gateway never activates, binds, migrates, or spawns its
+result. Those remain separate host decisions through existing Program APIs.
 
 A runtime instruction planner may invoke the gateway and then return the exact
 admitted version in a replacement or migration decision. This preserves:
 
 ```text
-proposal -> reserve -> compile -> admit -> decide -> migrate/spawn
+proposal -> reserve -> compile -> semantic validate -> admit -> decide -> migrate/spawn
 ```
 
 without exposing compiler, Catalog, credentials, or activation authority to
 generated JavaScript.
-

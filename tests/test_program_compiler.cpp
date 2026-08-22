@@ -468,6 +468,107 @@ TEST(ProgramCompilerTest, JavaScriptDefineBuildsOneCoreDefinitionWithOrdinaryCon
     EXPECT_EQ(bundle.orchestration_plan().plan["operations"][0]["op"], "call_core");
 }
 
+TEST(ProgramCompilerTest, JavaScriptGraphBuilderLowersEveryDeclaredPrimitiveAndAccumulatesCalls) {
+    const auto source = ProgramSource::from_javascript(
+        "all-graph-primitives.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.channel("audit", {reducer: "local-reducer", initial: []});
+                graph.node("draft", {type: "local-node"});
+                graph.node("review", {type: "local-node"});
+                graph.node("terminal", {type: "local-node"});
+                graph.entry("draft");
+                graph.edge("draft", "review");
+                graph.conditionalEdge("review", "local-condition", {done: "terminal"});
+                graph.barrier("review", ["draft"]);
+                graph.interruptBefore("draft");
+                graph.interruptBefore("review");
+                graph.interruptAfter("review");
+                graph.interruptAfter("terminal");
+                graph.retryPolicy({
+                    max_retries: 2,
+                    initial_delay_ms: 10,
+                    backoff_multiplier: 2,
+                    max_delay_ms: 100,
+                });
+                graph.exit("terminal");
+                return graph;
+            }
+        )JS");
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto bundle = compiler.compile(source);
+    const auto definitions = bundle.sealed_core_definitions();
+    ASSERT_EQ(definitions.size(), 1U);
+    const auto definition = definitions.front().definition;
+
+    ASSERT_TRUE(definition.contains("channels"));
+    EXPECT_EQ(definition.at("channels").size(), 2U);
+    ASSERT_TRUE(definition.contains("nodes"));
+    EXPECT_EQ(definition.at("nodes").size(), 3U);
+    EXPECT_EQ(definition.at("nodes").at("review").at("barrier").at("wait_for"),
+              json::array({"draft"}));
+    EXPECT_EQ(definition.at("interrupt_before"), json::array({"draft", "review"}));
+    EXPECT_EQ(definition.at("interrupt_after"), json::array({"review", "terminal"}));
+    EXPECT_EQ(definition.at("retry_policy"),
+              (json{{"max_retries", 2},
+                    {"initial_delay_ms", 10},
+                    {"backoff_multiplier", 2.0},
+                    {"max_delay_ms", 100}}));
+    ASSERT_EQ(definition.at("conditional_edges").size(), 1U);
+    EXPECT_EQ(definition.at("conditional_edges").at(0).at("routes").at("done"),
+              "terminal");
+    ASSERT_EQ(definition.at("edges").size(), 3U);
+    EXPECT_EQ(definition.at("edges").at(0),
+              (json{{"from", "__start__"}, {"to", "draft"}}));
+    EXPECT_EQ(definition.at("edges").at(1),
+              (json{{"from", "draft"}, {"to", "review"}}));
+    EXPECT_EQ(definition.at("edges").at(2),
+              (json{{"from", "terminal"}, {"to", "__end__"}}));
+}
+
+TEST(ProgramCompilerTest, JavaScriptCapabilityManifestMatchesTheInstalledGraphBuilder) {
+    const auto source = ProgramSource::from_javascript(
+        "graph-capability-manifest.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                const methods = Object.keys(graph).sort();
+                for (const method of methods) {
+                    graph.node(method, {type: "local-node"});
+                }
+                graph.entry(methods[0]);
+                for (let index = 1; index < methods.length; ++index) {
+                    graph.edge(methods[index - 1], methods[index]);
+                }
+                graph.exit(methods[methods.length - 1]);
+                return graph;
+            }
+        )JS");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto bundle = compiler.compile(source);
+    const auto definition = bundle.sealed_core_definitions().front().definition;
+
+    std::vector<std::string> installed;
+    for (const auto& [name, unused] : definition.at("nodes").items()) {
+        (void)unused;
+        installed.push_back(name);
+    }
+    std::sort(installed.begin(), installed.end());
+
+    std::vector<std::string> declared;
+    const auto manifest = javascript_authoring_capability_manifest();
+    for (const auto& method : manifest.at("define").at("graph_builder_methods"))
+        declared.push_back(method.at("name").get<std::string>());
+    std::sort(declared.begin(), declared.end());
+    EXPECT_EQ(installed, declared);
+    EXPECT_EQ(manifest.at("javascript_profile"), ProgramSource::JAVASCRIPT_PROFILE);
+    EXPECT_EQ(manifest.at("ng_api_version"), ProgramSource::JAVASCRIPT_NG_API_VERSION);
+}
+
 TEST(ProgramCompilerTest, JavaScriptHostBudgetAndContractsReplaceEvaluatedDeclarations) {
     const auto           source = ProgramSource::from_javascript("host-authority.js",
                                                                  R"JS(

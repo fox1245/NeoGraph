@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "dslProfile": "sealed-v1",
+  "ngApiVersion": 1,
+  "cases": [
+    {
+      "id": "graph_basics",
+      "classification": "direct",
+      "features": ["graph", "channel", "node", "entry", "edge", "exit", "ordinary_js_loop"],
+      "fixture": "graph_basics.js",
+      "request": "Define graph capability with channel value using reducer probe.overwrite and initial value 0. Add input, transform, and output nodes of type probe.node using a JavaScript loop. Execute them as the linear path input to transform to output."
+    },
+    {
+      "id": "graph_routing",
+      "classification": "direct_with_registry_reference",
+      "features": ["conditionalEdge", "condition_registry_reference"],
+      "fixture": "graph_routing.js",
+      "request": "Define graph capability with router, left, and right nodes of type probe.node. router is the entry. Route from router with registered condition probe.route: label left goes to node left and label right goes to node right. Both destinations exit."
+    },
+    {
+      "id": "graph_fanout_barrier",
+      "classification": "direct",
+      "features": ["static_fanout", "static_fanin", "barrier"],
+      "fixture": "graph_fanout_barrier.js",
+      "request": "Define graph capability with split, left, right, and join nodes of type probe.node. split is the entry and fans out to left and right. Both branches feed join. Configure join as a barrier waiting for both branch nodes, then exit from join."
+    },
+    {
+      "id": "graph_hitl_retry",
+      "classification": "direct",
+      "features": ["interruptBefore", "interruptAfter", "retryPolicy"],
+      "fixture": "graph_hitl_retry.js",
+      "request": "Define graph capability with one work node of type probe.node serving as both entry and exit. Interrupt immediately before and immediately after work. Configure graph retry with 2 retries, 10 ms initial delay, multiplier 2, and 100 ms maximum delay."
+    },
+    {
+      "id": "registry_mediated",
+      "classification": "registry_mediated",
+      "features": ["dynamic_send", "dynamic_interrupt"],
+      "fixture": "registry_mediated.js",
+      "request": "Define graph capability using the registered dynamic behavior nodes: dispatch has type probe.dynamic-send and approval has type probe.dynamic-interrupt. Execute dispatch then approval, with dispatch as entry and approval as exit. Do not attempt to implement Send or NodeInterrupt inline in JavaScript."
+    },
+    {
+      "id": "program_control_flow",
+      "classification": "compositional",
+      "features": ["callCore", "ordinary_js_branch", "ordinary_js_loop", "logical_retry"],
+      "fixture": "program_control_flow.js",
+      "request": "Define the minimal capability graph described by the common contract. In generator main(input), call the admitted Core named exactly capability at most twice. Each call input contains input.task and a zero-based attempt number. Stop when the response has accepted=true. The returned value must be {attempts: N}, so rejection followed by acceptance returns attempts 2."
+    },
+    {
+      "id": "program_map",
+      "classification": "compositional",
+      "features": ["ordinary_js_map", "all", "max_in_flight"],
+      "fixture": "program_map.js",
+      "request": "Define the minimal capability graph. In generator main(input), map input.items to callCore commands for the admitted Core named exactly capability, passing each item as {item}. Yield the one ng.all command directly, with max_in_flight 2; do not use yield*. Return {count: results.length}."
+    },
+    {
+      "id": "program_structured_concurrency",
+      "classification": "direct_and_compositional",
+      "features": ["all", "parallel", "join", "race", "quorum"],
+      "fixture": "program_structured_concurrency.js",
+      "request": "Define the minimal capability graph. In generator main, sequentially yield five structured command groups made from calls to the admitted Core named exactly capability: ng.all with two members, ng.parallel with two, generic ng.join in all mode with two, ng.race with two, and ng.quorum with three members requiring two successes. Use max_in_flight bounds and return {completed: true}."
+    },
+    {
+      "id": "program_spawn_await",
+      "classification": "direct",
+      "features": ["spawn", "await", "timeout"],
+      "fixture": "program_spawn_await.js",
+      "request": "Define the minimal capability graph. In generator main(input), construct a spawn command for child binding worker-child using input.task, wrap that sealed command in ng.await with timeout 5000 ms, yield it, and return the child's result."
+    },
+    {
+      "id": "program_durability",
+      "classification": "direct",
+      "features": ["emit", "checkpoint", "cancelScope"],
+      "fixture": "program_durability.js",
+      "request": "Define the minimal capability graph. In generator main, emit {phase: observed}, checkpoint {cursor: 1}, then cancel scope current with reason stop. If control hypothetically resumes after cancellation, return {unreachable: true}."
+    },
+    {
+      "id": "program_host_capability",
+      "classification": "direct_constructor_host_mediated_execution",
+      "features": ["hostCapability", "native_import_slot"],
+      "fixture": "program_host_capability.js",
+      "request": "Define the minimal capability graph. In generator main, yield admitted host capability import slot 7 with input {operation: audit}, and return the host result."
+    }
+  ]
+}

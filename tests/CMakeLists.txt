@@ -141,6 +141,39 @@ if(NEOGRAPH_BUILD_PROGRAM)
         set_tests_properties(Program.ModelSynthesisProbe PROPERTIES
             LABELS "program;quickjs;synthesis"
         )
+        add_executable(program_dsl_capability_probe
+            program_dsl_capability_probe.cpp
+        )
+        target_include_directories(program_dsl_capability_probe PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/program
+        )
+        target_link_libraries(program_dsl_capability_probe PRIVATE
+            neograph::program
+        )
+        set(_neograph_dsl_capability_cases
+            graph_basics
+            graph_routing
+            graph_fanout_barrier
+            graph_hitl_retry
+            registry_mediated
+            program_control_flow
+            program_map
+            program_structured_concurrency
+            program_spawn_await
+            program_durability
+            program_host_capability
+        )
+        foreach(_case IN LISTS _neograph_dsl_capability_cases)
+            add_test(
+                NAME Program.DslCapability.${_case}
+                COMMAND program_dsl_capability_probe
+                    ${_case}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsl_capabilities/${_case}.js
+            )
+            set_tests_properties(Program.DslCapability.${_case} PROPERTIES
+                LABELS "program;quickjs;dsl-capability"
+            )
+        endforeach()
         add_executable(program_model_semantic_migration_probe
             program_model_semantic_migration_probe.cpp
         )

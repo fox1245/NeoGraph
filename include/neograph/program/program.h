@@ -25,6 +25,7 @@
 #include <neograph/program/journal.h>
 #include <neograph/program/lineage.h>
 #include <neograph/program/invocation.h>
+#include <neograph/program/javascript_capabilities.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/module.h>

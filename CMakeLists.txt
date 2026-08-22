@@ -630,6 +630,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/diagnostic.cpp
     src/program/source.cpp
     src/program/synthesis.cpp
+        src/program/javascript_capabilities.cpp
         src/program/task_graph_proposal.cpp
         src/program/task_graph_fragment.cpp
         src/program/javascript.cpp

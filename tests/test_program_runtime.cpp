@@ -2725,6 +2725,28 @@ TEST(ProgramRuntimeTest, JavaScriptGeneratorExposesOnlyControlCommandBinding) {
               (json{{"graph", "undefined"}, {"callCore", "function"}, {"frozen", true}}));
 }
 
+TEST(ProgramRuntimeTest, JavaScriptCapabilityManifestMatchesTheInstalledCommandKernel) {
+    const auto source = ProgramSource::from_javascript(
+        "test:command-capability-manifest.js",
+        "export function* main() { return Object.keys(ng).sort(); }");
+    auto generator = neograph::program::detail::JavaScriptGenerator::open(
+        source, json::object(), JavaScriptCompileLimits{});
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    ASSERT_TRUE(step.done);
+
+    std::vector<std::string> installed;
+    for (const auto& name : step.value) installed.push_back(name.get<std::string>());
+    std::vector<std::string> declared;
+    const auto manifest = javascript_authoring_capability_manifest();
+    for (const auto& method : manifest.at("main").at("command_methods"))
+        declared.push_back(method.at("name").get<std::string>());
+    for (const auto& property : manifest.at("main").at("ng_properties"))
+        declared.push_back(property.at("name").get<std::string>());
+    std::sort(declared.begin(), declared.end());
+    EXPECT_EQ(installed, declared);
+}
+
 TEST(ProgramRuntimeTest, JavaScriptGeneratorProducesSealedTypedCommandEnvelope) {
     const auto source = ProgramSource::from_javascript("test:typed-command.js",
                                                        R"JS(
@@ -8183,6 +8205,22 @@ TEST(ProgramRuntimeTest, ParallelMapLaunchesNextWindowAfterPriorCompletion) {
 }
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramSynthesisGateway, RequiresSemanticValidatorBeforeAcceptingProposals) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    ProgramSynthesisGatewayConfig config;
+    config.compiler = std::make_shared<ProgramCompiler>(
+        fixture.registry, ProgramCompilerConfig{"program-runtime-test/v1"});
+    config.catalog = fixture.catalog;
+    config.reserve = [](const ProgramSynthesisProposal&) -> ProgramSynthesisReservation {
+        throw std::logic_error("reservation must not be called");
+    };
+    config.admission = [](const ProgramSynthesisProposal&, const ProgramBundle&,
+                          const ProgramSynthesisReservation&) -> ProgramAdmission {
+        throw std::logic_error("admission must not be called");
+    };
+    EXPECT_THROW(ProgramSynthesisGateway(std::move(config)), std::invalid_argument);
+}
+
 TEST(ProgramSynthesisGateway, ReservesBeforeCompilingAndAdmitsExactSuccessor) {
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     auto compiler = std::make_shared<ProgramCompiler>(
@@ -8219,12 +8257,35 @@ TEST(ProgramSynthesisGateway, ReservesBeforeCompilingAndAdmitsExactSuccessor) {
             return ProgramAdmission{"tenant:runtime", fixture.profile,
                                     fixture.policy, {}};
         },
+        1024 * 1024,
+        [](const ProgramSynthesisProposal&, const ProgramBundle& bundle,
+           const ProgramSynthesisReservation&) {
+            const auto definitions = bundle.sealed_core_definitions();
+            return ProgramSynthesisSemanticDecision{
+                digest('7'), digest('8'),
+                definitions.size() == 1 && definitions.front().name == "main",
+                json{{"core_count", definitions.size()}}};
+        },
         1024 * 1024});
     const auto result = gateway.synthesize(proposal);
     EXPECT_TRUE(reserved);
     EXPECT_EQ(result.receipt.data().proposal_id, proposal.id());
     EXPECT_EQ(result.receipt.data().bundle_id, result.bundle.id());
     EXPECT_EQ(result.receipt.data().program_version_id, result.version.id());
+    EXPECT_TRUE(result.validation.data().accepted);
+    EXPECT_EQ(result.validation.data().proposal_id, proposal.id());
+    EXPECT_EQ(result.validation.data().reservation_id, result.reservation.id());
+    EXPECT_EQ(result.validation.data().bundle_id, result.bundle.id());
+    EXPECT_EQ(ProgramSynthesisValidationReceipt::parse(
+                  result.validation.serialize_canonical()).id(),
+              result.validation.id());
+    EXPECT_NO_THROW(validate_program_synthesis_validation_evidence(
+        result.validation, result.validation_evidence));
+    auto tampered_evidence = result.validation_evidence;
+    tampered_evidence["core_count"] = 99;
+    EXPECT_THROW(validate_program_synthesis_validation_evidence(
+                     result.validation, tampered_evidence),
+                 std::invalid_argument);
     ASSERT_TRUE(fixture.catalog->find_version("tenant:runtime", result.version.id()));
 
     const auto& remaining = result.reservation.data().remaining_after_reservation;
@@ -8255,6 +8316,86 @@ TEST(ProgramSynthesisGateway, ReservesBeforeCompilingAndAdmitsExactSuccessor) {
         ASSERT_TRUE(expected_minimum.contains(requirement.resource));
         EXPECT_EQ(requirement.minimum, expected_minimum.at(requirement.resource));
         EXPECT_EQ(requirement.maximum, expected_maximum.at(requirement.resource));
+    }
+}
+
+TEST(ProgramSynthesisGateway, SemanticRejectionConsumesReservationAndPreventsAdmission) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    auto compiler = std::make_shared<ProgramCompiler>(
+        fixture.registry, ProgramCompilerConfig{"program-runtime-test/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "generated-wrong-successor.js",
+        javascript_runtime_source(
+            "runtime-completed",
+            "return yield ng.callCore(\"wrong-core\", input, \"semantic:wrong-core\");"));
+    ProgramSynthesisProposalData proposal_data;
+    proposal_data.owner_scope = "tenant:runtime";
+    proposal_data.lineage_id = digest('1');
+    proposal_data.parent_run_id = "parent-run";
+    proposal_data.source = source;
+    proposal_data.requested_budget = javascript_budget(1, 1, 0, 0);
+    proposal_data.created_at_ms = 1;
+    const auto proposal = ProgramSynthesisProposal::create(std::move(proposal_data));
+
+    bool reserved = false;
+    bool admission_called = false;
+    ProgramSynthesisGateway gateway({
+        compiler,
+        fixture.catalog,
+        [&](const ProgramSynthesisProposal& value) {
+            reserved = true;
+            auto before = javascript_budget(1, 1, 0, 0);
+            before.max_dynamic_compiles = 1;
+            auto after = before;
+            after.max_dynamic_compiles = 0;
+            return ProgramSynthesisReservation::create(
+                {value.id(), value.data().lineage_id, digest('2'), digest('3'), before, after});
+        },
+        [&](const ProgramSynthesisProposal&, const ProgramBundle&,
+            const ProgramSynthesisReservation&) {
+            admission_called = true;
+            return ProgramAdmission{"tenant:runtime", fixture.profile, fixture.policy, {}};
+        },
+        1024 * 1024,
+        [](const ProgramSynthesisProposal&, const ProgramBundle& bundle,
+           const ProgramSynthesisReservation&) {
+            std::string observed;
+            bool accepted = false;
+            if (const auto control = bundle.control_source()) {
+                auto generator = neograph::program::detail::JavaScriptGenerator::open(
+                    *control, json::object(), JavaScriptCompileLimits{});
+                if (generator) {
+                    const auto step = generator->next();
+                    if (step.command && step.command->kind() == JavaScriptCommandKind::CallCore) {
+                        observed = step.command->arguments().value("name", "");
+                        accepted = observed == "main";
+                    }
+                }
+            }
+            return ProgramSynthesisSemanticDecision{
+                digest('7'), digest('8'), accepted,
+                json{{"code", "P_SYNTHESIS_SEMANTIC_CORE_BINDING"},
+                     {"expected", "main"},
+                     {"observed", observed},
+                     {"observed_bundle", bundle.id()}}};
+        },
+        1024 * 1024});
+
+    try {
+        (void)gateway.synthesize(proposal);
+        FAIL() << "expected semantic rejection";
+    } catch (const ProgramSynthesisValidationError& error) {
+        EXPECT_TRUE(reserved);
+        EXPECT_FALSE(admission_called);
+        EXPECT_FALSE(error.receipt().data().accepted);
+        EXPECT_EQ(error.receipt().data().proposal_id, proposal.id());
+        EXPECT_EQ(error.evidence().at("code"), "P_SYNTHESIS_SEMANTIC_CORE_BINDING");
+        EXPECT_EQ(error.evidence().at("observed"), "wrong-core");
+        EXPECT_FALSE(fixture.store->get_bundle(
+            "tenant:runtime", error.receipt().data().bundle_id));
+        EXPECT_EQ(ProgramSynthesisValidationReceipt::parse(
+                      error.receipt().serialize_canonical()).id(),
+                  error.receipt().id());
     }
 }
 #endif

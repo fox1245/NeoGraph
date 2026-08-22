@@ -158,6 +158,18 @@ json receipt_body(const ProgramSynthesisReceiptData& data) {
             {"policy_snapshot_fingerprint", data.policy_snapshot_fingerprint}};
 }
 
+json validation_receipt_body(const ProgramSynthesisValidationReceiptData& data) {
+    return {{"format", "neograph-program-synthesis-validation-receipt"},
+            {"storage_schema_version", 1},
+            {"proposal_id", data.proposal_id},
+            {"reservation_id", data.reservation_id},
+            {"bundle_id", data.bundle_id},
+            {"validator_identity", data.validator_identity},
+            {"contract_identity", data.contract_identity},
+            {"accepted", data.accepted},
+            {"evidence_digest", data.evidence_digest}};
+}
+
 }  // namespace
 
 struct ProgramSynthesisProposal::Impl {
@@ -340,12 +352,109 @@ const ProgramSynthesisReceiptData& ProgramSynthesisReceipt::data() const noexcep
 const std::string& ProgramSynthesisReceipt::id() const noexcept { return impl_->id; }
 std::string ProgramSynthesisReceipt::serialize_canonical() const { return impl_->canonical; }
 
+struct ProgramSynthesisValidationReceipt::Impl {
+    ProgramSynthesisValidationReceiptData data;
+    std::string id;
+    std::string canonical;
+};
+
+ProgramSynthesisValidationReceipt::ProgramSynthesisValidationReceipt(
+    std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+ProgramSynthesisValidationReceipt ProgramSynthesisValidationReceipt::create(
+    ProgramSynthesisValidationReceiptData data) {
+    require_sha(data.proposal_id, "Synthesis validation proposal_id");
+    require_sha(data.reservation_id, "Synthesis validation reservation_id");
+    require_sha(data.bundle_id, "Synthesis validation bundle_id");
+    require_sha(data.validator_identity, "Synthesis validation validator_identity");
+    require_sha(data.contract_identity, "Synthesis validation contract_identity");
+    require_sha(data.evidence_digest, "Synthesis validation evidence_digest");
+    auto body = validation_receipt_body(data);
+    auto impl = std::make_shared<Impl>();
+    impl->id = detail::sha256_identity("program-synthesis-validation-receipt/v1",
+                                       detail::canonical_json_bytes(body));
+    body["id"] = impl->id;
+    impl->data = std::move(data);
+    impl->canonical = detail::canonical_json_bytes(body);
+    return ProgramSynthesisValidationReceipt(std::move(impl));
+}
+
+ProgramSynthesisValidationReceipt ProgramSynthesisValidationReceipt::parse(
+    std::string_view bytes) {
+    const auto value = detail::parse_json_strict(bytes);
+    detail::reject_unknown_fields(
+        value, "Stored ProgramSynthesisValidationReceipt",
+        {"format", "storage_schema_version", "id", "proposal_id", "reservation_id",
+         "bundle_id", "validator_identity", "contract_identity", "accepted",
+         "evidence_digest"});
+    if (required_string(value, "format") !=
+            "neograph-program-synthesis-validation-receipt" ||
+        value.at("storage_schema_version").get<std::uint32_t>() != STORAGE_SCHEMA_VERSION ||
+        !value.at("accepted").is_boolean()) {
+        throw std::invalid_argument("Stored ProgramSynthesisValidationReceipt is unsupported");
+    }
+    const auto stored_id = required_string(value, "id");
+    ProgramSynthesisValidationReceiptData data{
+        required_string(value, "proposal_id"),
+        required_string(value, "reservation_id"),
+        required_string(value, "bundle_id"),
+        required_string(value, "validator_identity"),
+        required_string(value, "contract_identity"),
+        value.at("accepted").get<bool>(),
+        required_string(value, "evidence_digest")};
+    auto result = create(std::move(data));
+    if (result.id() != stored_id)
+        throw std::invalid_argument("Stored synthesis validation receipt id mismatch");
+    return result;
+}
+
+const ProgramSynthesisValidationReceiptData&
+ProgramSynthesisValidationReceipt::data() const noexcept {
+    return impl_->data;
+}
+const std::string& ProgramSynthesisValidationReceipt::id() const noexcept {
+    return impl_->id;
+}
+std::string ProgramSynthesisValidationReceipt::serialize_canonical() const {
+    return impl_->canonical;
+}
+
+void validate_program_synthesis_validation_evidence(
+    const ProgramSynthesisValidationReceipt& receipt,
+    const json& evidence) {
+    const auto digest = detail::sha256_identity(
+        "program-synthesis-semantic-evidence/v1",
+        detail::canonical_json_bytes(evidence));
+    if (receipt.data().evidence_digest != digest) {
+        throw std::invalid_argument(
+            "Program synthesis semantic evidence does not match its receipt");
+    }
+}
+
+ProgramSynthesisValidationError::ProgramSynthesisValidationError(
+    ProgramSynthesisValidationReceipt receipt, json evidence)
+    : std::runtime_error("Compiled Program failed host semantic validation"),
+      receipt_(std::move(receipt)),
+      evidence_(detail::owned_json_copy(evidence)) {
+    validate_program_synthesis_validation_evidence(receipt_, evidence_);
+}
+
+const ProgramSynthesisValidationReceipt&
+ProgramSynthesisValidationError::receipt() const noexcept {
+    return receipt_;
+}
+const json& ProgramSynthesisValidationError::evidence() const noexcept {
+    return evidence_;
+}
+
 ProgramSynthesisGateway::ProgramSynthesisGateway(ProgramSynthesisGatewayConfig config)
     : config_(std::move(config)) {
     if (!config_.compiler || !config_.catalog || !config_.reserve ||
-        !config_.admission || !config_.max_source_bytes) {
+        !config_.admission || !config_.max_source_bytes || !config_.validate_semantics ||
+        !config_.max_semantic_evidence_bytes) {
         throw std::invalid_argument(
-            "Program synthesis gateway requires compiler, Catalog, reservation, admission, and limits");
+            "Program synthesis gateway requires compiler, Catalog, reservation, semantic validation, admission, and limits");
     }
 }
 
@@ -376,6 +485,24 @@ ProgramSynthesisResult ProgramSynthesisGateway::synthesize(
         throw std::runtime_error(
             "Compiled Program exceeds its synthesis proposal closure");
     }
+    auto semantic = config_.validate_semantics(proposal, bundle, reservation);
+    require_sha(semantic.validator_identity,
+                "Synthesis semantic validator_identity");
+    require_sha(semantic.contract_identity,
+                "Synthesis semantic contract_identity");
+    const auto semantic_evidence = detail::canonical_json_bytes(semantic.evidence);
+    if (semantic_evidence.size() > config_.max_semantic_evidence_bytes) {
+        throw std::runtime_error("Program synthesis semantic evidence exceeds host byte limit");
+    }
+    auto validation = ProgramSynthesisValidationReceipt::create(
+        {proposal.id(), reservation.id(), bundle.id(), semantic.validator_identity,
+         semantic.contract_identity, semantic.accepted,
+         detail::sha256_identity("program-synthesis-semantic-evidence/v1",
+                                 semantic_evidence)});
+    if (!semantic.accepted) {
+        throw ProgramSynthesisValidationError(std::move(validation),
+                                              std::move(semantic.evidence));
+    }
     auto admission = config_.admission(proposal, bundle, reservation);
     if (admission.owner_scope != proposal.data().owner_scope) {
         throw std::runtime_error("Program synthesis admission changed owner scope");
@@ -384,8 +511,8 @@ ProgramSynthesisResult ProgramSynthesisGateway::synthesize(
     auto receipt = ProgramSynthesisReceipt::create(
         {proposal.id(), reservation.id(), bundle.id(), version.id(),
          version.policy_snapshot().fingerprint()});
-    return {std::move(reservation), std::move(bundle), std::move(version),
-            std::move(receipt)};
+    return {std::move(reservation), std::move(bundle), std::move(validation),
+            std::move(semantic.evidence), std::move(version), std::move(receipt)};
 }
 
 }  // namespace neograph::program

@@ -82,6 +82,11 @@ TEST(ProgramSynthesisContracts, CanonicalizeProposalReservationAndReceipt) {
         {proposal.id(), reservation.id(), sha('4'), sha('5'), sha('6')});
     EXPECT_EQ(ProgramSynthesisReceipt::parse(receipt.serialize_canonical()).id(),
               receipt.id());
+    const auto validation = ProgramSynthesisValidationReceipt::create(
+        {proposal.id(), reservation.id(), sha('4'), sha('7'), sha('8'), true, sha('9')});
+    EXPECT_EQ(ProgramSynthesisValidationReceipt::parse(
+                  validation.serialize_canonical()).id(),
+              validation.id());
 
     after.max_dynamic_compiles = 1;
     EXPECT_THROW(ProgramSynthesisReservation::create(

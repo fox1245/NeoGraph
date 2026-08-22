@@ -254,6 +254,17 @@ int main(int argc, char** argv) {
                               const ProgramSynthesisReservation&) {
                 return ProgramAdmission{"model-synthesis-probe", profile, policy, {}};
             },
+            64 * 1024,
+            [](const ProgramSynthesisProposal&, const ProgramBundle& bundle,
+               const ProgramSynthesisReservation&) {
+                const auto definitions = bundle.sealed_core_definitions();
+                const bool accepted = definitions.size() == 1 &&
+                                      definitions.front().name == "model-synthesized";
+                return ProgramSynthesisSemanticDecision{
+                    digest('d'), digest('e'), accepted,
+                    json{{"expected_core", "model-synthesized"},
+                         {"observed_core", definitions.empty() ? "" : definitions.front().name}}};
+            },
             64 * 1024});
 
         const auto synthesized = gateway.synthesize(proposal);
