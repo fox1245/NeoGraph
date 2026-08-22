@@ -49,25 +49,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 — the bread-and-butter target.
-          - os: ubuntu-latest
-            arch: x86_64
-          # Linux aarch64 — GitHub's native arm runner (free for
-          # public repos as of 2025). Faster than QEMU emulation.
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-          # macOS arm64 — Apple Silicon runner. Native build, no
-          # cross-compile or universal2 packaging in this commit.
+          # Temporary release diagnostic: isolate the crashing macOS ABI.
           - os: macos-14
             arch: arm64
-          # Windows x64 — MSVC + vcpkg OpenSSL. NEOGRAPH_API decorations
-          # in include/neograph/api.h flip to __declspec(dllexport) inside
-          # engine TUs (NEOGRAPH_BUILDING_LIBRARY private compile def per
-          # library) and __declspec(dllimport) for downstream consumers
-          # like the binding. delvewheel bundles the engine .dll +
-          # OpenSSL .dll into the wheel via the cibw repair-command.
-          - os: windows-latest
-            arch: AMD64
 
     steps:
       - uses: actions/checkout@v4

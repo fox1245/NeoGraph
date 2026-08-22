@@ -337,6 +337,13 @@ python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
 # compile cleanly to x86_64 on an arm64 runner — extra setup that
 # isn't justified given Apple's own arm64 transition is mostly done.
 archs = ["arm64"]
+build = "cp39-*"
+test-command = """\
+python -c "import neograph_engine; print('cibw smoke version:', neograph_engine.__version__)" && \
+lldb --batch -o run -o "thread backtrace all" -- \
+  python -X faulthandler -m pytest -vv -s \
+  {project}/bindings/python/tests/test_program.py::test_local_program_host_compiles_admits_and_executes_program_runtime\
+"""
 
 # Install libpq and SQLite for the database-backed stores. openssl@3 is already
 # pre-installed on the macos-14 runner image; the database libraries are not. They are
