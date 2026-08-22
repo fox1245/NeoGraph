@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9fd05ae73230e67c9eec99a99bb8b9c7ac0513f6d302bbd9c042c809c51b8af9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1bc27ec8535e091253d051d0c90b861ca7a69040bcaddc2a58e8cad025bf8e1d -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-08-23
 
 ### 추가됨
 - **엄격한 런타임 인터포지션 완성.** `StrictRuntimeProfile`, 내구성 있는 제공자 터미널 결과 영수증, SQLite 스키마 v3 마이그레이션, JSON-RPC stdio/HTTP 아티팩트 게시를 포함한 전송 중립적 필수 Hook 백엔드, 일반 필수 컨텍스트 및 `HardConstraint` 아티팩트, 정확한 보존 `ContextTransformReceipt`, 내구성 있는 런타임 개발자 지침 결정, 그리고 컴파일 전 예약 `ProgramSynthesisGateway`을 추가했습니다. 생성된 소스는 여전히 스스로 활성화, 바인딩, 마이그레이션 또는 생성을 할 수 없으며, 해당 전환은 별도의 호스트 소유 Program 전환으로 유지됩니다. `DurableProviderDispatchReceiptStore`의 커스텀 하위 클래스는 이제 터미널 `settle`/`outcome`을 구현해야 하며, C++ 소비자는 이 ABI 변경에 맞춰 재빌드해야 합니다.
@@ -57,6 +59,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Python Program 휠 의존성 완결.** PyPI 빌드는 이제 QuickJS 제어 런타임을 활성화하고, 확장 모듈 옆에 `neograph_program` 로더를 번들하며, Windows의 Program/Harness DLL 경계를 가로질러 사용되는 비공개 평가기를 내보냅니다. 이를 통해 `P_JS_UNAVAILABLE`, 로더 누락으로 인한 import 실패, 공유 빌드의 `LNK2019` 실패를 방지합니다.
 - **제한된 원격 전송 및 자격 증명 출처.** HTTP/1.1, HTTP/2, SSE 및 WebSocket 수신 경로는 이제 신뢰할 수 없는 크기가 할당되기 전에 보수적인 응답, 헤더, 청크, 라인, 프레임, 핸드셰이크 및 메시지 한도를 적용합니다. Redirect된 POST 요청은 정규화된 동일 출처 내에서만 follow됩니다. 공급업체 자격 증명은 명시적 numeric loopback 개발 예외가 활성화되지 않는 한 TLS를 필요로 하며, WebSocket 디버그 출력은 더 이상 요청 헤더 또는 페이로드를 포함하지 않습니다.
 - **QuickJS `all` 생성 시작 경쟁(join startup race) 수정.** Completion 핸들러는 이제 JavaScript join을 닫기 전에 초기 멤버 시작 등록을 기다립니다. 즉시 완료되는 자식은 더 이상 형제 초기 또는 대체 명령이 전달되기 전에 생성기를 재개할 수 없습니다. 반복되는 런타임 회귀 테스트가 두 경로를 모두 다룹니다.
 - **Harness 집계 결과 출처(issue #174).** 세부 정보에는 이제 `finding_sources` 배열이 기존의 플랫 `findings` 배열과 정렬되어 포함됩니다. 각 항목은 집계 인덱스, 소스 워커 ID, 워커 로컬 인덱스를 기록하며, 스키마 검증된 워커 출력이나 기존의 `findings` 형태를 변경하지 않습니다.

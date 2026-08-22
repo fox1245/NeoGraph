@@ -11,6 +11,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-23
+
 ### Added
 - **Strict runtime interposition completion.** Added `StrictRuntimeProfile`,
   durable provider terminal-outcome receipts and SQLite schema v3 migration,
@@ -202,6 +204,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Python Program wheel closure.** PyPI builds now enable the QuickJS
+  control runtime, bundle the `neograph_program` loader beside the extension,
+  and export the private evaluator used across the Program/Harness DLL
+  boundary on Windows. This prevents `P_JS_UNAVAILABLE`, missing-loader import
+  failures, and the shared-build `LNK2019` failure.
 - **Bounded remote transports and credential origins.** HTTP/1.1, HTTP/2,
   SSE, and WebSocket receive paths now enforce conservative response, header,
   chunk, line, frame, handshake, and message limits before untrusted sizes are

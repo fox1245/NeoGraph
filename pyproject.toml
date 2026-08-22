@@ -43,7 +43,7 @@ build-backend = "scikit_build_core.build"
 # explicit — this package IS the C++ runtime, not a Python wrapper around
 # someone else's runtime. Python import name is ``neograph_engine``.
 name = "neograph-engine"
-version = "0.11.1"
+version = "0.12.0"
 description = "C++ graph agent engine — Python bindings (LangGraph-equivalent semantics, microsecond engine overhead)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -148,6 +148,7 @@ cmake.args = [
     "-DBUILD_SHARED_LIBS=ON",
     "-DNEOGRAPH_BUILD_PYBIND=ON",
     "-DNEOGRAPH_BUILD_PROGRAM=ON",
+    "-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON",
     "-DNEOGRAPH_BUILD_LLM=ON",
     # ON since #95: the Python MCP binding is useless if `pip install`
     # ships a wheel that compiled it out. Marginal size cost is small —

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9fd05ae73230e67c9eec99a99bb8b9c7ac0513f6d302bbd9c042c809c51b8af9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1bc27ec8535e091253d051d0c90b861ca7a69040bcaddc2a58e8cad025bf8e1d -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.12.0] - 2026-08-23
 
 ### 已添加
 - **严格的运行时插桩完成。** 新增了 `StrictRuntimeProfile`、持久的提供方终端结果回执和 SQLite schema v3 迁移、带有 JSON-RPC stdio/HTTP 工件发布的传输无关强制 Hook 后端、通用必需上下文和 `HardConstraint` 工件、精确保留的 `ContextTransformReceipt`、持久的运行时开发者指令决策，以及编译前预留的 `ProgramSynthesisGateway`。生成的源码仍无法自行激活、绑定、迁移或生成；这些仍是由主机拥有的独立 Program 转换。`DurableProviderDispatchReceiptStore` 的自定义子类现在必须实现终端 `settle`/`outcome`；C++ 使用者必须针对此 ABI 变更重新构建。
@@ -57,6 +59,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 已修复
 
+- **补全 Python Program wheel 依赖。** PyPI 构建现会启用 QuickJS 控制运行时，在扩展模块旁捆绑 `neograph_program` 加载器，并导出 Windows 上跨 Program/Harness DLL 边界使用的私有求值器。这样可防止 `P_JS_UNAVAILABLE`、因缺少加载器导致的 import 失败，以及共享构建中的 `LNK2019` 失败。
 - **有界远程传输和凭据来源。** HTTP/1.1、HTTP/2、SSE 和 WebSocket 接收路径现在在分配不受信任大小之前强制执行保守的响应、头、块、行、帧、握手和消息限制。重定向的 POST 请求仅在规范化同源内被跟随，提供商凭据需要 TLS，除非启用了显式数字回环开发异常，并且 WebSocket 调试输出不再包含请求头或负载。
 - **QuickJS `all` 加入启动竞争。** 完成处理器现在在关闭 JavaScript 加入之前等待初始成员启动注册。立即完成的子项不能再在其兄弟初始或替换命令派发之前恢复生成器；重复的运行时回归覆盖两条路径。
 - **Harness 聚合发现的溯源（issue #174）。** 详情现在包含一个 `finding_sources` 数组，与现有的扁平 `findings` 数组对齐。每个条目记录其聚合索引、源 worker ID 和 worker 本地索引，同时不改变经 schema 验证的 worker 输出或既有的 `findings` 形状。

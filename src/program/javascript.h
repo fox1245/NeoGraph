@@ -1,5 +1,6 @@
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/json.h>
 #include <neograph/program/command.h>
 #include <neograph/program/source.h>
@@ -42,8 +43,8 @@ struct JavaScriptSourceEvaluation {
 // Evaluates a sealed SourceKind::JavaScript source in the private QuickJS
 // compiler sandbox and returns the single document submitted through
 // neograph.define(), plus whether it exports the opt-in main() control entry.
-JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&           source,
-                                                      const JavaScriptCompileLimits& limits);
+NEOGRAPH_PROGRAM_API JavaScriptSourceEvaluation
+evaluate_javascript_source(const ProgramSource& source, const JavaScriptCompileLimits& limits);
 
 struct JavaScriptGeneratorStep {
     bool done = false;

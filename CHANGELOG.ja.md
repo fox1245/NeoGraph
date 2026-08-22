@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9fd05ae73230e67c9eec99a99bb8b9c7ac0513f6d302bbd9c042c809c51b8af9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1bc27ec8535e091253d051d0c90b861ca7a69040bcaddc2a58e8cad025bf8e1d -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+## [0.12.0] - 2026-08-23
 
 ### 追加
 - **厳格なランタイム・インターセプション完了。** `StrictRuntimeProfile`、永続的なプロバイダ終端結果レシート、SQLite スキーマ v3 マイグレーション、トランスポートに依存しない必須 Hook バックエンド（JSON-RPC stdio/HTTP による成果物公開）、一般必須コンテキスト、`HardConstraint` 成果物、完全保存の `ContextTransformReceipt`、永続的なランタイム開発者指示決定、およびコンパイル前の予約 `ProgramSynthesisGateway` を追加しました。生成されたソースは依然として自身をアクティブ化、バインド、マイグレート、または生成できません。これらは引き続きホスト所有の Program 遷移です。`DurableProviderDispatchReceiptStore` のカスタムサブクラスは、今後、終端の `settle`/`outcome` を実装する必要があります。C++ コンシューマーはこの ABI 変更に対して再ビルドする必要があります。
@@ -57,6 +59,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正済み
 
+- **Python Program wheel の依存関係を完結。** PyPI ビルドは QuickJS 制御ランタイムを有効化し、拡張モジュールの隣に `neograph_program` ローダーを同梱し、Windows の Program/Harness DLL 境界を越えて使用される非公開評価器をエクスポートするようになりました。これにより、`P_JS_UNAVAILABLE`、ローダー不足による import 失敗、および共有ビルドの `LNK2019` 失敗を防ぎます。
 - **境界付きのリモート輸送と資格情報の起源。** HTTP/1.1、HTTP/2、SSE、WebSocket の受信は、信頼されないサイズが割り当てられる前に、保守的な応答、ヘッダー、チャンク、ライン、フレーム、ハンドシェイク、メッセージ制限を強制する。リダイレクトされた POST リクエストは、正規化された同一オリジン内でのみフォローされ、プロバイダーの資格情報は、明示的な数値ループバック開発例外が有効でない限りTLS を必要とし、WebSocket デバッグ出力には、リクエストヘッダーやペイロードは含まれません。
 - **QuickJS `all` join 起動時レース。** 完了ハンドラは、JavaScript の join を閉じる前に、初期メンバー起動登録を待つようになりました。即座に完了する子は、その兄弟の初期コマンドまたは置換コマンドがディスパッチされる前に、ジェネレーターを再開できなくなりました。繰り返しのランタイムリグレッションは、両方のパスをカバーしています。
 - **Harness 集約ファインディングの来歴（issue #174）。** 詳細には、 `finding_sources` 配列が既存のフラットな `findings` 配列に揃えて含まれるようになりました。各エントリは、スキーマ検証済みのワーカー出力や確立された `findings` 形状を変更することなく、その集約インデックス、ソースワーカーID、およびワーカーローカルインデックスを記録します。

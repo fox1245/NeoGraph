@@ -2371,6 +2371,13 @@ endif()
 # (when LLM is on; needed for OpenAIProvider / SchemaProvider).
 if(NEOGRAPH_BUILD_PYBIND)
     set(NEOGRAPH_PYBIND_LIBS neograph_core neograph_async)
+    # The Python Program binding and the A2A adapter both hard-link the
+    # optional Program runtime. Keep its loader file beside the extension;
+    # otherwise a wheel can build successfully but fail to import after it is
+    # moved away from the CMake build directory.
+    if(TARGET neograph_program)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_program)
+    endif()
     if(TARGET neograph_llm)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_llm)
     endif()
