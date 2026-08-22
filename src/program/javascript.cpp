@@ -2934,7 +2934,13 @@ JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     imp
             throw_control_value_error("JavaScript control yielded a forged command value");
         }
         converted = command_value->command.to_json();
-        if (!is_done) sealed_command = command_value->command;
+        // Detach the yielded command from the QuickJS-owned opaque value.
+        // A shallow pimpl copy survives in static builds, but the original
+        // command is destroyed by JS_FreeValue below and crossed a shared
+        // library boundary in wheel builds. Reconstructing from the already
+        // validated canonical envelope gives the scheduler an independently
+        // owned command before that finalizer runs.
+        if (!is_done) sealed_command = JavaScriptCommand::from_json(converted);
         converted_ok = true;
     } else {
         converted_ok = js_to_json(context, value, converted, conversion, 0);
