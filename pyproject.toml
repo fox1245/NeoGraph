@@ -265,15 +265,15 @@ test-skip = ""
 manylinux-x86_64-image  = "quay.io/pypa/manylinux_2_34_x86_64"
 manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 
-# Container has gcc/cmake but not openssl-devel/libpq-devel. Install the
-# headers so find_package(OpenSSL) and find_package(PostgreSQL) succeed
-# during the wheel cmake config.
+# Container has gcc/cmake but not the optional database/TLS development
+# packages. Install the headers so all wheel-enabled components configure.
 #   - openssl-devel: async runtime + httplib link OpenSSL 3.
 #   - libpq-devel:   PostgresCheckpointStore links libpq. AlmaLinux 9 ships
 #                    libpq 13.x in AppStream. auditwheel-repair pulls
 #                    libpq.so.5 (and its transitive deps libldap, libsasl2,
 #                    libgssapi_krb5, etc.) into the wheel.
-before-all = "dnf install -y openssl-devel libpq-devel libcurl-devel"
+#   - sqlite-devel:  SqliteCheckpointStore and strict runtime persistence.
+before-all = "dnf install -y openssl-devel libpq-devel sqlite-devel libcurl-devel"
 
 [tool.cibuildwheel.windows]
 # Windows wheel build:
@@ -284,7 +284,7 @@ before-all = "dnf install -y openssl-devel libpq-devel libcurl-devel"
 #     BUILD_SHARED_LIBS=ON link cleanly on MSVC by tagging public symbols
 #     dllexport in the engine and dllimport in the binding.
 before-all = """\
-vcpkg install openssl:x64-windows libpq:x64-windows && \
+vcpkg install openssl:x64-windows libpq:x64-windows sqlite3:x64-windows && \
 echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
 """
 
@@ -338,11 +338,11 @@ python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
 # isn't justified given Apple's own arm64 transition is mostly done.
 archs = ["arm64"]
 
-# Install libpq for PostgresCheckpointStore. openssl@3 is already
-# pre-installed on the macos-14 runner image; libpq is not. Both are
+# Install libpq and SQLite for the database-backed stores. openssl@3 is already
+# pre-installed on the macos-14 runner image; the database libraries are not. They are
 # keg-only on Homebrew (not in the standard /opt/homebrew/lib search
 # path), so we point CMake at them via CMAKE_PREFIX_PATH below.
-before-all = "brew install libpq curl"
+before-all = "brew install libpq sqlite curl"
 
 # macOS deployment target: 14.0 (Sonoma, Sep 2023). The pinch is
 # Homebrew OpenSSL on the macos-14 GitHub runner — its bottles are
@@ -364,4 +364,4 @@ before-all = "brew install libpq curl"
 # Silicon brew prefix is /opt/homebrew (no shell expansion in TOML,
 # so the paths are hardcoded; safe because the matrix only runs on
 # macos-14 arm64).
-environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/openssl@3" }
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/sqlite:/opt/homebrew/opt/openssl@3" }
