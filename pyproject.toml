@@ -121,7 +121,7 @@ minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
 
 # Reproducible-ish: Release with assertions off, no debug info.
-cmake.build-type = "Release"
+cmake.build-type = "RelWithDebInfo"
 
 # Surface cmake install actions in the cibuildwheel log so future
 # wheel-content debugging isn't silent.
