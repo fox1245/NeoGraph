@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5e9af54ef18a3cd966ab6ab35fa63ee0fa9e78b92c6457c4de34a88edd87656d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6c0a2bac67bd43d1c94e3cd66a677752f593c8888e00faaac01fb04c8de917d3 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,20 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.12.1] - 2026-08-23
+
+### 修复
+- **Python 示例运行时契约。** 路由通道示例改用保留的 `__route__`，声明动态
+  `Send` 载荷通道，并将纯缓存示例设为 `CacheScope::Reusable`。同时保留
+  OpenRouter 基础 URL，使 Windows 控制台输出具备 UTF-8 安全性，并拒绝或重试
+  状态成功但内容为空的 reasoning 模型响应。
+- **Responses 传输演示。** 官方 OpenAI 使用真实的 WebSocket 流式入口，兼容
+  网关则选择构建中可用的 HTTP/2 或 HTTP/1.1。深度研究演示采用有界的令牌和
+  时间预算以及三路、两 worker 的 fan-out，并已通过 OpenRouter 实际验证。
+- **可操作的 Windows 网络错误。** Python 现公开 `_HAVE_LIBCURL`，并把采用
+  本地代码页编码的 `std::system_error` 消息转换为含 category 与 code 的安全
+  ASCII 诊断。因此 Winsock 10060 等根因不会再被 `UnicodeDecodeError` 覆盖。
 
 ## [0.12.0] - 2026-08-23
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=5e9af54ef18a3cd966ab6ab35fa63ee0fa9e78b92c6457c4de34a88edd87656d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=6c0a2bac67bd43d1c94e3cd66a677752f593c8888e00faaac01fb04c8de917d3 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,23 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+## [0.12.1] - 2026-08-23
+
+### 수정됨
+- **Python 예제 런타임 계약.** 라우트 채널 예제가 예약된 `__route__`를
+  사용하도록 수정하고, 동적 `Send` 페이로드 채널을 선언했으며, 순수 캐시
+  예제를 `CacheScope::Reusable`로 설정했습니다. 또한 OpenRouter 기본 URL을
+  보존하고 Windows 콘솔 출력을 UTF-8 안전하게 만들었으며, 성공했지만 비어
+  있는 reasoning 모델 응답은 거부하거나 재시도합니다.
+- **Responses 전송 데모.** 공식 OpenAI는 실제 WebSocket 스트리밍 진입점을
+  사용하고, 호환 게이트웨이는 빌드에 포함된 HTTP/2 또는 HTTP/1.1을
+  선택합니다. 딥 리서치 데모에는 제한된 토큰·시간 예산과 3-way/2-worker
+  fan-out을 적용했으며 OpenRouter로 실제 검증했습니다.
+- **조치 가능한 Windows 네트워크 오류.** Python에서 `_HAVE_LIBCURL`을
+  노출하고 로캘 인코딩된 `std::system_error` 문구를 category와 code가 포함된
+  안전한 ASCII 진단으로 변환합니다. 따라서 Winsock 10060 같은 원인이
+  `UnicodeDecodeError`로 대체되지 않습니다.
 
 ## [0.12.0] - 2026-08-23
 

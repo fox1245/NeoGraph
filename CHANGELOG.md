@@ -11,6 +11,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-23
+
+### Fixed
+- **Python example runtime contracts.** Updated route-channel examples to use
+  reserved `__route__`, declared dynamic `Send` payload channels, opted the
+  pure cache demo into `CacheScope::Reusable`, preserved OpenRouter base URLs,
+  made Windows console output UTF-8-safe, and rejected or retried successful
+  but empty reasoning-model responses.
+- **Responses transport demos.** Official OpenAI now uses the real WebSocket
+  streaming entry point, while compatible gateways select compiled HTTP/2 or
+  HTTP/1.1. The deep-research demos use bounded token/time budgets and a
+  three-way, two-worker fan-out that was validated live through OpenRouter.
+- **Actionable Windows network failures.** Python now exposes `_HAVE_LIBCURL`
+  and translates locale-encoded `std::system_error` messages into safe ASCII
+  diagnostics with category and code, preserving errors such as Winsock 10060
+  instead of replacing them with `UnicodeDecodeError`.
+
 ## [0.12.0] - 2026-08-23
 
 ### Added
