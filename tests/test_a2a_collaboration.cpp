@@ -768,6 +768,52 @@ TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
     server.stop();
 }
 
+TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
+    ProgramAdapterFixture fixture;
+    auto adapter = std::make_shared<ProgramAgentAdapter>(
+        fixture.runtime, fixture.admitted_version(), "owner-b");
+    AgentCard card;
+    card.name = "strict-authentication";
+    card.description = "Strict authenticated Program task test";
+    card.url = "http://127.0.0.1:0/";
+    card.version = "1.0.0";
+    card.protocol_version = "0.3.0";
+    card.preferred_transport = "JSONRPC";
+    card.default_input_modes = {"text/plain"};
+    card.default_output_modes = {"text/plain"};
+    A2AServer server(
+        adapter, card,
+        [](std::string_view authorization)
+            -> std::optional<CollaborationPeerIdentity> {
+            if (authorization == "Bearer supervisor") {
+                return CollaborationPeerIdentity{"owner-b", "supervisor"};
+            }
+            return std::nullopt;
+        },
+        true);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
+
+    const auto unauthenticated = client.send_message_sync("ordinary");
+    EXPECT_EQ(unauthenticated.status.state, TaskState::AuthRequired);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
+    client.set_authorization_header("Bearer wrong");
+    EXPECT_EQ(client.send_message_sync("ordinary").status.state,
+              TaskState::AuthRequired);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
+
+    client.set_authorization_header("Bearer supervisor");
+    const auto completed = client.send_message_sync("ordinary");
+    EXPECT_EQ(completed.status.state, TaskState::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+    client.set_authorization_header({});
+    EXPECT_THROW(client.get_task(completed.id), std::runtime_error);
+    EXPECT_THROW(client.cancel_task(completed.id), std::runtime_error);
+    client.set_authorization_header("Bearer supervisor");
+    EXPECT_EQ(client.get_task(completed.id).status.state, TaskState::Completed);
+    server.stop();
+}
+
 #endif
 
 }  // namespace

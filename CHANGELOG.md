@@ -12,6 +12,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Strict authentication for Program-backed A2A services.** Program A2A
+  constructors now accept an opt-in `require_authenticated_requests` flag that
+  applies the configured authenticator to ordinary message, stream, task-get,
+  and task-cancel RPCs as well as collaboration envelopes. The default remains
+  false for legacy compatibility.
 - **Untrusted supplemental runtime context.** Added
   `ContextArtifactKind::UntrustedSupplemental` and
   `ContextPlacement::AfterHistory`. Existing artifact kinds retain their

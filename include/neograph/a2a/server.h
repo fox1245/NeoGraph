@@ -135,28 +135,33 @@ class NEOGRAPH_API A2AServer {
     /**
      * Resolve the HTTP Authorization header into an identity the application
      * has authenticated. The server never retains the header or credentials.
-     * Collaboration envelopes require a non-empty, matching result; ordinary
-     * legacy A2A messages retain their existing unauthenticated behavior.
+     * Collaboration envelopes require a non-empty, matching result. Setting
+     * require_authenticated_requests additionally fail-closes ordinary
+     * message/send, message/stream, tasks/get, and tasks/cancel calls; its
+     * default is false for source-compatible legacy behavior.
      */
     using CollaborationAuthenticator = std::function<std::optional<CollaborationPeerIdentity>(
         std::string_view authorization_header)>;
 
     A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
               AgentCard card,
-              CollaborationAuthenticator collaboration_authenticator = {});
+              CollaborationAuthenticator collaboration_authenticator = {},
+              bool require_authenticated_requests = false);
 
     A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
               neograph::program::ProgramVersion version,
               std::string owner_scope,
               AgentCard card,
               std::shared_ptr<CollaborationMailbox> mailbox = {},
-              CollaborationAuthenticator collaboration_authenticator = {});
+              CollaborationAuthenticator collaboration_authenticator = {},
+              bool require_authenticated_requests = false);
     A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
               neograph::program::ProgramVersion version,
               AgentCard card,
               std::string owner_scope,
               std::shared_ptr<CollaborationMailbox> mailbox = {},
-              CollaborationAuthenticator collaboration_authenticator = {});
+              CollaborationAuthenticator collaboration_authenticator = {},
+              bool require_authenticated_requests = false);
 #endif
 
     ~A2AServer();

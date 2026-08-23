@@ -303,6 +303,18 @@ if(NEOGRAPH_BUILD_A2A)
         test_a2a_client.cpp
         test_a2a_server.cpp
     )
+
+    add_executable(neograph_a2a_collaboration_tests
+        test_a2a_collaboration.cpp
+    )
+    target_compile_definitions(neograph_a2a_collaboration_tests PRIVATE
+        NEOGRAPH_A2A_TESTING)
+    target_link_libraries(neograph_a2a_collaboration_tests PRIVATE
+        neograph::a2a
+        GTest::gtest_main
+    )
+    add_test(NAME neograph.a2a_collaboration
+             COMMAND neograph_a2a_collaboration_tests)
 endif()
 
 # The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9cbc4129d36ff62245c6af1ab51108eb19ce949100b032eaa39a89168d196fd5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a1c6eb92092169d7508c4209aff162fa841fd6052940e0db0cccba5d3db6b4fb -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **Program 驱动 A2A 服务的严格认证。** Program A2A 构造函数新增可选的
+  `require_authenticated_requests` 标志。启用后，除协作 envelope 外，普通
+  message、stream、task 查询和取消 RPC 也必须通过已配置的 authenticator。
+  为保持兼容，默认值仍为 false。
 - **不受信任的补充运行时上下文。** 新增
   `ContextArtifactKind::UntrustedSupplemental` 和
   `ContextPlacement::AfterHistory`。现有 artifact kind 的 system message

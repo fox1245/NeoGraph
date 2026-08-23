@@ -258,6 +258,7 @@ struct A2AServer::Impl {
 #ifdef NEOGRAPH_A2A_PROGRAM
     std::shared_ptr<ProgramAgentAdapter>           program_adapter;
     A2AServer::CollaborationAuthenticator          collaboration_authenticator;
+    bool                                            require_authenticated_requests = false;
 #endif
     httplib::Server                               svr;
     std::thread                                   listener;
@@ -641,6 +642,7 @@ A2AServer::Impl::authenticate_collaboration_request(const httplib::Request& requ
 bool A2AServer::Impl::authorizes_collaboration_message(
     const Message& inbound,
     const std::optional<CollaborationPeerIdentity>& authenticated_peer) const {
+    if (require_authenticated_requests && !authenticated_peer) return false;
     if (!has_collaboration_marker(inbound)) return true;
     if (!authenticated_peer || !program_adapter) return false;
     const auto& mailbox = program_adapter->mailbox();
@@ -904,8 +906,15 @@ void A2AServer::Impl::handle_tasks_get(const httplib::Request& req,
                                        httplib::Response& res) {
     auto task_id = params.value("id", std::string());
 #ifdef NEOGRAPH_A2A_PROGRAM
+    const auto authenticated_peer = authenticate_collaboration_request(req);
+    if (require_authenticated_requests && !authenticated_peer) {
+        res.status = 200;
+        res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
+                        "application/json");
+        return;
+    }
     if (authorize_collaboration_task(
-            task_id, authenticate_collaboration_request(req), false) ==
+            task_id, authenticated_peer, false) ==
         CollaborationTaskAuthorization::Unauthorized) {
         res.status = 200;
         res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
@@ -1015,8 +1024,15 @@ void A2AServer::Impl::handle_tasks_cancel(const httplib::Request& req,
                                           httplib::Response& res) {
     auto task_id = params.value("id", std::string());
 #ifdef NEOGRAPH_A2A_PROGRAM
+    const auto authenticated_peer = authenticate_collaboration_request(req);
+    if (require_authenticated_requests && !authenticated_peer) {
+        res.status = 200;
+        res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
+                        "application/json");
+        return;
+    }
     if (authorize_collaboration_task(
-            task_id, authenticate_collaboration_request(req), true) ==
+            task_id, authenticated_peer, true) ==
         CollaborationTaskAuthorization::Unauthorized) {
         res.status = 200;
         res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
@@ -1107,11 +1123,13 @@ A2AServer::A2AServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
 #ifdef NEOGRAPH_A2A_PROGRAM
 A2AServer::A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
                      AgentCard card,
-                     CollaborationAuthenticator collaboration_authenticator)
+                     CollaborationAuthenticator collaboration_authenticator,
+                     bool require_authenticated_requests)
     : impl_(std::make_unique<Impl>()) {
     if (!adapter) throw std::invalid_argument("A2AServer: ProgramAgentAdapter is null");
     impl_->program_adapter = std::move(adapter);
     impl_->collaboration_authenticator = std::move(collaboration_authenticator);
+    impl_->require_authenticated_requests = require_authenticated_requests;
     impl_->card = std::move(card);
     impl_->register_routes();
 }
@@ -1121,21 +1139,25 @@ A2AServer::A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
                      std::string owner_scope,
                      AgentCard card,
                      std::shared_ptr<CollaborationMailbox> mailbox,
-                     CollaborationAuthenticator collaboration_authenticator)
+                     CollaborationAuthenticator collaboration_authenticator,
+                     bool require_authenticated_requests)
     : A2AServer(std::make_shared<ProgramAgentAdapter>(
                     std::move(runtime), std::move(version), std::move(owner_scope),
                     std::move(mailbox)),
-                std::move(card), std::move(collaboration_authenticator)) {}
+                std::move(card), std::move(collaboration_authenticator),
+                require_authenticated_requests) {}
 
 A2AServer::A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
                      neograph::program::ProgramVersion version,
                      AgentCard card,
                      std::string owner_scope,
                      std::shared_ptr<CollaborationMailbox> mailbox,
-                     CollaborationAuthenticator collaboration_authenticator)
+                     CollaborationAuthenticator collaboration_authenticator,
+                     bool require_authenticated_requests)
     : A2AServer(std::move(runtime), std::move(version), std::move(owner_scope),
                 std::move(card), std::move(mailbox),
-                std::move(collaboration_authenticator)) {}
+                std::move(collaboration_authenticator),
+                require_authenticated_requests) {}
 #endif
 
 A2AServer::~A2AServer() { stop(); }

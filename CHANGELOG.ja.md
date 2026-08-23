@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9cbc4129d36ff62245c6af1ab51108eb19ce949100b032eaa39a89168d196fd5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a1c6eb92092169d7508c4209aff162fa841fd6052940e0db0cccba5d3db6b4fb -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **Program ベース A2A サービスの厳格認証。** Program A2A コンストラクタに
+  オプトインの `require_authenticated_requests` を追加しました。有効時は
+  collaboration envelope だけでなく通常の message、stream、task 取得・取消
+  RPC にも authenticator を適用します。互換性のため既定値は false です。
 - **信頼されていない補助ランタイムコンテキスト。**
   `ContextArtifactKind::UntrustedSupplemental` と
   `ContextPlacement::AfterHistory` を追加しました。既存の artifact kind の
