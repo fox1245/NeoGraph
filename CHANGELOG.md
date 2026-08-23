@@ -11,6 +11,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Untrusted supplemental runtime context.** Added
+  `ContextArtifactKind::UntrustedSupplemental` and
+  `ContextPlacement::AfterHistory`. Existing artifact kinds retain their
+  system-message behavior, while explicitly untrusted RAW or derived context
+  can now be receipt-bound and delivered as user data after the complete
+  chronological Human/AI/Tool window.
+
 ## [0.12.1] - 2026-08-23
 
 ### Fixed

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=6c0a2bac67bd43d1c94e3cd66a677752f593c8888e00faaac01fb04c8de917d3 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9cbc4129d36ff62245c6af1ab51108eb19ce949100b032eaa39a89168d196fd5 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,14 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 추가됨
+- **신뢰되지 않은 보조 런타임 컨텍스트.**
+  `ContextArtifactKind::UntrustedSupplemental`과
+  `ContextPlacement::AfterHistory`를 추가했습니다. 기존 artifact kind의
+  system message 동작은 유지하면서, 명시적으로 신뢰되지 않은 RAW 또는
+  derived context를 receipt에 결합해 전체 Human/AI/Tool 시간순 이력 뒤에
+  user data로 전달할 수 있습니다.
 
 ## [0.12.1] - 2026-08-23
 

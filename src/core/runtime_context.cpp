@@ -239,6 +239,7 @@ std::string_view to_string(ContextArtifactKind value) noexcept {
         case ContextArtifactKind::RequiredSkill: return "required_skill";
         case ContextArtifactKind::HookOutput: return "hook_output";
         case ContextArtifactKind::HardConstraint: return "hard_constraint";
+        case ContextArtifactKind::UntrustedSupplemental: return "untrusted_supplemental";
     }
     return "unknown";
 }
@@ -247,6 +248,7 @@ std::string_view to_string(ContextPlacement value) noexcept {
     switch (value) {
         case ContextPlacement::BeforeLatestUser: return "before_latest_user";
         case ContextPlacement::AfterLatestUser: return "after_latest_user";
+        case ContextPlacement::AfterHistory: return "after_history";
     }
     return "unknown";
 }
@@ -275,12 +277,14 @@ ContextArtifactKind context_artifact_kind_from_string(std::string_view value) {
     if (value == "required_skill") return ContextArtifactKind::RequiredSkill;
     if (value == "hook_output") return ContextArtifactKind::HookOutput;
     if (value == "hard_constraint") return ContextArtifactKind::HardConstraint;
+    if (value == "untrusted_supplemental") return ContextArtifactKind::UntrustedSupplemental;
     throw std::invalid_argument("Unknown context artifact kind");
 }
 
 ContextPlacement context_placement_from_string(std::string_view value) {
     if (value == "before_latest_user") return ContextPlacement::BeforeLatestUser;
     if (value == "after_latest_user") return ContextPlacement::AfterLatestUser;
+    if (value == "after_history") return ContextPlacement::AfterHistory;
     throw std::invalid_argument("Unknown context placement");
 }
 

@@ -27,11 +27,15 @@ enum class ContextArtifactKind : std::uint8_t {
     RequiredSkill,
     HookOutput,
     HardConstraint,
+    /** Explicitly untrusted RAW or derived data delivered as a user message. */
+    UntrustedSupplemental,
 };
 
 enum class ContextPlacement : std::uint8_t {
     BeforeLatestUser,
     AfterLatestUser,
+    /** Append after the complete chronological RAW message window. */
+    AfterHistory,
 };
 
 enum class RuntimeGuaranteeProfile : std::uint8_t {

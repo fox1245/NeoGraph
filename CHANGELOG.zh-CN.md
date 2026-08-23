@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6c0a2bac67bd43d1c94e3cd66a677752f593c8888e00faaac01fb04c8de917d3 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9cbc4129d36ff62245c6af1ab51108eb19ce949100b032eaa39a89168d196fd5 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -10,6 +10,13 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 新增
+- **不受信任的补充运行时上下文。** 新增
+  `ContextArtifactKind::UntrustedSupplemental` 和
+  `ContextPlacement::AfterHistory`。现有 artifact kind 的 system message
+  行为保持不变，同时可以将显式不受信任的 RAW 或 derived context 绑定到
+  receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ## [0.12.1] - 2026-08-23
 

@@ -105,13 +105,16 @@ ChatMessage render_artifact(const ContextArtifact& artifact) {
     if (artifact.media_type() != "text/plain" && artifact.media_type() != "text/markdown") {
         throw std::invalid_argument("Context assembly only renders text/plain or text/markdown artifacts");
     }
+    const auto role = artifact.kind() == ContextArtifactKind::UntrustedSupplemental
+        ? "user"
+        : "system";
     const auto content = artifact.content();
-    if (content.is_string()) return {"system", content.get<std::string>()};
+    if (content.is_string()) return {role, content.get<std::string>()};
     if (!content.is_object() || content.size() != 1 || !content.contains("text") ||
         !content.at("text").is_string()) {
         throw std::invalid_argument("Context artifact text content must be a string or exactly {text: string}");
     }
-    return {"system", content.at("text").get<std::string>()};
+    return {role, content.at("text").get<std::string>()};
 }
 
 void normalize_required_ids(std::vector<std::string>& ids,
@@ -258,15 +261,21 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     }
 
     std::vector<ChatMessage> before;
-    std::vector<ChatMessage> after;
+    std::vector<ChatMessage> after_user;
+    std::vector<ChatMessage> after_history;
     std::uint64_t mandatory = 0;
     for (const auto& item : selected) {
         const auto rendered = render_artifact(item.artifact);
         if (item.artifact.required()) {
             mandatory += estimate_json_tokens(messages_json({rendered}));
         }
-        (item.artifact.placement() == ContextPlacement::BeforeLatestUser ? before : after)
-            .push_back(rendered);
+        if (item.artifact.placement() == ContextPlacement::BeforeLatestUser) {
+            before.push_back(rendered);
+        } else if (item.artifact.placement() == ContextPlacement::AfterLatestUser) {
+            after_user.push_back(rendered);
+        } else {
+            after_history.push_back(rendered);
+        }
     }
 
     std::vector<ChatMessage> merged;
@@ -279,11 +288,12 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     merged.insert(merged.end(), before.begin(), before.end());
     if (insertion < raw_messages.size()) {
         merged.push_back(raw_messages[insertion]);
-        merged.insert(merged.end(), after.begin(), after.end());
+        merged.insert(merged.end(), after_user.begin(), after_user.end());
         merged.insert(merged.end(), raw_messages.begin() + insertion + 1, raw_messages.end());
     } else {
-        merged.insert(merged.end(), after.begin(), after.end());
+        merged.insert(merged.end(), after_user.begin(), after_user.end());
     }
+    merged.insert(merged.end(), after_history.begin(), after_history.end());
     // Slots are distinct from caller history: host instructions survive
     // interposition, and supplemental task input is receipt-bound.
     std::vector<ChatMessage> assembled;

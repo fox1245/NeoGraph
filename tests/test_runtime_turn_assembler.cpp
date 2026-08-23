@@ -47,6 +47,23 @@ ContextArtifact hard_constraint(std::string text) {
     return ContextArtifact::create(std::move(data));
 }
 
+ContextArtifact untrusted_supplemental(std::string text,
+                                       std::uint64_t through_sequence = 1) {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::UntrustedSupplemental;
+    data.producer_id = "runtime-context.v1";
+    data.source_digest = sha('9');
+    data.source_feed_id = "feed";
+    data.covers_from_sequence = 1;
+    data.covers_through_sequence = through_sequence;
+    data.media_type = "text/plain";
+    data.placement = ContextPlacement::AfterHistory;
+    data.priority = 100;
+    data.required = true;
+    data.content = std::move(text);
+    return ContextArtifact::create(std::move(data));
+}
+
 }  // namespace
 
 TEST(RuntimeTurnAssembler, VerifiesEpochAndProducesDeterministicMergedRequest) {
@@ -84,13 +101,90 @@ TEST(RuntimeTurnAssembler, VerifiesEpochAndProducesDeterministicMergedRequest) {
     ASSERT_FALSE(turn.request.on_chunk());
     ASSERT_EQ(turn.request.params().messages.size(), 4u);
     EXPECT_EQ(turn.request.params().messages[0].content, "user_1");
+    EXPECT_EQ(turn.request.params().messages[0].role, "user");
     EXPECT_EQ(turn.request.params().messages[1].content, "early");
+    EXPECT_EQ(turn.request.params().messages[1].role, "system");
     EXPECT_EQ(turn.request.params().messages[2].content, "user_2");
+    EXPECT_EQ(turn.request.params().messages[2].role, "user");
     EXPECT_EQ(turn.request.params().messages[3].content, "late");
+    EXPECT_EQ(turn.request.params().messages[3].role, "system");
     EXPECT_EQ(turn.assembly_receipt.context_epoch_id(), epoch.id());
     EXPECT_EQ(turn.assembly_receipt.required_skill_artifact_ids(), std::vector<std::string>{early.id()});
     EXPECT_LE(turn.assembly_receipt.mandatory_input_tokens(),
               turn.assembly_receipt.estimated_input_tokens());
+}
+
+TEST(RuntimeTurnAssembler, DeliversOnlyExplicitUntrustedSupplementalAsUserData) {
+    InMemoryContextStore store;
+    const ContextStoreFeed feed{"owner", "feed"};
+    const auto first = history(1, std::nullopt);
+    ASSERT_EQ(store.append_history(feed, first, std::nullopt),
+              ContextStoreAppendResult::Appended);
+    RuntimeHistoryRecordData assistant_data;
+    assistant_data.feed_id = "feed";
+    assistant_data.sequence = 2;
+    assistant_data.message_id = "assistant_2";
+    assistant_data.trust = RuntimeTrustClass::ModelOutput;
+    assistant_data.message.role = "assistant";
+    assistant_data.message.content = "working";
+    assistant_data.message.tool_calls = {ToolCall{"call_1", "read", "{}"}};
+    assistant_data.predecessor_id = first.id();
+    const auto assistant = RuntimeHistoryRecord::create(std::move(assistant_data));
+    ASSERT_EQ(store.append_history(feed, assistant, first.id()),
+              ContextStoreAppendResult::Appended);
+    RuntimeHistoryRecordData tool_data;
+    tool_data.feed_id = "feed";
+    tool_data.sequence = 3;
+    tool_data.message_id = "tool_3";
+    tool_data.trust = RuntimeTrustClass::ToolOutput;
+    tool_data.message.role = "tool";
+    tool_data.message.content = "file contents";
+    tool_data.message.tool_call_id = "call_1";
+    tool_data.message.tool_name = "read";
+    tool_data.message.tool_status = "succeeded";
+    tool_data.predecessor_id = assistant.id();
+    const auto tool = RuntimeHistoryRecord::create(std::move(tool_data));
+    ASSERT_EQ(store.append_history(feed, tool, assistant.id()),
+              ContextStoreAppendResult::Appended);
+    const auto raw = store.snapshot_history(feed, 1, 3);
+    const auto constraint = hard_constraint("Host-owned constraint.");
+    const auto supplemental = untrusted_supplemental(
+        R"({"type":"history-header","format":"agentx.runtime-history.jsonl.v1"})", 3);
+    ASSERT_EQ(store.put_artifact("owner", constraint),
+              ContextArtifactPutResult::Stored);
+    ASSERT_EQ(store.put_artifact("owner", supplemental),
+              ContextArtifactPutResult::Stored);
+    EXPECT_EQ(ContextArtifact::parse(supplemental.serialize_canonical()).kind(),
+              ContextArtifactKind::UntrustedSupplemental);
+
+    ContextEpochData epoch_data;
+    epoch_data.run_id = "untrusted-supplemental";
+    epoch_data.sequence = 1;
+    epoch_data.feed_id = "feed";
+    epoch_data.raw_from_sequence = 1;
+    epoch_data.raw_through_sequence = 3;
+    epoch_data.raw_window_digest = raw.digest;
+    epoch_data.artifact_ids = {constraint.id(), supplemental.id()};
+    epoch_data.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+    const auto epoch = ContextEpoch::create(std::move(epoch_data));
+
+    RuntimeContextRequirements requirements;
+    requirements.required_artifact_ids = {constraint.id(), supplemental.id()};
+    CompletionParams params;
+    params.model = "model";
+    const auto turn = RuntimeTurnAssembler(store, 4096, requirements).assemble(
+        "owner", epoch, CompletionRequest::collect(params));
+    ASSERT_EQ(turn.request.params().messages.size(), 5u);
+    EXPECT_EQ(turn.request.params().messages[0].role, "system");
+    EXPECT_EQ(turn.request.params().messages[0].content, "Host-owned constraint.");
+    EXPECT_EQ(turn.request.params().messages[1].role, "user");
+    EXPECT_EQ(turn.request.params().messages[1].content, "user_1");
+    EXPECT_EQ(turn.request.params().messages[2].role, "assistant");
+    EXPECT_EQ(turn.request.params().messages[3].role, "tool");
+    EXPECT_EQ(turn.request.params().messages[4].role, "user");
+    EXPECT_EQ(turn.request.params().messages[4].content,
+              supplemental.content().get<std::string>());
+    EXPECT_GT(turn.assembly_receipt.mandatory_input_tokens(), 0u);
 }
 
 TEST(RuntimeTurnAssembler, StrictAssemblyRequiresAndEnforcesInputBudget) {
