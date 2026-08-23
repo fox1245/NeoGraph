@@ -212,6 +212,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
         target_link_libraries(neograph_program_tests PRIVATE
             neograph::program_postgres
+            PostgreSQL::PostgreSQL
         )
     endif()
 endif()
@@ -561,10 +562,10 @@ set_tests_properties(QuickJS.LegacyDrainAudit
 
 if(TARGET neograph_program_tests)
     if(NEOGRAPH_BUILD_POSTGRES)
-        # Keep the Program PostgreSQL store integration case off the shared
+        # Keep the Program PostgreSQL store integration cases off the shared
         # checkpoint fixture while other test cases remain parallelizable.
         set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
-            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility")
+            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*")
         gtest_discover_tests(neograph_program_tests
             TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
             PROPERTIES RESOURCE_LOCK postgres_test_db)

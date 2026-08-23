@@ -471,10 +471,11 @@ The typed direct-dispatch path covers sequence, branch, bounded loop/retry,
 parallel/race/quorum/map, await, cancel, checkpoint, emit, return, and Core
 operations. Durable `spawn`/child `await` remains the P6 child path; arbitrary
 dynamic `Send` and topology mutation remain out of scope.
-Status (2026-08-05): **Partial.** In-memory and SQLite catalog/store activation,
-rollback, owner isolation, retention, and migration records are implemented.
-PostgreSQL Program transition persistence and backend-parity process-restart
-proof remain open.
+Status (2026-08-23): **Partial.** In-memory, SQLite, and PostgreSQL Program
+transition persistence now cover atomic publication, owner isolation, CAS races,
+lineage/generation replacement, leases, effects, commands, context, Hooks, and
+child metadata across reopen. A backend-neutral reconnect, corruption/tamper,
+retention, and GC proof matrix remains open.
 Status (2026-08-05): **Partial.** Migration classes, exact compatible forks,
 journal CAS, pending input/effect records, outbox binding, and ambiguity
 classification are implemented locally. The runtime-level crash gate spanning
@@ -652,10 +653,11 @@ portable performance promise. Any future generic interpreter requires a new
 measured architecture decision.
 
 ### P4 — Versions, activation, and durable stores
-Status (2026-08-05): **Partial.** In-memory and SQLite catalog/store activation,
-rollback, owner isolation, retention, and migration records are implemented.
-PostgreSQL Program transition persistence and backend-parity process-restart
-proof remain open.
+Status (2026-08-23): **Partial.** In-memory, SQLite, and PostgreSQL Program
+transition persistence now cover atomic publication, owner isolation, CAS races,
+lineage/generation replacement, leases, effects, commands, context, Hooks, and
+child metadata across reopen. A backend-neutral reconnect, corruption/tamper,
+retention, and GC proof matrix remains open.
 
 Deliverables:
 

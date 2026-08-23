@@ -7,12 +7,17 @@
 
 #include <sqlite3.h>
 #endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+#include <neograph/program/postgres_transition_store.h>
+#include <libpq-fe.h>
+#endif
 #include <gtest/gtest.h>
 
 #include <array>
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <stdexcept>
@@ -1199,6 +1204,59 @@ void exercise_execution_lease_fences_ordinary_publication(
               ProgramTransitionPublishResult::Published);
     EXPECT_FALSE(store.load_execution_lease("owner-a", "run-1"));
 }
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+void reset_postgres_transition_schema(const char* url) {
+    auto* connection = PQconnectdb(url);
+    if (!connection || PQstatus(connection) != CONNECTION_OK) {
+        const auto message = connection ? std::string(PQerrorMessage(connection))
+                                        : std::string("null PostgreSQL connection");
+        if (connection) PQfinish(connection);
+        throw std::runtime_error("PostgreSQL transition test reset failed: " + message);
+    }
+    auto* database = PQexec(connection, "SELECT current_database()");
+    const bool database_query_succeeded = database &&
+        PQresultStatus(database) == PGRES_TUPLES_OK && PQntuples(database) == 1 &&
+        PQnfields(database) == 1;
+    if (!database_query_succeeded ||
+        std::string(PQgetvalue(database, 0, 0)) != "neograph_test") {
+        const auto actual = database_query_succeeded
+            ? std::string(PQgetvalue(database, 0, 0))
+            : std::string("unknown");
+        if (database) PQclear(database);
+        PQfinish(connection);
+        throw std::runtime_error(
+            "PostgreSQL transition tests require the disposable neograph_test database; got " +
+            actual);
+    }
+    PQclear(database);
+    const char* sql = R"SQL(
+DROP TABLE IF EXISTS neograph_program_execution_leases_v1;
+DROP TABLE IF EXISTS neograph_program_graph_migration_capsules_v1;
+DROP TABLE IF EXISTS neograph_program_run_lineage_runs_v1;
+DROP TABLE IF EXISTS neograph_program_run_lineage_history_v1;
+DROP TABLE IF EXISTS neograph_program_run_generation_publications_v1;
+DROP TABLE IF EXISTS neograph_program_run_generations_v1;
+DROP TABLE IF EXISTS neograph_program_run_lineage_heads_v1;
+DROP TABLE IF EXISTS neograph_program_transition_hook_outbox_log_v1;
+DROP TABLE IF EXISTS neograph_program_transition_context_log_v1;
+DROP TABLE IF EXISTS neograph_program_transition_javascript_command_log_v2;
+DROP TABLE IF EXISTS neograph_program_transition_effect_log_v2;
+DROP TABLE IF EXISTS neograph_program_transition_event_log_v2;
+DROP TABLE IF EXISTS neograph_program_transition_run_heads_v2;
+)SQL";
+    auto* result = PQexec(connection, sql);
+    const auto status = result ? PQresultStatus(result) : PGRES_FATAL_ERROR;
+    if (status != PGRES_COMMAND_OK) {
+        const auto message = result ? std::string(PQresultErrorMessage(result))
+                                    : std::string(PQerrorMessage(connection));
+        if (result) PQclear(result);
+        PQfinish(connection);
+        throw std::runtime_error("PostgreSQL transition test reset failed: " + message);
+    }
+    PQclear(result);
+    PQfinish(connection);
+}
+#endif
 }  // namespace
 
 TEST(ProgramTransitionStoreTest, MissingJavaScriptCommandReadSupportFailsClosed) {
@@ -3068,6 +3126,241 @@ TEST(ProgramTransitionStoreTest, SQLiteConcurrentCasAcrossConnectionsHasOneWinne
                     run->terminal_result()->status() == ProgramTerminalStatus::Failed);
     }
     std::filesystem::remove(path);
+}
+#endif
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+TEST(ProgramTransitionStoreTest, PostgreSQLReopensAtomicLineageAndOwnerIsolation) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+    reset_postgres_transition_schema(url);
+    static std::atomic<unsigned> sequence{0};
+    const auto suffix = std::to_string(sequence.fetch_add(1));
+    const auto run_id = "pg-transition-run-" + suffix;
+    auto publication = start_publication_for(run_id, digest('d'), digest('e'), budget(), 100);
+    attach_initial_lineage(publication);
+    const auto lineage_id = publication.run_lineage->lineage_id();
+    const auto generation_id = publication.run_generation->id();
+
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, publication),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+    }
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        PostgreSQLProgramTransitionStore same_backend(url);
+        EXPECT_FALSE(store.process_coordination_key().empty());
+        EXPECT_EQ(store.process_coordination_key(), same_backend.process_coordination_key());
+        const auto run = store.load("owner-a", run_id);
+        ASSERT_TRUE(run);
+        EXPECT_EQ(run->id(), publication.run_record.id());
+        EXPECT_FALSE(store.load("owner-b", run_id));
+        ASSERT_EQ(store.load_events("owner-a", run_id).size(), 1U);
+        const auto lineage = store.load_lineage("owner-a", lineage_id);
+        ASSERT_TRUE(lineage);
+        EXPECT_EQ(lineage->id(), publication.run_lineage->id());
+        EXPECT_EQ(store.load_run_lineage("owner-a", run_id)->id(), lineage->id());
+        const auto generation = store.load_generation("owner-a", lineage_id, 1);
+        ASSERT_TRUE(generation);
+        EXPECT_EQ(generation->id(), generation_id);
+        const auto initial = store.load_generation_initial_publication(
+            "owner-a", lineage_id, 1);
+        ASSERT_TRUE(initial);
+        EXPECT_EQ(initial->run_record.id(), publication.run_record.id());
+    }
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLConcurrentInitialCasHasOneWinner) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+    reset_postgres_transition_schema(url);
+    static std::atomic<unsigned> sequence{1000};
+    const auto run_id = "pg-transition-cas-" + std::to_string(sequence.fetch_add(1));
+    auto first = start_publication_for(run_id, digest('f'), digest('1'), budget(), 200);
+    auto second = start_publication_for(run_id, digest('2'), digest('3'), budget(), 201);
+    attach_initial_lineage(first);
+    attach_initial_lineage(second);
+    PostgreSQLProgramTransitionStore first_store(url);
+    PostgreSQLProgramTransitionStore second_store(url);
+    std::barrier ready(3);
+    auto publish = [&](PostgreSQLProgramTransitionStore& store,
+                       ProgramTransitionPublication value) {
+        ready.arrive_and_wait();
+        return store.compare_publish("owner-a", {}, std::move(value));
+    };
+    auto a = std::async(std::launch::async, [&] { return publish(first_store, first); });
+    auto b = std::async(std::launch::async, [&] { return publish(second_store, second); });
+    ready.arrive_and_wait();
+    const auto a_result = a.get();
+    const auto b_result = b.get();
+    EXPECT_TRUE((a_result == ProgramTransitionPublishResult::Published &&
+                 b_result == ProgramTransitionPublishResult::Conflict) ||
+                (b_result == ProgramTransitionPublishResult::Published &&
+                 a_result == ProgramTransitionPublishResult::Conflict));
+    const auto winner = first_store.load("owner-a", run_id);
+    ASSERT_TRUE(winner);
+    EXPECT_TRUE(winner->id() == first.run_record.id() || winner->id() == second.run_record.id());
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLCriticalStateMachineScenarios) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_initial_reservation_is_rejected(store);
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_javascript_command_history(store);
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_javascript_command_reservation_settlement(store);
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_commandless_running_checkpoint_requires_host_evidence(store);
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_execution_lease_fences_ordinary_publication(store);
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_cross_thread_call_core_settlement(store, false);
+    }
+    reset_postgres_transition_schema(url);
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        exercise_cross_thread_call_core_settlement(store, true);
+    }
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSurviveReopen) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+
+    reset_postgres_transition_schema(url);
+    std::string lineage_id;
+    std::string successor_generation_id;
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        const auto boundary = publish_replacement_boundary(store);
+        const auto lineage = store.load_run_lineage("owner-a", "run-1");
+        ASSERT_TRUE(lineage);
+        const auto predecessor = store.load_generation("owner-a", lineage->lineage_id(), 1);
+        ASSERT_TRUE(predecessor);
+        const auto successor_budget = program_replacement_remaining_budget(
+            boundary.publication.run_record, *lineage, 40);
+        auto target = start_publication_for(
+            "run-2", digest('7'), digest('8'), successor_budget, 40,
+            json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}},
+                 {"previous_run_id", "run-1"}});
+        attach_replacement_successor(target, *lineage, *predecessor,
+                                     boundary.publication.run_record,
+                                     boundary.completed_checkpoint);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, target),
+                  ProgramTransitionPublishResult::Published);
+        lineage_id = lineage->lineage_id();
+        successor_generation_id = target.run_generation->id();
+    }
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        const auto lineage = store.load_lineage("owner-a", lineage_id);
+        ASSERT_TRUE(lineage);
+        EXPECT_EQ(lineage->active_generation(), 2U);
+        EXPECT_EQ(lineage->active_generation_id(), successor_generation_id);
+        ASSERT_TRUE(store.load_generation_initial_publication("owner-a", lineage_id, 1));
+        ASSERT_TRUE(store.load_generation_initial_publication("owner-a", lineage_id, 2));
+        const auto chain = inspect_program_replacement_chain(store, "owner-a", "run-2");
+        ASSERT_EQ(chain.replacements().size(), 1U);
+        EXPECT_EQ(chain.replacements().front().target_generation().id(),
+                  successor_generation_id);
+    }
+
+    reset_postgres_transition_schema(url);
+    {
+        const auto start = start_publication();
+        const auto interrupted = interrupted_effect_publication(start);
+        const auto resumed = resumed_effect_publication(interrupted);
+        PostgreSQLProgramTransitionStore store(url);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", interrupted.journal_record.id, resumed),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
+    }
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        ASSERT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
+        ASSERT_TRUE(store.load("owner-a", "run-1"));
+        EXPECT_EQ(store.load("owner-a", "run-1")->continuation().state,
+                  ContinuationState::Running);
+    }
+
+    reset_postgres_transition_schema(url);
+    {
+        auto initial = start_publication();
+        initial.context_publication = context_publication(1);
+        initial.hook_outbox_entries = {pending_hook_outbox_entry()};
+        attach_initial_lineage(initial);
+        auto next = javascript_command_publication(
+            initial, javascript_command_entry(1, false), 20);
+        next.context_publication =
+            context_publication(2, initial.context_publication->epoch.id());
+        attach_same_generation_lineage(next, *initial.run_lineage);
+        PostgreSQLProgramTransitionStore store(url);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, next),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.load_context_publications("owner-a", "run-1").size(), 2U);
+        ASSERT_EQ(store.load_context_publications("owner-a", "run-1", 1).size(), 1U);
+        ASSERT_EQ(store.load_hook_outbox_entries("owner-a", "run-1").size(), 1U);
+    }
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        ASSERT_EQ(store.load_context_publications("owner-a", "run-1").size(), 2U);
+        ASSERT_EQ(store.load_context_publications("owner-a", "run-1", 1).size(), 1U);
+        ASSERT_EQ(store.load_hook_outbox_entries("owner-a", "run-1").size(), 1U);
+    }
+
+    reset_postgres_transition_schema(url);
+    {
+        const auto initial = start_publication();
+        const auto child = child_metadata_publication(initial);
+        PostgreSQLProgramTransitionStore store(url);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, child),
+                  ProgramTransitionPublishResult::Published);
+    }
+    {
+        PostgreSQLProgramTransitionStore store(url);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run);
+        ASSERT_EQ(run->children().size(), 1U);
+        EXPECT_EQ(run->children().front().child_run_id, "child-run-1");
+    }
 }
 #endif
 

@@ -705,6 +705,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
     if(NEOGRAPH_BUILD_POSTGRES)
         add_library(neograph_program_postgres
             src/program/postgres_store.cpp
+            src/program/postgres_transition_store.cpp
         )
         target_include_directories(neograph_program_postgres
             PUBLIC
