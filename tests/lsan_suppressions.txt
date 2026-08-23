@@ -74,6 +74,8 @@ leak:_PyList_AppendTakeRefListResize
 leak:_PyObject_GC_Resize
 leak:_PyBytes_Resize
 leak:PyThread_allocate_lock
+# pytest's capture manager owns an io.StringIO until interpreter shutdown.
+leak:resize_buffer
 
 # pybind11 — class binding init creates Python type objects that
 # live for the process lifetime (one per `py::class_<T>` declaration).

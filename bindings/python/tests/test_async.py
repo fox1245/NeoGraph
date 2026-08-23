@@ -419,6 +419,10 @@ def test_async_run_api_preserves_python_node_exception(async_method):
     assert async_exc.node_name == "e"
     assert async_exc.attempts == 1
     assert _traceback_function_names(async_exc)[-2:] == sync_frames[-2:]
+    # The registered node class deliberately closes over this same exception
+    # object for process lifetime. Its traceback retains this test frame (and
+    # therefore `engine`) unless the fixture explicitly releases it.
+    error.__traceback__ = None
 
 
 def test_resume_async_preserves_python_node_exception():
@@ -477,6 +481,7 @@ def test_resume_async_preserves_python_node_exception():
     assert resume_exc.attempts == 1
     assert _traceback_function_names(resume_exc)[-2:] == [
         "run", "raise_resume_error"]
+    error.__traceback__ = None
 
 
 def test_run_async_invalid_node_return_matches_sync_type_error():
@@ -561,3 +566,6 @@ def test_node_context_does_not_replace_locked_or_existing_attributes():
     assert info.value.attempts == 99
     assert info.value._neograph_node_name == "explode"
     assert info.value._neograph_attempts == 1
+    # LockedError rejects ordinary setattr by design; bypass that test-only
+    # policy to release the traceback frame retained by the registered node.
+    object.__setattr__(error, "__traceback__", None)
