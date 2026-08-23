@@ -61,6 +61,7 @@ _ensure_ssl_ca_bundle()
 
 
 from ._neograph import (
+    _HAVE_LIBCURL,
     ToolDecision,
     ToolGateContext,
     ToolConcurrency,

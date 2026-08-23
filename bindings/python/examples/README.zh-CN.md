@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=26de7309b7f766019fcfd7817d7f697ddb001ae663c127d72fee305abdf2a559 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=f83696b352140f2c77392207424b16e3d297e7b183c67f5d1fd26347c1d7e911 -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -33,12 +33,12 @@ cp .env.example .env  # edit OPENAI_API_KEY for examples that hit a real LLM
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | 双辩论者 + 裁判。辩论者通过 `Send` 进行 fan-out。 |
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | 离线 | 将图定义序列化为 `.json` 文件。 |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | 离线 | 加载一个`.json`图并运行它（14的配套）。 |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **OpenAI WS** | 多轮 Gradio 对话，在 `조사해줘 / research / investigate` 上切换到并行深度研究子图。使用 `SchemaProvider("openai_responses", use_websocket=True)`。需要 `pip install gradio`。 |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **OpenAI WS + Crawl4AI + Postgres** | 与16相同的聊天结构，但研究人员实际上通过本地Crawl4AI容器（`docker run unclecode/crawl4ai`）进行网络搜索，并且状态在Postgres（`PostgresCheckpointStore`）中持久化。两者均可通过环境变量可选配置；缺失时优雅降级。使用 `-DNEOGRAPH_BUILD_POSTGRES=ON` 进行源构建以启用Postgres路径。 |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True)` — 对相同输入的第二次运行在0毫秒内重放缓存的`NodeResult`，无需LLM调用。统计信息通过`engine.node_cache_stats()`获取。 |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **Responses（WS/HTTP）** | 多轮 Gradio 对话，在 `조사해줘 / research / investigate` 上切换到三路并行深度研究子图。官方 OpenAI 默认使用 WebSocket；兼容网关会自动选择构建中可用的 HTTP/2 或 HTTP/1.1。可通过 `NG_RESPONSES_TRANSPORT` 覆盖。需要 `pip install gradio`。 |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **Responses + Crawl4AI + Postgres** | 与16相同的传输感知聊天结构，但研究人员会通过本地 Crawl4AI 容器（`docker run unclecode/crawl4ai`）实际搜索网络，状态则持久化到 Postgres（`PostgresCheckpointStore`）。两者都可通过环境变量选配，缺失时会正常降级。Postgres 路径需要使用 `-DNEOGRAPH_BUILD_POSTGRES=ON` 从源码构建。 |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True, CacheScope.Reusable)` — 后续相同输入的运行会在0毫秒内重放缓存的 `NodeResult`，不再调用 LLM。可通过 `engine.node_cache_stats()` 查看统计信息。 |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | 离线 | `from neograph_engine import message_stream` — 包装一个回调，使`LLM_TOKEN`事件以LangChain形状的消息字典（`{role, content, content_so_far, node, metadata}`）形式到达。 |
 | 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | 离线 | `from neograph_engine.tracing import otel_tracer` — 将引擎事件桥接到OpenTelemetry spans。附带ConsoleSpanExporter；替换为OTLP以发送到Jaeger / Tempo / Honeycomb / Datadog。 |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — 可选 HTTP/2 (libcurl) 传输，对比默认 ConnPool（HTTP/1.1 keep-alive）。两者均在 5 路并行突发流量下进行 A/B 测试，并打印在您的端点上哪个更快。默认 ConnPool 在 api.openai.com 上更快；当您需要 CF-WAF 兼容性、通过企业代理降低 TCP fan-out，或需要 HTTP/3 时，请切换。 |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — 对比可选的 HTTP/2（libcurl）传输与默认 ConnPool（HTTP/1.1 keep-alive）。构建中包含 libcurl 时，会以五路并行突发进行 A/B 测试；不含该后端的 wheel 则执行一次 HTTP/1.1 smoke 调用，并说明如何从源码构建 HTTP/2。 |
 | 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | **OpenAI** | 目标驱动的自我进化：智能体运行，将其输出与 JSON 形状的目标进行评分，并请求 LLM 提出修订后的图定义。当分数 ≥ 1.0 或达到 max_iters 时循环结束。演示了 JSON-as-program，其中修改器的唯一输出是新图规范。 |
 | 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | **OpenAI** | 每线程进化聊天智能体：持续的多轮对话；在轮次之间，智能体的 JSON 定义根据累积的历史被重写。演示了跨进化的检查点恢复（先前的消息得以保留）、`__graph_meta__` 审计通道模式，以及验证器边界（白名单节点类型、必需通道、边连接）。需要 `OPENAI_API_KEY`；没有它也会干净地退出。 |
 | 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | 离线 | 工具门（#89）：`engine.set_tool_gate(...)` 在**任何工具运行之前**对每次工具调用进行咨询，返回 Allow / Allow-with-rewritten-args / Deny / Interrupt。展示了规范的批准提示 — *“智能体想要运行 `rm -rf build/`。允许吗？”* — 并且，关键在于，无害的兄弟调用在人类做决定时**尚未**运行，因此拒绝真的意味着什么都没发生，而批准也不会重新运行它。 |

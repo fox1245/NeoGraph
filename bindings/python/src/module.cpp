@@ -9,9 +9,47 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl_bind.h>
 
+#include <cstdio>
+#include <exception>
+#include <string>
+#include <system_error>
+
 namespace py = pybind11;
 
 namespace neograph::pybind {
+namespace {
+
+std::string ascii_safe_exception_text(const char* text) {
+    std::string out;
+    if (!text) return out;
+    for (const unsigned char byte : std::string(text)) {
+        if (byte >= 0x20 && byte <= 0x7e) {
+            out.push_back(static_cast<char>(byte));
+            continue;
+        }
+        char escaped[5]{};
+        std::snprintf(escaped, sizeof(escaped), "\\x%02x", byte);
+        out.append(escaped);
+    }
+    return out;
+}
+
+void translate_system_error(std::exception_ptr error) {
+    if (!error) return;
+    try {
+        std::rethrow_exception(error);
+    } catch (const std::system_error& system_error) {
+        const auto& code = system_error.code();
+        std::string message = "system error [category=";
+        message += ascii_safe_exception_text(code.category().name());
+        message += ", code=" + std::to_string(code.value()) + "]: ";
+        message += ascii_safe_exception_text(system_error.what());
+        PyErr_SetString(PyExc_RuntimeError, message.c_str());
+    }
+}
+
+} // namespace
+
 void init_provider(py::module_& m);
 void init_artifact(py::module_& m);
 void init_state(py::module_& m);
@@ -82,6 +120,18 @@ PYBIND11_MODULE(_neograph, m) {
     #define NEOGRAPH_PY_VERSION "0.0.0+unknown"
 #endif
     m.attr("__version__") = NEOGRAPH_PY_VERSION;
+
+    // Windows system_error::what() follows the active ANSI code page, not
+    // UTF-8. Passing it to pybind11's default translator can replace the real
+    // socket failure with UnicodeDecodeError. Preserve the error code and
+    // escape non-ASCII bytes into an always-valid diagnostic string.
+    py::register_exception_translator(
+        &neograph::pybind::translate_system_error);
+#ifdef NEOGRAPH_PYBIND_HAS_LIBCURL
+    m.attr("_HAVE_LIBCURL") = true;
+#else
+    m.attr("_HAVE_LIBCURL") = false;
+#endif
 
     neograph::pybind::init_opaque_vectors(m);
     neograph::pybind::init_provider(m);

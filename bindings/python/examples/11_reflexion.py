@@ -91,6 +91,7 @@ class CriticNode(ng.GraphNode):
 
         return [
             ng.ChannelWrite("verdict",    verdict),
+            ng.ChannelWrite("__route__",  verdict),
             ng.ChannelWrite("reflection", reflection),
             ng.ChannelWrite("iteration",  n),
         ]
@@ -118,6 +119,7 @@ definition = {
         "task":       {"reducer": "overwrite"},
         "attempt":    {"reducer": "overwrite"},
         "verdict":    {"reducer": "overwrite"},
+        "__route__":  {"reducer": "overwrite"},
         "reflection": {"reducer": "overwrite"},
         "iteration":  {"reducer": "overwrite"},
     },
@@ -136,6 +138,7 @@ definition = {
             "routes": {
                 "retry": "actor",
                 "ok":    ng.END_NODE,
+                "default": ng.END_NODE,
             },
         },
     ],

@@ -67,7 +67,9 @@ definition = {
 
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
 engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
-engine.set_node_cache_enabled("ask", True)
+# The safe default is execution-local. This node is deliberately pure with
+# respect to RunContext, so opt into reuse across the separate run() calls.
+engine.set_node_cache_enabled("ask", True, ng.CacheScope.Reusable)
 
 
 def run_once(label, topic):

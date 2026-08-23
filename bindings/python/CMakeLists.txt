@@ -112,6 +112,9 @@ if(TARGET neograph::llm)
     target_link_libraries(_neograph PRIVATE neograph::llm)
     target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_LLM)
 endif()
+if(NEOGRAPH_USE_LIBCURL AND CURL_FOUND)
+    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_LIBCURL)
+endif()
 
 # Optional Postgres checkpoint store. Only bound when the engine was
 # built with -DNEOGRAPH_BUILD_POSTGRES=ON (default OFF in the wheel

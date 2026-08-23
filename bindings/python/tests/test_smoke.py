@@ -10,14 +10,47 @@ binding boundary works end-to-end: dict-shaped graph definition →
 GraphEngine.compile → GraphEngine.run → result.output.
 """
 
+import socket
+
 import neograph_engine as neograph  # PyPI dist name is `neograph-engine`;
                                      # bare `neograph` was already taken
+from neograph_engine.llm import SchemaProvider
 
 
 def test_module_metadata():
     assert isinstance(neograph.__version__, str)
     assert neograph.START_NODE == "__start__"
     assert neograph.END_NODE == "__end__"
+    assert isinstance(neograph._HAVE_LIBCURL, bool)
+
+
+def test_non_utf8_system_error_keeps_original_error_type():
+    # Keep an ephemeral loopback port bound but not listening, so connect()
+    # deterministically raises system_error without racing another process.
+    guard = socket.socket()
+    guard.bind(("127.0.0.1", 0))
+    port = guard.getsockname()[1]
+    provider = SchemaProvider(
+        schema_path="openai",
+        api_key="test-key",
+        base_url_override=f"http://127.0.0.1:{port}",
+        allow_insecure_loopback=True,
+        timeout_seconds=1,
+    )
+    params = neograph.CompletionParams(
+        messages=[neograph.ChatMessage(role="user", content="hi")],
+    )
+    try:
+        try:
+            provider.complete(params)
+        except RuntimeError as exc:
+            message = str(exc)
+            assert "category=" in message
+            assert "code=" in message
+        else:  # pragma: no cover - the port is deliberately not listening
+            raise AssertionError("connection-refused probe did not throw")
+    finally:
+        guard.close()
 
 
 def test_stream_mode_bitfield():

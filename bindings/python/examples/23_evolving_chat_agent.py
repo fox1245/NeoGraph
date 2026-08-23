@@ -87,6 +87,14 @@ class PromptedChatNode(ng.GraphNode):
 
         result = self._ctx.provider.complete(params)
         text = result.message.content if result.message else ""
+        if not text.strip():
+            # Keep the graph's brevity preference in the prompt, but give
+            # reasoning models enough total budget to reach visible content.
+            params.max_tokens = max(params.max_tokens, 1200)
+            result = self._ctx.provider.complete(params)
+            text = result.message.content if result.message else ""
+        if not text.strip():
+            raise RuntimeError("model returned no visible chat content")
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
             "content": text,

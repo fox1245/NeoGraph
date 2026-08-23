@@ -40,7 +40,13 @@ not mean "nothing happened" is not a permission system.
 So: decide everything while nothing has happened yet, then act.
 """
 
+import sys
+
 import neograph_engine as ng
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────

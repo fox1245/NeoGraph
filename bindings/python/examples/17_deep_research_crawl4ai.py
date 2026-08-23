@@ -47,7 +47,7 @@ import urllib.parse
 
 import requests
 
-from _common import ng, schema_provider
+from _common import complete_responses, ng, responses_transport, schema_provider
 
 
 # ─── Config (env-driven) ─────────────────────────────────────────────
@@ -58,11 +58,17 @@ PG_DSN = os.environ.get("NEOGRAPH_PG_DSN", "")
 RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
 
+TRANSPORT = responses_transport()
 PROVIDER = schema_provider(
     schema="openai_responses",
     default_model=os.environ.get("DR_MODEL", "gpt-5.6-luna"),
-    use_websocket=True,
+    use_websocket=TRANSPORT == "websocket",
+    prefer_libcurl=TRANSPORT == "http2",
 )
+
+
+def complete(params):
+    return complete_responses(PROVIDER, params, TRANSPORT)
 
 
 # ─── Crawl4AI client ─────────────────────────────────────────────────
@@ -134,7 +140,7 @@ class GeneralChatNode(ng.GraphNode):
         return self._name
 
     def run(self, input):
-        completion = PROVIDER.complete(
+        completion = complete(
             ng.CompletionParams(messages=input.state.get_messages()))
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
@@ -152,9 +158,9 @@ class ResearchPlanNode(ng.GraphNode):
 
     def run(self, input):
         topic = input.state.get("research_topic") or ""
-        completion = PROVIDER.complete(ng.CompletionParams(
+        completion = complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=(
-                "다음 주제를 심층 조사하기 위한 sub-question 3-5개로 분해. "
+                "다음 주제를 심층 조사하기 위한 sub-question 정확히 3개로 분해. "
                 "각각 독립적으로 답변 가능한 형태. 한 줄에 하나, 번호/글머리표 없이.\n\n"
                 f"주제: {topic}"
             ))],
@@ -164,7 +170,7 @@ class ResearchPlanNode(ng.GraphNode):
             line.strip().lstrip("-•0123456789. ")
             for line in completion.message.content.strip().splitlines()
             if line.strip()
-        ][:5]
+        ][:3]
         return [ng.ChannelWrite("sub_questions", questions)]
 
 
@@ -215,7 +221,7 @@ class ResearcherNode(ng.GraphNode):
                 "Note any uncertainty."
             )
 
-        completion = PROVIDER.complete(ng.CompletionParams(
+        completion = complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=prompt)],
         ))
         # ChannelWrite + Command(goto=synthesize). Each Send-spawned
@@ -251,7 +257,7 @@ class SynthesizeNode(ng.GraphNode):
             "마크다운 종합 보고서를 작성하세요. 구조: 개요(2-3 문장) → 주요 발견 → 결론.\n\n"
             f"--- 조사 결과 ---\n\n{sections}"
         )
-        completion = PROVIDER.complete(ng.CompletionParams(
+        completion = complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=prompt)],
         ))
         return [
@@ -310,7 +316,7 @@ definition = {
 }
 
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-engine.set_worker_count(4)
+engine.set_worker_count(int(os.getenv("DR_WORKERS", "2")))
 
 
 # Pick the durable store when available; otherwise fall back.
@@ -340,10 +346,9 @@ engine.set_checkpoint_store(_make_checkpoint_store())
 # ─── Gradio frontend (streaming) ────────────────────────────────────
 #
 # Streaming via run_stream: engine emits GraphEvent on a worker thread,
-# a queue bridges them to the Gradio chat generator. We don't have
-# token-level streaming here (PROVIDER.complete() is non-stream), but
-# node-level progress + the final synthesized message updates live so
-# the user sees what's happening instead of staring at a spinner.
+# and a queue bridges them to the Gradio chat generator. The UI does not
+# render token chunks, but node-level progress and the final synthesized
+# message update live so the user sees work instead of a blank spinner.
 
 import queue
 import threading

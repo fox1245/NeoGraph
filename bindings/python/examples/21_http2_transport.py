@@ -63,10 +63,12 @@ import sys
 import time
 
 import _common  # side-effect: loads .env  # noqa: F401
+import neograph_engine as ng
 from neograph_engine.llm import SchemaProvider
 
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 MODEL   = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+BASE_URL = os.getenv("OPENAI_API_BASE", "")
 PROMPT  = "Reply with a single short factual sentence about apples."
 PARALLEL = 5
 ITERS    = 3
@@ -90,6 +92,7 @@ def make_provider(*, http2: bool) -> SchemaProvider:
         schema_path="openai",
         api_key=API_KEY,
         default_model=MODEL,
+        base_url_override=BASE_URL,
         use_websocket=False,        # libcurl path is HTTP-only.
         prefer_libcurl=http2,       # ← the only knob that matters here.
     )
@@ -153,8 +156,16 @@ print(f"Comparing transports against {os.getenv('OPENAI_API_BASE', 'api.openai.c
 print(f"  model: {MODEL}")
 print(f"  workload: {PARALLEL} parallel POST per burst, {ITERS} bursts each")
 
+if not getattr(ng, "_HAVE_LIBCURL", False):
+    print("\nlibcurl HTTP/2 is not compiled into this wheel; running one "
+          "HTTP/1.1 smoke call and skipping the comparison.")
+    _one_call_with_retry(make_provider(http2=False))
+    print("HTTP/1.1 smoke call: OK")
+    print("Build from source with -DNEOGRAPH_USE_LIBCURL=ON to compare both.")
+    raise SystemExit(0)
+
 connpool_walls = measure("ConnPool HTTP/1.1", http2=False)
-libcurl_walls  = measure("libcurl  HTTP/2",   http2=True)
+libcurl_walls = measure("libcurl  HTTP/2", http2=True)
 
 print("\n" + "=" * 60)
 print("Results")

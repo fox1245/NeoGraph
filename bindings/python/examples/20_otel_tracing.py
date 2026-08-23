@@ -15,7 +15,14 @@ Run:
     python 20_otel_tracing.py
 """
 
+import sys
+
 import neograph_engine as ng
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from neograph_engine.tracing import otel_tracer
 
 from opentelemetry import trace

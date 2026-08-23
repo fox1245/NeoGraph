@@ -69,17 +69,20 @@ class DecomposeNode(ng.GraphNode):
             follow_up = text.split("Follow up:", 1)[1].strip().splitlines()[0]
             return [
                 ng.ChannelWrite("next_step", "follow_up"),
+                ng.ChannelWrite("__route__", "follow_up"),
                 ng.ChannelWrite("follow_up", follow_up),
             ]
         if "So the final answer is:" in text:
             final = text.split("So the final answer is:", 1)[1].strip()
             return [
                 ng.ChannelWrite("next_step", "done"),
+                ng.ChannelWrite("__route__", "done"),
                 ng.ChannelWrite("final_answer", final),
             ]
         # The model didn't follow the format — treat as done with raw text.
         return [
             ng.ChannelWrite("next_step", "done"),
+            ng.ChannelWrite("__route__", "done"),
             ng.ChannelWrite("final_answer", text),
         ]
 
@@ -135,6 +138,7 @@ definition = {
         "question":     {"reducer": "overwrite"},
         "scratchpad":   {"reducer": "overwrite"},
         "next_step":    {"reducer": "overwrite"},
+        "__route__":    {"reducer": "overwrite"},
         "follow_up":    {"reducer": "overwrite"},
         "final_answer": {"reducer": "overwrite"},
     },
@@ -150,12 +154,11 @@ definition = {
         {
             "from":      "decompose",
             "condition": "route_channel",
-            # Looks up channel matching the condition name; here we use
-            # `next_step` as the channel-keyed router.
-            "channel":   "next_step",
+            # route_channel reads the reserved __route__ channel.
             "routes": {
                 "follow_up": "answer_intermediate",
                 "done":      ng.END_NODE,
+                "default":   ng.END_NODE,
             },
         },
     ],

@@ -119,6 +119,14 @@ class PromptedLLMNode(ng.GraphNode):
         ]
         result = self._ctx.provider.complete(params)
         text = result.message.content if result.message else ""
+        if not text.strip():
+            # Reasoning models may spend a small token budget before emitting
+            # visible content. Retry once with enough room for the final answer.
+            params.max_tokens = max(params.max_tokens, 1200)
+            result = self._ctx.provider.complete(params)
+            text = result.message.content if result.message else ""
+        if not text.strip():
+            raise RuntimeError("model returned no visible profile content")
         return [ng.ChannelWrite(self._output_channel, text)]
 
 
@@ -219,6 +227,15 @@ Return the revised graph JSON now."""
     ]
     result = provider.complete(params)
     raw = result.message.content if result.message else ""
+    if not raw.strip():
+        # The modifier emits a whole graph, so reasoning models need more room
+        # than the ordinary writer node before any visible JSON appears.
+        params.max_tokens = max(params.max_tokens, 4096)
+        params.timeout_seconds = max(params.timeout_seconds, 300)
+        result = provider.complete(params)
+        raw = result.message.content if result.message else ""
+    if not raw.strip():
+        raise RuntimeError("self-modifier returned no visible graph JSON")
 
     # Strip code fences if the LLM ignored the instruction.
     raw = raw.strip()

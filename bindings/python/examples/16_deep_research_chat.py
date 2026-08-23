@@ -7,11 +7,10 @@ then synthesizes a markdown report.
 
 Pieces wired together:
 
-  - **OpenAI Responses API over WebSocket** —
-    `SchemaProvider(schema="openai-responses", use_websocket=True)`.
-    Same /v1/responses WebSocket path as the C++ example
-    33_openai_responses_ws.cpp, driven through the binding's
-    high-level Provider surface.
+  - **OpenAI Responses transport** — official OpenAI uses WebSocket;
+    compatible gateways that do not implement the upgrade use HTTP/2 when
+    compiled in, otherwise HTTP/1.1. Override with
+    `NG_RESPONSES_TRANSPORT=websocket|http2|http1`.
 
   - **Multi-turn context** — Gradio's ChatInterface keeps the
     user-visible history. Each turn we hand the engine the FULL prior
@@ -24,7 +23,7 @@ Pieces wired together:
             ng.PostgresCheckpointStore("postgresql://..."))
 
   - **Deep-research subgraph** — when the router fires `research`
-    mode, the graph plans 3-5 sub-questions, fans them out as parallel
+    mode, the graph plans three sub-questions, fans them out as parallel
     `Send` branches (each researcher node runs an independent LLM
     call), then a synthesize node merges the findings into a single
     markdown report.
@@ -42,9 +41,10 @@ Run:
 UI opens at http://localhost:7860.
 """
 
+import os
 import re
 
-from _common import ng, schema_provider
+from _common import complete_responses, ng, responses_transport, schema_provider
 
 
 # Recognise common Korean / English research triggers in the latest
@@ -53,14 +53,19 @@ RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
 
 
-# Single shared provider — WS keeps a connection per call, so a
-# top-level instance is fine. SchemaProvider with use_websocket=True
-# routes streaming completions over wss://api.openai.com/v1/responses.
+# Official OpenAI supports the Responses WebSocket transport. Compatible
+# gateways often expose only HTTP, so auto-select HTTP/2 for those endpoints.
+TRANSPORT = responses_transport()
 PROVIDER = schema_provider(
     schema="openai_responses",   # underscore — built-in schema name
     default_model="gpt-5.6-luna",
-    use_websocket=True,
+    use_websocket=TRANSPORT == "websocket",
+    prefer_libcurl=TRANSPORT == "http2",
 )
+
+
+def complete(params):
+    return complete_responses(PROVIDER, params, TRANSPORT)
 
 
 # ─── Custom nodes ────────────────────────────────────────────────────
@@ -102,7 +107,7 @@ class GeneralChatNode(ng.GraphNode):
 
     def run(self, input):
         msgs = input.state.get_messages()
-        completion = PROVIDER.complete(ng.CompletionParams(messages=msgs))
+        completion = complete(ng.CompletionParams(messages=msgs))
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
             "content": completion.message.content,
@@ -110,7 +115,7 @@ class GeneralChatNode(ng.GraphNode):
 
 
 class ResearchPlanNode(ng.GraphNode):
-    """Decompose the topic into 3-5 sub-questions."""
+    """Decompose the topic into three complementary sub-questions."""
 
     def __init__(self, name):
         super().__init__()
@@ -122,12 +127,12 @@ class ResearchPlanNode(ng.GraphNode):
     def run(self, input):
         topic = input.state.get("research_topic") or ""
         prompt = (
-            "다음 주제를 심층 조사할 수 있도록 서로 보완적인 sub-question 3개에서 "
-            "5개로 분해하세요. 각 sub-question은 독립적으로 답변할 수 있어야 합니다.\n\n"
+            "다음 주제를 심층 조사할 수 있도록 서로 보완적인 sub-question 정확히 "
+            "3개로 분해하세요. 각 sub-question은 독립적으로 답변할 수 있어야 합니다.\n\n"
             f"주제: {topic}\n\n"
             "Sub-question을 한 줄에 하나씩, 번호나 글머리표 없이 출력하세요."
         )
-        completion = PROVIDER.complete(ng.CompletionParams(
+        completion = complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=prompt)],
             temperature=0.0,
         ))
@@ -135,7 +140,7 @@ class ResearchPlanNode(ng.GraphNode):
             line.strip().lstrip("-•0123456789. ")
             for line in completion.message.content.strip().splitlines()
             if line.strip()
-        ][:5]
+        ][:3]
         return [ng.ChannelWrite("sub_questions", questions)]
 
 
@@ -168,7 +173,7 @@ class ResearcherNode(ng.GraphNode):
 
     def run(self, input):
         question = input.state.get("current_question") or ""
-        completion = PROVIDER.complete(ng.CompletionParams(
+        completion = complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=(
                 "다음 질문에 알려진 사실 기반으로 상세하고 정확하게 답하세요. "
                 "확실하지 않은 부분은 명시하세요.\n\n"
@@ -204,7 +209,7 @@ class SynthesizeNode(ng.GraphNode):
             "주요 발견(섹션별) → 결론(2-3 문장).\n\n"
             f"--- 조사 결과 ---\n\n{sections}"
         )
-        completion = PROVIDER.complete(ng.CompletionParams(
+        completion = complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=prompt)],
         ))
 
@@ -246,6 +251,8 @@ definition = {
         "research_topic":    {"reducer": "overwrite"},
         "sub_questions":     {"reducer": "overwrite"},
         "research_findings": {"reducer": "append"},
+        # Per-researcher input carried by Send.payload.
+        "current_question":  {"reducer": "overwrite"},
     },
     "nodes": {
         "router":           {"type": "router"},
@@ -268,7 +275,7 @@ definition = {
 
 
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-engine.set_worker_count(4)  # parallel researchers
+engine.set_worker_count(int(os.getenv("DR_WORKERS", "2")))
 engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 
 

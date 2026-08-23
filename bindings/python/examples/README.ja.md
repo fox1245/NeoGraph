@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=26de7309b7f766019fcfd7817d7f697ddb001ae663c127d72fee305abdf2a559 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=f83696b352140f2c77392207424b16e3d297e7b183c67f5d1fd26347c1d7e911 -->
 # Python API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -33,12 +33,12 @@ cp .env.example .env  # edit OPENAI_API_KEY for examples that hit a real LLM
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | 二人のディベーター＋ジャッジ。ディベーターは`Send`を介してfan-outする。 |
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | オフライン | グラフ定義を`.json`ファイルにシリアライズします。 |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | オフライン | `.json` グラフをロードして実行します（14の関連項目）。 |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **OpenAI WS** | 並列ディープリサーチサブグラフに切り替わるマルチターンGradioチャットで、`조사해줘 / research / investigate`を使用します。`SchemaProvider("openai_responses", use_websocket=True)`を必要とし、`pip install gradio`が必要です。 |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **OpenAI WS + Crawl4AI + Postgres** | 16と同じチャット形状ですが、研究者は実際にローカルのCrawl4AIコンテナ（`docker run unclecode/crawl4ai`）を介してウェブを検索し、状態はPostgres（`PostgresCheckpointStore`）で永続化されます。両方ともenv varsでオプションであり、存在しない場合は正常にフォールバックします。Postgresパス用に `-DNEOGRAPH_BUILD_POSTGRES=ON` でソースビルドします。 |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True)` — 同じ入力に対する2回目の実行は、キャッシュされた`NodeResult`を0ミリ秒でリプレイし、LLM呼び出しは発生しません。統計情報は`engine.node_cache_stats()`を介して取得されます。 |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **Responses（WS/HTTP）** | `조사해줘 / research / investigate`で3-way並列ディープリサーチサブグラフへ切り替わるマルチターンGradioチャットです。公式OpenAIは既定でWebSocketを使用し、互換ゲートウェイはビルド済みのHTTP/2またはHTTP/1.1を自動選択します。`NG_RESPONSES_TRANSPORT`で上書きできます。`pip install gradio`が必要です。 |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **Responses + Crawl4AI + Postgres** | 16と同じトランスポート対応チャットですが、研究者はローカルのCrawl4AIコンテナ（`docker run unclecode/crawl4ai`）を介して実際にウェブを検索し、状態はPostgres（`PostgresCheckpointStore`）で永続化されます。両方とも環境変数で任意に設定でき、未設定時は正常にフォールバックします。Postgresパスには `-DNEOGRAPH_BUILD_POSTGRES=ON` のソースビルドが必要です。 |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True, CacheScope.Reusable)` — 以降、同じ入力の実行ではキャッシュ済みの `NodeResult` が0msで再生され、LLM呼び出しは行われません。統計は `engine.node_cache_stats()` で確認できます。 |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | オフライン | `from neograph_engine import message_stream` — コールバックをラップして、`LLM_TOKEN`イベントがLangChain形式のメッセージ辞書（`{role, content, content_so_far, node, metadata}`）として届くようにします。 |
 | 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | オフライン | `from neograph_engine.tracing import otel_tracer` — エンジンのイベントをOpenTelemetryスパンにブリッジします。ConsoleSpanExporterが同梱されています。OTLPに交換してJaeger / Tempo / Honeycomb / Datadogに送信できます。 |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — オプトインのHTTP/2（libcurl）トランスポートと、デフォルトのConnPool（HTTP/1.1 keep-alive）を比較。両方を5並列バーストでA/Bテストし、お使いのエンドポイントでどちらが速いかを出力します。デフォルトのConnPoolはapi.openai.com上でより高速です。CF-WAF互換性、企業プロキシを通じた低TCP fan-out、またはHTTP/3が必要な場合は切り替えてください。 |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — オプトインのHTTP/2（libcurl）と既定のConnPool（HTTP/1.1 keep-alive）を比較します。libcurlが組み込まれている場合は5-way並列バーストでA/Bテストし、バックエンドのないwheelではHTTP/1.1のsmoke呼び出しを1回実行してHTTP/2のソースビルド方法を案内します。 |
 | 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | **OpenAI** | 目標指向の自己進化: エージェントが実行され、出力をJSON-shape目標に対して採点し、LLMに改definitions. Loop closes when score ≥ 1.0 or max_iters hit. JSON-as-program validates、 where the selectorは新しいgraph spec. |
 | 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | **OpenAI** | スレッド単位で進化するチャットエージェント: 永続的なマルチターン会話。ターン間では、エージェントのJSON定義が蓄積された履歴に基づいて書き換えられます。進化をまたぐチェックポイント再開（以前のメッセージは存続）、`__graph_meta__`監査チャネルパターン、およびバリデータ境界（ノードタイプのホワイトリスト、必須チャネル、エッジ接続）を示します。`OPENAI_API_KEY`を要求します。なければクリーンに終了します。 |
 | 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | オフライン | ツールゲート（#89）: すべてのツールコールに対して`engine.set_tool_gate(...)`が、**どのツールの実行前にも**参照され、Allow / Allow-with-rewritten-args / Deny / Interrupt を返します。標準の承認プロンプトを表示します。 *「エージェントが`rm -rf build/`を実行しようとしています。許可しますか？」* — そして重要なのは、人間が決定している間に無害な兄弟呼び出しが**実行されていない**ことです。したがって、拒否は実際には何も起こらなかったことを意味し、承認しても再実行はされません。 |

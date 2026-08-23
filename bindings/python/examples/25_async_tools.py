@@ -33,9 +33,14 @@ it. Pure-Python CPU work does not, and no number of threads will change that.
 The last section measures exactly that, so the promise stays honest.
 """
 
+import sys
 import time
 
 import neograph_engine as ng
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 LATENCY = 0.3   # what one "network call" costs
