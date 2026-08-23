@@ -63,6 +63,17 @@ leak:PyType_Ready
 leak:_PyEval_EvalFrameDefault
 leak:_PyType_AllocNoTrack
 leak:_PyMem_RawMalloc
+# Python 3.12 moved several process-lifetime caches onto direct realloc
+# paths, so their stacks no longer pass through PyObject_Malloc. Keep these
+# exact interpreter frames suppressed; do not replace them with a broad
+# `leak:Py` rule because that would hide leaked extension-owned Python objects.
+leak:resize_compact
+leak:_PyUnicodeWriter_Finish
+leak:list_resize
+leak:_PyList_AppendTakeRefListResize
+leak:_PyObject_GC_Resize
+leak:_PyBytes_Resize
+leak:PyThread_allocate_lock
 
 # pybind11 — class binding init creates Python type objects that
 # live for the process lifetime (one per `py::class_<T>` declaration).
@@ -72,6 +83,13 @@ leak:pybind11::detail::generic_type::initialize
 leak:pybind11::class_
 leak:pybind11_meta_setattro
 leak:pybind11::setattr
+# Function/enum/type registration records are owned by the imported extension
+# module for the interpreter lifetime. These exact pybind11 initializer frames
+# grew as Python parity added more bindings; they are not runtime graph objects.
+leak:pybind11::cpp_function::make_function_record
+leak:pybind11::cpp_function::initialize_generic
+leak:pybind11::detail::enum_base::init
+leak:pybind11::detail::all_type_info_get_cache
 
 # pydantic-core — Rust-built C extension with its own static caches.
 # Pulled in transitively by some test deps (e.g. anyio, langsmith,
