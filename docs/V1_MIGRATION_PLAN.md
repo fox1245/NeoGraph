@@ -169,13 +169,13 @@ against source, tests, and current documents.
 
 | Issue | Finding | v1 disposition | Owner / phase |
 |---|---|---|---|
-| #112 Python `llm::Agent` | **Reject.** Python `GraphEngine` already provides ReAct, async cancellation, checkpoint/HITL, Store, and ToolGate; standalone Agent adds no NeoGraph-specific ability. | Close with the capability-based reason. Reopen only for a requested lightweight API or a real coroutine Agent contract. | Extension / P0 |
-| #179 WSL2 baseline | **Done.** Fractional timing and worker-mode documentation exist. | Close as a platform record; do not promote its old numbers to a universal gate. | Performance / P0 |
+| #112 Python `llm::Agent` | **Closed (not planned).** Python `GraphEngine` already provides ReAct, async cancellation, checkpoint/HITL, Store, and ToolGate; standalone Agent adds no NeoGraph-specific ability. | Reopen only for a requested lightweight API or a real coroutine Agent contract. | Extension / P0 |
+| #179 WSL2 baseline | **Closed (completed).** Fractional timing and worker-mode documentation exist. | Retain as a platform record; do not promote its old numbers to a universal gate. | Performance / P0 |
 | #187 v1 API tracker | **Partial.** Many children landed, but shared invocation and remaining ownership/decomposition work are not complete. | Rewrite as the Core/Program/Protocol v1 umbrella; completion follows the focused items below. | Cross-cutting / P0-P8 |
 | #188 memory-probe portability | **Partial.** Checkout-relative path and `psutil` instructions landed. | Run once outside `/root/Coding/NeoGraph`, retain evidence, then close. | Release / P0 |
 | #189 WASM smoke sources | **Partial.** Missing Core sources, behavior checks, and corrected default-worker documentation landed. | Rebuild with Emscripten, run the Node/browser smoke, retain evidence, then close. | Docs/Release / P0 |
 | #190 dr_compare workers | **Partial.** Code and docs use worker count 4. | Run mock once; run one low-cost live-provider sample only when a key is available, then close with call metadata. | Performance / P0 |
-| #192 Provider dispatch | **Superseded.** ABI-safe `CompletionProvider::do_invoke` replaced the proposed `Provider::invoke` cutover. | Close as superseded; keep the old Provider vtable, require new implementations to use CompletionProvider. | Core/Release / P0 |
+| #192 Provider dispatch | **Closed (superseded).** ABI-safe `CompletionProvider::do_invoke` replaced the proposed `Provider::invoke` cutover. | Keep the old Provider vtable; require new implementations to use CompletionProvider. | Core/Release / P0 |
 | #193 checkpoint dispatch | **Partial.** New capability interfaces remove recursion for compliant backends, but legacy defaults still mutually recurse and sync-only stores still block async executors. | Add a nonblocking sync-store adapter, migrate internal callers, and retain regression tests for zero-override and sync-only implementations before closing. | State/Core / P1-P2 |
 | #214 `RunInvocation` | **Partial.** `program::RunInvocation` is canonical at the Program runtime boundary and is used by Harness and the Program-backed A2A adapter. Legacy GraphEngine A2A construction, ACP, and gRPC have not been rebased. | Keep legacy routes explicit; migrate each remaining protocol through the owned invocation and prove lifecycle parity before removing its compatibility path. | Protocol / P2-P8 |
 | #215 invocation contracts | **Partial.** Program/A2A and Harness regression suites cover canonical identity, cancellation, events, recovery, and terminal projection. ACP/gRPC parity is still absent. | Add a parameterized protocol suite only when each remaining adapter has a Program route; do not count legacy GraphEngine tests as Program conformance. | Protocol / P2-P8 |
@@ -184,7 +184,7 @@ against source, tests, and current documents.
 | #218 scoped registries | **Partial.** Local overlays and isolation tests exist; global fallback remains. | Freeze immutable registry snapshots and remove ambient fallback for strict Core/Program admission. Migrate Python registration deliberately. | Core/Program / P1 |
 | #219 MCP transport split | **Partial.** Internal sessions exist, but protocol/tool code still branches on HTTP vs stdio. | Add one MCP transport capability with owned cancellation, timeout, shutdown, and error translation. | Protocol / P6 |
 | #220 SchemaProvider split | **Partial.** Request mapping has a test seam; parsing, transport, pools, and callback ownership remain coupled. | Extract value-level parsers, then transport strategy; preserve the Provider-facing contract. | Extension/Protocol / P6 |
-| #230 Galaxy A34 benchmark | **Done in this branch.** Async-off CMake target guards, one-source-tree reproduction instructions, explicit machine/compiler metadata, and repeated-median result output now exist. | Retain the measurement as device-specific evidence; do not promote it to a universal performance gate. | Performance/Release / P0 |
+| #230 Galaxy A34 benchmark | **Closed (completed record).** Async-off CMake target guards, one-source-tree reproduction instructions, explicit machine/compiler metadata, and repeated-median result output now exist. | Retain the measurement as device-specific evidence; do not promote it to a universal performance gate. | Performance/Release / P0 |
 | #231 adaptive fan-out/token path | **Pending.** Only a fixed no-op 5-way benchmark exists. | Keep as a measurement program. Add width × body cost × worker and token batching/crossover tests before changing defaults. | Core/Performance / independent lane |
 | #237 channel lifecycle | **Partial.** Reducers, full snapshots, SQLite deduplication, and pending writes exist; combine/retention/checkpoint policy is not explicit. | Define separate channel combine, retention, and persistence policies; resolve executor/validator order wording and measure long histories. | Core/State / P1-P3 |
 | #238 subgraph persistence | **Partial.** Per-invocation derived identity and context inheritance exist; mode and nested inspection do not. | Add explicit stateless/per-invocation/per-thread modes, stable graph paths, nested inspection, and concurrency rules after #237. | Core/Program / P3 |
@@ -195,7 +195,7 @@ against source, tests, and current documents.
 | #250 authenticated host models | **Partial.** A generic worker seam exists; only direct API-key Provider execution is implemented. | Implement installable host adapters with safe process ownership, preflight, structured errors, cancellation, and no token extraction. | Program/Extension / P7 |
 | #251 global MCP adoption | **Partial.** Existing MCP clients can be called; discovery/trust/pinned identity/process hardening are absent. | Harden process launch first, then implement credentialless global discovery and two-step trust/admission for local mode only. | Program/Extension / P7 |
 | #252 Programmable Agents epic | **Partial.** Compiler-backed Harness and behavioral evaluation exist; child Programs, activation, modules, and feedback promotion do not. | Rewrite the epic around Core + Program; remove VM/Kernel claims and use this phase plan as its dependency graph. | Program / P0-P8 |
-| #254 sole Control VM | **Superseded.** Production uses GraphEngine and the cutover was already withdrawn. | Close; retain experiment history only. | Docs / P0 |
+| #254 sole Control VM | **Closed (not planned; superseded).** Production uses GraphEngine and the cutover was already withdrawn. | Retain experiment history only. | Docs / P0 |
 | #255 lightweight planner/Kernel | **Partial experiment.** One reference Kernel lost in a narrow strict-linear measurement; other semantics were not measured. | Record that candidate as rejected. Keep broader runtime-boundary measurement only if a future concrete design needs it; do not generalize. | Core/State/Performance / independent lane |
 | #256 bounded DSL | **Partial.** The admitted bounded control set now lowers to typed direct operations, including durable `spawn`/`await`; arbitrary dynamic `Send` and topology mutation remain deliberately out of scope. | Add new syntax only when it can be sealed into the immutable plan and given lifecycle/checkpoint semantics. | Program / P3 |
 | #257 immutable generations | **Partial.** ProgramVersion admission/activation CAS, pinned runs, MigrationPlan, durable child attachment, lineage, and retention are implemented. Backend/SDK/ABI cutover remains. | Keep storage parity and consumer migration as separate P4-P8 gates. | Program/State / P4-P8 |
@@ -203,9 +203,11 @@ against source, tests, and current documents.
 
 ### Issue housekeeping order
 
-1. Close/reclassify #112, #179, #192, and #254 with the evidence above.
+1. **Completed 2026-08-23:** closed/reclassified #112, #179, #192, #230,
+   and #254 with the evidence above.
 2. Finish the bounded validation items in #188, #189, and #190.
-3. Retain #230 as a device-specific benchmark record and update #187/#252 to point at Core + Program and this plan.
+3. Retain closed #230 as a device-specific benchmark record and update #187/#252
+   to point at Core + Program and this plan.
 4. Keep #193, #214-#220, #237-#251, #256, and #257 as focused deliverables
    with the revised phase ownership.
 5. Keep #231/#255/#260 out of the architecture critical path. Performance work
