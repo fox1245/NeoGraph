@@ -161,13 +161,15 @@ ProgramAgentAdapter::ProgramAgentAdapter(
     std::string owner_scope,
     std::shared_ptr<CollaborationMailbox> mailbox,
     InvocationBuilder invocation_builder,
-    ArtifactBuilder artifact_builder)
+    ArtifactBuilder artifact_builder,
+    HostMessageHandler host_message_handler)
     : runtime_(std::move(runtime)),
       version_(std::move(version)),
       owner_scope_(std::move(owner_scope)),
       mailbox_(std::move(mailbox)),
       invocation_builder_(std::move(invocation_builder)),
-      artifact_builder_(std::move(artifact_builder)) {
+      artifact_builder_(std::move(artifact_builder)),
+      host_message_handler_(std::move(host_message_handler)) {
     if (!runtime_) throw std::invalid_argument("ProgramAgentAdapter runtime is null");
     if (owner_scope_.empty()) throw std::invalid_argument("ProgramAgentAdapter owner is required");
     if (version_.ownership_scope() != owner_scope_) {
@@ -185,6 +187,14 @@ const std::shared_ptr<program::ProgramRuntime>& ProgramAgentAdapter::runtime() c
 }
 const std::shared_ptr<CollaborationMailbox>& ProgramAgentAdapter::mailbox() const noexcept {
     return mailbox_;
+}
+
+std::optional<Task> ProgramAgentAdapter::handle_host_message(
+    const Message& inbound, std::string_view task_id,
+    std::string_view context_id,
+    const std::optional<CollaborationPeerIdentity>& authenticated_peer) const {
+    if (!host_message_handler_) return std::nullopt;
+    return host_message_handler_(inbound, task_id, context_id, authenticated_peer);
 }
 
 program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,

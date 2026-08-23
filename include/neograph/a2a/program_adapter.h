@@ -44,18 +44,26 @@ public:
         const Message&, std::string_view task_id, std::string_view context_id)>;
     using ArtifactBuilder = std::function<std::optional<Artifact>(
         const program::ProgramResult&, std::string_view task_id)>;
+    using HostMessageHandler = std::function<std::optional<Task>(
+        const Message&, std::string_view task_id, std::string_view context_id,
+        const std::optional<CollaborationPeerIdentity>& authenticated_peer)>;
 
     ProgramAgentAdapter(std::shared_ptr<program::ProgramRuntime> runtime,
                          program::ProgramVersion version,
                          std::string owner_scope,
                          std::shared_ptr<CollaborationMailbox> mailbox = {},
                          InvocationBuilder invocation_builder = {},
-                         ArtifactBuilder artifact_builder = {});
+                         ArtifactBuilder artifact_builder = {},
+                         HostMessageHandler host_message_handler = {});
 
     const std::string& owner_scope() const noexcept;
     const program::ProgramVersion& version() const noexcept;
     const std::shared_ptr<program::ProgramRuntime>& runtime() const noexcept;
     const std::shared_ptr<CollaborationMailbox>& mailbox() const noexcept;
+    std::optional<Task> handle_host_message(
+        const Message& inbound, std::string_view task_id,
+        std::string_view context_id,
+        const std::optional<CollaborationPeerIdentity>& authenticated_peer) const;
 
     /// Admit and start one request through the existing ProgramRuntime.
     /// A repeated collaboration idempotency key recovers the exact persisted
@@ -104,6 +112,7 @@ private:
     std::shared_ptr<CollaborationMailbox>   mailbox_;
     InvocationBuilder                       invocation_builder_;
     ArtifactBuilder                         artifact_builder_;
+    HostMessageHandler                      host_message_handler_;
 };
 
 /// Descriptive alias for callers that name adapters after the transport.

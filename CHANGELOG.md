@@ -17,6 +17,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies the configured authenticator to ordinary message, stream, task-get,
   and task-cancel RPCs as well as collaboration envelopes. The default remains
   false for legacy compatibility.
+- **Host-owned A2A control-message interception.** `ProgramAgentAdapter` can
+  now route an authenticated typed message to a host callback before starting
+  `ProgramRuntime`. The callback must preserve task/context identity and its
+  returned Task is retained for ordinary task observation.
 - **Untrusted supplemental runtime context.** Added
   `ContextArtifactKind::UntrustedSupplemental` and
   `ContextPlacement::AfterHistory`. Existing artifact kinds retain their

@@ -686,6 +686,28 @@ Task A2AServer::Impl::run_program(
         }
         return rejected;
     }
+    if (auto handled = program_adapter->handle_host_message(
+            inbound, task_id, context_id, authenticated_peer)) {
+        if (handled->id != task_id || handled->context_id != context_id) {
+            throw ProgramA2ARequestError(
+                "Host message handler changed the A2A task or context identity");
+        }
+        {
+            std::lock_guard lk(tasks_mu);
+            tasks[task_id] = *handled;
+            touch_task_unlocked(task_id);
+            evict_lru_unlocked();
+        }
+        if (on_event) {
+            TaskStatusUpdateEvent event;
+            event.task_id = task_id;
+            event.context_id = context_id;
+            event.status = handled->status;
+            event.final = is_terminal(handled->status.state);
+            on_event(event);
+        }
+        return *handled;
+    }
     std::optional<Task> rejected;
     std::optional<Task> existing;
     std::uint64_t generation = 0;

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a1c6eb92092169d7508c4209aff162fa841fd6052940e0db0cccba5d3db6b4fb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -16,6 +16,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   `require_authenticated_requests` 标志。启用后，除协作 envelope 外，普通
   message、stream、task 查询和取消 RPC 也必须通过已配置的 authenticator。
   为保持兼容，默认值仍为 false。
+- **宿主拥有的 A2A 控制消息拦截。** `ProgramAgentAdapter` 现在可在启动
+  `ProgramRuntime` 前，把已认证的 typed message 交给宿主 callback。callback
+  必须保持 task/context identity，返回的 Task 会保留用于常规 task 观测。
 - **不受信任的补充运行时上下文。** 新增
   `ContextArtifactKind::UntrustedSupplemental` 和
   `ContextPlacement::AfterHistory`。现有 artifact kind 的 system message

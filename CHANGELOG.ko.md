@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a1c6eb92092169d7508c4209aff162fa841fd6052940e0db0cccba5d3db6b4fb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -16,6 +16,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   `require_authenticated_requests` 플래그를 추가했습니다. 활성화하면 협업
   envelope뿐 아니라 일반 message, stream, task 조회 및 취소 RPC에도 설정된
   authenticator를 적용합니다. 기존 호환성을 위해 기본값은 false입니다.
+- **호스트 소유 A2A 제어 메시지 가로채기.** `ProgramAgentAdapter`가 인증된
+  typed message를 `ProgramRuntime` 시작 전에 호스트 callback으로 전달할 수
+  있습니다. callback은 task/context identity를 유지해야 하며 반환된 Task는
+  일반 task 관측을 위해 보존됩니다.
 - **신뢰되지 않은 보조 런타임 컨텍스트.**
   `ContextArtifactKind::UntrustedSupplemental`과
   `ContextPlacement::AfterHistory`를 추가했습니다. 기존 artifact kind의

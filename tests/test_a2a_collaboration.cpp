@@ -770,8 +770,29 @@ TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
 
 TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
     ProgramAdapterFixture fixture;
+    auto host_calls = std::make_shared<std::atomic<std::uint32_t>>(0);
     auto adapter = std::make_shared<ProgramAgentAdapter>(
-        fixture.runtime, fixture.admitted_version(), "owner-b");
+        fixture.runtime, fixture.admitted_version(), "owner-b", nullptr,
+        ProgramAgentAdapter::InvocationBuilder{}, ProgramAgentAdapter::ArtifactBuilder{},
+        [host_calls](const Message& inbound, std::string_view task_id,
+                     std::string_view context_id,
+                     const std::optional<CollaborationPeerIdentity>& peer)
+            -> std::optional<Task> {
+            if (inbound.parts.size() != 1 || inbound.parts.front().kind != "text" ||
+                inbound.parts.front().text != "host-control") {
+                return std::nullopt;
+            }
+            if (!peer || peer->agent_id != "supervisor") {
+                throw std::invalid_argument("host handler lost authenticated peer");
+            }
+            ++(*host_calls);
+            Task task;
+            task.id = std::string(task_id);
+            task.context_id = std::string(context_id);
+            task.status.state = TaskState::Completed;
+            task.metadata = {{"host_handled", true}};
+            return task;
+        });
     AgentCard card;
     card.name = "strict-authentication";
     card.description = "Strict authenticated Program task test";
@@ -803,6 +824,11 @@ TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
 
     client.set_authorization_header("Bearer supervisor");
+    const auto host_handled = client.send_message_sync("host-control");
+    EXPECT_EQ(host_handled.status.state, TaskState::Completed);
+    EXPECT_EQ(host_handled.metadata.at("host_handled"), true);
+    EXPECT_EQ(host_calls->load(), 1U);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
     const auto completed = client.send_message_sync("ordinary");
     EXPECT_EQ(completed.status.state, TaskState::Completed);
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
