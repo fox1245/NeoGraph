@@ -12,6 +12,7 @@
 #include <atomic>
 #include <limits>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <neograph/json.h>
@@ -48,6 +49,10 @@ struct ChatMessage {
     bool tool_retryable = false;
     bool tool_effect_uncertain = false;
     std::vector<std::string> image_urls; ///< Base64 data URLs or HTTP URLs for vision support.
+    /// Provider-returned reasoning text. Keep separate from user-visible content.
+    std::string reasoning;
+    /// Opaque provider-native continuation blocks replayed only on a compatible route.
+    json reasoning_details = json::array();
 };
 
 /**
@@ -253,6 +258,8 @@ inline void to_json(json& j, const ChatMessage& msg) {
     if (msg.tool_retryable)        j["tool_retryable"] = true;
     if (msg.tool_effect_uncertain) j["tool_effect_uncertain"] = true;
     if (!msg.image_urls.empty())   j["image_urls"] = msg.image_urls;
+    if (!msg.reasoning.empty())    j["reasoning"] = msg.reasoning;
+    if (!msg.reasoning_details.empty()) j["reasoning_details"] = msg.reasoning_details;
 }
 
 /// @brief Deserialize a ChatMessage from JSON.
@@ -276,6 +283,13 @@ inline void from_json(const json& j, ChatMessage& msg) {
     if (j.contains("image_urls") && j["image_urls"].is_array()) {
         msg.image_urls = j["image_urls"].get<std::vector<std::string>>();
     }
+    msg.reasoning = j.value("reasoning", "");
+    if (j.contains("reasoning_details") && !j["reasoning_details"].is_array()) {
+        throw std::invalid_argument("ChatMessage reasoning_details must be an array");
+    }
+    msg.reasoning_details = j.contains("reasoning_details")
+        ? j["reasoning_details"]
+        : json::array();
 }
 
 // --- JSON serialization helpers ---
@@ -323,6 +337,18 @@ inline json messages_to_json(const std::vector<ChatMessage>& messages) {
             j["content"] = msg.content;
         }
 
+        if (msg.role == "assistant") {
+            if (!msg.reasoning_details.empty()) {
+                if (!msg.reasoning_details.is_array()) {
+                    throw std::invalid_argument(
+                        "ChatMessage reasoning_details must be an array");
+                }
+                j["reasoning_details"] = msg.reasoning_details;
+            } else if (!msg.reasoning.empty()) {
+                j["reasoning_content"] = msg.reasoning;
+            }
+        }
+
         arr.push_back(j);
     }
     return arr;
@@ -365,6 +391,15 @@ inline ChatMessage parse_response_message(const json& choice) {
     msg.role = m.value("role", "assistant");
     msg.content = (m.contains("content") && !m["content"].is_null())
                   ? m["content"].get<std::string>() : "";
+    if (m.contains("reasoning") && m["reasoning"].is_string()) {
+        msg.reasoning = m["reasoning"].get<std::string>();
+    } else if (m.contains("reasoning_content") &&
+               m["reasoning_content"].is_string()) {
+        msg.reasoning = m["reasoning_content"].get<std::string>();
+    }
+    if (m.contains("reasoning_details") && m["reasoning_details"].is_array()) {
+        msg.reasoning_details = m["reasoning_details"];
+    }
 
     if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
         for (const auto& tc : m["tool_calls"]) {

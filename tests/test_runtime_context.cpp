@@ -102,6 +102,9 @@ TEST(RuntimeContext, RawHistoryPreservesMultipleToolCallsAndToolFailureState) {
     assistant.trust = RuntimeTrustClass::ModelOutput;
     assistant.predecessor_id = first.id();
     assistant.message.role = "assistant";
+    assistant.message.reasoning = "inspect both files";
+    assistant.message.reasoning_details = json::array(
+        {{{"type", "reasoning.text"}, {"text", "opaque"}, {"index", 0}}});
     assistant.message.tool_calls = {
         ToolCall{"call_1", "read", R"({"path":"a"})"},
         ToolCall{"call_2", "read", R"({"path":"b"})"}};
@@ -125,6 +128,13 @@ TEST(RuntimeContext, RawHistoryPreservesMultipleToolCallsAndToolFailureState) {
     auto parsed_third = RuntimeHistoryRecord::parse(third.serialize_canonical());
     ASSERT_EQ(parsed_second.message().tool_calls.size(), 2u);
     EXPECT_EQ(parsed_second.message().tool_calls[1].arguments, R"({"path":"b"})");
+    EXPECT_EQ(parsed_second.message().reasoning, "inspect both files");
+    ASSERT_EQ(parsed_second.message().reasoning_details.size(), 1U);
+    EXPECT_EQ(parsed_second.message().reasoning_details.at(0).at("type"),
+              "reasoning.text");
+    EXPECT_EQ(parsed_second.message().reasoning_details.at(0).at("text"),
+              "opaque");
+    EXPECT_EQ(parsed_second.message().reasoning_details.at(0).at("index"), 0);
     EXPECT_EQ(parsed_third.message().tool_status, "failed");
     EXPECT_EQ(parsed_third.predecessor_id(), second.id());
 }
