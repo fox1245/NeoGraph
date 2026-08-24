@@ -105,9 +105,10 @@ ChatMessage render_artifact(const ContextArtifact& artifact) {
     if (artifact.media_type() != "text/plain" && artifact.media_type() != "text/markdown") {
         throw std::invalid_argument("Context assembly only renders text/plain or text/markdown artifacts");
     }
-    const auto role = artifact.kind() == ContextArtifactKind::UntrustedSupplemental
-        ? "user"
-        : "system";
+    const auto role = artifact.kind() == ContextArtifactKind::RequiredSkill ||
+                      artifact.kind() == ContextArtifactKind::HardConstraint
+        ? "system"
+        : "user";
     const auto content = artifact.content();
     if (content.is_string()) return {role, content.get<std::string>()};
     if (!content.is_object() || content.size() != 1 || !content.contains("text") ||
@@ -253,13 +254,20 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         receipt_artifacts.push_back(*artifact);
     }
     std::sort(selected.begin(), selected.end(), artifact_less);
-    if (!selected.empty() && std::none_of(raw_messages.begin(), raw_messages.end(),
-                                          [](const ChatMessage& message) {
-                                              return message.role == "user";
-                                          })) {
+    const bool needs_latest_user = std::any_of(
+        selected.begin(), selected.end(), [](const SelectedArtifact& item) {
+            return item.artifact.placement() == ContextPlacement::BeforeLatestUser ||
+                   item.artifact.placement() == ContextPlacement::AfterLatestUser;
+        });
+    if (needs_latest_user &&
+        std::none_of(raw_messages.begin(), raw_messages.end(),
+                     [](const ChatMessage& message) {
+                         return message.role == "user";
+                     })) {
         throw std::invalid_argument("Selected context artifacts require a raw history user message");
     }
 
+    std::vector<ChatMessage> before_history;
     std::vector<ChatMessage> before;
     std::vector<ChatMessage> after_user;
     std::vector<ChatMessage> after_history;
@@ -269,7 +277,9 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         if (item.artifact.required()) {
             mandatory += estimate_json_tokens(messages_json({rendered}));
         }
-        if (item.artifact.placement() == ContextPlacement::BeforeLatestUser) {
+        if (item.artifact.placement() == ContextPlacement::BeforeHistory) {
+            before_history.push_back(rendered);
+        } else if (item.artifact.placement() == ContextPlacement::BeforeLatestUser) {
             before.push_back(rendered);
         } else if (item.artifact.placement() == ContextPlacement::AfterLatestUser) {
             after_user.push_back(rendered);
@@ -279,6 +289,7 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     }
 
     std::vector<ChatMessage> merged;
+    merged.insert(merged.end(), before_history.begin(), before_history.end());
     const auto last_user = std::find_if(raw_messages.rbegin(), raw_messages.rend(),
                                         [](const ChatMessage& message) { return message.role == "user"; });
     const auto insertion = last_user == raw_messages.rend()

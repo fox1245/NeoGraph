@@ -83,6 +83,8 @@ struct ChatCompletion {
         int prompt_tokens = 0;      ///< Number of tokens in the prompt.
         int completion_tokens = 0;  ///< Number of tokens in the completion.
         int total_tokens = 0;       ///< Total tokens used (prompt + completion).
+        int cached_prompt_tokens = 0; ///< Prompt-token subset served from cache.
+        int reasoning_tokens = 0;   ///< Completion-token subset spent on reasoning.
     } usage;
 };
 

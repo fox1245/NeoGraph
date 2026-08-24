@@ -265,6 +265,7 @@ std::string_view to_string(ContextArtifactKind value) noexcept {
 
 std::string_view to_string(ContextPlacement value) noexcept {
     switch (value) {
+        case ContextPlacement::BeforeHistory: return "before_history";
         case ContextPlacement::BeforeLatestUser: return "before_latest_user";
         case ContextPlacement::AfterLatestUser: return "after_latest_user";
         case ContextPlacement::AfterHistory: return "after_history";
@@ -301,6 +302,7 @@ ContextArtifactKind context_artifact_kind_from_string(std::string_view value) {
 }
 
 ContextPlacement context_placement_from_string(std::string_view value) {
+    if (value == "before_history") return ContextPlacement::BeforeHistory;
     if (value == "before_latest_user") return ContextPlacement::BeforeLatestUser;
     if (value == "after_latest_user") return ContextPlacement::AfterLatestUser;
     if (value == "after_history") return ContextPlacement::AfterHistory;

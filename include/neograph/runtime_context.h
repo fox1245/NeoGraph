@@ -36,6 +36,8 @@ enum class ContextPlacement : std::uint8_t {
     AfterLatestUser,
     /** Append after the complete chronological RAW message window. */
     AfterHistory,
+    /** Insert supplemental context before the retained chronological history. */
+    BeforeHistory,
 };
 
 enum class RuntimeGuaranteeProfile : std::uint8_t {
