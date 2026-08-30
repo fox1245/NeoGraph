@@ -52,6 +52,24 @@ TEST(ContextStore, AppendsWithCasAndTreatsExactRetryAsIdempotent) {
     EXPECT_EQ(store.append_history(feed, first, std::nullopt), ContextStoreAppendResult::AlreadyPresent);
     EXPECT_EQ(store.history_head(feed).sequence, 3u);
     EXPECT_EQ(store.history_head(feed).record_id, third.id());
+    ASSERT_TRUE(store.history_record_by_message_id(feed, "message_2"));
+    EXPECT_EQ(store.history_record_by_message_id(feed, "message_2")->id(),
+              second.id());
+    EXPECT_FALSE(store.history_record_by_message_id(feed, "missing"));
+    EXPECT_FALSE(store.history_record_by_message_id(
+        {"tenant_b", feed.feed_id}, "message_2"));
+
+    RuntimeHistoryRecordData duplicate_data;
+    duplicate_data.feed_id = feed.feed_id;
+    duplicate_data.sequence = 4;
+    duplicate_data.message_id = "message_2";
+    duplicate_data.trust = RuntimeTrustClass::UntrustedInput;
+    duplicate_data.message = ChatMessage{"user", "duplicate identity"};
+    duplicate_data.predecessor_id = third.id();
+    const auto duplicate = RuntimeHistoryRecord::create(
+        std::move(duplicate_data));
+    EXPECT_EQ(store.append_history(feed, duplicate, third.id()),
+              ContextStoreAppendResult::Conflict);
 }
 
 TEST(ContextStore, RejectsNonContiguousAndBrokenPredecessorAppends) {

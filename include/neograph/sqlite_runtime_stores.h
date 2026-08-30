@@ -20,6 +20,8 @@ public:
     SQLiteContextStore& operator=(const SQLiteContextStore&) = delete;
     ContextStoreAppendResult append_history(const ContextStoreFeed&, const RuntimeHistoryRecord&, const std::optional<std::string>&) override;
     ContextStoreHead history_head(const ContextStoreFeed&) const override;
+    std::optional<RuntimeHistoryRecord> history_record_by_message_id(
+        const ContextStoreFeed&, std::string_view) const override;
     ContextHistoryRange snapshot_history(const ContextStoreFeed&, std::uint64_t, std::uint64_t) const override;
     std::string hydrate_history(const ContextHistoryRange&) const override;
     ContextArtifactPutResult put_artifact(std::string_view, const ContextArtifact&) override;

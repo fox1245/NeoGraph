@@ -64,6 +64,10 @@ public:
         const RuntimeHistoryRecord& record,
         const std::optional<std::string>& expected_head_id) = 0;
     virtual ContextStoreHead history_head(const ContextStoreFeed& feed) const = 0;
+    /** Exact host message identity lookup; default is a bounded reverse scan. */
+    virtual std::optional<RuntimeHistoryRecord> history_record_by_message_id(
+        const ContextStoreFeed& feed,
+        std::string_view message_id) const;
     virtual ContextHistoryRange snapshot_history(
         const ContextStoreFeed& feed,
         std::uint64_t from_sequence,
@@ -106,6 +110,9 @@ public:
         const RuntimeHistoryRecord& record,
         const std::optional<std::string>& expected_head_id) override;
     ContextStoreHead history_head(const ContextStoreFeed& feed) const override;
+    std::optional<RuntimeHistoryRecord> history_record_by_message_id(
+        const ContextStoreFeed& feed,
+        std::string_view message_id) const override;
     ContextHistoryRange snapshot_history(
         const ContextStoreFeed& feed,
         std::uint64_t from_sequence,

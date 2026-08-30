@@ -33,12 +33,29 @@ TEST(SQLiteRuntimeStores, ContextReopensWithOwnerIsolationAndCas) {
     { SQLiteContextStore store(path); EXPECT_EQ(store.append_history(owner, first, {}), ContextStoreAppendResult::Appended); }
     SQLiteContextStore reopened(path);
     EXPECT_EQ(reopened.history_head(owner).record_id, first.id());
+    ASSERT_TRUE(reopened.history_record_by_message_id(owner, "message_1"));
+    EXPECT_EQ(reopened.history_record_by_message_id(owner, "message_1")->id(),
+              first.id());
+    EXPECT_FALSE(reopened.history_record_by_message_id(owner, "missing"));
     EXPECT_EQ(reopened.history_head({"owner_b", "feed"}).sequence, 0u);
+    EXPECT_FALSE(reopened.history_record_by_message_id(
+        {"owner_b", "feed"}, "message_1"));
     const auto second = record(2, first.id());
     std::atomic<int> wins{0}; std::vector<std::thread> workers;
     for (int i = 0; i != 6; ++i) workers.emplace_back([&] { if (reopened.append_history(owner, second, first.id()) == ContextStoreAppendResult::Appended) ++wins; });
     for (auto& worker : workers) worker.join();
     EXPECT_EQ(wins, 1); EXPECT_EQ(reopened.hydrate_history(reopened.snapshot_history(owner, 1, 2)), first.serialize_canonical() + "\n" + second.serialize_canonical());
+    RuntimeHistoryRecordData duplicate_data;
+    duplicate_data.feed_id = owner.feed_id;
+    duplicate_data.sequence = 3;
+    duplicate_data.message_id = "message_1";
+    duplicate_data.trust = RuntimeTrustClass::UntrustedInput;
+    duplicate_data.message = {"user", "duplicate identity"};
+    duplicate_data.predecessor_id = second.id();
+    EXPECT_EQ(reopened.append_history(
+                  owner, RuntimeHistoryRecord::create(std::move(duplicate_data)),
+                  second.id()),
+              ContextStoreAppendResult::Conflict);
 }
 
 TEST(SQLiteRuntimeStores, HookLeaseSurvivesReopenAndFencesStaleWorker) {

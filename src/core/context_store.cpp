@@ -2,6 +2,7 @@
 
 #include "canonical_json.h"
 
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -59,6 +60,7 @@ void validate_range(const ContextHistoryRange& range) {
 struct InMemoryContextStore::Impl {
     struct Feed {
         std::map<std::uint64_t, std::string> canonical_records;
+        std::map<std::string, std::uint64_t, std::less<>> message_sequences;
         std::string head_id;
     };
 
@@ -71,6 +73,55 @@ InMemoryContextStore::InMemoryContextStore() : impl_(std::make_unique<Impl>()) {
 InMemoryContextStore::~InMemoryContextStore() = default;
 InMemoryContextStore::InMemoryContextStore(InMemoryContextStore&&) noexcept = default;
 InMemoryContextStore& InMemoryContextStore::operator=(InMemoryContextStore&&) noexcept = default;
+
+std::optional<RuntimeHistoryRecord> ContextStore::history_record_by_message_id(
+    const ContextStoreFeed& feed, std::string_view message_id) const {
+    validate_feed(feed);
+    if (message_id.empty() || message_id.size() > 512) {
+        throw std::invalid_argument("Context history message id is invalid");
+    }
+    detail::validate_token(message_id, "Context history message id");
+    const auto head = history_head(feed);
+    if (head.sequence == 0) return std::nullopt;
+    if (!head.record_id || head.sequence > InMemoryContextStore::MAX_RANGE_RECORDS) {
+        throw std::invalid_argument(
+            "Context history lookup exceeds its record bound");
+    }
+    std::optional<RuntimeHistoryRecord> found;
+    std::uint64_t retained_bytes = 0;
+    auto through = head.sequence;
+    while (through != 0) {
+        const auto from = through > 4 ? through - 3 : 1;
+        const auto range = snapshot_history(feed, from, through);
+        const auto hydrated = hydrate_history(range);
+        if (hydrated.size() > 64U * 1024U * 1024U -
+                                  std::min<std::uint64_t>(
+                                      retained_bytes, 64U * 1024U * 1024U)) {
+            throw std::invalid_argument(
+                "Context history lookup exceeds its byte bound");
+        }
+        retained_bytes += static_cast<std::uint64_t>(hydrated.size());
+        std::size_t start = 0;
+        while (start < hydrated.size()) {
+            const auto end = hydrated.find('\n', start);
+            const auto bytes = end == std::string::npos
+                ? hydrated.size() - start : end - start;
+            auto record = RuntimeHistoryRecord::parse(
+                std::string_view(hydrated).substr(start, bytes));
+            if (record.message_id() == message_id) {
+                if (found) {
+                    throw std::invalid_argument(
+                        "Context history message id is not unique");
+                }
+                found = std::move(record);
+            }
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        through = from - 1;
+    }
+    return found;
+}
 
 ContextStoreAppendResult InMemoryContextStore::append_history(
     const ContextStoreFeed& feed,
@@ -97,6 +148,9 @@ ContextStoreAppendResult InMemoryContextStore::append_history(
             if (existing->second == canonical) return ContextStoreAppendResult::AlreadyPresent;
             return ContextStoreAppendResult::Conflict;
         }
+        if (feed_it->second.message_sequences.contains(record.message_id())) {
+            return ContextStoreAppendResult::Conflict;
+        }
     }
 
     const auto stored_size = feed_it == impl_->feeds.end()
@@ -115,6 +169,7 @@ ContextStoreAppendResult InMemoryContextStore::append_history(
                        ? impl_->feeds.emplace(key, Impl::Feed{}).first->second
                        : feed_it->second;
     stored.canonical_records.emplace(record.sequence(), canonical);
+    stored.message_sequences.emplace(record.message_id(), record.sequence());
     stored.head_id = record.id();
     return ContextStoreAppendResult::Appended;
 }
@@ -127,6 +182,33 @@ ContextStoreHead InMemoryContextStore::history_head(const ContextStoreFeed& feed
     return {static_cast<std::uint64_t>(found->second.canonical_records.size()),
             found->second.head_id.empty() ? std::nullopt
                                           : std::optional<std::string>(found->second.head_id)};
+}
+
+std::optional<RuntimeHistoryRecord>
+InMemoryContextStore::history_record_by_message_id(
+    const ContextStoreFeed& feed, std::string_view message_id) const {
+    validate_feed(feed);
+    if (message_id.empty() || message_id.size() > 512) {
+        throw std::invalid_argument("Context history message id is invalid");
+    }
+    detail::validate_token(message_id, "Context history message id");
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->feeds.find({feed.owner_id, feed.feed_id});
+    if (found == impl_->feeds.end()) return std::nullopt;
+    const auto sequence = found->second.message_sequences.find(
+        std::string(message_id));
+    if (sequence == found->second.message_sequences.end()) return std::nullopt;
+    const auto encoded = found->second.canonical_records.find(sequence->second);
+    if (encoded == found->second.canonical_records.end()) {
+        throw std::invalid_argument("Context history message index is corrupt");
+    }
+    auto record = RuntimeHistoryRecord::parse(encoded->second);
+    if (record.feed_id() != feed.feed_id ||
+        record.sequence() != sequence->second ||
+        record.message_id() != message_id) {
+        throw std::invalid_argument("Context history message index crossed scope");
+    }
+    return record;
 }
 
 ContextHistoryRange InMemoryContextStore::snapshot_history(
