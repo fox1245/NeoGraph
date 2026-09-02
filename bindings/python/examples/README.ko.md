@@ -54,7 +54,7 @@ C++ 라이브러리에는 자체 `A2AServer`와 `ACPServer`가 있지만, 해당
 | 항목 | 결정 |
 |------|----------|
 | 누락된 것처럼 보이는 C++ 기능 | `A2AServer`, `ACPServer` 및 그 수명 주기 메서드는 Python 클래스로 미러링되지 않습니다. |
-| Python 대안 | 공식 `a2a-sdk` 1.x 및 `agent-client-protocol` 0.11.x 서버 런타임. |
+| Python 대안 | 공식 `a2a-sdk` 1.x 및 `agent-client-protocol` 0.12.1 서버 런타임. |
 | NeoGraph 통합 | `ProtocolHostAdapter`는 프로토콜 대화 ID를 `RunConfig.thread_id`에 매핑하고, `resume_if_exists`를 활성화하며, `LLM_TOKEN` 이벤트를 스트리밍하고, 사용자 정의 JSON 안전 입력 페이로드를 수락하며, 활성 asyncio 작업을 취소합니다. |
 | 종속성 정책 | 두 SDK 모두 선택 사항입니다. 왜냐하면 Python 3.10+가 필요하지만 `neograph-engine`는 Python 3.9를 지원하기 때문입니다. `neograph-engine[a2a]`, `neograph-engine[acp]`, 또는 `neograph-engine[protocols]`를 설치하세요. |
 | 지속적 ACP 세션 | 휠 지원 영구 백엔드에 대해 `NEOGRAPH_ACP_POSTGRES_URL`를 설정합니다. `NEOGRAPH_BUILD_SQLITE=ON`로 빌드한 소스는 `NEOGRAPH_ACP_SQLITE_PATH`를 설정할 수 있습니다. 에이전트는 구성된 경우에만 `session/load`를 알립니다. 새 세션은 첫 번째 완료된 프롬프트가 체크포인트를 생성한 후에 로드 가능해집니다. 세션 ID는 서버 생성 자격 증명이며 체크포인트는 비공개 `acp:` 스레드 네임스페이스를 사용합니다. 세션당 하나의 활성 에이전트 프로세스를 유지합니다. 체크포인트 저장소는 프로세스 간 동시 쓰기를 직렬화하지 않습니다. |

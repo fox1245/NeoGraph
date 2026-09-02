@@ -54,7 +54,7 @@ C++ライブラリには独自の`A2AServer`と`ACPServer`があるが、それ�
 | 項目 | 決定 |
 |------|----------|
 | 欠落していると思われるC++機能 | `A2AServer`、`ACPServer`、およびそれらのライフサイクルメソッドはPythonクラスとしてミラーリングされていない。 |
-| Pythonの代替案 | 公式の`a2a-sdk` 1.xおよび`agent-client-protocol` 0.11.xサーバーランタイム。 |
+| Pythonの代替案 | 公式の`a2a-sdk` 1.xおよび`agent-client-protocol` 0.12.1サーバーランタイム。 |
 | NeoGraph統合 | `ProtocolHostAdapter` はプロトコル会話IDを`RunConfig.thread_id`にマッピングし、`resume_if_exists`を有効にし、`LLM_TOKEN`イベントをストリーミングし、カスタムのJSON安全な入力ペイロードを受け入れ、アクティブなasyncioタスクをキャンセルする。 |
 | 依存関係ポリシー | 両SDKはPython 3.10+が必要なためオプションであり、`neograph-engine`はPython 3.9をサポートしている。`neograph-engine[a2a]`、`neograph-engine[acp]`、または`neograph-engine[protocols]`をインストールする。 |
 | 永続的なACPセッション | ホイール対応の永続的バックエンドには`NEOGRAPH_ACP_POSTGRES_URL`を設定する。`NEOGRAPH_BUILD_SQLITE=ON`を使ったソースビルドは`NEOGRAPH_ACP_SQLITE_PATH`を設定することができる。エージェントは、構成済みの場合にのみ`session/load`をアドバタイズする。最初の完了したプロンプトがチェックポイントを生成した後、新しいセッションはロード可能になる。セッションIDはサーバー生成の機能であり、チェックポイントはプライベートな`acp:`スレッド名前空間を使用する。セッションごとにアクティブなエージェントプロセスを1つ維持すること。チェックポイントストアは、複数のプロセスにまたがる同時書き込みをシリアライズしない。 |

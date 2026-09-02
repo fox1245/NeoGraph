@@ -54,7 +54,7 @@ C++ 库拥有自己的 `A2AServer` 和 `ACPServer`，但直接暴露这些类会
 | 条目 | 决策 |
 |------|----------|
 | 看似缺失的 C++ 功能 | `A2AServer`、`ACPServer`，且它们的生命周期方法未以 Python 类形式镜像。 |
-| Python 替代方案 | Official `a2a-sdk` 1.x 和 `agent-client-protocol` 0.11.x 服务器运行时。 |
+| Python 替代方案 | Official `a2a-sdk` 1.x 和 `agent-client-protocol` 0.12.1 服务器运行时。 |
 | NeoGraph 集成 | `ProtocolHostAdapter` 将协议会话ID映射到 `RunConfig.thread_id`，启用 `resume_if_exists`，流式传输 `LLM_TOKEN` 事件，接受自定义JSON安全输入载荷，并取消当前活动的asyncio任务。 |
 | 依赖策略 | 两个SDK都是可选的，因为它们需要Python 3.10+，而`neograph-engine`支持Python 3.9。请安装`neograph-engine[a2a]`、`neograph-engine[acp]`或`neograph-engine[protocols]`。 |
 | 持久 ACP 会话 | 为支持wheel的持久后端设置`NEOGRAPH_ACP_POSTGRES_URL`。使用`NEOGRAPH_BUILD_SQLITE=ON`的源码构建可设置`NEOGRAPH_ACP_SQLITE_PATH`。仅在配置了`session/load`时，代理才通告该属性；新会话在首次完成的提示创建检查点后才变为可加载。会话ID是服务器生成的凭证，检查点使用私有`acp:`线程命名空间。每个会话保持一个活动代理进程；检查点存储不跨进程序列化并发写入者。 |

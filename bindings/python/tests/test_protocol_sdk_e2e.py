@@ -6,14 +6,18 @@ a dedicated Python 3.12 job that installs both SDKs and runs these tests.
 
 import asyncio
 import contextlib
+import importlib.metadata
 import os
 import runpy
 import socket
 import sys
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 
 pytest.importorskip("a2a")
@@ -39,6 +43,27 @@ import neograph_engine as ng
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES = ROOT / "bindings" / "python" / "examples"
 sys.path.insert(0, str(EXAMPLES))
+
+
+def test_acp_sdk_version_matches_project_contract():
+    project = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    installed = Version(importlib.metadata.version("agent-client-protocol"))
+    for extra in ("acp", "protocols"):
+        requirements = [
+            Requirement(raw)
+            for raw in project["optional-dependencies"][extra]
+        ]
+        contract = next(
+            requirement
+            for requirement in requirements
+            if requirement.name == "agent-client-protocol"
+        )
+        assert installed in contract.specifier, (
+            f"CI installed agent-client-protocol {installed}, but "
+            f"project[{extra}] requires {contract.specifier}"
+        )
 
 
 def _free_port():

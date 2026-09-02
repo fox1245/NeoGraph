@@ -60,7 +60,7 @@ that those SDKs cannot: a checkpoint-aware call into the C++ graph engine.
 | Item | Decision |
 |------|----------|
 | C++ feature that appears missing | `A2AServer`, `ACPServer`, and their lifecycle methods are not mirrored as Python classes. |
-| Python alternative | Official `a2a-sdk` 1.x and `agent-client-protocol` 0.11.x server runtimes. |
+| Python alternative | Official `a2a-sdk` 1.x and `agent-client-protocol` 0.12.1 server runtimes. |
 | NeoGraph integration | `ProtocolHostAdapter` maps protocol conversation IDs to `RunConfig.thread_id`, enables `resume_if_exists`, streams `LLM_TOKEN` events, accepts custom JSON-safe input payloads, and cancels the active asyncio task. |
 | Dependency policy | Both SDKs are optional because they require Python 3.10+, while `neograph-engine` supports Python 3.9. Install `neograph-engine[a2a]`, `neograph-engine[acp]`, or `neograph-engine[protocols]`. |
 | Durable ACP sessions | Set `NEOGRAPH_ACP_POSTGRES_URL` for the wheel-supported durable backend. Source builds with `NEOGRAPH_BUILD_SQLITE=ON` may set `NEOGRAPH_ACP_SQLITE_PATH`. The agent advertises `session/load` only when one is configured; a new session becomes loadable after its first completed prompt creates a checkpoint. Session IDs are server-generated capabilities and checkpoints use a private `acp:` thread namespace. Keep one active agent process per session; checkpoint stores do not serialize concurrent writers across processes. |
