@@ -209,7 +209,7 @@ struct ACPServer::Impl {
     std::mutex                                    workers_mu;
     std::condition_variable                       workers_cv;
     std::mutex                                    worker_threads_mu;
-    using WorkerThread = std::pair<std::jthread, std::future<void>>;
+    using WorkerThread = std::pair<std::thread, std::future<void>>;
     std::vector<WorkerThread>                      worker_threads;
     int                                           inflight_count = 0;
     std::set<std::string>                         inflight_sessions;
@@ -222,7 +222,7 @@ struct ACPServer::Impl {
     std::atomic<bool>                             fail_next_handle_message{false};
 #endif
 
-    void retain_worker(std::jthread worker, std::future<void> exited) {
+    void retain_worker(std::thread& worker, std::future<void> exited) {
         // Reap finished threads on admission so a long-lived session retains
         // only its active workers. Use a separate lock: joining a thread may
         // still need workers_mu while its captured reservation is destroyed.
@@ -615,7 +615,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
 #endif
         std::promise<void> exited;
         auto exit_future = exited.get_future();
-        std::jthread worker(
+        std::thread worker(
             [this, req = std::move(req), id, task_cancel, worker_reservation = reservation,
               exited = std::move(exited), resume_pending, reply_expected]() mutable {
                 exited.set_value_at_thread_exit();
@@ -809,7 +809,12 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                 // returns. Its destructor cleans every worker exit path.
             });
 
-        retain_worker(std::move(worker), std::move(exit_future));
+        try {
+            retain_worker(worker, std::move(exit_future));
+        } catch (...) {
+            if (worker.joinable()) worker.join();
+            throw;
+        }
         reservation.reset();
     } catch (const std::exception& e) {
         // If worker launch fails, no worker owns the reservation.
