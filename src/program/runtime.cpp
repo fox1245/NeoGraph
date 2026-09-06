@@ -4393,7 +4393,17 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     if (parent.control_->owner_scope != owner_scope || link.owner_scope() != owner_scope)
         throw_runtime_diagnostic("P_CHILD_OWNER", "Child owner scope is not admitted");
 
-    auto parent_record = parent.snapshot();
+    std::optional<ProgramJournalRecord> parent_journal;
+    auto parent_record = [&] {
+        // A sibling can publish completion between the run-record and journal
+        // reads. Take the same lock as child-relation publication so admission
+        // validates one generation instead of reporting a spurious CAS loss.
+        std::lock_guard lock(child_relation_publication_mutex(
+            *impl_->config.transitions, owner_scope, parent.run_id()));
+        auto record = parent.snapshot();
+        parent_journal = impl_->config.transitions->latest(owner_scope, parent.run_id());
+        return record;
+    }();
     if (parent_record.continuation().state != ContinuationState::Running)
         throw_runtime_diagnostic("P_CHILD_PARENT", "Child can only attach to a running parent");
     if (parent.control_->cancellation_cause() != detail::CancellationCause::None)
@@ -4466,7 +4476,6 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     }
     RunBudget parent_budget = parent_record.remaining_budget();
     if (!existing) {
-        const auto parent_journal = impl_->config.transitions->latest(owner_scope, parent_run_id);
         if (!parent_journal || parent_journal->id != parent_record.journal_head()) {
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                      "Parent-child admission lost the transition CAS");

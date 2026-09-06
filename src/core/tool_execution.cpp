@@ -6,6 +6,7 @@
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/error.hpp>
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
@@ -316,9 +317,14 @@ asio::awaitable<std::string> execute_blocking_tool_async(Tool& tool, json argume
             using Handler = std::decay_t<decltype(handler)>;
             auto completion = std::make_shared<Handler>(std::move(handler));
             const auto completion_executor = caller_executor;
+            // The completion can run before the pool thread's post() returns.
+            // Keep the caller alive until that post has stopped touching its
+            // scheduler, even if the resumed coroutine has already finished.
+            auto work = asio::make_work_guard(completion_executor);
             asio::post(blocking_tool_pool().get_executor(),
                        [&tool, arguments = std::move(arguments), result,
-                        completion = std::move(completion), completion_executor]() mutable {
+                        completion = std::move(completion), completion_executor,
+                        work = std::move(work)]() mutable {
                            try {
                                result->value = tool.execute(arguments);
                            } catch (...) {

@@ -16,6 +16,8 @@
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace neograph::acp {
 
@@ -200,12 +202,15 @@ struct ACPServer::Impl {
     /// the engine on the same thread_id (which is what the engine's
     /// checkpoint store keys on).
     ///
-    /// Workers are spawned detached and accounted via `inflight_count`
-    /// (incremented before std::thread launches, decremented + cv
+    /// Workers are accounted via `inflight_count`
+    /// (incremented before the worker launches, decremented + cv
     /// notified at the end of the worker body). Destructor waits on
     /// the cv until inflight_count drains to zero.
     std::mutex                                    workers_mu;
     std::condition_variable                       workers_cv;
+    std::mutex                                    worker_threads_mu;
+    using WorkerThread = std::pair<std::thread, std::future<void>>;
+    std::vector<WorkerThread>                      worker_threads;
     int                                           inflight_count = 0;
     std::set<std::string>                         inflight_sessions;
     /// Sessions currently being restored from checkpoint. Prompt admission
@@ -216,6 +221,35 @@ struct ACPServer::Impl {
     std::atomic<bool>                             fail_next_worker_launch{false};
     std::atomic<bool>                             fail_next_handle_message{false};
 #endif
+
+    void retain_worker(std::thread& worker, std::future<void> exited) {
+        // Reap finished threads on admission so a long-lived session retains
+        // only its active workers. Use a separate lock: joining a thread may
+        // still need workers_mu while its captured reservation is destroyed.
+        std::lock_guard lock(worker_threads_mu);
+        std::erase_if(worker_threads, [](auto& worker) {
+            if (worker.second.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                return false;
+            worker.first.join();
+            return true;
+        });
+        worker_threads.emplace_back(std::move(worker), std::move(exited));
+    }
+
+    void drain_workers() {
+        {
+            std::unique_lock lock(workers_mu);
+            workers_cv.wait(lock, [this] { return inflight_count == 0; });
+        }
+        std::vector<WorkerThread> finished;
+        {
+            std::lock_guard lock(worker_threads_mu);
+            finished.swap(worker_threads);
+        }
+        // Join before destroying the readiness futures: set_value_at_thread_exit
+        // may still be releasing the promise's shared state in the thread tail.
+        for (auto& worker : finished) worker.first.join();
+    }
 
     struct WorkerReservation {
         Impl*       owner;
@@ -293,7 +327,7 @@ struct ACPServer::Impl {
             emit(jsonrpc_error(-32603, message, id));
         } catch (...) {
             // A failing transport/sink cannot be used to report its own
-            // failure, but it must never escape a detached worker.
+            // failure, but it must never escape a prompt worker.
         }
     }
 };
@@ -567,12 +601,10 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
     }
     if (pre_cancelled) task_cancel->cancel();
 
-    // Run the engine on a detached worker so the run-loop reader can
+    // Run the engine on a worker so the run-loop reader can
     // keep pumping inbound messages — including responses to fs/*
     // requests the engine issues mid-run via ACPClient::call_client.
-    // The thread is detached because completed workers don't need
-    // joining individually; the dtor / drain path waits on
-    // inflight_count via workers_cv instead.
+    // Retain its thread handle so drain also joins thread-local cleanup.
     try {
 #if defined(NEOGRAPH_ACP_TESTING)
         if (fail_next_worker_launch.exchange(false, std::memory_order_acq_rel)) {
@@ -581,9 +613,14 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                 "injected ACP worker launch failure");
         }
 #endif
+        std::promise<void> exited;
+        auto exit_future = exited.get_future();
         std::thread worker(
-            [this, req = std::move(req), id, task_cancel, reservation,
-              resume_pending, reply_expected]() mutable {
+            [this, req = std::move(req), id, task_cancel, worker_reservation = reservation,
+              exited = std::move(exited), resume_pending, reply_expected]() mutable {
+                exited.set_value_at_thread_exit();
+                // Release accounting at body exit, before thread-local cleanup.
+                auto reservation = std::move(worker_reservation);
                 bool response_attempted = false;
                 bool terminal_committed = false;
                 auto cleanup = [&] {
@@ -773,16 +810,14 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
             });
 
         try {
-            worker.detach();
+            retain_worker(worker, std::move(exit_future));
         } catch (...) {
-            if (worker.joinable()) {
-                worker.join();
-            }
+            if (worker.joinable()) worker.join();
             throw;
         }
         reservation.reset();
     } catch (const std::exception& e) {
-        // If std::thread construction fails, no worker owns the reservation.
+        // If worker launch fails, no worker owns the reservation.
         reservation.reset();
         if (reply_expected) {
             emit_internal_error(id, "ACP prompt worker launch failed: ", e.what());
@@ -832,11 +867,9 @@ ACPServer::~ACPServer() {
     // Make sure no in-flight worker is mid-engine-run when the server
     // dies — that would dereference a freed engine pointer through the
     // captured shared_ptr (which is safe) but would also try to write to
-    // an output stream that's about to disappear. Workers are detached
-    // (see handle_session_prompt) so we don't join them; we wait on
-    // inflight_count via workers_cv until every worker has decremented
-    // and cleared its single-flight session.
-    // Detached workers may finish while this destructor drains. Drop their
+    // an output stream that's about to disappear. Drain reservations and
+    // join the workers, including their captured and thread-local state.
+    // Workers may finish while this destructor drains. Drop their
     // late notifications instead of invoking a sink owned by the caller.
     std::atomic_store_explicit(
         &impl_->sink_, std::shared_ptr<NotificationSink>{}, std::memory_order_release);
@@ -849,12 +882,7 @@ ACPServer::~ACPServer() {
         }
     }
     for (const auto& token : active_tokens) token->cancel();
-    {
-        std::unique_lock lk(impl_->workers_mu);
-        impl_->workers_cv.wait(lk, [this]{
-            return impl_->inflight_count == 0;
-        });
-    }
+    impl_->drain_workers();
 
     // Wake any pending outbound RPC waiters with an error so they don't
     // hang the caller forever.
@@ -1072,12 +1100,7 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
     struct RunCleanupGuard {
         Impl* impl;
         ~RunCleanupGuard() {
-            {
-                std::unique_lock lk(impl->workers_mu);
-                impl->workers_cv.wait(lk, [this]{
-                    return impl->inflight_count == 0;
-                });
-            }
+            impl->drain_workers();
             std::atomic_store_explicit(
                 &impl->sink_, std::shared_ptr<NotificationSink>{},
                 std::memory_order_release);

@@ -8194,7 +8194,8 @@ TEST(ProgramRuntimeTest, ParallelMapLaunchesNextWindowAfterPriorCompletion) {
                                                "trace-parallel-map-windowed",
                                                {}});
 
-    ASSERT_FALSE(result.failure().has_value());
+    ASSERT_FALSE(result.failure().has_value())
+        << result.failure()->code << ": " << result.failure()->message;
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(window_calls.load(), 4U);
     EXPECT_EQ(window_completed.load(), 2U);
