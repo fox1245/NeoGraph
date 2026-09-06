@@ -302,10 +302,16 @@ private:
     std::string code_;
 };
 
+class ProgramChildSynthesisRecord;
+
 /** Enforces reserve -> compile -> semantic validate -> admit. */
 class NEOGRAPH_PROGRAM_API ProgramSynthesisGateway final {
 public:
     explicit ProgramSynthesisGateway(ProgramSynthesisGatewayConfig config);
+    /** Continue a durably reserved request; publish must CAS each stage before returning. */
+    ProgramChildSynthesisRecord continue_child(
+        ProgramChildSynthesisRecord                                    record,
+        const std::function<void(const ProgramChildSynthesisRecord&)>& publish) const;
     ProgramSynthesisResult synthesize(const ProgramSynthesisProposal& proposal) const;
     /** Checked child path; never treats a proposal or returned receipt as authority. */
     ProgramChildSynthesisResult synthesize_child(const ProgramSynthesisProposal&    proposal,

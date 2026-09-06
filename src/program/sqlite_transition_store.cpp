@@ -393,6 +393,36 @@ std::vector<HookOutboxEntry> load_hook_outbox_heads(sqlite3* db, std::string_vie
     return result;
 }
 
+std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(sqlite3*         db,
+                                                              std::string_view owner_scope,
+                                                              std::string_view run_id) {
+    std::vector<ProgramChildSynthesisRecord> heads;
+    Statement                                rows(
+        db,
+        "SELECT proposal_id, head_id, canonical_bytes FROM program_transition_synthesis_log_v1 "
+                                       "WHERE owner_scope=?1 AND run_id=?2 ORDER BY sequence ASC");
+    rows.bind_text(1, owner_scope);
+    rows.bind_text(2, run_id);
+    while (rows.step_row()) {
+        auto entry = ProgramChildSynthesisRecord::parse(column_blob(rows.get(), 2));
+        if (entry.data().proposal.id() != column_text(rows.get(), 0) ||
+            entry.id() != column_text(rows.get(), 1))
+            throw std::invalid_argument("Stored child synthesis key is corrupt");
+        if (entry.data().proposal.data().owner_scope != owner_scope ||
+            entry.data().parent.run.run_id() != run_id ||
+            !is_valid_program_child_synthesis_append(heads, entry))
+            throw std::invalid_argument("Stored child synthesis history is corrupt");
+        auto found = std::find_if(heads.begin(), heads.end(), [&](const auto& head) {
+            return head.data().proposal.id() == entry.data().proposal.id();
+        });
+        if (found == heads.end())
+            heads.push_back(std::move(entry));
+        else
+            *found = std::move(entry);
+    }
+    return heads;
+}
+
 bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
     return std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
         const auto state = entry.data().state;
@@ -783,6 +813,16 @@ void create_v2_schema(sqlite3* db) {
               "canonical_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, run_id, sequence), "
               "FOREIGN KEY(owner_scope, run_id) REFERENCES "
               "program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db,
+         "CREATE TABLE IF NOT EXISTS program_transition_synthesis_log_v1 ("
+         "sequence INTEGER PRIMARY KEY AUTOINCREMENT, owner_scope TEXT NOT NULL, run_id TEXT NOT "
+         "NULL, "
+         "proposal_id TEXT NOT NULL, head_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
+         "UNIQUE(owner_scope, run_id, head_id), FOREIGN KEY(owner_scope, run_id) "
+         "REFERENCES program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE)");
+    exec(db,
+         "CREATE INDEX IF NOT EXISTS program_transition_synthesis_run_v1 ON "
+         "program_transition_synthesis_log_v1(owner_scope, run_id, sequence)");
     exec(db, "CREATE TABLE IF NOT EXISTS program_transition_hook_outbox_log_v1 ("
              "sequence INTEGER PRIMARY KEY AUTOINCREMENT, owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, "
              "invocation_id TEXT NOT NULL, head_id TEXT NOT NULL, canonical_bytes BLOB NOT NULL, "
@@ -1138,6 +1178,25 @@ void append_context_publication(sqlite3* db, std::string_view owner_scope,
     statement.step_done();
 }
 
+void append_synthesis_records(sqlite3*                                        db,
+                              std::string_view                                owner_scope,
+                              std::string_view                                run_id,
+                              const std::vector<ProgramChildSynthesisRecord>& entries) {
+    Statement statement(db,
+                        "INSERT INTO "
+                        "program_transition_synthesis_log_v1(owner_scope,run_id,proposal_id,head_"
+                        "id,canonical_bytes) VALUES(?1,?2,?3,?4,?5)");
+    for (const auto& entry : entries) {
+        statement.bind_text(1, owner_scope);
+        statement.bind_text(2, run_id);
+        statement.bind_text(3, entry.data().proposal.id());
+        statement.bind_text(4, entry.id());
+        statement.bind_blob(5, entry.serialize_canonical());
+        statement.step_done();
+        statement.reset();
+    }
+}
+
 void append_hook_outbox_entries(sqlite3* db, std::string_view owner_scope,
                                 std::string_view run_id,
                                 const std::vector<HookOutboxEntry>& entries) {
@@ -1419,6 +1478,13 @@ std::vector<ProgramContextPublication> SQLiteProgramTransitionStore::load_contex
     }
     return result;
 }
+std::vector<ProgramChildSynthesisRecord> SQLiteProgramTransitionStore::load_child_syntheses(
+    std::string_view owner_scope, std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    if (!load_head(impl_->db, owner_scope, run_id)) return {};
+    return load_synthesis_heads(impl_->db, owner_scope, run_id);
+}
+
 std::vector<HookOutboxEntry> SQLiteProgramTransitionStore::load_hook_outbox_entries(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return {};
@@ -1631,6 +1697,11 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
+    if (!publication.child_synthesis_records.empty() &&
+        !is_valid_program_child_synthesis_publication(
+            load_synthesis_heads(impl_->db, owner_scope, run_id),
+            current ? &current->run_record : nullptr, publication))
+        return ProgramTransitionPublishResult::Conflict;
     const auto hook_heads = load_hook_outbox_heads(impl_->db, owner_scope, run_id,
                                                    current ? current->run_record : publication.run_record);
     if (!is_valid_program_hook_history_append(hook_heads, publication.hook_outbox_entries,
@@ -1791,6 +1862,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     append_effects(impl_->db, owner_scope, run_id, publication.effects);
     append_javascript_commands(impl_->db, owner_scope, run_id, publication.commands);
     append_context_publication(impl_->db, owner_scope, run_id, publication.context_publication);
+    append_synthesis_records(impl_->db, owner_scope, run_id, publication.child_synthesis_records);
     append_hook_outbox_entries(impl_->db, owner_scope, run_id, publication.hook_outbox_entries);
     if (publication.run_lineage) {
         if (current_lineage)

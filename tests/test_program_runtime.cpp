@@ -6,11 +6,23 @@
 #include <neograph/hook_runtime.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+#include <neograph/program/postgres_store.h>
+#include <neograph/program/postgres_transition_store.h>
+
+#include <libpq-fe.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT
+#include <neograph/graph/postgres_checkpoint.h>
+#endif
+#endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
 #include <neograph/graph/sqlite_checkpoint.h>
 #endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <neograph/program/sqlite_store.h>
 #include <neograph/program/sqlite_transition_store.h>
+
+#include <sqlite3.h>
 #endif
 
 #include "javascript.h"
@@ -26,7 +38,9 @@
 #include <barrier>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <limits>
@@ -1461,55 +1475,63 @@ neograph::HookOutboxEntry recovery_hook(std::string run_id) {
 
 class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
 public:
+    explicit BlockAfterJavaScriptResultJournal(std::shared_ptr<ProgramTransitionStore> inner = {})
+        : inner_(inner ? std::move(inner) : std::make_shared<InMemoryProgramTransitionStore>()) {}
+    std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
+        std::string_view owner, std::string_view run) const override {
+        return inner_->load_child_syntheses(owner, run);
+    }
+    std::vector<ProgramTransitionPublication> synthesis_publications;
+    std::optional<ProgramChildSynthesisState> fail_synthesis_after;
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
         if (throw_next_load_.exchange(false)) {
             throw std::runtime_error("simulated Program run read failure");
         }
-        return inner_.load(owner, run_id);
+        return inner_->load(owner, run_id);
     }
     std::optional<ProgramJournalRecord> latest(std::string_view owner,
                                                std::string_view run_id) const override {
-        return inner_.latest(owner, run_id);
+        return inner_->latest(owner, run_id);
     }
     std::vector<ProgramEvent> load_events(std::string_view owner,
                                           std::string_view run_id,
                                           std::uint64_t    sequence) const override {
-        return inner_.load_events(owner, run_id, sequence);
+        return inner_->load_events(owner, run_id, sequence);
     }
     std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
-        return inner_.load_effects(owner, run_id, sequence);
+        return inner_->load_effects(owner, run_id, sequence);
     }
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_javascript_commands(owner, run_id, sequence);
+        return inner_->load_javascript_commands(owner, run_id, sequence);
     }
     std::vector<ProgramContextPublication> load_context_publications(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
-        return inner_.load_context_publications(owner, run_id, sequence);
+        return inner_->load_context_publications(owner, run_id, sequence);
     }
     std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_hook_outbox_entries(owner, run_id);
+        return inner_->load_hook_outbox_entries(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
                                                     std::string_view lineage_id) const override {
-        return inner_.load_lineage(owner, lineage_id);
+        return inner_->load_lineage(owner, lineage_id);
     }
     std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
                                                        std::string_view run_id) const override {
         if (consume_replacement_readback_failure()) {
             throw std::runtime_error("simulated replacement lineage readback failure");
         }
-        return inner_.load_run_lineage(owner, run_id);
+        return inner_->load_run_lineage(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage_head(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
-        return inner_.load_lineage_head(owner, lineage_id, head_id);
+        return inner_->load_lineage_head(owner, lineage_id, head_id);
     }
     std::optional<ProgramRunGeneration> load_generation(
         std::string_view owner, std::string_view lineage_id,
@@ -1517,18 +1539,17 @@ public:
         if (consume_replacement_readback_failure()) {
             throw std::runtime_error("simulated replacement generation readback failure");
         }
-        return inner_.load_generation(owner, lineage_id, generation);
+        return inner_->load_generation(owner, lineage_id, generation);
     }
     std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
         std::string_view owner,
         std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override {
-        return inner_.load_graph_migration_capsule(
-            owner, source_run_id, source_lineage_head_id);
+        return inner_->load_graph_migration_capsule(owner, source_run_id, source_lineage_head_id);
     }
     std::optional<ProgramExecutionLease> load_execution_lease(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_execution_lease(owner, run_id);
+        return inner_->load_execution_lease(owner, run_id);
     }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
@@ -1547,7 +1568,14 @@ public:
             if (publish_collision) publish_collision();
             throw std::runtime_error("simulated replacement failure before publication");
         }
-        const auto published = inner_.compare_publish(owner, expected, std::move(publication));
+        const auto synthesis = publication.child_synthesis_records;
+        if (!synthesis.empty()) synthesis_publications.push_back(publication);
+        const auto published = inner_->compare_publish(owner, expected, std::move(publication));
+        if (!synthesis.empty() && fail_synthesis_after == synthesis.front().data().state &&
+            published == ProgramTransitionPublishResult::Published) {
+            fail_synthesis_after.reset();
+            throw std::runtime_error("simulated loss after durable synthesis stage");
+        }
         if (replacement && published == ProgramTransitionPublishResult::Published &&
             crash_after_replacement_.exchange(false)) {
             if (unreadable_replacement_commit_.exchange(false)) {
@@ -1574,7 +1602,7 @@ public:
         if (replacement && throw_before_replacement_.exchange(false)) {
             throw std::runtime_error("simulated replacement failure before publication");
         }
-        const auto published = inner_.compare_publish_execution(
+        const auto published = inner_->compare_publish_execution(
             owner, expected, std::move(publication), expected_lease, next_lease);
         if (replacement && published == ProgramTransitionPublishResult::Published &&
             crash_after_replacement_.exchange(false)) {
@@ -1592,9 +1620,8 @@ public:
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) override {
-        const auto published = inner_.compare_publish_graph_safe_point(
-            owner, expected, std::move(publication), evidence, capsule,
-            execution_lease);
+        const auto published = inner_->compare_publish_graph_safe_point(
+            owner, expected, std::move(publication), evidence, capsule, execution_lease);
         if (published == ProgramTransitionPublishResult::Published &&
             crash_after_graph_safe_point_.exchange(false)) {
             if (unreadable_graph_safe_point_commit_.exchange(false)) {
@@ -1643,7 +1670,7 @@ private:
         return false;
     }
 
-    InMemoryProgramTransitionStore inner_;
+    std::shared_ptr<ProgramTransitionStore> inner_;
     mutable std::mutex             mutex_;
     std::condition_variable        condition_;
     bool                           observed_ = false;
@@ -8234,8 +8261,18 @@ struct ChildSynthesisFixture {
     std::function<void(ProgramSynthesisReservationData&)> alter_reservation;
     std::function<void(ProgramAdmission&)>                alter_admission;
 
-    ChildSynthesisFixture() {
+    std::optional<ProgramChildSynthesisGrant> trusted_grant;
+    ChildSynthesisFixture(std::shared_ptr<ProgramTransitionStore> backend          = {},
+                          bool                                    durable          = false,
+                          std::shared_ptr<ProgramStore>           program_store    = {},
+                          std::shared_ptr<CheckpointStore>        checkpoint_store = {})
+        : journal(std::make_shared<BlockAfterJavaScriptResultJournal>(std::move(backend))) {
         completed_calls.store(0);
+        if (program_store)
+            fixture.catalog = std::make_shared<ProgramCatalog>(
+                CatalogConfig{std::move(program_store), fixture.registry, fixture.engines,
+                              "program-runtime-test/v1"});
+        if (checkpoint_store) fixture.checkpoints = std::move(checkpoint_store);
         // The current compiler conservatively labels arbitrary generator
         // control Unmanaged. The reviewed declaration-only child stays Strict.
         fixture.profile =
@@ -8243,7 +8280,11 @@ struct ChildSynthesisFixture {
         fixture.policy =
             AdmittedRuntime::make_policy(fixture.profile, ExecutionGuarantee::Unmanaged, true);
         const auto source = ProgramSource::from_javascript(
-            "synthesis-parent.js", javascript_runtime_source("runtime-completed", R"JS(
+            "synthesis-parent.js", javascript_runtime_source("runtime-completed", durable ? R"JS(
+                yield ng.checkpoint({ready: true}, "synthesis:ready");
+                return yield ng.await(ng.spawn("generated-child", {}, "generated:spawn"), 5000, "generated:await");
+            )JS"
+                                                                                          : R"JS(
                 yield ng.checkpoint({ready: true}, "synthesis:ready");
                 return {done: true};
             )JS"));
@@ -8259,6 +8300,19 @@ struct ChildSynthesisFixture {
                 message += "\n" + diagnostic.code + ": " + diagnostic.message;
             }
             throw std::runtime_error(message);
+        }
+        if (durable) {
+            RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, journal, 2};
+            config.child_synthesis_gateway = std::make_shared<ProgramSynthesisGateway>(gateway());
+            config.child_synthesis_grant_resolver =
+                [this](std::string_view owner, std::string_view run,
+                       std::string_view id) -> std::optional<ProgramChildSynthesisGrant> {
+                if (trusted_grant && owner == trusted_grant->data().owner_scope &&
+                    run == trusted_grant->data().parent_run_id && id == trusted_grant->id())
+                    return trusted_grant;
+                return std::nullopt;
+            };
+            fixture.runtime = std::make_unique<ProgramRuntime>(std::move(config));
         }
         handle = fixture.runtime->start(
             "tenant:runtime", *version,
@@ -8278,6 +8332,7 @@ struct ChildSynthesisFixture {
         if (!generation) throw std::runtime_error("Missing parent generation");
         parent.emplace(
             ProgramChildSynthesisParent{*version, std::move(run), *lineage, *generation});
+        if (durable) trusted_grant = ProgramChildSynthesisGrant::create(grant_data());
         reservation_head      = lineage->id();
         reservation_remaining = lineage->remaining_budget();
     }
@@ -8961,5 +9016,409 @@ TEST(ProgramSynthesisGateway, SemanticRejectionConsumesReservationAndPreventsAdm
                       error.receipt().serialize_canonical()).id(),
                   error.receipt().id());
     }
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+namespace {
+class ProgramChildSynthesisPersistence : public ::testing::TestWithParam<std::string> {
+protected:
+    std::string database;
+    void        SetUp() override {
+        if (GetParam() == "PostgreSQL" && !std::getenv("NEOGRAPH_TEST_POSTGRES_URL"))
+            GTEST_SKIP() << "PostgreSQL test URL is required";
+        database = (std::filesystem::temp_directory_path() /
+                    ("neograph-synthesis-" + Checkpoint::generate_id() + ".db"))
+                       .string();
+    }
+    void TearDown() override {
+        if (GetParam() == "SQLite") {
+            std::filesystem::remove(database);
+            std::filesystem::remove(database + "-wal");
+            std::filesystem::remove(database + "-shm");
+        }
+    }
+    std::shared_ptr<ProgramTransitionStore> backend() {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramTransitionStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (GetParam() == "PostgreSQL")
+            return std::make_shared<PostgreSQLProgramTransitionStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"));
+#endif
+        return std::make_shared<InMemoryProgramTransitionStore>();
+    }
+};
+std::vector<std::string> synthesis_backends() {
+    std::vector<std::string> result{"Memory"};
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+    result.push_back("SQLite");
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+    result.push_back("PostgreSQL");
+#endif
+    return result;
+}
+INSTANTIATE_TEST_SUITE_P(Backends,
+                         ProgramChildSynthesisPersistence,
+                         ::testing::ValuesIn(synthesis_backends()),
+                         [](const auto& info) { return info.param; });
+}  // namespace
+TEST_P(ProgramChildSynthesisPersistence, BindsSpawnsAndJoinsWithoutRefundOrDuplicateValidation) {
+    auto                  storage = backend();
+    ChildSynthesisFixture test(storage, true);
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    auto                  bound    = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    ASSERT_EQ(bound.data().state, ProgramChildSynthesisState::Bound);
+    EXPECT_EQ(test.fixture.runtime
+                  ->prepare_child_synthesis("tenant:runtime", *test.handle, *test.hold, proposal,
+                                            *test.trusted_grant, "generated-child")
+                  .id(),
+              bound.id());
+    EXPECT_EQ(test.semantic_calls, 1U);
+    EXPECT_EQ(test.admissions, 1U);
+    EXPECT_EQ(test.reservations,
+              0U);  // The runtime transaction, never the N1 fixture callback, debited.
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(ProgramChildSynthesisRecord::parse(bound.serialize_canonical()).id(), bound.id());
+    if (GetParam() != "Memory") {
+        auto reopened = backend();
+        ASSERT_EQ(reopened->load_child_syntheses("tenant:runtime", test.handle->run_id()).size(),
+                  1U);
+        EXPECT_EQ(
+            reopened->load_child_syntheses("tenant:runtime", test.handle->run_id()).front().id(),
+            bound.id());
+        EXPECT_TRUE(
+            reopened->load_child_syntheses("tenant:foreign", test.handle->run_id()).empty());
+        EXPECT_TRUE(reopened->load_child_syntheses("tenant:runtime", "another-parent").empty());
+    }
+    test.hold.reset();
+    const auto result = test.handle->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    const auto records = storage->load_child_syntheses("tenant:runtime", test.handle->run_id());
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_EQ(records.front().data().state, ProgramChildSynthesisState::Spawned);
+    EXPECT_EQ(test.handle->snapshot().children().size(), 1U);
+}
+TEST_P(ProgramChildSynthesisPersistence, ReusesCommittedCompileValidationAndFrozenAdmission) {
+    for (auto state : {ProgramChildSynthesisState::Compiled, ProgramChildSynthesisState::Validated,
+                       ProgramChildSynthesisState::Admitting}) {
+        ChildSynthesisFixture test(backend(), true);
+        test.journal->fail_synthesis_after = state;
+        const auto proposal                = ProgramSynthesisProposal::create(test.proposal_data());
+        EXPECT_THROW(test.fixture.runtime->prepare_child_synthesis(
+                         "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+                         "generated-child"),
+                     std::runtime_error);
+        ASSERT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.handle->run_id())
+                      .front()
+                      .data()
+                      .state,
+                  state);
+        auto bound = test.fixture.runtime->prepare_child_synthesis(
+            "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+            "generated-child");
+        EXPECT_EQ(bound.data().state, ProgramChildSynthesisState::Bound);
+        EXPECT_EQ(test.semantic_calls, 1U);
+        EXPECT_EQ(test.admissions, 1U);
+        EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    }
+}
+TEST_P(ProgramChildSynthesisPersistence, AmbiguousClaimsBlockReplayAndNeverRerunForFree) {
+    for (auto state :
+         {ProgramChildSynthesisState::Compiling, ProgramChildSynthesisState::Validating}) {
+        ChildSynthesisFixture test(backend(), true);
+        test.journal->fail_synthesis_after = state;
+        const auto proposal                = ProgramSynthesisProposal::create(test.proposal_data());
+        EXPECT_THROW(test.fixture.runtime->prepare_child_synthesis(
+                         "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+                         "generated-child"),
+                     std::runtime_error);
+        EXPECT_THROW(test.fixture.runtime->reconnect("tenant:runtime", test.handle->run_id()),
+                     std::runtime_error);
+        auto uncertain = test.fixture.runtime->prepare_child_synthesis(
+            "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+            "generated-child");
+        EXPECT_EQ(uncertain.data().state, ProgramChildSynthesisState::ReconciliationRequired);
+        EXPECT_EQ(test.semantic_calls, 0U);
+        EXPECT_EQ(test.admissions, 0U);
+        EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    }
+}
+TEST_P(ProgramChildSynthesisPersistence, ReservationIsAtomicAndCannotFundAnotherBinding) {
+    auto                  storage = backend();
+    ChildSynthesisFixture test(storage, true);
+    test.journal->fail_synthesis_after = ProgramChildSynthesisState::Reserved;
+    const auto proposal                = ProgramSynthesisProposal::create(test.proposal_data());
+    EXPECT_THROW(test.fixture.runtime->prepare_child_synthesis(
+                     "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+                     "generated-child"),
+                 std::runtime_error);
+    auto       publication = test.journal->synthesis_publications.front();
+    const auto expected    = publication.journal_record.previous_id;
+    EXPECT_EQ(storage->compare_publish("tenant:runtime", expected, publication),
+              ProgramTransitionPublishResult::AlreadyPresent);
+    auto data                           = publication.child_synthesis_records.front().data();
+    data.binding_name                   = "another-binding";
+    publication.child_synthesis_records = {ProgramChildSynthesisRecord::create(std::move(data))};
+    EXPECT_EQ(storage->compare_publish("tenant:runtime", expected, publication),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(storage->load_child_syntheses("tenant:runtime", test.handle->run_id()).size(), 1U);
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    // A revoked host grant cannot be resurrected by deserializing its valid content id.
+    const auto trusted = test.trusted_grant;
+    test.trusted_grant.reset();
+    EXPECT_THROW(
+        test.fixture.runtime->prepare_child_synthesis("tenant:runtime", *test.handle, *test.hold,
+                                                      proposal, *trusted, "generated-child"),
+        std::runtime_error);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && !defined(_WIN32)
+TEST_P(ProgramChildSynthesisPersistence,
+       ProcessExitReopensCatalogCheckpointAndSynthesisBeforeJoin) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires a durable backend";
+    if (const auto* inherited = std::getenv("NEOGRAPH_SYNTHESIS_CRASH_DB")) database = inherited;
+    setenv("NEOGRAPH_SYNTHESIS_CRASH_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    const auto programs                     = [&]() -> std::shared_ptr<ProgramStore> {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (GetParam() == "PostgreSQL")
+            return std::make_shared<PostgreSQLProgramStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"));
+#endif
+        throw std::runtime_error("Durable Program store unavailable");
+    };
+    const auto checkpoints = [&]() -> std::shared_ptr<CheckpointStore> {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
+        if (GetParam() == "SQLite")
+            return std::make_shared<neograph::graph::SqliteCheckpointStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT
+        if (GetParam() == "PostgreSQL")
+            return std::make_shared<neograph::graph::PostgresCheckpointStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"), 2);
+#endif
+        throw std::runtime_error("Durable checkpoint store unavailable");
+    };
+    ASSERT_EXIT(
+        ([&] {
+            ChildSynthesisFixture child(backend(), true, programs(), checkpoints());
+            const auto proposal = ProgramSynthesisProposal::create(child.proposal_data());
+            child.journal->fail_synthesis_after = ProgramChildSynthesisState::Admitting;
+            try {
+                child.fixture.runtime->prepare_child_synthesis(
+                    "tenant:runtime", *child.handle, *child.hold, proposal, *child.trusted_grant,
+                    "generated-child");
+                std::_Exit(78);
+            } catch (const std::runtime_error&) {
+                const auto stored =
+                    child.journal->load_child_syntheses("tenant:runtime", child.handle->run_id());
+                if (stored.size() != 1 ||
+                    stored.front().data().state != ProgramChildSynthesisState::Admitting)
+                    std::_Exit(79);
+                std::ofstream metadata(database + ".recovery");
+                metadata << json{{"run_id", child.handle->run_id()},
+                                 {"proposal_id", proposal.id()},
+                                 {"grant", child.trusted_grant->serialize_canonical()}}
+                                .dump();
+                metadata.close();
+                std::_Exit(77);  // No destructors, cancellation, or orderly parent termination.
+            }
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_SYNTHESIS_CRASH_DB");
+    std::ifstream     metadata(database + ".recovery");
+    const std::string bytes((std::istreambuf_iterator<char>(metadata)),
+                            std::istreambuf_iterator<char>());
+    const auto        saved       = json::parse(bytes);
+    const auto        run_id      = saved.at("run_id").get<std::string>();
+    const auto        proposal_id = saved.at("proposal_id").get<std::string>();
+    const auto      grant = ProgramChildSynthesisGrant::parse(saved.at("grant").get<std::string>());
+    AdmittedRuntime host(2, checkpoints(), backend(), {}, ExecutionGuarantee::Strict, true);
+    host.catalog = std::make_shared<ProgramCatalog>(
+        CatalogConfig{programs(), host.registry, host.engines, "program-runtime-test/v1"});
+    unsigned                      semantic_calls = 0, admission_calls = 0;
+    ProgramSynthesisGatewayConfig gateway;
+    gateway.compiler = std::make_shared<ProgramCompiler>(
+        host.registry, ProgramCompilerConfig{"program-runtime-test/v1"});
+    gateway.catalog       = host.catalog;
+    gateway.reserve_child = [](const auto&, const auto&) -> ProgramSynthesisReservation {
+        throw std::runtime_error("Must not reserve twice");
+    };
+    gateway.validate_semantics = [&](const auto&, const auto&,
+                                     const auto&) -> ProgramSynthesisSemanticDecision {
+        ++semantic_calls;
+        throw std::runtime_error("Must reuse semantic result");
+    };
+    gateway.admission = [&](const auto&, const auto&, const auto&) -> ProgramAdmission {
+        ++admission_calls;
+        throw std::runtime_error("Must reuse frozen admission");
+    };
+    RuntimeConfig config{host.catalog, host.checkpoints, {}, host.journal, 2};
+    config.child_synthesis_gateway = std::make_shared<ProgramSynthesisGateway>(std::move(gateway));
+    config.child_synthesis_grant_resolver =
+        [grant](std::string_view owner, std::string_view run,
+                std::string_view id) -> std::optional<ProgramChildSynthesisGrant> {
+        if (owner == grant.data().owner_scope && run == grant.data().parent_run_id &&
+            id == grant.id())
+            return grant;
+        return std::nullopt;
+    };
+    host.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+    EXPECT_THROW(host.runtime->reconnect("tenant:runtime", run_id), std::runtime_error);
+    const auto bound = host.runtime->recover_child_synthesis("tenant:runtime", run_id, proposal_id);
+    ASSERT_EQ(bound.data().state, ProgramChildSynthesisState::Bound);
+    EXPECT_EQ(semantic_calls, 0U);
+    EXPECT_EQ(admission_calls, 0U);
+    auto       parent = host.runtime->reconnect("tenant:runtime", run_id);
+    const auto result = parent.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(parent.snapshot().children().size(), 1U);
+    const auto head = host.journal->load_child_syntheses("tenant:runtime", run_id).front();
+    EXPECT_EQ(head.data().state, ProgramChildSynthesisState::Spawned);
+    metadata.close();
+    std::filesystem::remove(database + ".recovery");
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, SemanticRejectionPersistsEvidenceWithoutAdmission) {
+    ChildSynthesisFixture test(backend(), true);
+    test.semantic_accept = false;
+    const auto proposal  = ProgramSynthesisProposal::create(test.proposal_data());
+    auto       rejected  = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    EXPECT_EQ(rejected.data().state, ProgramChildSynthesisState::Failed);
+    EXPECT_EQ(rejected.data().error_code, "P_CHILD_SYNTHESIS_REJECTED");
+    EXPECT_FALSE(rejected.data().artifacts.at("evidence").at("accepted").get<bool>());
+    EXPECT_EQ(test.admissions, 0U);
+    EXPECT_EQ(test.semantic_calls, 1U);
+    EXPECT_EQ(test.fixture.runtime
+                  ->prepare_child_synthesis("tenant:runtime", *test.handle, *test.hold, proposal,
+                                            *test.trusted_grant, "generated-child")
+                  .id(),
+              rejected.id());
+    EXPECT_EQ(test.semantic_calls, 1U);
+    EXPECT_TRUE(test.handle->snapshot().children().empty());
+}
+TEST_P(ProgramChildSynthesisPersistence, ConcurrentRetriesHaveOneReservationAndOneSemanticCall) {
+    ChildSynthesisFixture test(backend(), true);
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            prepare  = [&] {
+        return test.fixture.runtime->prepare_child_synthesis(
+            "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+            "generated-child");
+    };
+    auto first  = std::async(std::launch::async, prepare);
+    auto second = std::async(std::launch::async, prepare);
+    EXPECT_EQ(first.get().id(), second.get().id());
+    EXPECT_EQ(test.semantic_calls, 1U);
+    EXPECT_EQ(test.admissions, 1U);
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    ASSERT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.handle->run_id()).size(),
+              1U);
+}
+TEST_P(ProgramChildSynthesisPersistence, RejectsMutatedStageArtifactsAndRecordIdentity) {
+    ChildSynthesisFixture test(backend(), true);
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            bound    = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    auto value        = json::parse(bound.serialize_canonical());
+    value["revision"] = 8.5;
+    EXPECT_THROW(ProgramChildSynthesisRecord::parse(value.dump()), std::invalid_argument);
+    value                           = json::parse(bound.serialize_canonical());
+    value["unrecognized_authority"] = true;
+    EXPECT_THROW(ProgramChildSynthesisRecord::parse(value.dump()), std::invalid_argument);
+    auto data                  = bound.data();
+    data.artifacts["evidence"] = json{{"accepted", false}};
+    EXPECT_THROW(ProgramChildSynthesisRecord::create(data), std::invalid_argument);
+    data              = bound.data();
+    data.binding_name = "foreign-child";
+    EXPECT_THROW(ProgramChildSynthesisRecord::create(data), std::invalid_argument);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence,
+       BackendWriteFailureRollsBackReservationAndParentHeadTogether) {
+    auto                  storage = backend();
+    ChildSynthesisFixture test(storage, true);
+    const auto            before = test.handle->snapshot();
+    const auto lineage = storage->load_run_lineage("tenant:runtime", test.handle->run_id());
+    const auto execute = [&](const std::string& sql) {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (GetParam() == "SQLite") {
+            sqlite3* connection = nullptr;
+            if (sqlite3_open(database.c_str(), &connection) != SQLITE_OK)
+                throw std::runtime_error("Test SQLite connection failed");
+            const auto code = sqlite3_exec(connection, sql.c_str(), nullptr, nullptr, nullptr);
+            const std::string error = sqlite3_errmsg(connection);
+            sqlite3_close(connection);
+            if (code != SQLITE_OK) throw std::runtime_error(error);
+            return;
+        }
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (GetParam() == "PostgreSQL") {
+            auto* connection = PQconnectdb(std::getenv("NEOGRAPH_TEST_POSTGRES_URL"));
+            if (!connection || PQstatus(connection) != CONNECTION_OK ||
+                std::string(PQdb(connection)) != "neograph_test") {
+                if (connection) PQfinish(connection);
+                throw std::runtime_error(
+                    "Failure injection requires disposable neograph_test database");
+            }
+            auto*             result = PQexec(connection, sql.c_str());
+            const bool        ok     = result && PQresultStatus(result) == PGRES_COMMAND_OK;
+            const std::string error  = PQerrorMessage(connection);
+            if (result) PQclear(result);
+            PQfinish(connection);
+            if (!ok) throw std::runtime_error(error);
+        }
+#endif
+    };
+    if (GetParam() == "Memory")
+        std::dynamic_pointer_cast<InMemoryProgramTransitionStore>(storage)
+            ->fail_next_publication_for_testing(ProgramTransitionFaultPoint::BeforeCommit);
+    else if (GetParam() == "SQLite")
+        execute(
+            "CREATE TRIGGER synthesis_test_abort BEFORE INSERT ON "
+            "program_transition_synthesis_log_v1 BEGIN SELECT RAISE(ABORT, 'injected synthesis "
+            "failure'); END;");
+    else
+        execute(
+            "CREATE FUNCTION synthesis_test_abort_fn() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN RAISE EXCEPTION 'injected synthesis failure'; END $$; CREATE TRIGGER "
+            "synthesis_test_abort BEFORE INSERT ON neograph_program_transition_synthesis_log_v1 "
+            "FOR EACH ROW EXECUTE FUNCTION synthesis_test_abort_fn();");
+    const auto proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    EXPECT_THROW(test.fixture.runtime->prepare_child_synthesis(
+                     "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+                     "generated-child"),
+                 std::runtime_error);
+    if (GetParam() == "SQLite")
+        execute("DROP TRIGGER synthesis_test_abort;");
+    else if (GetParam() == "PostgreSQL")
+        execute(
+            "DROP TRIGGER synthesis_test_abort ON neograph_program_transition_synthesis_log_v1; "
+            "DROP FUNCTION synthesis_test_abort_fn();");
+    EXPECT_EQ(test.handle->snapshot().id(), before.id());
+    EXPECT_EQ(storage->load_run_lineage("tenant:runtime", test.handle->run_id())->id(),
+              lineage->id());
+    EXPECT_TRUE(storage->load_child_syntheses("tenant:runtime", test.handle->run_id()).empty());
+    EXPECT_EQ(test.semantic_calls, 0U);
+    const auto bound = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    EXPECT_EQ(bound.data().state, ProgramChildSynthesisState::Bound);
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
 }
 #endif

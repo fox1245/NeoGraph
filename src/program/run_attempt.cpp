@@ -4440,8 +4440,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         }
     }
 
-    outcome.remaining_budget.max_dynamic_compiles = subtract_saturated(
-        control->granted_budget.max_dynamic_compiles, dynamic_compile_count);
+    outcome.remaining_budget.max_dynamic_compiles = std::min<std::uint64_t>(
+        control->dynamic_compile_ceiling.load(),
+        subtract_saturated(control->granted_budget.max_dynamic_compiles, dynamic_compile_count));
 
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
         control->cancellation_cause() == CancellationCause::None) {

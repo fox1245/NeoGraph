@@ -215,6 +215,10 @@ if(NEOGRAPH_BUILD_PROGRAM)
             neograph::program_postgres
             PostgreSQL::PostgreSQL
         )
+        if(TARGET neograph_postgres)
+            target_compile_definitions(neograph_program_tests PRIVATE NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT)
+            target_link_libraries(neograph_program_tests PRIVATE neograph::postgres)
+        endif()
     endif()
 endif()
 
@@ -578,7 +582,7 @@ if(TARGET neograph_program_tests)
         # Keep the Program PostgreSQL store integration cases off the shared
         # checkpoint fixture while other test cases remain parallelizable.
         set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
-            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*")
+            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*:*ProgramChildSynthesisPersistence.*/*PostgreSQL*")
         gtest_discover_tests(neograph_program_tests
             TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
             PROPERTIES RESOURCE_LOCK postgres_test_db)

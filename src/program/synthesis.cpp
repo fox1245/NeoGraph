@@ -1,3 +1,4 @@
+#include <neograph/program/child_synthesis.h>
 #include <neograph/program/synthesis.h>
 
 #include "canonical_json.h"
@@ -747,11 +748,11 @@ void validate_program_child_synthesis_reservation(
 
 ProgramSynthesisGateway::ProgramSynthesisGateway(ProgramSynthesisGatewayConfig config)
     : config_(std::move(config)) {
-    if (!config_.compiler || !config_.catalog || (!config_.reserve && !config_.reserve_child) ||
-        !config_.admission || !config_.max_source_bytes || !config_.validate_semantics ||
-        !config_.max_semantic_evidence_bytes) {
+    if (!config_.compiler || !config_.catalog || !config_.admission || !config_.max_source_bytes ||
+        !config_.validate_semantics || !config_.max_semantic_evidence_bytes) {
         throw std::invalid_argument(
-            "Program synthesis gateway requires compiler, Catalog, reservation, semantic validation, admission, and limits");
+            "Program synthesis gateway requires compiler, Catalog, semantic validation, admission, "
+            "and limits");
     }
 }
 
@@ -882,6 +883,142 @@ ProgramSynthesisResult ProgramSynthesisGateway::synthesize_impl(
          version.policy_snapshot().fingerprint()});
     return {std::move(reservation), std::move(bundle), std::move(validation),
             std::move(semantic.evidence), std::move(version), std::move(receipt)};
+}
+
+ProgramChildSynthesisRecord ProgramSynthesisGateway::continue_child(
+    ProgramChildSynthesisRecord                                    record,
+    const std::function<void(const ProgramChildSynthesisRecord&)>& publish) const {
+    using State = ProgramChildSynthesisState;
+    if (!publish) throw std::invalid_argument("Child synthesis requires durable stage publication");
+    const auto save = [&](State state, json artifacts, std::string error = {}) {
+        auto data        = record.data();
+        data.previous_id = record.id();
+        ++data.revision;
+        data.state      = state;
+        data.artifacts  = std::move(artifacts);
+        data.error_code = std::move(error);
+        auto next       = ProgramChildSynthesisRecord::create(std::move(data));
+        publish(next);  // Never start a stage until its claim is durable.
+        record = std::move(next);
+    };
+    const auto decode = [](const json& value) { return detail::canonical_json_bytes(value); };
+    const auto encode = [](std::string_view value) { return detail::parse_json_strict(value); };
+    // No process can prove whether an uncommitted external validator ran. Do not replay it.
+    if (record.data().state == State::Compiling || record.data().state == State::Validating) {
+        save(State::ReconciliationRequired, record.data().artifacts, "P_CHILD_SYNTHESIS_UNCERTAIN");
+        return record;
+    }
+    if (record.data().state >= State::Bound) return record;
+    const auto& proposal    = record.data().proposal;
+    const auto& reservation = record.data().reservation;
+    // Copies survive record replacement by the durable stage callback.
+    const auto request  = proposal;
+    const auto reserved = reservation;
+    if (request.source().serialize_canonical().size() > config_.max_source_bytes)
+        throw std::invalid_argument("Program synthesis source exceeds host byte limit");
+    if (record.data().state == State::Reserved) {
+        save(State::Compiling, record.data().artifacts);
+        auto bundle = config_.compiler->compile(
+            request.source(), successor_budget_bounds(request.data().requested_budget));
+        auto artifacts      = record.data().artifacts;
+        artifacts["bundle"] = encode(bundle.serialize_canonical());
+        save(State::Compiled, std::move(artifacts));
+    }
+    if (record.data().state == State::Compiled) {
+        save(State::Validating, record.data().artifacts);
+        auto       bundle   = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
+        auto       semantic = config_.validate_semantics(request, bundle, reserved);
+        const auto evidence = decode(semantic.evidence);
+        if (evidence.size() > config_.max_semantic_evidence_bytes)
+            throw std::runtime_error("Program synthesis semantic evidence exceeds host byte limit");
+        auto validation = ProgramSynthesisValidationReceipt::create(
+            {request.id(), reserved.id(), bundle.id(), semantic.validator_identity,
+             semantic.contract_identity, semantic.accepted,
+             detail::sha256_identity("program-synthesis-semantic-evidence/v1", evidence)});
+        auto artifacts          = record.data().artifacts;
+        artifacts["validation"] = encode(validation.serialize_canonical());
+        artifacts["evidence"]   = std::move(semantic.evidence);
+        if (!semantic.accepted) {
+            save(State::Failed, std::move(artifacts), "P_CHILD_SYNTHESIS_REJECTED");
+            return record;
+        }
+        save(State::Validated, std::move(artifacts));
+    }
+    if (record.data().state == State::Validated) {
+        auto bundle       = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
+        auto admission    = config_.admission(request, bundle, reserved);
+        json dependencies = json::array();
+        for (const auto& r : admission.dependency_receipts)
+            dependencies.push_back(
+                json{{"dependency_id", r.dependency_id}, {"content_identity", r.content_identity}});
+        auto artifacts         = record.data().artifacts;
+        artifacts["admission"] = json{{"owner_scope", admission.owner_scope},
+                                      {"profile", encode(admission.profile.serialize_canonical())},
+                                      {"policy", encode(admission.policy.serialize_canonical())},
+                                      {"dependency_receipts", dependencies}};
+        save(State::Admitting, std::move(artifacts));
+    }
+    if (record.data().state == State::Admitting) {
+        auto        bundle = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
+        const auto& a      = record.data().artifacts.at("admission");
+        ProgramAdmission admission{a.at("owner_scope").get<std::string>(),
+                                   AdmissionProfile::parse(decode(a.at("profile"))),
+                                   PolicySnapshot::parse(decode(a.at("policy"))),
+                                   {}};
+        for (const auto& r : a.at("dependency_receipts"))
+            admission.dependency_receipts.push_back({r.at("dependency_id").get<std::string>(),
+                                                     r.at("content_identity").get<std::string>()});
+        auto version = config_.catalog->admit(bundle, std::move(admission));
+        auto receipt =
+            ProgramSynthesisReceipt::create({request.id(), reserved.id(), bundle.id(), version.id(),
+                                             version.policy_snapshot().fingerprint()});
+        auto artifacts       = record.data().artifacts;
+        artifacts["version"] = encode(version.serialize_canonical());
+        artifacts["receipt"] = encode(receipt.serialize_canonical());
+        save(State::Admitted, std::move(artifacts));
+    }
+    if (record.data().state == State::Admitted) {
+        auto        bundle  = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
+        auto        version = ProgramVersion::parse(decode(record.data().artifacts.at("version")));
+        const auto& b       = request.data().requested_budget;
+        if (b.max_dynamic_compiles > UINT32_MAX)
+            throw std::invalid_argument(
+                "Synthesized child compile budget exceeds module link range");
+        BudgetLimits      budget{b.wall_time_ms,
+                            b.model_tokens,
+                            b.monetary_microunits,
+                            b.max_concurrency,
+                            b.max_program_operations,
+                            b.max_core_steps,
+                            static_cast<std::uint32_t>(b.max_dynamic_compiles),
+                            b.max_child_depth,
+                            b.max_total_children};
+        ProgramModuleData module_data;
+        module_data.owner_scope = request.data().owner_scope;
+        module_data.coordinate  = {"synthesis", "child", "1.0.0", ""};
+        module_data.attestation_id =
+            authorize_program_child_synthesis(request, record.data().grant, record.data().parent)
+                .id();
+        module_data.allowed_capabilities = bundle.capability_effect_closure().capabilities;
+        module_data.declared_effects     = bundle.capability_effect_closure().effects;
+        module_data.children.push_back({record.data().binding_name,
+                                        version.id(),
+                                        {{"input", bundle.input_contract()}},
+                                        {{"output", bundle.output_contract()}},
+                                        module_data.allowed_capabilities,
+                                        module_data.declared_effects,
+                                        budget,
+                                        record.data().grant.data().minimum_execution_guarantee});
+        auto             module = ProgramModule::create(std::move(module_data));
+        ModuleResolution resolution{module.coordinate(), {module}, {}};
+        auto             link =
+            link_module_child(resolution, module, record.data().binding_name, bundle, version);
+        auto artifacts      = record.data().artifacts;
+        artifacts["module"] = encode(module.serialize_canonical());
+        artifacts["link"]   = encode(link.serialize_canonical());
+        save(State::Bound, std::move(artifacts));
+    }
+    return record;
 }
 
 }  // namespace neograph::program

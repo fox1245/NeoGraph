@@ -399,6 +399,35 @@ std::vector<HookOutboxEntry> load_hook_outbox_heads(
     return result;
 }
 
+std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(PGconn*          connection,
+                                                              std::string_view owner_scope,
+                                                              std::string_view run_id) {
+    std::vector<ProgramChildSynthesisRecord> heads;
+    auto                                     rows = exec_params(connection,
+                                                                "SELECT proposal_id, head_id, canonical_bytes FROM "
+                                                                                                    "neograph_program_transition_synthesis_log_v1 "
+                                                                                                    "WHERE owner_scope=$1 AND run_id=$2 ORDER BY sequence ASC",
+                                                                {std::string(owner_scope), std::string(run_id)});
+    for (int row = 0; row < PQntuples(rows.get()); ++row) {
+        auto entry = ProgramChildSynthesisRecord::parse(row_text(rows, row, 2));
+        if (entry.data().proposal.id() != row_text(rows, row, 0) ||
+            entry.id() != row_text(rows, row, 1))
+            throw std::invalid_argument("Stored child synthesis key is corrupt");
+        if (entry.data().proposal.data().owner_scope != owner_scope ||
+            entry.data().parent.run.run_id() != run_id ||
+            !is_valid_program_child_synthesis_append(heads, entry))
+            throw std::invalid_argument("Stored child synthesis history is corrupt");
+        auto found = std::find_if(heads.begin(), heads.end(), [&](const auto& head) {
+            return head.data().proposal.id() == entry.data().proposal.id();
+        });
+        if (found == heads.end())
+            heads.push_back(std::move(entry));
+        else
+            *found = std::move(entry);
+    }
+    return heads;
+}
+
 bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
     return std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
         const auto state = entry.data().state;
@@ -1025,6 +1054,19 @@ void append_context_publication(PGconn* connection, std::string_view owner_scope
          std::to_string(context->epoch.sequence()), context_publication_bytes(*context)});
 }
 
+void append_synthesis_records(PGconn*                                         connection,
+                              std::string_view                                owner_scope,
+                              std::string_view                                run_id,
+                              const std::vector<ProgramChildSynthesisRecord>& entries) {
+    for (const auto& entry : entries)
+        (void)exec_params(connection,
+                          "INSERT INTO "
+                          "neograph_program_transition_synthesis_log_v1(owner_scope,run_id,"
+                          "proposal_id,head_id,canonical_bytes) VALUES($1,$2,$3,$4,$5)",
+                          {std::string(owner_scope), std::string(run_id),
+                           entry.data().proposal.id(), entry.id(), entry.serialize_canonical()});
+}
+
 void append_hook_outbox_entries(PGconn* connection, std::string_view owner_scope,
                                 std::string_view run_id,
                                 const std::vector<HookOutboxEntry>& entries) {
@@ -1071,6 +1113,13 @@ CREATE TABLE IF NOT EXISTS neograph_program_transition_context_log_v1 (
     FOREIGN KEY(owner_scope, run_id)
         REFERENCES neograph_program_transition_run_heads_v2(owner_scope, run_id)
         ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS neograph_program_transition_synthesis_log_v1 (
+    sequence BIGSERIAL PRIMARY KEY, owner_scope TEXT NOT NULL, run_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL, head_id TEXT NOT NULL, canonical_bytes TEXT NOT NULL,
+    UNIQUE(owner_scope, run_id, head_id), FOREIGN KEY(owner_scope, run_id)
+        REFERENCES neograph_program_transition_run_heads_v2(owner_scope, run_id) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS neograph_program_transition_synthesis_run_v1
+    ON neograph_program_transition_synthesis_log_v1(owner_scope, run_id, sequence);
 CREATE TABLE IF NOT EXISTS neograph_program_transition_hook_outbox_log_v1 (
     sequence BIGSERIAL PRIMARY KEY, owner_scope TEXT NOT NULL, run_id TEXT NOT NULL,
     invocation_id TEXT NOT NULL, head_id TEXT NOT NULL, canonical_bytes TEXT NOT NULL,
@@ -1251,6 +1300,13 @@ PostgreSQLProgramTransitionStore::load_context_publications(
         if (context.epoch.sequence() > after_sequence) result.push_back(context);
     }
     return result;
+}
+
+std::vector<ProgramChildSynthesisRecord> PostgreSQLProgramTransitionStore::load_child_syntheses(
+    std::string_view owner_scope, std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    if (!load_head(impl_->connection, owner_scope, run_id)) return {};
+    return load_synthesis_heads(impl_->connection, owner_scope, run_id);
 }
 
 std::vector<HookOutboxEntry> PostgreSQLProgramTransitionStore::load_hook_outbox_entries(
@@ -1462,6 +1518,11 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
+    if (!publication.child_synthesis_records.empty() &&
+        !is_valid_program_child_synthesis_publication(
+            load_synthesis_heads(impl_->connection, owner_scope, run_id),
+            current ? &current->run_record : nullptr, publication))
+        return ProgramTransitionPublishResult::Conflict;
     const auto hook_heads = load_hook_outbox_heads(
         impl_->connection, owner_scope, run_id,
         current ? current->run_record : publication.run_record);
@@ -1622,6 +1683,8 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
     append_javascript_commands(impl_->connection, owner_scope, run_id, publication.commands);
     append_context_publication(impl_->connection, owner_scope, run_id,
                                publication.context_publication);
+    append_synthesis_records(impl_->connection, owner_scope, run_id,
+                             publication.child_synthesis_records);
     append_hook_outbox_entries(impl_->connection, owner_scope, run_id,
                                publication.hook_outbox_entries);
     if (publication.run_lineage) {

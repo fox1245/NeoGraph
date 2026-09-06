@@ -107,6 +107,9 @@ struct ProgramRuntimeRecoveryState {
 using ProgramRuntimeRecoveryHandler =
     std::function<void(const ProgramRuntimeRecoveryState&)>;
 
+using ProgramChildSynthesisGrantResolver = std::function<std::optional<ProgramChildSynthesisGrant>(
+    std::string_view owner_scope, std::string_view parent_run_id, std::string_view grant_id)>;
+
 struct ProgramChildQuotaConfig {
     /// Zero disables the corresponding global limit.
     std::uint64_t max_active_children = 0;
@@ -141,6 +144,8 @@ struct ProgramChildQuotaConfig {
       std::shared_ptr<HookRuntime>              hook_runtime;
       /// Required on reconnect when the run has durable context or hook state.
       ProgramRuntimeRecoveryHandler             runtime_recovery_handler;
+      std::shared_ptr<ProgramSynthesisGateway>  child_synthesis_gateway;
+      ProgramChildSynthesisGrantResolver        child_synthesis_grant_resolver;
   };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
@@ -182,6 +187,18 @@ public:
                               const ModuleLinkReceipt& link,
                               const ProgramVersion&    version,
                               ProgramInvocation        invocation);
+    /** Host-only synthesis at a held top-level checkpoint, bound to this exact run generation. */
+    ProgramChildSynthesisRecord prepare_child_synthesis(std::string_view                owner_scope,
+                                                        const ProgramHandle&            parent,
+                                                        const ProgramHandoff&           handoff,
+                                                        const ProgramSynthesisProposal& proposal,
+                                                        const ProgramChildSynthesisGrant& grant,
+                                                        std::string binding_name);
+    /** Finish durable stages before reconnect; uncommitted compile/validation requires
+     * reconciliation. */
+    ProgramChildSynthesisRecord recover_child_synthesis(std::string_view owner_scope,
+                                                        std::string_view parent_run_id,
+                                                        std::string_view proposal_id);
     ProgramHandle reconnect(std::string_view owner_scope, std::string_view run_id);
     /**
      * Reconcile the durable child join records for a parent. Existing terminal

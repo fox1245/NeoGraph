@@ -1229,7 +1229,7 @@ void reset_postgres_transition_schema(const char* url) {
             actual);
     }
     PQclear(database);
-    const char* sql = R"SQL(
+    const char* sql    = R"SQL(
 DROP TABLE IF EXISTS neograph_program_execution_leases_v1;
 DROP TABLE IF EXISTS neograph_program_graph_migration_capsules_v1;
 DROP TABLE IF EXISTS neograph_program_run_lineage_runs_v1;
@@ -1237,6 +1237,7 @@ DROP TABLE IF EXISTS neograph_program_run_lineage_history_v1;
 DROP TABLE IF EXISTS neograph_program_run_generation_publications_v1;
 DROP TABLE IF EXISTS neograph_program_run_generations_v1;
 DROP TABLE IF EXISTS neograph_program_run_lineage_heads_v1;
+DROP TABLE IF EXISTS neograph_program_transition_synthesis_log_v1;
 DROP TABLE IF EXISTS neograph_program_transition_hook_outbox_log_v1;
 DROP TABLE IF EXISTS neograph_program_transition_context_log_v1;
 DROP TABLE IF EXISTS neograph_program_transition_javascript_command_log_v2;

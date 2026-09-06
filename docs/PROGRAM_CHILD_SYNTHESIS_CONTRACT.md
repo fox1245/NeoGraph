@@ -1,6 +1,6 @@
 # Child Program synthesis: host authorization contract
 
-Status: N1 host boundary implemented. Durable orchestration and Program-side submission remain subsequent integration work.
+Status: N1 host boundary and N2 durable runtime integration implemented. See [SQLite/PostgreSQL persistence and recovery](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md). Dedicated Program-side submission and model generation remain follow-up work.
 
 ## Entry and ownership
 
@@ -117,24 +117,15 @@ Compile errors retain the existing compiler diagnostics. Stored budget decoders
 reject negative, fractional, and out-of-range integers before canonical identity
 verification; invalid numbers cannot wrap into an otherwise valid stored ID.
 
-## Subsequent N2/N3 integration
+## Durable integration and remaining qualification
 
-This API ends at admission of an immutable child version. It does not activate a
-version, attach a runtime child binding, spawn a child, or expose `ng.proposeProgram`.
-The reservation callback is a required host boundary, not a bundled SQLite ledger
-implementation. The authorization value is serialized for evidence, but has no
-public stored-value constructor that could be mistaken for fresh authorization.
-
-N2 must persist the proposal, selected grant/template identity, reservation,
-compiled bundle, semantic result, admission result, and exact parent-child
-binding, then delegate dispatch to the existing child lifecycle. Recovery must
-revalidate the trusted grant/receipt chain and distinguish a recorded outcome
-from fresh authority. N3 must inject real process failures across those
-boundaries and prove budget preservation, no unadmitted dispatch, no lost child,
-and explicit reconciliation of uncertain external effects.
-Generated bindings must carry the parent run/generation scope into dispatch.
-The existing resolver's `(owner, parent_version, binding_name)` lookup alone is
-not proof that a generated binding belongs to the calling run.
+The standalone `synthesize_child` API ends at admission. The N2 runtime API adds
+atomic reservation, durable stage outcomes, a parent-run/generation-scoped
+binding, and dispatch through the existing child lifecycle on SQLite and
+PostgreSQL. See [the persistence contract](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)
+for configuration, recovery behavior, and the remaining N3 failure matrix.
+The authorization value remains evidence, with no public stored-value
+constructor that could be mistaken for fresh authorization.
 
 The C++ API addition requires rebuilding Program consumers. The existing
 successor synthesis result format, JavaScript command protocol, native control C

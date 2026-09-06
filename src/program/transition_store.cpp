@@ -880,7 +880,17 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     std::string bytes;
     bytes.reserve(4096);
 
-    append_publication_bytes(bytes, "{\"commands\":[");
+    append_publication_bytes(bytes, "{");
+    if (!publication.child_synthesis_records.empty()) {
+        append_publication_bytes(bytes, "\"child_synthesis_records\":[");
+        for (std::size_t i = 0; i < publication.child_synthesis_records.size(); ++i) {
+            if (i) append_publication_bytes(bytes, ",");
+            append_publication_bytes(bytes,
+                                     publication.child_synthesis_records[i].serialize_canonical());
+        }
+        append_publication_bytes(bytes, "],");
+    }
+    append_publication_bytes(bytes, "\"commands\":[");
     for (std::size_t index = 0; index < publication.commands.size(); ++index) {
         if (index != 0) append_publication_bytes(bytes, ",");
         append_publication_bytes(bytes, publication.commands[index].serialize_canonical());
@@ -949,7 +959,9 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     }
     append_publication_bytes(bytes, ",\"run_record\":");
     append_publication_bytes(bytes, publication.run_record.serialize_canonical());
-    append_publication_bytes(bytes, ",\"storage_schema_version\":5}");
+    append_publication_bytes(bytes, publication.child_synthesis_records.empty()
+                                        ? ",\"storage_schema_version\":5}"
+                                        : ",\"storage_schema_version\":6}");
     return bytes;
 }
 }  // namespace
@@ -1044,6 +1056,13 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
             {"format", "storage_schema_version", "run_record", "journal_record", "events",
              "effects", "commands", "migration_plan", "run_generation", "run_lineage",
              "fork_source_lineage", "context_publication", "hook_outbox_entries"});
+    } else if (schema_version == 6) {
+        detail::reject_unknown_fields(
+            v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan", "run_generation", "run_lineage",
+             "fork_source_lineage", "context_publication", "hook_outbox_entries",
+             "child_synthesis_records"});
     } else {
         throw std::invalid_argument("Stored Program publication schema unsupported");
     }
@@ -1132,7 +1151,7 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
         }
     }
     std::vector<HookOutboxEntry> hook_outbox_entries;
-    if (schema_version == 5) {
+    if (schema_version >= 5) {
         const auto& encoded_hooks = rv(v, "hook_outbox_entries");
         if (!encoded_hooks.is_array()) throw std::invalid_argument("Program hook outbox must be array");
         for (const auto& entry : encoded_hooks)
@@ -1143,6 +1162,14 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
                                         std::move(commands), std::move(run_generation),
                                         std::move(run_lineage), std::move(fork_source_lineage),
                                          std::move(context_publication), std::move(hook_outbox_entries)};
+    if (schema_version >= 6) {
+        const auto& entries = rv(v, "child_synthesis_records");
+        if (!entries.is_array() || entries.size() != 1)
+            throw std::invalid_argument("Program synthesis publication requires one record");
+        for (const auto& entry : entries)
+            out.child_synthesis_records.push_back(
+                ProgramChildSynthesisRecord::parse(detail::canonical_json_bytes(entry)));
+    }
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
@@ -1156,6 +1183,12 @@ std::vector<ProgramContextPublication> ProgramTransitionStore::load_context_publ
     std::string_view, std::string_view, std::uint64_t) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support durable context-publication reads");
+}
+
+std::vector<ProgramChildSynthesisRecord> ProgramTransitionStore::load_child_syntheses(
+    std::string_view, std::string_view) const {
+    throw std::runtime_error(
+        "ProgramTransitionStore does not support durable child synthesis reads");
 }
 
 std::vector<HookOutboxEntry> ProgramTransitionStore::load_hook_outbox_entries(
@@ -1406,6 +1439,7 @@ struct InMemoryProgramTransitionStore::Impl {
         std::vector<ProgramJavaScriptCommandJournalEntry> commands;
         std::vector<ProgramContextPublication>             context_publications;
         std::vector<HookOutboxEntry>                        hook_outbox_entries;
+        std::vector<ProgramChildSynthesisRecord>            child_syntheses;
         ProgramTransitionHistoryPtr              history;
         std::optional<MigrationPlan>             migration_plan;
         std::optional<std::string>               lineage_id;
@@ -1521,6 +1555,14 @@ std::vector<ProgramContextPublication> InMemoryProgramTransitionStore::load_cont
     }
     return result;
 }
+std::vector<ProgramChildSynthesisRecord> InMemoryProgramTransitionStore::load_child_syntheses(
+    std::string_view owner_scope, std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    auto            found = impl_->runs.find(key(owner_scope, run_id));
+    if (found == impl_->runs.end()) return {};
+    return found->second->child_syntheses;
+}
+
 std::vector<HookOutboxEntry> InMemoryProgramTransitionStore::load_hook_outbox_entries(
     std::string_view o, std::string_view r) const {
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1935,6 +1977,25 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         !valid_hook_history_append({}, publication.hook_outbox_entries, publication.run_record))
         return ProgramTransitionPublishResult::Conflict;
 
+    const auto synthesis_heads = current == impl_->runs.end()
+                                     ? std::vector<ProgramChildSynthesisRecord>{}
+                                     : current->second->child_syntheses;
+    if (!is_valid_program_child_synthesis_publication(
+            synthesis_heads, current == impl_->runs.end() ? nullptr : &current->second->run,
+            publication))
+        return ProgramTransitionPublishResult::Conflict;
+    auto next_syntheses = synthesis_heads;
+    for (const auto& entry : publication.child_synthesis_records) {
+        auto found =
+            std::find_if(next_syntheses.begin(), next_syntheses.end(), [&](const auto& old) {
+                return old.data().proposal.id() == entry.data().proposal.id();
+            });
+        if (found == next_syntheses.end())
+            next_syntheses.push_back(entry);
+        else
+            *found = entry;
+    }
+
     const auto maybe_fail = [&](ProgramTransitionFaultPoint point) {
         if (impl_->fault && *impl_->fault == point) {
             impl_->fault.reset();
@@ -2028,15 +2089,13 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     auto migration_plan = current == impl_->runs.end()
                               ? std::move(publication.migration_plan)
                               : current->second->migration_plan;
-    auto candidate = std::make_shared<const Impl::Stored>(
-        Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                        std::move(effects), std::move(commands), std::move(context_publications), std::move(hook_outbox_entries),
-                       std::move(history),
-                      std::move(migration_plan),
-                      publication.run_lineage
-                          ? std::optional<std::string>(publication.run_lineage->lineage_id())
-                          : std::nullopt,
-                      std::move(publication_bytes)});
+    auto candidate      = std::make_shared<const Impl::Stored>(Impl::Stored{
+        std::move(staged_run), std::move(staged_journal), std::move(events), std::move(effects),
+        std::move(commands), std::move(context_publications), std::move(hook_outbox_entries),
+        std::move(next_syntheses), std::move(history), std::move(migration_plan),
+        publication.run_lineage ? std::optional<std::string>(publication.run_lineage->lineage_id())
+                                     : std::nullopt,
+        std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (staged_lineage || staged_fork_source || safe_point_capsule ||
         expected_lease || next_lease) {

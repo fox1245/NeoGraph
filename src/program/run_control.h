@@ -180,6 +180,11 @@ public:
         std::optional<RunBudget>   inflight_reservation = std::nullopt);
     /** Durably consumes one nonrenewable dynamic-compilation unit before dispatch. */
     bool consume_dynamic_compile();
+    std::atomic<std::uint64_t> dynamic_compile_ceiling{UINT64_MAX};
+    void                       limit_dynamic_compiles(std::uint64_t remaining) noexcept {
+        auto old = dynamic_compile_ceiling.load();
+        while (old > remaining && !dynamic_compile_ceiling.compare_exchange_weak(old, remaining)) {}
+    }
     ProgramEvent make_event(std::string_view operation_id,
                             ProgramEventKind kind,
                             ProgramEventPayload payload);

@@ -5,12 +5,13 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/program/child_synthesis.h>
 #include <neograph/program/command_journal.h>
 #include <neograph/program/event.h>
 #include <neograph/program/lineage.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/run_record.h>
-#include <neograph/hook_outbox.h>
 #include <neograph/runtime_context.h>
 
 #include <cstdint>
@@ -111,6 +112,7 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     std::optional<ProgramContextPublication>  context_publication;
     /// Immutable hook outbox heads appended atomically with this transition.
     std::vector<HookOutboxEntry>               hook_outbox_entries;
+    std::vector<ProgramChildSynthesisRecord>   child_synthesis_records;
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
 };
@@ -174,6 +176,9 @@ public:
         std::string_view owner_scope, std::string_view run_id) const;
     /** Target-local state plus source-origin hook heads authorized by its generation. */
     virtual ProgramEffectiveRuntimeState load_effective_runtime_state(
+        std::string_view owner_scope, std::string_view run_id) const;
+    /** Current synthesis heads. Unsupported stores fail closed, never report an empty journal. */
+    virtual std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
         std::string_view owner_scope, std::string_view run_id) const;
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>
@@ -280,6 +285,8 @@ public:
         std::string_view run_id,
                                std::uint64_t    after_sequence = 0) const override;
     std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override;
+    std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
         std::string_view owner_scope, std::string_view run_id) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
