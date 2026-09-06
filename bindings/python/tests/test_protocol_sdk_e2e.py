@@ -11,7 +11,6 @@ import os
 import runpy
 import socket
 import sys
-import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +21,11 @@ from packaging.version import Version
 
 pytest.importorskip("a2a")
 pytest.importorskip("acp")
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9 and 3.10 wheel tests.
+    import tomli as tomllib
 
 import httpx
 from a2a.client import A2ACardResolver, ClientConfig, create_client

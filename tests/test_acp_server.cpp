@@ -815,6 +815,58 @@ TEST(ACPServer, PromptCannotRaceSessionResumeStateRestore) {
     EXPECT_EQ(side_effects.load(), 0);
 }
 
+TEST(ACPServer, DestructorJoinsPromptThreadLocalCleanup) {
+    struct ExitState {
+        std::promise<void> entered;
+        std::promise<void> release;
+        std::shared_future<void> released = release.get_future().share();
+    };
+    struct ExitGuard {
+        std::shared_ptr<ExitState> state;
+        ~ExitGuard() {
+            if (!state) return;
+            state->entered.set_value();
+            state->released.wait();
+        }
+    };
+    class ExitAdapter final : public ACPGraphAdapter {
+    public:
+        explicit ExitAdapter(std::shared_ptr<ExitState> state) : state_(std::move(state)) {}
+        neograph::json build_initial_state(const std::vector<ContentBlock>& blocks,
+                                          const std::string& session_id) const override {
+            thread_local ExitGuard guard;
+            guard.state = state_;
+            return ACPGraphAdapter::build_initial_state(blocks, session_id);
+        }
+    private:
+        std::shared_ptr<ExitState> state_;
+    };
+
+    auto state = std::make_shared<ExitState>();
+    auto entered = state->entered.get_future();
+    CapturingSink cap;
+    auto server = std::make_unique<ACPServer>(
+        build_echo_engine(), neograph::json{{"name", "test-acp"}, {"version", "0.0.1"}},
+        std::make_shared<ExitAdapter>(state));
+    initialize_server(*server);
+    server->set_notification_sink(cap.as_sink());
+    const auto sid = new_session(*server);
+    server->handle_message(make_request(2, "session/prompt",
+        {{"sessionId", sid}, {"prompt", neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
+    EXPECT_TRUE(cap.wait_for_response(2).contains("result"));
+    const auto exit_started = entered.wait_for(std::chrono::seconds(5));
+    if (exit_started != std::future_status::ready) {
+        state->release.set_value();
+        FAIL() << "Prompt worker did not reach thread-local cleanup";
+    }
+    auto destroyed = std::async(std::launch::async, [&] { server.reset(); });
+    const auto before_release = destroyed.wait_for(std::chrono::milliseconds(50));
+    state->release.set_value();
+    destroyed.get();
+    EXPECT_EQ(before_release, std::future_status::timeout);
+}
+
 TEST(ACPServer, BuildInitialStateExceptionIsContained) {
     CapturingSink cap;
     auto adapter = std::make_shared<ThrowingAdapter>(
