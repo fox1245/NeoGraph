@@ -8206,6 +8206,569 @@ TEST(ProgramRuntimeTest, ParallelMapLaunchesNextWindowAfterPriorCompletion) {
 }
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+namespace {
+struct ChildSynthesisFixture {
+    std::shared_ptr<BlockAfterJavaScriptResultJournal> journal =
+        std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime                  fixture{2, {}, journal, {}, ExecutionGuarantee::Strict, true};
+    std::shared_ptr<ProgramCompiler> compiler = std::make_shared<ProgramCompiler>(
+        fixture.registry, ProgramCompilerConfig{"program-runtime-test/v1"});
+    RunBudget     child_budget{1000, 10, 10, 1, 1, 2, 0, 0, 0};
+    ProgramSource child_source = [] {
+        auto text = javascript_runtime_source("runtime-completed", "");
+        text.resize(text.find("export function* main"));
+        return ProgramSource::from_javascript("reviewed-child.js", std::move(text));
+    }();
+    std::optional<ProgramVersion>                         version;
+    std::optional<ProgramHandle>                          handle;
+    std::optional<ProgramHandoff>                         hold;
+    std::optional<ProgramChildSynthesisParent>            parent;
+    std::string                                           reservation_head;
+    RunBudget                                             reservation_remaining;
+    unsigned                                              reservations       = 0;
+    unsigned                                              semantic_calls     = 0;
+    unsigned                                              admissions         = 0;
+    bool                                                  semantic_accept    = true;
+    std::string                                           semantic_validator = digest('b');
+    std::string                                           semantic_contract  = digest('c');
+    std::function<void(ProgramSynthesisReservationData&)> alter_reservation;
+    std::function<void(ProgramAdmission&)>                alter_admission;
+
+    ChildSynthesisFixture() {
+        completed_calls.store(0);
+        // The current compiler conservatively labels arbitrary generator
+        // control Unmanaged. The reviewed declaration-only child stays Strict.
+        fixture.profile =
+            AdmittedRuntime::make_profile(fixture.registry, ExecutionGuarantee::Unmanaged, true);
+        fixture.policy =
+            AdmittedRuntime::make_policy(fixture.profile, ExecutionGuarantee::Unmanaged, true);
+        const auto source = ProgramSource::from_javascript(
+            "synthesis-parent.js", javascript_runtime_source("runtime-completed", R"JS(
+                yield ng.checkpoint({ready: true}, "synthesis:ready");
+                return {done: true};
+            )JS"));
+        const RunBudget ceiling{60000, 1000, 1000, 2, 16, 20, 3, 2, 8};
+        const RunBudget floor{1, 0, 0, 1, 1, 1, 0, 0, 0};
+        auto            bundle = compiler->compile(source, ProgramBudgetBounds{floor, ceiling});
+        try {
+            version = fixture.catalog->admit(
+                bundle, ProgramAdmission{"tenant:runtime", fixture.profile, fixture.policy, {}});
+        } catch (const ProgramAdmissionError& error) {
+            std::string message = error.what();
+            for (const auto& diagnostic : error.diagnostics()) {
+                message += "\n" + diagnostic.code + ": " + diagnostic.message;
+            }
+            throw std::runtime_error(message);
+        }
+        handle = fixture.runtime->start(
+            "tenant:runtime", *version,
+            ProgramInvocation{json::object(), ceiling, "child-synthesis-parent", {}});
+        if (!journal->wait_for_result(std::chrono::seconds(2))) {
+            journal->release_result();
+            throw std::runtime_error("Parent did not reach synthesis checkpoint");
+        }
+        hold.emplace(handle->next_handoff());
+        journal->release_result();
+        (void)hold->value();
+        auto run     = handle->snapshot();
+        auto lineage = journal->load_run_lineage("tenant:runtime", handle->run_id());
+        if (!lineage) throw std::runtime_error("Missing parent lineage");
+        auto generation = journal->load_generation("tenant:runtime", lineage->lineage_id(),
+                                                   lineage->active_generation());
+        if (!generation) throw std::runtime_error("Missing parent generation");
+        parent.emplace(
+            ProgramChildSynthesisParent{*version, std::move(run), *lineage, *generation});
+        reservation_head      = lineage->id();
+        reservation_remaining = lineage->remaining_budget();
+    }
+    ~ChildSynthesisFixture() {
+        if (handle) handle->cancel();
+        journal->release_result();
+        hold.reset();
+        if (handle) (void)handle->wait();
+    }
+    ProgramSynthesisProposalData proposal_data() const {
+        ProgramSynthesisProposalData data;
+        data.owner_scope      = "tenant:runtime";
+        data.lineage_id       = parent->lineage.lineage_id();
+        data.parent_run_id    = parent->run.run_id();
+        data.source           = child_source;
+        data.requested_budget = child_budget;
+        data.created_at_ms    = parent->run.updated_at_ms();
+        return data;
+    }
+    ProgramChildSynthesisGrantData grant_data() const {
+        ProgramChildSynthesisGrantData data;
+        data.owner_scope                 = "tenant:runtime";
+        data.parent_run_id               = parent->run.run_id();
+        data.parent_program_version_id   = version->id();
+        data.parent_policy_fingerprint   = version->policy_snapshot().fingerprint();
+        data.lineage_id                  = parent->lineage.lineage_id();
+        data.expected_lineage_head_id    = parent->lineage.id();
+        data.template_identity           = digest('a');
+        data.reviewed_source_identity    = program_synthesis_source_identity(child_source);
+        data.semantic_validator_identity = digest('b');
+        data.semantic_contract_identity  = digest('c');
+        data.child_budget_ceiling        = child_budget;
+        return data;
+    }
+    ProgramSynthesisGateway gateway() {
+        ProgramSynthesisGatewayConfig config{
+            compiler,
+            fixture.catalog,
+            {},
+            [this](const auto&, const auto&, const auto&) {
+                ++admissions;
+                auto admission =
+                    ProgramAdmission{"tenant:runtime", fixture.profile, fixture.policy, {}};
+                if (alter_admission) alter_admission(admission);
+                return admission;
+            },
+            1024 * 1024,
+            [this](const auto&, const auto&, const auto&) {
+                ++semantic_calls;
+                return ProgramSynthesisSemanticDecision{semantic_validator, semantic_contract,
+                                                        semantic_accept,
+                                                        json{{"accepted", semantic_accept}}};
+            }};
+        config.reserve_child = [this](const ProgramSynthesisProposal&           proposal,
+                                      const ProgramChildSynthesisAuthorization& authorization) {
+            // Model the host's compare-and-swap boundary. SQLite publication
+            // and its crash recovery belong to the subsequent integration slice.
+            if (reservation_head != authorization.data().source_lineage_head_id) {
+                throw ProgramChildSynthesisError("P_CHILD_SYNTHESIS_RESERVATION", "stale host CAS");
+            }
+            auto before = reservation_remaining;
+            auto after  = before;
+            --after.max_dynamic_compiles;
+            ProgramSynthesisReservationData data{proposal.id(),
+                                                 parent->lineage.lineage_id(),
+                                                 parent->lineage.id(),
+                                                 digest('f'),
+                                                 before,
+                                                 after};
+            if (alter_reservation) alter_reservation(data);
+            auto result = ProgramSynthesisReservation::create(std::move(data));
+            ++reservations;
+            reservation_head      = result.data().reserved_lineage_head_id;
+            reservation_remaining = result.data().remaining_after_reservation;
+            return result;
+        };
+        return ProgramSynthesisGateway(std::move(config));
+    }
+};
+
+void expect_child_synthesis_error(const std::function<void()>& call, std::string_view code) {
+    try {
+        call();
+        FAIL() << "Expected " << code;
+    } catch (const ProgramChildSynthesisError& error) {
+        EXPECT_EQ(error.code(), code);
+    }
+}
+}  // namespace
+
+TEST(ProgramChildSynthesis, AuthorizesExactHostGrantWithoutChangingParent) {
+    ChildSynthesisFixture test;
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            grant    = ProgramChildSynthesisGrant::create(test.grant_data());
+    const auto authorization = authorize_program_child_synthesis(proposal, grant, *test.parent);
+    EXPECT_EQ(authorization.data().proposal_id, proposal.id());
+    EXPECT_EQ(authorization.data().grant_id, grant.id());
+    EXPECT_EQ(authorization.data().source_lineage_head_id, test.parent->lineage.id());
+    EXPECT_EQ(authorization.data().child_budget, test.child_budget);
+    EXPECT_EQ(authorize_program_child_synthesis(proposal, grant, *test.parent).id(),
+              authorization.id());
+    EXPECT_EQ(test.handle->snapshot().id(), test.parent->run.id());
+    EXPECT_EQ(test.journal->load_run_lineage("tenant:runtime", test.handle->run_id())->id(),
+              test.parent->lineage.id());
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, AdmitsChildAtRequestedCeilingWithoutDispatch) {
+    ChildSynthesisFixture test;
+    const auto            result = test.gateway().synthesize_child(
+        ProgramSynthesisProposal::create(test.proposal_data()),
+        ProgramChildSynthesisGrant::create(test.grant_data()), *test.parent);
+    EXPECT_EQ(test.reservations, 1U);
+    EXPECT_EQ(test.semantic_calls, 1U);
+    EXPECT_EQ(test.admissions, 1U);
+    EXPECT_EQ(completed_calls.load(), 0U);
+    EXPECT_EQ(result.synthesis.reservation.data().remaining_after_reservation.max_dynamic_compiles,
+              result.authorization.data().parent_remaining.max_dynamic_compiles - 1);
+    const std::map<std::string, std::uint64_t> ceilings{
+        {"wall_time_ms", 1000},      {"model_tokens", 10},          {"monetary_microunits", 10},
+        {"max_concurrency", 1},      {"max_program_operations", 1}, {"max_core_steps", 2},
+        {"max_dynamic_compiles", 0}, {"max_child_depth", 0},        {"max_total_children", 0}};
+    for (const auto& budget : result.synthesis.bundle.declared_budget_requirements()) {
+        EXPECT_EQ(budget.maximum, ceilings.at(budget.resource));
+    }
+}
+
+TEST(ProgramChildSynthesis, RejectsForeignOwnerAndRunBeforeReservation) {
+    ChildSynthesisFixture test;
+    const auto            grant   = ProgramChildSynthesisGrant::create(test.grant_data());
+    auto                  request = test.proposal_data();
+    request.owner_scope           = "tenant:foreign";
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(request), grant,
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_OWNER");
+    request               = test.proposal_data();
+    request.parent_run_id = "another-run";
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(request), grant,
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_GENERATION");
+    EXPECT_EQ(test.reservations, 0U);
+    EXPECT_EQ(test.admissions, 0U);
+}
+
+TEST(ProgramChildSynthesis, RejectsStaleHeadPolicyAndGeneration) {
+    ChildSynthesisFixture test;
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    for (const auto field : {0, 1, 2}) {
+        auto data = test.grant_data();
+        if (field == 0) data.expected_lineage_head_id = digest('d');
+        if (field == 1) data.parent_policy_fingerprint = digest('d');
+        if (field == 2) data.parent_program_version_id = digest('d');
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(proposal, ProgramChildSynthesisGrant::create(data),
+                                                *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_GENERATION");
+    }
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, GrantCannotMoveBetweenRunsOfTheSameVersion) {
+    ChildSynthesisFixture first;
+    ChildSynthesisFixture second;
+    ASSERT_EQ(first.version->id(), second.version->id());
+    const auto proposal = ProgramSynthesisProposal::create(second.proposal_data());
+    const auto grant    = ProgramChildSynthesisGrant::create(first.grant_data());
+    expect_child_synthesis_error(
+        [&] { second.gateway().synthesize_child(proposal, grant, *second.parent); },
+        "P_CHILD_SYNTHESIS_GENERATION");
+    EXPECT_EQ(second.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, RejectsUnreviewedSourceAndSourceByteLimit) {
+    ChildSynthesisFixture test;
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    auto                  data     = test.grant_data();
+    data.reviewed_source_identity  = digest('d');
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(proposal, ProgramChildSynthesisGrant::create(data),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_SOURCE");
+    data                  = test.grant_data();
+    data.max_source_bytes = proposal.source().serialize_canonical().size() - 1;
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(proposal, ProgramChildSynthesisGrant::create(data),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_SOURCE");
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, SourceReviewIncludesSealedModulesAndCountLimit) {
+    ChildSynthesisFixture test;
+    const auto text   = javascript_runtime_source("runtime-completed", "return {ok: true};");
+    const auto source = ProgramSource::from_javascript(
+        "reviewed-child.js", text, {{"reviewed:helper", digest('1')}}, {},
+        {{"reviewed:helper", digest('1'), "export const v=1;"}});
+    EXPECT_NE(program_synthesis_source_identity(source),
+              program_synthesis_source_identity(test.child_source));
+    auto request                  = test.proposal_data();
+    request.source                = source;
+    auto data                     = test.grant_data();
+    data.reviewed_source_identity = program_synthesis_source_identity(source);
+    data.max_sealed_modules       = 0;
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(request),
+                                            ProgramChildSynthesisGrant::create(data), *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_SOURCE");
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, RequestAndHostGrantCannotWidenParentAuthority) {
+    ChildSynthesisFixture test;
+    for (const bool capability : {false, true}) {
+        auto request = test.proposal_data();
+        auto grant   = test.grant_data();
+        if (capability) {
+            request.requested_capabilities = {"foreign.capability"};
+            grant.allowed_capabilities     = request.requested_capabilities;
+        } else {
+            request.requested_effects = {"foreign.effect"};
+            grant.allowed_effects     = request.requested_effects;
+        }
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(ProgramSynthesisProposal::create(request),
+                                                ProgramChildSynthesisGrant::create(grant),
+                                                *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_AUTHORITY");
+    }
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, ChecksEveryHostBudgetDimensionBeforeReservation) {
+    ChildSynthesisFixture test;
+    const auto            grant = ProgramChildSynthesisGrant::create(test.grant_data());
+    const std::vector<std::function<void(RunBudget&)>> increases{
+        [](auto& b) { ++b.wall_time_ms; },           [](auto& b) { ++b.model_tokens; },
+        [](auto& b) { ++b.monetary_microunits; },    [](auto& b) { ++b.max_concurrency; },
+        [](auto& b) { ++b.max_program_operations; }, [](auto& b) { ++b.max_core_steps; },
+        [](auto& b) { ++b.max_dynamic_compiles; },   [](auto& b) { ++b.max_child_depth; },
+        [](auto& b) { ++b.max_total_children; }};
+    for (std::size_t i = 0; i < increases.size(); ++i) {
+        SCOPED_TRACE(i);
+        auto request = test.proposal_data();
+        increases[i](request.requested_budget);
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(ProgramSynthesisProposal::create(request), grant,
+                                                *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_BUDGET");
+    }
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, AdmissionCannotGiveTheChildUnrequestedAuthority) {
+    for (const auto field : {0, 1, 2}) {
+        ChildSynthesisFixture test;
+        const auto versions_before = test.fixture.store->list_versions("tenant:runtime").size();
+        test.alter_admission       = [&](ProgramAdmission& admission) {
+            PolicySnapshotBuilder builder;
+            builder.id("overbroad-child-policy")
+                .semantic_version("1.0.0")
+                .owner_scope("tenant:runtime")
+                .admission_profile(test.fixture.profile)
+                .budget_ceiling(test.fixture.policy.budget_ceiling())
+                .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged);
+            if (field == 0) builder.allow_capability("unused.capability");
+            if (field == 1) builder.allow_effect("unused.effect");
+            if (field == 2) builder.allow_module_digest(digest('e'));
+            admission.policy = std::move(builder).build();
+        };
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(
+                    ProgramSynthesisProposal::create(test.proposal_data()),
+                    ProgramChildSynthesisGrant::create(test.grant_data()), *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_AUTHORITY");
+        EXPECT_EQ(test.fixture.store->list_versions("tenant:runtime").size(), versions_before);
+    }
+}
+
+TEST(ProgramChildSynthesis, ReservesRoomForCompileChildAndDescendantDepth) {
+    ChildSynthesisFixture test;
+    auto                  grant = test.grant_data();
+    grant.child_budget_ceiling  = test.parent->lineage.remaining_budget();
+    for (const auto field : {0, 1, 2}) {
+        auto       request   = test.proposal_data();
+        const auto remaining = test.parent->lineage.remaining_budget();
+        if (field == 0)
+            request.requested_budget.max_dynamic_compiles = remaining.max_dynamic_compiles;
+        if (field == 1) request.requested_budget.max_child_depth = remaining.max_child_depth;
+        if (field == 2) request.requested_budget.max_total_children = remaining.max_total_children;
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(ProgramSynthesisProposal::create(request),
+                                                ProgramChildSynthesisGrant::create(grant),
+                                                *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_BUDGET");
+    }
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, RejectsZeroExecutionBudgetAndCompiledGuaranteeDowngrade) {
+    ChildSynthesisFixture test;
+    test.child_source = ProgramSource::from_javascript(
+        "reviewed-generator.js",
+        javascript_runtime_source("runtime-completed", "return {ok: true};"));
+    auto grant = test.grant_data();
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(test.proposal_data()),
+                                            ProgramChildSynthesisGrant::create(grant),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_GUARANTEE");
+    auto request                                    = test.proposal_data();
+    request.requested_budget.max_program_operations = 0;
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(request),
+                                            ProgramChildSynthesisGrant::create(test.grant_data()),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_BUDGET");
+    EXPECT_EQ(test.reservations, 1U);
+    EXPECT_EQ(test.semantic_calls, 0U);
+    EXPECT_EQ(test.admissions, 0U);
+}
+
+TEST(ProgramChildSynthesis, RejectsMismatchedReservationBeforeEvaluatingInvalidSource) {
+    ChildSynthesisFixture test;
+    test.child_source = ProgramSource::from_javascript("reviewed-invalid.js", "not JavaScript {");
+    test.alter_reservation = [](auto& data) { data.source_lineage_head_id = digest('e'); };
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(test.proposal_data()),
+                                            ProgramChildSynthesisGrant::create(test.grant_data()),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_RESERVATION");
+    EXPECT_EQ(test.reservations, 1U);
+    EXPECT_EQ(test.semantic_calls, 0U);
+    EXPECT_EQ(test.admissions, 0U);
+}
+
+TEST(ProgramChildSynthesis, RejectsReservationThatConsumesRequiredChildCapacity) {
+    for (const bool depth : {false, true}) {
+        ChildSynthesisFixture test;
+        test.alter_reservation = [depth](auto& data) {
+            if (depth)
+                data.remaining_after_reservation.max_child_depth = 0;
+            else
+                data.remaining_after_reservation.max_total_children = 0;
+        };
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(
+                    ProgramSynthesisProposal::create(test.proposal_data()),
+                    ProgramChildSynthesisGrant::create(test.grant_data()), *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_RESERVATION");
+        EXPECT_EQ(test.admissions, 0U);
+    }
+}
+
+TEST(ProgramChildSynthesis, SemanticRejectionOccursAfterReservationAndNeverAdmits) {
+    ChildSynthesisFixture test;
+    test.semantic_accept = false;
+    EXPECT_THROW(test.gateway().synthesize_child(
+                     ProgramSynthesisProposal::create(test.proposal_data()),
+                     ProgramChildSynthesisGrant::create(test.grant_data()), *test.parent),
+                 ProgramSynthesisValidationError);
+    EXPECT_EQ(test.reservations, 1U);
+    EXPECT_EQ(test.semantic_calls, 1U);
+    EXPECT_EQ(test.admissions, 0U);
+    EXPECT_EQ(completed_calls.load(), 0U);
+    const auto after_rejection = test.reservation_remaining;
+    EXPECT_EQ(after_rejection.max_dynamic_compiles,
+              test.parent->lineage.remaining_budget().max_dynamic_compiles - 1);
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(test.proposal_data()),
+                                            ProgramChildSynthesisGrant::create(test.grant_data()),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_RESERVATION");
+    EXPECT_EQ(test.reservation_remaining, after_rejection);
+    EXPECT_EQ(test.reservations, 1U);
+}
+
+TEST(ProgramChildSynthesis, ChildOnlyGatewayHasNoUncheckedSuccessorFallback) {
+    ChildSynthesisFixture test;
+    EXPECT_THROW(test.gateway().synthesize(ProgramSynthesisProposal::create(test.proposal_data())),
+                 std::invalid_argument);
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, SameSourceCannotSwitchItsRegistryBeforeSemanticValidation) {
+    ChildSynthesisFixture test;
+    test.compiler =
+        std::make_shared<ProgramCompiler>(runtime_registry(ExecutionGuarantee::Unmanaged),
+                                          ProgramCompilerConfig{"program-runtime-test/v1"});
+    expect_child_synthesis_error(
+        [&] {
+            test.gateway().synthesize_child(ProgramSynthesisProposal::create(test.proposal_data()),
+                                            ProgramChildSynthesisGrant::create(test.grant_data()),
+                                            *test.parent);
+        },
+        "P_CHILD_SYNTHESIS_REGISTRY");
+    EXPECT_EQ(test.reservations, 1U);
+    EXPECT_EQ(test.semantic_calls, 0U);
+    EXPECT_EQ(test.admissions, 0U);
+}
+
+TEST(ProgramChildSynthesis, SemanticAcceptanceCannotSwitchValidatorOrContract) {
+    for (const bool validator : {false, true}) {
+        ChildSynthesisFixture test;
+        if (validator)
+            test.semantic_validator = digest('e');
+        else
+            test.semantic_contract = digest('e');
+        expect_child_synthesis_error(
+            [&] {
+                test.gateway().synthesize_child(
+                    ProgramSynthesisProposal::create(test.proposal_data()),
+                    ProgramChildSynthesisGrant::create(test.grant_data()), *test.parent);
+            },
+            "P_CHILD_SYNTHESIS_SEMANTICS");
+        EXPECT_EQ(test.reservations, 1U);
+        EXPECT_EQ(test.semantic_calls, 1U);
+        EXPECT_EQ(test.admissions, 0U);
+    }
+}
+
+TEST(ProgramChildSynthesis, ANewGrantCannotAuthorizeATerminalParent) {
+    ChildSynthesisFixture test;
+    test.hold.reset();
+    ASSERT_EQ(test.handle->wait().status(), ProgramTerminalStatus::Completed);
+    test.parent->run     = test.handle->snapshot();
+    test.parent->lineage = *test.journal->load_run_lineage("tenant:runtime", test.handle->run_id());
+    const auto proposal  = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto grant     = ProgramChildSynthesisGrant::create(test.grant_data());
+    expect_child_synthesis_error(
+        [&] { test.gateway().synthesize_child(proposal, grant, *test.parent); },
+        "P_CHILD_SYNTHESIS_GENERATION");
+    EXPECT_EQ(test.reservations, 0U);
+}
+
+TEST(ProgramChildSynthesis, DynamicCompileBudgetRequiresGeneratorAndExplicitHostBounds) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    ProgramCompiler compiler(fixture.registry, {"program-runtime-test/v1"});
+    const auto      body   = javascript_runtime_source("runtime-completed", "return {ok: true};");
+    const auto      source = ProgramSource::from_javascript("compile-grant.js", body);
+    auto            budget = javascript_budget(1, 4, 1, 1);
+    budget.max_dynamic_compiles = 2;
+    const auto bundle           = compiler.compile(source, budget);
+    const auto version          = fixture.catalog->admit(
+        bundle, ProgramAdmission{"tenant:runtime", fixture.profile, fixture.policy, {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), budget, "unused-compile-grant", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    const auto define_only = ProgramSource::from_javascript(
+        "define-only.js", body.substr(0, body.find("export function* main")));
+    EXPECT_THROW(compiler.compile(define_only, budget), ProgramCompileError);
+    const auto default_version = fixture.admit_javascript(body);
+    EXPECT_THROW(
+        fixture.runtime->start("tenant:runtime", default_version,
+                               ProgramInvocation{json::object(), budget, "ungranted-compile", {}}),
+        ProgramDiagnosticError);
+}
+
 TEST(ProgramSynthesisGateway, RequiresSemanticValidatorBeforeAcceptingProposals) {
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     ProgramSynthesisGatewayConfig config;

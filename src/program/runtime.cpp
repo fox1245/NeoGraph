@@ -795,14 +795,15 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
         budget.max_concurrency == 0 || budget.max_program_operations == 0 ||
         budget.max_core_steps == 0 ||
         budget.max_core_steps > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-        (!has_dynamic_expansion && budget.max_dynamic_compiles != 0) ||
+        (!has_dynamic_expansion && budget.max_dynamic_compiles != 0 &&
+         !materialized.bundle.control_source()) ||
         (has_dynamic_expansion && budget.max_dynamic_compiles == 0) ||
         budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH ||
         ((budget.max_child_depth == 0) != (budget.max_total_children == 0))) {
         throw_runtime_diagnostic(
             "P_START_BUDGET",
             "Program requires positive wall/Core/operation/concurrency limits, "
-            "a dynamic-compilation grant only when expand_task_graph is present, and "
+            "a dynamic-compilation grant only for JavaScript control or expand_task_graph, and "
             "an unpaired child budget is forbidden");
     }
 
