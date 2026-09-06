@@ -235,7 +235,7 @@ skip   = "*-musllinux_* *_i686 pp*"
 # Inside the wheel-test venv, install pytest and run the binding's
 # pytest suite plus a one-line import smoke. The {project} placeholder
 # resolves to the source tree path inside the cibw container.
-test-requires = ["pytest", "tomli; python_version < '3.11'"]
+test-requires = ["pytest", "tomli"]
 test-command  = """\
 python -c "import pathlib, sqlite3, tempfile; import neograph_engine as ng; ng.SQLiteContextStore(str(pathlib.Path(tempfile.mkdtemp()) / 'smoke.sqlite3')); print('cibw smoke version:', ng.__version__, 'preloaded sqlite:', sqlite3.sqlite_version)" && \
 python -m pytest -q {project}/bindings/python/tests/\
