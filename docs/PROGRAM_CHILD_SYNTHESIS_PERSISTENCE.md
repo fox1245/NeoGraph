@@ -1,6 +1,8 @@
 # Durable child synthesis
 
 Status: N2 implemented for the in-memory reference store, SQLite, and PostgreSQL.
+N3 recovery qualification for the single-child scenario is described in
+[the recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md).
 The host entry point uses an existing top-level checkpoint and the existing
 `ng.spawn` / `ng.await` child lifecycle. This is a bounded reviewed-source path;
 it does not implement a model generator, template renderer, or a new DSL command.
@@ -78,7 +80,7 @@ compaction of large histories are follow-up work.
 | `Admitted` | Link the exact admitted version using a scoped module receipt |
 | `Bound` | Resume the parent's ordinary child command |
 | `Dispatching` | Reuse the recorded child ID and input through `start_child` |
-| `Spawned` | Reuse the existing durable child relation and join result |
+| `Spawned` | Reuse the child/result, or reconcile Core dispatch without a durable checkpoint |
 | `Failed` / `ReconciliationRequired` | Retain the outcome and block automatic parent replay |
 
 Call `recover_child_synthesis(owner, parent_run, proposal_id)` before reconnecting
@@ -107,12 +109,13 @@ destructors after frozen admission and reopen the Program store, transition
 store, and checkpoint store on both SQLite and PostgreSQL before joining the
 child successfully.
 
-N3 remains broader than these tests: process termination at every boundary,
-dispatch/child-result interruption, multi-process contention, database outage
-and lost-acknowledgement matrices, and interactions with migration, cancellation,
-retention, and external effects still need systematic qualification. There is
-no automatic reconciliation authorizer or retry-budget renewal. Host validator
-implementations remain responsible for bounding their own external work.
+The [N3 recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) extends coverage to
+16 process-exit boundaries per database, concurrent process recovery, lost
+acknowledgements, actual PostgreSQL connection termination, cancellation, version
+retention, activation, and Program replacement. Its limits remain explicit:
+there is no automatic reconciliation authorizer, and general mixed-effect joins,
+power loss, cross-host failover, and all graph-migration/retention combinations
+are not covered by the single-child scenario.
 
 This adds public C++ types, virtual methods, and configuration fields. Rebuild
 all Program consumers; do not mix old objects with the new library. It adds no

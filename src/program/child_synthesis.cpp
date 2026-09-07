@@ -248,7 +248,9 @@ bool is_valid_program_child_synthesis_append(const std::vector<ProgramChildSynth
         }
         if (!old) return n.state == State::Reserved && n.revision == 1;
         const auto& p = old->data();
-        if (p.state >= State::Spawned || n.previous_id != old->id() || n.revision != p.revision + 1)
+        if ((p.state >= State::Spawned &&
+             !(p.state == State::Spawned && n.state == State::ReconciliationRequired)) ||
+            n.previous_id != old->id() || n.revision != p.revision + 1)
             return false;
         auto previous = body(p), current = body(n);
         for (const auto* key : {"revision", "previous_id", "state", "artifacts", "error_code"}) {

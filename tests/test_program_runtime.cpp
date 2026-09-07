@@ -39,6 +39,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#ifndef _WIN32
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
+#endif
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -74,6 +80,7 @@ using namespace neograph::graph;
 using namespace neograph::program;
 
 std::atomic<unsigned>               completed_calls{0};
+std::string                         synthesis_execution_marker;
 std::atomic<unsigned>               interrupt_calls{0};
 std::atomic<unsigned>               blocking_calls{0};
 std::atomic<unsigned>               blocking_active{0};
@@ -111,6 +118,10 @@ public:
 
     asio::awaitable<NodeOutput> run(NodeInput) override {
         ++completed_calls;
+        if (!synthesis_execution_marker.empty()) {
+            std::ofstream marker(synthesis_execution_marker, std::ios::app);
+            marker << "executed\n";
+        }
         NodeOutput output;
         output.writes.push_back(ChannelWrite{"value", "completed"});
         co_return output;
@@ -1477,12 +1488,21 @@ class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
 public:
     explicit BlockAfterJavaScriptResultJournal(std::shared_ptr<ProgramTransitionStore> inner = {})
         : inner_(inner ? std::move(inner) : std::make_shared<InMemoryProgramTransitionStore>()) {}
+    void reopen_backend_for_testing(std::shared_ptr<ProgramTransitionStore> backend) {
+        inner_ = std::move(backend);
+    }
     std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
         std::string_view owner, std::string_view run) const override {
+        auto remaining = synthesis_read_failures.load();
+        while (remaining &&
+               !synthesis_read_failures.compare_exchange_weak(remaining, remaining - 1)) {}
+        if (remaining) throw std::runtime_error("simulated synthesis journal outage");
         return inner_->load_child_syntheses(owner, run);
     }
     std::vector<ProgramTransitionPublication> synthesis_publications;
     std::optional<ProgramChildSynthesisState> fail_synthesis_after;
+    std::function<void(const ProgramTransitionPublication&)> after_publication;
+    mutable std::atomic<unsigned>                            synthesis_read_failures{0};
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
         if (throw_next_load_.exchange(false)) {
@@ -1570,7 +1590,12 @@ public:
         }
         const auto synthesis = publication.child_synthesis_records;
         if (!synthesis.empty()) synthesis_publications.push_back(publication);
+        const auto observed  = after_publication
+                                   ? std::optional<ProgramTransitionPublication>(publication)
+                                   : std::nullopt;
         const auto published = inner_->compare_publish(owner, expected, std::move(publication));
+        if (observed && published == ProgramTransitionPublishResult::Published)
+            after_publication(*observed);
         if (!synthesis.empty() && fail_synthesis_after == synthesis.front().data().state &&
             published == ProgramTransitionPublishResult::Published) {
             fail_synthesis_after.reset();
@@ -1602,8 +1627,13 @@ public:
         if (replacement && throw_before_replacement_.exchange(false)) {
             throw std::runtime_error("simulated replacement failure before publication");
         }
+        const auto observed  = after_publication
+                                   ? std::optional<ProgramTransitionPublication>(publication)
+                                   : std::nullopt;
         const auto published = inner_->compare_publish_execution(
             owner, expected, std::move(publication), expected_lease, next_lease);
+        if (observed && published == ProgramTransitionPublishResult::Published)
+            after_publication(*observed);
         if (replacement && published == ProgramTransitionPublishResult::Published &&
             crash_after_replacement_.exchange(false)) {
             if (unreadable_replacement_commit_.exchange(false)) {
@@ -8256,6 +8286,7 @@ struct ChildSynthesisFixture {
     unsigned                                              semantic_calls     = 0;
     unsigned                                              admissions         = 0;
     bool                                                  semantic_accept    = true;
+    std::function<void()>                                 semantic_hook;
     std::string                                           semantic_validator = digest('b');
     std::string                                           semantic_contract  = digest('c');
     std::function<void(ProgramSynthesisReservationData&)> alter_reservation;
@@ -8382,6 +8413,7 @@ struct ChildSynthesisFixture {
             1024 * 1024,
             [this](const auto&, const auto&, const auto&) {
                 ++semantic_calls;
+                if (semantic_hook) semantic_hook();
                 return ProgramSynthesisSemanticDecision{semantic_validator, semantic_contract,
                                                         semantic_accept,
                                                         json{{"accepted", semantic_accept}}};
@@ -9037,6 +9069,17 @@ protected:
             std::filesystem::remove(database + "-shm");
         }
     }
+    std::shared_ptr<ProgramStore> program_backend() {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (GetParam() == "PostgreSQL")
+            return std::make_shared<PostgreSQLProgramStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"));
+#endif
+        return std::make_shared<InMemoryProgramStore>();
+    }
     std::shared_ptr<ProgramTransitionStore> backend() {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramTransitionStore>(database);
@@ -9420,5 +9463,532 @@ TEST_P(ProgramChildSynthesisPersistence,
         "generated-child");
     EXPECT_EQ(bound.data().state, ProgramChildSynthesisState::Bound);
     EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && !defined(_WIN32)
+namespace {
+class ProgramChildSynthesisCrash : public ::testing::TestWithParam<std::string> {
+protected:
+    std::string database;
+    std::string backend_name() const { return GetParam().substr(0, GetParam().find('_')); }
+    std::string boundary() const { return GetParam().substr(GetParam().find('_') + 1); }
+    void        SetUp() override {
+        if (backend_name() == "PostgreSQL" && !std::getenv("NEOGRAPH_TEST_POSTGRES_URL"))
+            GTEST_SKIP();
+        const auto* inherited = std::getenv("NEOGRAPH_N3_CRASH_DB");
+        database              = inherited ? inherited
+                                                 : (std::filesystem::temp_directory_path() /
+                                ("neograph-n3-" + Checkpoint::generate_id() + ".db"))
+                                   .string();
+    }
+    void TearDown() override {
+        if (std::getenv("NEOGRAPH_N3_WORKER")) return;
+        synthesis_execution_marker.clear();
+        unsetenv("NEOGRAPH_N3_CRASH_DB");
+        for (const auto* suffix : {"", "-wal", "-shm", ".recovery", ".executions"})
+            std::filesystem::remove(database + suffix);
+    }
+    std::shared_ptr<ProgramTransitionStore> backend() {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (backend_name() == "SQLite")
+            return std::make_shared<SQLiteProgramTransitionStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (backend_name() == "PostgreSQL")
+            return std::make_shared<PostgreSQLProgramTransitionStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"));
+#endif
+        throw std::runtime_error("Durable transition backend unavailable");
+    }
+    std::shared_ptr<ProgramStore> programs() {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (backend_name() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (backend_name() == "PostgreSQL")
+            return std::make_shared<PostgreSQLProgramStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"));
+#endif
+        throw std::runtime_error("Durable Program backend unavailable");
+    }
+    std::shared_ptr<CheckpointStore> checkpoints() {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
+        if (backend_name() == "SQLite")
+            return std::make_shared<neograph::graph::SqliteCheckpointStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT
+        if (backend_name() == "PostgreSQL")
+            return std::make_shared<neograph::graph::PostgresCheckpointStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"), 2);
+#endif
+        throw std::runtime_error("Durable checkpoint backend unavailable");
+    }
+};
+std::vector<std::string> synthesis_crash_boundaries() {
+    std::vector<std::string> result;
+    for (const auto& backend : synthesis_backends()) {
+        if (backend == "Memory") continue;
+        for (const auto* boundary :
+             {"Reserved", "Compiling", "Compiled", "Validating", "Validated", "Admitting",
+              "Admitted", "Bound", "Dispatching", "Spawned", "ChildPublishing", "ChildDispatched",
+              "ChildTerminal", "ChildResult", "CommandResult", "ParentTerminal",
+              "ConcurrentRecovery"})
+            result.push_back(backend + "_" + boundary);
+    }
+    return result;
+}
+INSTANTIATE_TEST_SUITE_P(Boundaries,
+                         ProgramChildSynthesisCrash,
+                         ::testing::ValuesIn(synthesis_crash_boundaries()),
+                         [](const auto& info) { return info.param; });
+}  // namespace
+TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecordedOutcomes) {
+    const auto* worker = std::getenv("NEOGRAPH_N3_WORKER");
+    if (!worker) {
+        setenv("NEOGRAPH_N3_CRASH_DB", database.c_str(), 1);
+        ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+        ASSERT_EXIT(
+            ([&] {
+                ChildSynthesisFixture child(backend(), true, programs(), checkpoints());
+                const auto proposal  = ProgramSynthesisProposal::create(child.proposal_data());
+                const auto parent_id = child.handle->run_id();
+                synthesis_execution_marker = database + ".executions";
+                {
+                    std::ofstream metadata(database + ".recovery");
+                    metadata << json{{"run_id", parent_id},
+                                     {"proposal_id", proposal.id()},
+                                     {"grant", child.trusted_grant->serialize_canonical()}}
+                                    .dump();
+                }
+                const std::vector<std::string> states{
+                    "Reserved",  "Compiling", "Compiled", "Validating",  "Validated",
+                    "Admitting", "Admitted",  "Bound",    "Dispatching", "Spawned"};
+                child.journal->after_publication =
+                    [&](const ProgramTransitionPublication& publication) {
+                        bool stop = false;
+                        if (!publication.child_synthesis_records.empty()) {
+                            auto state = static_cast<std::size_t>(
+                                publication.child_synthesis_records.front().data().state);
+                            stop = state < states.size() &&
+                                   (boundary() == states[state] ||
+                                    (boundary() == "ConcurrentRecovery" && state == 0));
+                        }
+                        const auto& run = publication.run_record;
+                        if (boundary() == "ChildTerminal" &&
+                            run.invocation().parent_run_id == parent_id && run.terminal_result())
+                            stop = true;
+                        if (run.run_id() == parent_id) {
+                            if (boundary() == "ParentTerminal" && run.terminal_result())
+                                stop = true;
+                            for (const auto& command : publication.commands)
+                                if (boundary() == "CommandResult" &&
+                                    command.command_ordinal() == 2 && command.completed())
+                                    stop = true;
+                            for (const auto& relation : run.children()) {
+                                if (boundary() == "ChildPublishing" &&
+                                    relation.state == ProgramChildState::Publishing)
+                                    stop = true;
+                                if (boundary() == "ChildDispatched" &&
+                                    relation.state == ProgramChildState::Dispatched)
+                                    stop = true;
+                                if (boundary() == "ChildResult" && relation.terminal_result)
+                                    stop = true;
+                            }
+                        }
+                        if (stop) std::_Exit(77);
+                    };
+                child.fixture.runtime->prepare_child_synthesis(
+                    "tenant:runtime", *child.handle, *child.hold, proposal, *child.trusted_grant,
+                    "generated-child");
+                child.hold.reset();
+                (void)child.handle->wait();
+                std::_Exit(78);  // The requested boundary was never observed.
+            }()),
+            ::testing::ExitedWithCode(77), "");
+        unsetenv("NEOGRAPH_N3_CRASH_DB");
+    }
+    std::ifstream     metadata(database + ".recovery");
+    const std::string bytes((std::istreambuf_iterator<char>(metadata)),
+                            std::istreambuf_iterator<char>());
+    const auto        saved       = json::parse(bytes);
+    const auto        run_id      = saved.at("run_id").get<std::string>();
+    const auto        proposal_id = saved.at("proposal_id").get<std::string>();
+    const auto grant   = ProgramChildSynthesisGrant::parse(saved.at("grant").get<std::string>());
+    auto       storage = backend();
+    const auto before  = storage->load_child_syntheses("tenant:runtime", run_id).front();
+    const auto previous_parent  = storage->load("tenant:runtime", run_id);
+    const auto previous_journal = storage->latest("tenant:runtime", run_id);
+    EXPECT_EQ(previous_parent->remaining_budget().max_dynamic_compiles +
+                  previous_journal->inflight_reservation.max_dynamic_compiles,
+              2U);
+    const auto      original_child = previous_parent->children().empty()
+                                         ? std::string{}
+                                         : previous_parent->children().front().child_run_id;
+    AdmittedRuntime host(2, checkpoints(), storage, {}, ExecutionGuarantee::Strict, true);
+    host.catalog = std::make_shared<ProgramCatalog>(
+        CatalogConfig{programs(), host.registry, host.engines, "program-runtime-test/v1"});
+    const auto                    profile        = before.data().parent.version.admission_profile();
+    const auto                    policy         = before.data().parent.version.policy_snapshot();
+    unsigned                      semantic_calls = 0, admission_calls = 0;
+    ProgramSynthesisGatewayConfig gateway;
+    gateway.compiler = std::make_shared<ProgramCompiler>(
+        host.registry, ProgramCompilerConfig{"program-runtime-test/v1"});
+    gateway.catalog            = host.catalog;
+    gateway.validate_semantics = [&](const auto&, const auto&, const auto&) {
+        ++semantic_calls;
+        if (worker) {
+            std::ofstream marker(database + ".semantic-" + worker);
+            marker << "validated";
+        }
+        return ProgramSynthesisSemanticDecision{digest('b'), digest('c'), true,
+                                                json{{"accepted", true}}};
+    };
+    gateway.admission = [&](const auto&, const auto&, const auto&) {
+        ++admission_calls;
+        return ProgramAdmission{"tenant:runtime", profile, policy, {}};
+    };
+    RuntimeConfig config{host.catalog, host.checkpoints, {}, storage, 2};
+    config.child_synthesis_gateway = std::make_shared<ProgramSynthesisGateway>(std::move(gateway));
+    unsigned grant_reads           = 0;
+    config.child_synthesis_grant_resolver =
+        [&, grant](std::string_view owner, std::string_view run,
+                   std::string_view id) -> std::optional<ProgramChildSynthesisGrant> {
+        if (worker && ++grant_reads == 2) {
+            {
+                std::ofstream ready(database + ".ready-" + worker);
+                ready << "ready";
+            }
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+            while (!std::filesystem::exists(database + ".release")) {
+                if (std::chrono::steady_clock::now() > deadline)
+                    throw std::runtime_error("Concurrent recovery barrier timed out");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        if (owner == grant.data().owner_scope && run == grant.data().parent_run_id &&
+            id == grant.id())
+            return grant;
+        return std::nullopt;
+    };
+    host.runtime               = std::make_unique<ProgramRuntime>(std::move(config));
+    synthesis_execution_marker = database + ".executions";
+    using State                = ProgramChildSynthesisState;
+    if (worker) {
+        try {
+            const auto value =
+                host.runtime->recover_child_synthesis("tenant:runtime", run_id, proposal_id);
+            std::_Exit(value.data().state == State::Bound ? 0 : 4);
+        } catch (const std::exception&) {
+            std::_Exit(3);
+        }
+    }
+    if (boundary() == "ConcurrentRecovery") {
+        setenv("NEOGRAPH_N3_CRASH_DB", database.c_str(), 1);
+        const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
+        const auto filter =
+            "--gtest_filter=Boundaries/"
+            "ProgramChildSynthesisCrash.ProcessLossPreservesBudgetIdentityAndRecordedOutcomes/" +
+            GetParam();
+        std::vector<pid_t> workers;
+        for (const auto* identity : {"1", "2"}) {
+            setenv("NEOGRAPH_N3_WORKER", identity, 1);
+            char* arguments[] = {const_cast<char*>(executable.c_str()),
+                                 const_cast<char*>(filter.c_str()), nullptr};
+            pid_t process     = 0;
+            ASSERT_EQ(
+                posix_spawn(&process, executable.c_str(), nullptr, nullptr, arguments, environ), 0);
+            workers.push_back(process);
+        }
+        unsetenv("NEOGRAPH_N3_WORKER");
+        unsetenv("NEOGRAPH_N3_CRASH_DB");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while ((!std::filesystem::exists(database + ".ready-1") ||
+                !std::filesystem::exists(database + ".ready-2")) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        EXPECT_TRUE(std::filesystem::exists(database + ".ready-1"));
+        EXPECT_TRUE(std::filesystem::exists(database + ".ready-2"));
+        {
+            std::ofstream release(database + ".release");
+            release << "go";
+        }
+        std::vector<int> outcomes;
+        for (const auto process : workers) {
+            int status = 0;
+            ASSERT_EQ(waitpid(process, &status, 0), process);
+            ASSERT_TRUE(WIFEXITED(status));
+            outcomes.push_back(WEXITSTATUS(status));
+        }
+        std::sort(outcomes.begin(), outcomes.end());
+        EXPECT_EQ(outcomes, (std::vector<int>{0, 3}));
+        EXPECT_EQ(static_cast<unsigned>(std::filesystem::exists(database + ".semantic-1")) +
+                      static_cast<unsigned>(std::filesystem::exists(database + ".semantic-2")),
+                  1U);
+        EXPECT_EQ(storage->load_child_syntheses("tenant:runtime", run_id).front().data().state,
+                  State::Bound);
+        for (const auto* suffix :
+             {".ready-1", ".ready-2", ".release", ".semantic-1", ".semantic-2"})
+            std::filesystem::remove(database + suffix);
+    }
+    const auto recovered =
+        host.runtime->recover_child_synthesis("tenant:runtime", run_id, proposal_id);
+    if (recovered.data().state == State::ReconciliationRequired &&
+        recovered.data().error_code == "P_CHILD_SYNTHESIS_CHILD_UNCERTAIN") {
+        EXPECT_TRUE(boundary() == "ChildDispatched" || boundary() == "Spawned");
+        EXPECT_THROW(host.runtime->reconnect("tenant:runtime", run_id), std::runtime_error);
+        ASSERT_EQ(storage->load("tenant:runtime", run_id)->children().size(), 1U);
+        EXPECT_EQ(storage->load("tenant:runtime", run_id)->children().front().child_run_id,
+                  original_child);
+        EXPECT_EQ(semantic_calls, 0U);
+        EXPECT_EQ(admission_calls, 0U);
+        return;
+    }
+    if (before.data().state == State::Compiling || before.data().state == State::Validating) {
+        EXPECT_EQ(recovered.data().state, State::ReconciliationRequired);
+        EXPECT_EQ(semantic_calls, 0U);
+        EXPECT_EQ(admission_calls, 0U);
+        EXPECT_THROW(host.runtime->reconnect("tenant:runtime", run_id), std::runtime_error);
+        EXPECT_TRUE(storage->load("tenant:runtime", run_id)->children().empty());
+        EXPECT_EQ(storage->load("tenant:runtime", run_id)->remaining_budget().max_dynamic_compiles,
+                  2U);
+        return;
+    }
+    EXPECT_EQ(
+        semantic_calls,
+        before.data().state < State::Validated && boundary() != "ConcurrentRecovery" ? 1U : 0U);
+    EXPECT_EQ(
+        admission_calls,
+        before.data().state < State::Admitting && boundary() != "ConcurrentRecovery" ? 1U : 0U);
+    auto       parent = host.runtime->reconnect("tenant:runtime", run_id);
+    const auto result = parent.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(result.remaining_budget().max_program_operations, 13U);
+    const auto snapshot = parent.snapshot();
+    ASSERT_EQ(snapshot.children().size(), 1U);
+    if (!original_child.empty())
+        EXPECT_EQ(snapshot.children().front().child_run_id, original_child);
+    EXPECT_EQ(snapshot.children().front().state, ProgramChildState::Completed);
+    EXPECT_EQ(host.runtime->reconnect("tenant:runtime", run_id).wait().id(), result.id());
+    const auto head = storage->load_child_syntheses("tenant:runtime", run_id).front();
+    EXPECT_EQ(head.data().state, State::Spawned);
+    EXPECT_EQ(head.data().artifacts.at("child_run_id"), snapshot.children().front().child_run_id);
+    if (boundary() == "ChildTerminal" || boundary() == "ChildResult" ||
+        boundary() == "CommandResult" || boundary() == "ParentTerminal") {
+        std::ifstream executions(database + ".executions");
+        std::string   line;
+        unsigned      count = 0;
+        while (std::getline(executions, line))
+            ++count;
+        EXPECT_EQ(count, 1U) << "Completed child work must not be repeated after recovery";
+    }
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, LostCommitAcknowledgementAndReadOutageNeverRefundCompile) {
+    ChildSynthesisFixture test(backend(), true);
+    const auto            proposal  = ProgramSynthesisProposal::create(test.proposal_data());
+    test.journal->after_publication = [&](const auto& publication) {
+        if (!publication.child_synthesis_records.empty() &&
+            publication.child_synthesis_records.front().data().state ==
+                ProgramChildSynthesisState::Reserved) {
+            test.journal->synthesis_read_failures.store(2);
+            throw std::runtime_error("lost commit acknowledgement");
+        }
+    };
+    const auto prepare = [&] {
+        return test.fixture.runtime->prepare_child_synthesis(
+            "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+            "generated-child");
+    };
+    EXPECT_THROW(prepare(), std::runtime_error);
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_THROW(prepare(), std::runtime_error);
+    const auto bound = prepare();
+    EXPECT_EQ(bound.data().state, ProgramChildSynthesisState::Bound);
+    EXPECT_EQ(test.semantic_calls, 1U);
+    test.hold.reset();
+    const auto result = test.handle->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+}
+TEST_P(ProgramChildSynthesisPersistence, CancellationDuringValidationCannotAdmitOrDispatch) {
+    ChildSynthesisFixture test(backend(), true);
+    test.semantic_hook  = [&] { test.handle->cancel(); };
+    const auto proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    EXPECT_THROW(test.fixture.runtime->prepare_child_synthesis(
+                     "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+                     "generated-child"),
+                 std::runtime_error);
+    test.hold.reset();
+    const auto result = test.handle->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled) << result.serialize_canonical();
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(test.admissions, 0U);
+    EXPECT_EQ(completed_calls.load(), 0U);
+    EXPECT_TRUE(test.handle->snapshot().children().empty());
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && defined(NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES)
+TEST(ProgramChildSynthesisPostgreSQL, ConnectionLossInsideReservationRollsBackBeforeHostRecovery) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url) GTEST_SKIP();
+    auto* admin = PQconnectdb(url);
+    ASSERT_TRUE(admin && PQstatus(admin) == CONNECTION_OK);
+    ASSERT_EQ(std::string(PQdb(admin)), "neograph_test");
+    const auto execute = [&](const char* sql) {
+        auto*             result = PQexec(admin, sql);
+        const bool        ok     = result && PQresultStatus(result) == PGRES_COMMAND_OK;
+        const std::string error  = PQerrorMessage(admin);
+        if (result) PQclear(result);
+        if (!ok) throw std::runtime_error(error);
+    };
+    ChildSynthesisFixture test(std::make_shared<PostgreSQLProgramTransitionStore>(url), true);
+    const auto            before = test.handle->snapshot();
+    execute(
+        "CREATE FUNCTION synthesis_n3_disconnect_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+        "PERFORM pg_terminate_backend(pg_backend_pid()); RETURN NEW; END $$; CREATE TRIGGER "
+        "synthesis_n3_disconnect BEFORE INSERT ON neograph_program_transition_synthesis_log_v1 FOR "
+        "EACH ROW EXECUTE FUNCTION synthesis_n3_disconnect_fn();");
+    const auto proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    EXPECT_THROW(test.fixture.runtime->prepare_child_synthesis(
+                     "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+                     "generated-child"),
+                 std::runtime_error);
+    execute(
+        "DROP TRIGGER synthesis_n3_disconnect ON neograph_program_transition_synthesis_log_v1; "
+        "DROP FUNCTION synthesis_n3_disconnect_fn();");
+    PQfinish(admin);
+    auto reopened = std::make_shared<PostgreSQLProgramTransitionStore>(url);
+    EXPECT_EQ(reopened->load("tenant:runtime", test.handle->run_id())->id(), before.id());
+    EXPECT_TRUE(reopened->load_child_syntheses("tenant:runtime", test.handle->run_id()).empty());
+    test.journal->reopen_backend_for_testing(reopened);
+    EXPECT_EQ(test.fixture.runtime
+                  ->prepare_child_synthesis("tenant:runtime", *test.handle, *test.hold, proposal,
+                                            *test.trusted_grant, "generated-child")
+                  .data()
+                  .state,
+              ProgramChildSynthesisState::Bound);
+    test.hold.reset();
+    const auto result = test.handle->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(test.semantic_calls, 1U);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, ActivationCannotRedirectTheAdmittedChild) {
+    ChildSynthesisFixture test(backend(), true, program_backend());
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            bound    = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    const auto alternative = test.fixture.admit("runtime-failing");
+    (void)test.fixture.catalog->activate("tenant:runtime", alternative.id(), 0);
+    test.hold.reset();
+    const auto result = test.handle->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    const auto relation = test.handle->snapshot().children().front();
+    const auto link     = ModuleLinkReceipt::parse(relation.link_receipt);
+    EXPECT_EQ(link.child_program_version_id(),
+              bound.data().artifacts.at("version").at("id").get<std::string>());
+    EXPECT_NE(link.child_program_version_id(), alternative.id());
+}
+TEST_P(ProgramChildSynthesisPersistence,
+       RemovedChildVersionCannotExecuteFromCachedSynthesisEvidence) {
+    ChildSynthesisFixture test(backend(), true, program_backend());
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            bound    = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    const auto child_id = bound.data().artifacts.at("version").at("id").get<std::string>();
+    (void)test.fixture.catalog->collect_retention("tenant:runtime", {test.version->id(), child_id});
+    ASSERT_TRUE(test.fixture.catalog->resolve_version("tenant:runtime", child_id));
+    (void)test.fixture.catalog->collect_retention("tenant:runtime", {test.version->id()});
+    ASSERT_FALSE(test.fixture.catalog->resolve_version("tenant:runtime", child_id));
+    test.hold.reset();
+    const auto result = test.handle->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(completed_calls.load(), 0U);
+    EXPECT_TRUE(test.handle->snapshot().children().empty());
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence,
+       ReplacementKeepsCompileDebitAndCannotInheritGeneratedBinding) {
+    ChildSynthesisFixture test(backend(), true, program_backend());
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    (void)test.fixture.runtime->prepare_child_synthesis("tenant:runtime", *test.handle, *test.hold,
+                                                        proposal, *test.trusted_grant,
+                                                        "generated-child");
+    const auto handoff = test.handle->latest_handoff();
+    ASSERT_TRUE(handoff);
+    auto source = ProgramSource::from_javascript(
+        "n3-successor.js", javascript_runtime_source("runtime-completed", R"JS(
+        return {generation: "successor"};
+    )JS"));
+    const auto      ceiling = test.parent->run.invocation().budget;
+    const RunBudget floor{1, 0, 0, 1, 1, 1, 0, 0, 0};
+    auto            bundle = test.compiler->compile(source, ProgramBudgetBounds{floor, ceiling});
+    auto            target = test.fixture.catalog->admit(
+        bundle, ProgramAdmission{"tenant:runtime", test.fixture.profile, test.fixture.policy, {}});
+    auto replacement = test.fixture.runtime->replace(
+        "tenant:runtime", handoff->reference, target,
+        ProgramInvocation{
+            json{{"handoff", handoff->value}, {"previous_run_id", test.handle->run_id()}},
+            test.handle->snapshot().remaining_budget(),
+            "n3-successor",
+            {}});
+    test.hold.reset();
+    const auto result = replacement.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_EQ(test.journal->load_run_lineage("tenant:runtime", test.handle->run_id())
+                  ->active_generation(),
+              2U);
+    EXPECT_TRUE(test.journal->load_child_syntheses("tenant:runtime", replacement.run_id()).empty());
+    EXPECT_THROW(test.fixture.runtime->recover_child_synthesis(
+                     "tenant:runtime", test.handle->run_id(), proposal.id()),
+                 std::runtime_error);
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, LiveReconnectDoesNotMisclassifyAnActiveChildAsUncertain) {
+    ChildSynthesisFixture test(backend(), true);
+    test.child_budget.wall_time_ms = 5000;
+    test.trusted_grant             = ProgramChildSynthesisGrant::create(test.grant_data());
+    const auto proposal            = ProgramSynthesisProposal::create(test.proposal_data());
+    (void)test.fixture.runtime->prepare_child_synthesis("tenant:runtime", *test.handle, *test.hold,
+                                                        proposal, *test.trusted_grant,
+                                                        "generated-child");
+    std::promise<void> reached, release;
+    auto               ready  = reached.get_future();
+    auto               resume = release.get_future().share();
+    std::atomic<bool>  observed{false};
+    test.journal->after_publication = [&](const auto& publication) {
+        if (publication.run_record.run_id() != test.handle->run_id()) return;
+        for (const auto& child : publication.run_record.children()) {
+            if (child.state == ProgramChildState::Dispatched && !observed.exchange(true)) {
+                reached.set_value();
+                (void)resume.wait_for(std::chrono::seconds(10));
+            }
+        }
+    };
+    test.hold.reset();
+    EXPECT_EQ(ready.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_NO_THROW({
+        auto same = test.fixture.runtime->reconnect("tenant:runtime", test.handle->run_id());
+        EXPECT_EQ(same.run_id(), test.handle->run_id());
+    });
+    release.set_value();
+    const auto result = test.handle->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.handle->run_id())
+                  .front()
+                  .data()
+                  .state,
+              ProgramChildSynthesisState::Spawned);
 }
 #endif

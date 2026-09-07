@@ -1840,6 +1840,20 @@ void RunControl::set_child_launch_callback(ChildLaunchCallback callback) noexcep
     std::lock_guard lock(mutex_);
     child_launch_callback_ = std::move(callback);
 }
+void RunControl::set_child_recovery_callback(ChildRecoveryCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    child_recovery_callback_ = std::move(callback);
+}
+bool RunControl::can_recover_child(std::string_view binding,
+                                   const json&      input,
+                                   std::string_view operation) const {
+    ChildRecoveryCallback callback;
+    {
+        std::lock_guard lock(mutex_);
+        callback = child_recovery_callback_;
+    }
+    return callback && callback(binding, input, operation);
+}
 void RunControl::set_child_binding_validation_callback(
     ChildBindingValidationCallback callback) noexcept {
     std::lock_guard lock(mutex_);
@@ -3732,6 +3746,26 @@ struct ProgramRuntime::Impl {
                                      "Child synthesis generation is no longer active");
     }
 
+    bool synthesis_child_is_uncertain(const ProgramChildSynthesisRecord& record) const {
+        using State   = ProgramChildSynthesisState;
+        const auto& d = record.data();
+        if (d.state != State::Dispatching && d.state != State::Spawned) return false;
+        const auto child_id = d.artifacts.at("child_run_id").get<std::string>();
+        const auto child    = config.transitions->load(d.proposal.data().owner_scope, child_id);
+        if (!child || child->continuation().state != ContinuationState::Running ||
+            child->exact_checkpoint())
+            return false;
+        const auto parent =
+            config.transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id());
+        const auto relation =
+            parent ? find_child(*parent, child_id) : std::optional<ProgramChildRecord>{};
+        if (!relation || relation->state != ProgramChildState::Dispatched) return false;
+        const auto bundle =
+            ProgramBundle::parse(detail::canonical_json_bytes(d.artifacts.at("bundle")));
+        return !bundle.control_source() &&
+               !checkpointless_replay_safe(bundle.typed_orchestration_plan());
+    }
+
     void publish_synthesis(const ProgramChildSynthesisRecord&         next,
                            const std::shared_ptr<detail::RunControl>& control = {}) {
         verify_synthesis_grant(next);
@@ -3772,7 +3806,14 @@ struct ProgramRuntime::Impl {
                                 : config.transitions->compare_publish(d.proposal.data().owner_scope,
                                                                       previous->journal_head(),
                                                                       std::move(publication));
-            if (result != ProgramTransitionPublishResult::Conflict) return;
+            if (result == ProgramTransitionPublishResult::Published) return;
+            if (result == ProgramTransitionPublishResult::AlreadyPresent) {
+                if (d.state == ProgramChildSynthesisState::Compiling ||
+                    d.state == ProgramChildSynthesisState::Validating)
+                    throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
+                                             "A durable synthesis claim already has an owner");
+                return;
+            }
         }
         throw_runtime_diagnostic(
             "P_CHILD_SYNTHESIS_CONFLICT",
@@ -3825,6 +3866,33 @@ struct ProgramRuntime::Impl {
             return;
         }
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
+        if (config.child_synthesis_gateway) {
+            control->set_child_recovery_callback([this, weak_control](std::string_view binding,
+                                                                      const json&      input,
+                                                                      std::string_view operation) {
+                const auto parent = weak_control.lock();
+                if (!parent) return false;
+                const auto synthesis = synthesis_binding(parent, binding);
+                if (!synthesis) return false;
+                if (synthesis->data().state == ProgramChildSynthesisState::Bound) return true;
+                const auto& artifacts = synthesis->data().artifacts;
+                const auto  link =
+                    ModuleLinkReceipt::parse(detail::canonical_json_bytes(artifacts.at("link")));
+                const auto expected_id = detail::sha256_identity(
+                    "program-dsl-child/v1",
+                    detail::canonical_json_bytes(
+                        json{{"owner_scope", parent->owner_scope},
+                             {"parent_run_id", parent->run_id},
+                             {"parent_program_version_id", parent->program_version_id},
+                             {"link_id", link.id()},
+                             {"operation_id", std::string(operation)},
+                             {"execution_key", std::string(operation)}}));
+                return artifacts.at("child_run_id") == expected_id &&
+                       detail::canonical_json_bytes(artifacts.at("child_input")) ==
+                           detail::canonical_json_bytes(input);
+            });
+        }
+
         control->set_child_binding_validation_callback(
             [this, weak_control](std::string_view binding_name, std::string_view operation_id) {
                 const auto parent = weak_control.lock();
@@ -4278,8 +4346,24 @@ struct ProgramRuntime::Impl {
         return found == child_reservations.end() ? RunBudget{} : found->second.used;
     }
 
-    void hydrate_child_reservations(const ProgramRunRecord& parent) {
+    RunBudget hydrate_child_reservations(const ProgramRunRecord&     parent,
+                                         const ProgramJournalRecord* snapshot_journal = nullptr) {
         const auto            children = parent.children();
+        auto                  available = parent.remaining_budget();
+        if (!children.empty()) {
+            const auto  loaded = snapshot_journal ? std::optional<ProgramJournalRecord>{}
+                                                  : config.transitions->latest(parent.owner_scope(),
+                                                                               parent.run_id());
+            const auto* journal =
+                snapshot_journal ? snapshot_journal : (loaded ? &*loaded : nullptr);
+            if (!journal || journal->id != parent.journal_head())
+                throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                         "Child reservation recovery lost its parent journal");
+            // A pending structured command owns the parent's spendable allocation.
+            // This reconstructs the same ceiling used at admission; it does not
+            // credit either the durable remainder or the compile ledger.
+            available = restore_reserved_resources(available, journal->inflight_reservation);
+        }
         std::set<std::string> child_ids;
         for (const auto& child : children) {
             if (!child_ids.insert(child.child_run_id).second) {
@@ -4299,7 +4383,7 @@ struct ProgramRuntime::Impl {
                 auto additional = permanent;
                 if (in_flight)
                     additional.max_concurrency = child.invocation.granted_budget.max_concurrency;
-                if (!budget_sum_fits(parent.remaining_budget(), state.used, additional)) {
+                if (!budget_sum_fits(available, state.used, additional)) {
                     throw_runtime_diagnostic(
                         "P_CHILD_BUDGET",
                         "Persisted child reservations exceed the parent remainder",
@@ -4316,8 +4400,7 @@ struct ProgramRuntime::Impl {
 
             const auto active = state.active_concurrency.find(child.child_run_id);
             if (in_flight) {
-                if (!activate_concurrency_locked(state, child.child_run_id,
-                                                 parent.remaining_budget(),
+                if (!activate_concurrency_locked(state, child.child_run_id, available,
                                                  child.invocation.granted_budget.max_concurrency)) {
                     throw_runtime_diagnostic(
                         "P_CHILD_BUDGET",
@@ -4329,6 +4412,7 @@ struct ProgramRuntime::Impl {
                 release_concurrency_locked(state, child.child_run_id, active->second);
             }
         }
+        return available;
     }
     ParentChildBudget hydrate_parent_child_budget(std::string_view owner_scope,
                                                   std::string_view parent_run_id,
@@ -4347,8 +4431,8 @@ struct ProgramRuntime::Impl {
                                      json{{"parent_run_id", std::string(parent_run_id)},
                                           {"child_run_id", std::string(child_run_id)}});
         }
-        hydrate_child_reservations(*parent);
-        return ParentChildBudget{parent->remaining_budget(), child->invocation.granted_budget};
+        const auto available = hydrate_child_reservations(*parent);
+        return ParentChildBudget{available, child->invocation.granted_budget};
     }
     void shutdown() noexcept {
         try {
@@ -4596,7 +4680,10 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 json{{"parent_run_id", parent_run_id}, {"child_run_id", run_id}});
         parent_record = *durable_parent;
     }
-    impl_->hydrate_child_reservations(parent_record);
+    const auto hydrated_parent_budget = impl_->hydrate_child_reservations(
+        parent_record, parent_journal && parent_journal->id == parent_record.journal_head()
+                           ? &*parent_journal
+                           : nullptr);
     if (existing) {
         const auto expected = child_record_for(run_id, link, invocation, existing->state);
         if (!same_child_metadata(*existing, expected)) {
@@ -4621,14 +4708,14 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                      json{{"child_run_id", run_id}, {"detail", error.what()}});
         }
     }
-    RunBudget parent_budget = parent_record.remaining_budget();
+    RunBudget parent_budget = hydrated_parent_budget;
     if (!existing) {
         if (!parent_journal || parent_journal->id != parent_record.journal_head()) {
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                      "Parent-child admission lost the transition CAS");
         }
-        parent_budget =
-            restore_reserved_resources(parent_budget, parent_journal->inflight_reservation);
+        parent_budget       = restore_reserved_resources(parent_record.remaining_budget(),
+                                                         parent_journal->inflight_reservation);
         const auto reserved = impl_->reserved_children(parent_run_id);
         validate_child_link(*pinned, link, version, invocation, parent_budget, reserved);
         validate_invocation(*pinned, invocation, true);
@@ -6212,6 +6299,17 @@ ProgramChildSynthesisRecord ProgramRuntime::recover_child_synthesis(std::string_
          impl_->config.transitions->load_child_syntheses(owner_scope, parent_run_id)) {
         if (record.data().proposal.id() != proposal_id) continue;
         impl_->verify_synthesis_grant(record);
+        if (impl_->synthesis_child_is_uncertain(record)) {
+            auto data        = record.data();
+            data.previous_id = record.id();
+            ++data.revision;
+            data.state      = ProgramChildSynthesisState::ReconciliationRequired;
+            data.error_code = "P_CHILD_SYNTHESIS_CHILD_UNCERTAIN";
+            auto uncertain  = ProgramChildSynthesisRecord::create(std::move(data));
+            impl_->publish_synthesis(uncertain);
+            return uncertain;
+        }
+
         return impl_->config.child_synthesis_gateway->continue_child(
             record, [&](const auto& next) { impl_->publish_synthesis(next); });
     }
@@ -6253,6 +6351,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         for (const auto& synthesis :
              impl_->config.transitions->load_child_syntheses(owner_scope, run_id)) {
             impl_->verify_synthesis_grant(synthesis);
+            if (!impl_->find_control(owner_scope, run_id) &&
+                !impl_->find_process_control(owner_scope, run_id) &&
+                impl_->synthesis_child_is_uncertain(synthesis))
+                throw_runtime_diagnostic("P_CHILD_SYNTHESIS_RECOVERY_REQUIRED",
+                                         "Child Core dispatch has no durable outcome; reconcile "
+                                         "synthesis before parent replay");
+
             const auto& source = synthesis.data().parent.run;
             const auto  wall   = source.remaining_budget().wall_time_ms;
             if (wall > static_cast<std::uint64_t>(INT64_MAX - source.updated_at_ms()))
