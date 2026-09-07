@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -72,10 +73,58 @@ std::size_t checked_json_size(std::size_t current, std::size_t additional) {
     return current + additional;
 }
 
+constexpr std::uint64_t BYTE_ONES = 0x0101010101010101ULL;
+constexpr std::uint64_t BYTE_HIGHS = 0x8080808080808080ULL;
+
+bool has_zero_byte(std::uint64_t word) noexcept {
+    return ((word - BYTE_ONES) & ~word & BYTE_HIGHS) != 0;
+}
+
+bool needs_json_escape(unsigned char byte) noexcept {
+    return byte < 0x20 || byte == '"' || byte == '\\';
+}
+
+// Only skip complete words proven to contain no escape byte. memcpy permits
+// unaligned views and the repeated-byte masks are independent of byte order.
+std::size_t unescaped_prefix(std::string_view value) noexcept {
+    std::size_t count = 0;
+    while (value.size() - count >= sizeof(std::uint64_t)) {
+        std::uint64_t word;
+        std::memcpy(&word, value.data() + count, sizeof(word));
+        const bool control = ((word - 0x2020202020202020ULL) & ~word & BYTE_HIGHS) != 0;
+        if (control || has_zero_byte(word ^ 0x2222222222222222ULL) ||
+            has_zero_byte(word ^ 0x5c5c5c5c5c5c5c5cULL)) break;
+        count += sizeof(word);
+    }
+    while (count < value.size() && !needs_json_escape(static_cast<unsigned char>(value[count])))
+        ++count;
+    return count;
+}
+
+std::size_t ascii_prefix(std::string_view value) noexcept {
+    std::size_t count = 0;
+    while (value.size() - count >= sizeof(std::uint64_t)) {
+        std::uint64_t word;
+        std::memcpy(&word, value.data() + count, sizeof(word));
+        if (word & BYTE_HIGHS) break;
+        count += sizeof(word);
+    }
+    while (count < value.size() && static_cast<unsigned char>(value[count]) < 0x80) ++count;
+    return count;
+}
+
 std::size_t escaped_json_string_size(std::string_view value) {
-    std::size_t size = 2;
-    for (const unsigned char byte : value) {
-        size = checked_json_size(size, byte < 0x20 ? 6 : ((byte == '"' || byte == '\\') ? 2 : 1));
+    // Reject oversized raw strings before scanning. Keep the existing
+    // conservative six-byte charge for every control character, including LF.
+    std::size_t size = checked_json_size(2, value.size());
+    while (!value.empty()) {
+        const auto byte = static_cast<unsigned char>(value.front());
+        if (!needs_json_escape(byte)) {
+            value.remove_prefix(unescaped_prefix(value));
+        } else {
+            size = checked_json_size(size, byte < 0x20 ? 5 : 1);
+            value.remove_prefix(1);
+        }
     }
     return size;
 }
@@ -168,7 +217,7 @@ bool valid_dot_identifiers(std::string_view value, bool prerelease) {
     }
 }
 
-std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t index) {
+std::size_t validated_utf8_prefix_length(std::string_view value, std::size_t index) {
     const auto byte_at = [&value](std::size_t offset) {
         return static_cast<unsigned char>(value[offset]);
     };
@@ -179,7 +228,7 @@ std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t i
     };
 
     const auto lead = byte_at(index);
-    if (lead < 0x80) return 1;
+    if (lead < 0x80) return ascii_prefix(value.substr(index));
     if (lead >= 0xc2 && lead <= 0xdf) {
         require_continuation(index + 1);
         return 2;
@@ -230,7 +279,7 @@ std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t i
 
 void validate_utf8_impl(std::string_view value) {
     for (std::size_t index = 0; index < value.size();) {
-        index += validated_utf8_sequence_length(value, index);
+        index += validated_utf8_prefix_length(value, index);
     }
 }
 
@@ -238,7 +287,15 @@ void append_escaped(std::string& out, std::string_view value) {
     validate_utf8_impl(value);
     static constexpr char hex[] = "0123456789abcdef";
     out.push_back('"');
-    for (const unsigned char c : value) {
+    while (!value.empty()) {
+        const auto c = static_cast<unsigned char>(value.front());
+        if (!needs_json_escape(c)) {
+            const auto count = unescaped_prefix(value);
+            out.append(value.data(), count);
+            value.remove_prefix(count);
+            continue;
+        }
+        value.remove_prefix(1);
         switch (c) {
             case '"':
                 out += "\\\"";

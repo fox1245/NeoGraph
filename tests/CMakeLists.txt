@@ -1,4 +1,5 @@
 add_executable(neograph_tests
+    test_canonical_json.cpp
     test_graph_state.cpp
     test_graph_engine.cpp
     test_engine_config.cpp
