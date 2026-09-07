@@ -15,13 +15,15 @@ struct Options {
     std::string session = "demo";
     std::string model;
     std::string api_key;
-    std::string base_url          = "https://openrouter.ai/api/v1";
-    bool        mock              = true;
-    bool        allow_loopback    = false;
-    unsigned    max_turns         = 12;
-    unsigned    max_calls         = 100;
-    unsigned    max_tokens        = 200000;
-    unsigned    max_output_tokens = 2048;
+    std::string base_url                 = "https://openrouter.ai/api/v1";
+    bool        mock                     = true;
+    bool        allow_loopback           = false;
+    unsigned    max_turns                = 12;
+    unsigned    max_calls                = 100;
+    unsigned    max_tokens               = 200000;
+    unsigned    max_output_tokens        = 4096;
+    unsigned    provider_timeout_seconds = 120;
+    std::string reasoning_effort;
     /// Trusted host guidance; empty selects the packaged skill and chat-mode reference.
     std::string authoring_guidance;
 };

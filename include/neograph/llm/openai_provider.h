@@ -31,8 +31,12 @@ namespace neograph::llm {
  * Connects to any endpoint following the OpenAI chat completions API
  * format (`/v1/chat/completions`). Configure via Config struct. For an
  * OpenRouter endpoint, a per-call `CompletionParams::extra_fields.provider`
- * object is forwarded as its documented provider-routing object; other
- * `extra_fields` keys are intentionally ignored by this native provider.
+ * object is forwarded as its documented provider-routing object.
+ * `extra_fields.response_format` accepts exactly `{type: "json_object"}` for
+ * JSON mode. The caller still validates the returned application schema.
+ * `extra_fields.reasoning_effort` accepts none, minimal, low, medium, high,
+ * xhigh, or max. The selected model/provider must support the requested value.
+ * Other `extra_fields` keys are intentionally ignored by this native provider.
  *
  * @code
  * auto provider = OpenAIProvider::create({

@@ -52,6 +52,10 @@ The live CLI defaults to `z-ai/glm-5.3-flash`. `--model` overrides
 `--env-file`, the CLI discovers the nearest `.env` from the working directory.
 `--no-env` disables this discovery. Only named chatbot settings are consumed;
 the file is parsed as data, not sourced as a shell script.
+For GLM 5.3 Flash, chat calls default to `reasoning_effort=low` to leave room for
+visible replies within the output cap. `--reasoning-effort default` omits this
+override; other explicit values must be supported by the chosen model/provider.
+The DSL capability evaluator keeps its separate generation configuration.
 
 OpenRouter uses the existing cookbook's ZDR routing option. Choose a model with
 an eligible route. No token price is assumed. Do not
@@ -63,7 +67,12 @@ address, intended for protocol tests.
 
 The native adapter sends the output limit as `max_completion_tokens`, supported
 by the [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request).
-The default is 2,048 per call; use `--max-output-tokens` to set 1..8,192.
+The default is 4,096 per call (including provider reasoning tokens); use
+`--max-output-tokens` to set 1..8,192.
+`--provider-timeout-seconds` sets a 1..120 second per-call timeout (default 120).
+The host checkpoint wait covers the sequential calls between checkpoints, and
+the reviewer has a separate 180-second child budget. Timed-out calls remain
+uncertain and charged; they are not automatically retried.
 
 For PostgreSQL, run native Docker inside WSL and set the connection string in that
 same shell. Use a dedicated database; the example creates its own tables but is
@@ -82,6 +91,11 @@ Without it, `--db` selects SQLite. Either backend can be disabled at build time.
 The model returns `{plan, reason, confidence}`. The host accepts only `direct` or
 `review`, a bounded reason and confidence in [0,1]. Below 0.7, invalid JSON or an
 unknown plan is rejected. An unchanged plan is recorded as `kept`.
+Evolution calls request JSON-object response mode through the native provider;
+the application still validates the exact fields and allowed values.
+An empty or truncated proposal is rejected without losing the completed answer.
+Known provider usage is settled and its stop reason is retained in the proposal
+diagnostic; transport uncertainty still prevents automatic redispatch.
 
 These parameters instantiate reviewed JavaScript templates. A candidate must pass
 source identity checks, bounded compilation, host semantic/template validation,
@@ -103,7 +117,7 @@ context. Ordinary answer/reviewer calls keep their role-specific prompts. The
 loaded skill digest is persisted with the session, and model-call identities bind
 the actual prompt and output cap, so reopening cannot silently change guidance.
 This version changes the example build/registry identity; use a new session for
-old v1 demo databases.
+demo databases created by earlier builds.
 
 The skill also has separate QuickJS authoring and native runtime-handoff guides.
 The source-generation evaluator loads the QuickJS route, gives the model the

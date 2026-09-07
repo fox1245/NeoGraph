@@ -194,11 +194,15 @@ class ChatTest(unittest.TestCase):
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 seen.append(request)
-                content = ("{\"plan\":\"execute_shell\",\"reason\":\"untrusted\",\"confidence\":1}"
-                           if "Return only JSON" in request["messages"][0]["content"] else "Fixture answer")
-                body = json.dumps({"id": "fixture", "object": "chat.completion",
+                proposal = "Return only JSON" in request["messages"][0]["content"]
+                empty = "empty proposal" in request["messages"][1]["content"]
+                content = ("" if empty else "{\"plan\":\"execute_shell\",\"reason\":\"untrusted\",\"confidence\":1}") if proposal else "Fixture answer"
+                response = {"id": "fixture", "object": "chat.completion",
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
-                                 "finish_reason": "stop"}]}).encode()
+                                 "finish_reason": "length" if empty and proposal else "stop"}]}
+                if empty:
+                    response["usage"] = {"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}
+                body = json.dumps(response).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -209,7 +213,7 @@ class ChatTest(unittest.TestCase):
             thread = threading.Thread(target=provider.serve_forever, daemon=True)
             thread.start()
             try:
-                s = self.server(["--live", "--allow-loopback-provider"], {
+                s = self.server(["--live", "--allow-loopback-provider", "--reasoning-effort", "low"], {
                     "OPENROUTER_API_KEY": "local-fixture-only", "OPENROUTER_MODEL": "fixture-model",
                     "NEOGRAPH_CHAT_BASE_URL": f"http://127.0.0.1:{provider.server_port}/v1"})
                 s.turn("alice", "a1", "hello from protocol test")
@@ -220,9 +224,21 @@ class ChatTest(unittest.TestCase):
                 self.assertGreater(state["usage"]["tokens"], 0)
                 self.assertEqual(state["usage"]["prompt_tokens"], 0)
                 self.assertEqual(seen[0]["model"], "fixture-model")
+                self.assertNotIn("response_format",seen[0])
+                self.assertEqual(seen[0]["reasoning_effort"],"low")
+                self.assertEqual(seen[1]["response_format"],{"type":"json_object"})
                 self.assertGreater(seen[0].get("max_completion_tokens", seen[0].get("max_tokens", 0)), 0)
                 skill = (Path(__file__).resolve().parents[3] / "skills/neograph-harness-authoring/SKILL.md").read_text(encoding="utf-8")
                 self.assertIn(skill, seen[1]["messages"][0]["content"].replace("\r\n", "\n"))
+                before=state["usage"]["tokens"]
+                result=s.turn("alice","a2","empty proposal")
+                after=s.state("alice")
+                self.assertEqual(result["status"],"completed")
+                self.assertEqual(result["answer"],"Fixture answer")
+                self.assertEqual(after["usage"]["tokens"],before+18)
+                self.assertEqual(after["usage"]["uncertain_calls"],0)
+                self.assertEqual(after["evolutions"][-1]["status"],"rejected")
+                self.assertEqual(after["evolutions"][-1]["proposal"]["stop_reason"],"max_tokens")
             finally:
                 provider.shutdown()
                 thread.join()

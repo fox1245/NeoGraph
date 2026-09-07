@@ -100,6 +100,24 @@ json OpenAIProvider::build_body(const CompletionParams& params) const {
         body["provider"] = config_.provider_routing;
     }
     if (params.extra_fields.is_object()) {
+        const auto effort = params.extra_fields.find("reasoning_effort");
+        if (effort != params.extra_fields.end()) {
+            const auto value = effort.value();
+            if (!value.is_string() ||
+                (value != "none" && value != "minimal" && value != "low" && value != "medium" &&
+                 value != "high" && value != "xhigh" && value != "max"))
+                throw std::invalid_argument("OpenAIProvider reasoning_effort is unsupported");
+            body["reasoning_effort"] = value;
+        }
+        const auto format = params.extra_fields.find("response_format");
+        if (format != params.extra_fields.end()) {
+            const auto value = format.value();
+            if (!value.is_object() || value.size() != 1 || !value.contains("type") ||
+                value.at("type") != "json_object")
+                throw std::invalid_argument(
+                    "OpenAIProvider response_format must be {type: json_object}");
+            body["response_format"] = value;
+        }
         const auto provider = params.extra_fields.find("provider");
         if (provider != params.extra_fields.end()) {
             auto routing = provider.value();

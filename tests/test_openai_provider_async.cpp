@@ -210,6 +210,50 @@ TEST(OpenAIProviderAsync, RejectsNonObjectProviderRoutingPreferences) {
     EXPECT_EQ(mock.request_count.load(), 0);
 }
 
+TEST(OpenAIProviderAsync, ForwardsJsonObjectFormatWithoutLeakingOtherOverrides) {
+    MockServer mock;
+    auto       config       = make_config(mock);
+    config.provider_routing = {{"zdr", true}};
+    auto provider           = llm::OpenAIProvider::create(config);
+    auto params             = make_params();
+    params.max_tokens       = 128;
+    params.extra_fields     = {{"response_format", {{"type", "json_object"}}},
+                               {"reasoning_effort", "low"},
+                               {"model", "untrusted-override"},
+                               {"max_completion_tokens", 999999}};
+    EXPECT_EQ(provider->complete(params).message.content, "pong");
+    const auto body = mock.last_request_json();
+    EXPECT_EQ(body.at("response_format").at("type"), "json_object");
+    EXPECT_EQ(body.at("reasoning_effort"), "low");
+    EXPECT_EQ(body.at("model"), params.model);
+    EXPECT_EQ(body.at("max_completion_tokens"), 128);
+    EXPECT_TRUE(body.at("provider").at("zdr").get<bool>());
+}
+
+TEST(OpenAIProviderAsync, RejectsMalformedJsonFormatBeforeDispatch) {
+    MockServer mock;
+    auto       provider = llm::OpenAIProvider::create(make_config(mock));
+    auto       params   = make_params();
+    for (const auto& format :
+         json::array({"json_object", json::object(), json{{"type", "json_schema"}},
+                      json{{"type", "json_object"}, {"model", "override"}}})) {
+        params.extra_fields = {{"response_format", format}};
+        EXPECT_THROW(provider->complete(params), std::invalid_argument);
+    }
+    EXPECT_EQ(mock.request_count.load(), 0);
+}
+
+TEST(OpenAIProviderAsync, RejectsInvalidReasoningEffortBeforeDispatch) {
+    MockServer mock;
+    auto       provider = llm::OpenAIProvider::create(make_config(mock));
+    auto       params   = make_params();
+    for (const auto& value : json::array({json{{"effort", "low"}}, 999, "unbounded"})) {
+        params.extra_fields = {{"reasoning_effort", value}};
+        EXPECT_THROW(provider->complete(params), std::invalid_argument);
+    }
+    EXPECT_EQ(mock.request_count.load(), 0);
+}
+
 TEST(OpenAIProviderAsync, SyncCompleteBridgesThroughRunSync) {
     MockServer mock;
     ASSERT_GT(mock.port, 0);

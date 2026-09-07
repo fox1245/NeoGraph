@@ -23,8 +23,9 @@ int main(int argc, char** argv) {
     try {
         evolving_chat::Options options;
         std::string            env_file;
-        bool                   no_env = false;
-        unsigned               port   = 8768;
+        bool                   no_env             = false;
+        bool                   reasoning_override = false;
+        unsigned               port               = 8768;
         std::string            script;
         bool                   crash_after_script = false;
         for (int i = 1; i < argc; ++i) {
@@ -55,7 +56,13 @@ int main(int argc, char** argv) {
                 options.max_calls = std::stoul(value());
             else if (arg == "--max-output-tokens")
                 options.max_output_tokens = std::stoul(value());
-            else if (arg == "--script")
+            else if (arg == "--provider-timeout-seconds")
+                options.provider_timeout_seconds = std::stoul(value());
+            else if (arg == "--reasoning-effort") {
+                options.reasoning_effort = value();
+                if (options.reasoning_effort == "default") options.reasoning_effort.clear();
+                reasoning_override = true;
+            } else if (arg == "--script")
                 script = value();
             else if (arg == "--crash-after-script")
                 crash_after_script = true;
@@ -70,7 +77,10 @@ int main(int argc, char** argv) {
                        "--env-file PATH selects a dotenv file; otherwise discover .env from cwd.\n"
                        "--no-env disables discovery. Existing environment values take precedence.\n"
                        "--model overrides OPENROUTER_MODEL; live default: z-ai/glm-5.3-flash.\n"
-                       "--max-output-tokens 2048 bounds each model completion.\n"
+                       "--max-output-tokens 4096 bounds each model completion.\n"
+                       "--provider-timeout-seconds 120 sets the per-call timeout (1..120).\n"
+                       "GLM 5.3 Flash chat defaults to low reasoning effort; --reasoning-effort "
+                       "default omits the override.\n"
                        "--script JSON_FILE runs [{tenant,request_id,message,force_swap?}, ...].\n"
                        "--crash-after-script exits without cancelling runs for recovery testing.\n";
                 return 0;
@@ -98,6 +108,8 @@ int main(int argc, char** argv) {
         options.api_key = setting("OPENROUTER_API_KEY");
         if (options.model.empty()) options.model = setting("OPENROUTER_MODEL");
         if (!options.mock && options.model.empty()) options.model = "z-ai/glm-5.3-flash";
+        if (!reasoning_override && options.model == "z-ai/glm-5.3-flash")
+            options.reasoning_effort = "low";
         options.postgres_url = setting("NEOGRAPH_CHAT_POSTGRES_URL");
         if (!setting("NEOGRAPH_CHAT_BASE_URL").empty())
             options.base_url = setting("NEOGRAPH_CHAT_BASE_URL");

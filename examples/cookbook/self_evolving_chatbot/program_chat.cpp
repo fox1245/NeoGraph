@@ -21,10 +21,10 @@ namespace evolving_chat {
 using namespace neograph::program;
 using namespace neograph::graph;
 namespace {
-constexpr const char* build_id = "evolving-chat/v2";
+constexpr const char* build_id = "evolving-chat/v5";
 const RunBudget       root_budget{86400000, 2000000, 0, 4, 1200, 10000, 40, 3, 16};
 const RunBudget       assistant_budget{82800000, 1000000, 0, 2, 800, 8000, 30, 2, 12};
-const RunBudget       reviewer_budget{120000, 16000, 0, 1, 4, 12, 0, 0, 0};
+const RunBudget       reviewer_budget{180000, 16000, 0, 1, 4, 12, 0, 0, 0};
 const RunBudget       floor_budget{1, 0, 0, 1, 1, 1, 0, 0, 0};
 std::string           digest(const std::string& s) {
     unsigned char bytes[SHA256_DIGEST_LENGTH];
@@ -93,7 +93,7 @@ std::string source_text(const std::string& plan) {
              "},'assistant:review');\n"
              "const review=yield "
              "ng.await(ng.spawn('review-'+task.turn,{payload:{phase:'critique',task:task,draft:"
-             "answer}},'review:spawn'),120000,'review:await');\n"
+             "answer}},'review:spawn'),180000,'review:await');\n"
              "const final=yield "
              "ng.callCore('main',{payload:{phase:'refine',task:task,draft:answer,critique:review}},"
              "'refine');\n"
@@ -126,7 +126,7 @@ private:
 };
 RegistrySnapshot make_registry(Step::Work work) {
     RegistrySnapshotBuilder b;
-    ExecutableManifest node{{ExecutableKind::Node, "chat.step", "1.1.0", digest("chat.step/v2")},
+    ExecutableManifest node{{ExecutableKind::Node, "chat.step", "1.4.0", digest("chat.step/v5")},
                             EffectMode::Brokered,
                             "evolving-chat:host",
                             {"chat:model"},
@@ -240,6 +240,8 @@ struct Tenant {
                       {"base_url", options.base_url},
                       {"skill_sha256", digest(options.authoring_guidance)},
                       {"max_output_tokens", options.max_output_tokens},
+                      {"provider_timeout_seconds", options.provider_timeout_seconds},
+                      {"reasoning_effort", options.reasoning_effort},
                       {"build", build_id}}},
                     {"limits",
                      {{"turns", options.max_turns},
@@ -258,6 +260,8 @@ struct Tenant {
                             {"base_url", options.base_url},
                             {"skill_sha256", digest(options.authoring_guidance)},
                             {"max_output_tokens", options.max_output_tokens},
+                            {"provider_timeout_seconds", options.provider_timeout_seconds},
+                            {"reasoning_effort", options.reasoning_effort},
                             {"build", build_id}};
         if (data.at("settings") != settings)
             throw std::runtime_error(
@@ -281,7 +285,7 @@ struct Tenant {
             config.base_url                = options.base_url;
             config.default_model           = options.model;
             config.provider_routing        = json{{"zdr", true}};
-            config.timeout_seconds         = 45;
+            config.timeout_seconds         = static_cast<int>(options.provider_timeout_seconds);
             config.allow_insecure_loopback = options.allow_loopback;
             provider                       = neograph::llm::OpenAIProvider::create_shared(config);
         }
@@ -360,7 +364,8 @@ struct Tenant {
     Point next_point() {
         std::unique_lock lock(queue_mutex);
         // Bound the host wait separately from model and Program deadlines.
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(150);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(3 * options.provider_timeout_seconds + 30);
         while (queue.empty() && !stopping && !(root && root->try_result())) {
             queue_cv.wait_for(lock, std::chrono::milliseconds(100));
             if (std::chrono::steady_clock::now() >= deadline)
@@ -492,17 +497,23 @@ struct Tenant {
                 : "Answer the user's latest request clearly in their language. Use the "
                   "conversation for context.";
         neograph::CompletionParams params;
-        params.model            = options.model;
-        params.temperature      = 0.2f;
-        params.max_tokens       = static_cast<int>(options.max_output_tokens);
-        params.cancel_token     = ctx.cancel_token;
-        params.timeout_seconds  = 45;
-        params.messages         = {{"system", prompt}, {"user", payload.dump()}};
+        params.model           = options.model;
+        params.temperature     = 0.2f;
+        params.max_tokens      = static_cast<int>(options.max_output_tokens);
+        params.cancel_token    = ctx.cancel_token;
+        params.timeout_seconds = static_cast<int>(options.provider_timeout_seconds);
+        params.messages        = {{"system", prompt}, {"user", payload.dump()}};
+        if (role == "evolve")
+            params.extra_fields = json{{"response_format", {{"type", "json_object"}}}};
+        if (!options.reasoning_effort.empty())
+            params.extra_fields["reasoning_effort"] = options.reasoning_effort;
         const auto request_hash = digest(json{
             {"model", options.model},
             {"role", role},
             {"payload", payload},
             {"system", prompt},
+            {"extra_fields", params.extra_fields},
+            {"timeout_seconds", options.provider_timeout_seconds},
             {"max_output_tokens",
              options.max_output_tokens}}.dump());
         // UTF-8 bytes plus an explicit framing allowance are conservative for the
@@ -561,13 +572,15 @@ struct Tenant {
                 completion = provider->complete(params);
                 if (completion.message.content.size() > 16384)
                     throw std::runtime_error("Provider response too large");
-                if (completion.message.content.empty())
+                if (completion.message.content.empty() && role != "evolve")
                     throw std::runtime_error("Provider returned no answer");
                 if (role == "evolve") {
                     try {
                         output = json::parse(completion.message.content);
                     } catch (const json::parse_error&) {
-                        output = {{"invalid", true}, {"reason", "Model proposal was not JSON"}};
+                        output = {{"invalid", true},
+                                  {"reason", "Model proposal was not JSON"},
+                                  {"stop_reason", completion.stop_reason}};
                     }
                 } else
                     output = completion.message.content;
@@ -869,6 +882,13 @@ struct Chat::Impl {
             throw std::invalid_argument("session must be 1..64 bytes");
         if (!o.max_output_tokens || o.max_output_tokens > 8192)
             throw std::invalid_argument("max-output-tokens must be 1..8192");
+        if (!o.provider_timeout_seconds || o.provider_timeout_seconds > 120)
+            throw std::invalid_argument("provider-timeout-seconds must be 1..120");
+        if (!o.reasoning_effort.empty() && o.reasoning_effort != "none" &&
+            o.reasoning_effort != "minimal" && o.reasoning_effort != "low" &&
+            o.reasoning_effort != "medium" && o.reasoning_effort != "high" &&
+            o.reasoning_effort != "xhigh" && o.reasoning_effort != "max")
+            throw std::invalid_argument("Unsupported reasoning effort");
         if (o.authoring_guidance.empty())
             o.authoring_guidance =
                 read_guidance(CHAT_SKILL_PATH) + "\n\n" + read_guidance(CHAT_SKILL_MODE_PATH);
