@@ -629,6 +629,19 @@ if(NEOGRAPH_BUILD_POSTGRES)
         PROPERTIES RESOURCE_LOCK postgres_test_db)
 endif()
 
+if(TARGET cookbook_program_chatbot AND NEOGRAPH_BUILD_SQLITE)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ProgramChatbot.SQLite
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/test_program_chat.py
+                $<TARGET_FILE:cookbook_program_chatbot>)
+        set_tests_properties(ProgramChatbot.SQLite PROPERTIES
+            TIMEOUT 240 LABELS "program;example;integration"
+            ENVIRONMENT "NEOGRAPH_CHAT_POSTGRES_URL=")
+    endif()
+endif()
+
 # ThreadSanitizer ASLR notice: when CMAKE_CXX_FLAGS contains
 # `-fsanitize=thread`, the test binaries can FATAL with
 # "unexpected memory mapping" on Linux kernels with high

@@ -27,7 +27,7 @@ struct ProgramPersistedInvocation {
     std::string parent_run_id;
     std::uint32_t child_depth = 0;
 
-    bool operator==(const ProgramPersistedInvocation&) const = default;
+    NEOGRAPH_PROGRAM_API bool operator==(const ProgramPersistedInvocation&) const;
 };
 
 enum class ProgramChildState : std::uint8_t {

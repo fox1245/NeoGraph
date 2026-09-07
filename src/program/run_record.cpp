@@ -428,6 +428,11 @@ json stored_body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
     return value;
 }
 }  // namespace
+bool ProgramPersistedInvocation::operator==(const ProgramPersistedInvocation& other) const {
+    return granted_budget == other.granted_budget && trace_id == other.trace_id &&
+           parent_run_id == other.parent_run_id && child_depth == other.child_depth &&
+           detail::canonical_json_bytes(input) == detail::canonical_json_bytes(other.input);
+}
 bool ProgramChildRecord::operator==(const ProgramChildRecord& other) const {
     return detail::canonical_json_bytes(child_body(*this)) ==
            detail::canonical_json_bytes(child_body(other));

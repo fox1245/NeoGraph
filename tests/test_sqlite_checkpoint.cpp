@@ -6,12 +6,17 @@
 // the two backends are held to identical contracts; if you change one
 // surface, change both.
 
-#include <gtest/gtest.h>
 #include <neograph/graph/sqlite_checkpoint.h>
+
+#include <gtest/gtest.h>
+
+#include <barrier>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <map>
+#include <set>
 #include <string>
 #ifdef _WIN32
 #include <process.h>
@@ -21,6 +26,47 @@
 
 using namespace neograph::graph;
 using json = neograph::json;
+
+TEST(SqliteCheckpointConcurrencyTest, IndependentConnectionsAppendWithoutSnapshotUpgradeLoss) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-pending-" + Checkpoint::generate_id() + ".sqlite");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            for (const auto& suffix : {"", "-wal", "-shm"})
+                std::filesystem::remove(path.string() + suffix, ignored);
+        }
+    } cleanup{path};
+    SqliteCheckpointStore first(path.string()), second(path.string());
+    std::barrier          rendezvous(2);
+    auto append = [&](SqliteCheckpointStore& connection, const std::string& prefix) {
+        unsigned failures = 0;
+        for (int i = 0; i < 40; ++i) {
+            PendingWrite write;
+            write.task_id   = prefix + std::to_string(i);
+            write.node_name = "writer";
+            write.writes    = json::array();
+            write.step      = i;
+            rendezvous.arrive_and_wait();
+            try {
+                connection.put_writes("shared", "parent", write);
+            } catch (const std::exception&) {
+                ++failures;
+            }
+        }
+        return failures;
+    };
+    auto one = std::async(std::launch::async, [&] { return append(first, "a"); });
+    auto two = std::async(std::launch::async, [&] { return append(second, "b"); });
+    EXPECT_EQ(one.get() + two.get(), 0U);
+    const auto writes = first.get_writes("shared", "parent");
+    ASSERT_EQ(writes.size(), 80U);
+    std::set<std::string> tasks;
+    for (const auto& write : writes)
+        tasks.insert(write.task_id);
+    EXPECT_EQ(tasks.size(), 80U);
+}
 
 namespace {
 

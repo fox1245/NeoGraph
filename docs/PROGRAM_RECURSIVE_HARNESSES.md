@@ -122,3 +122,32 @@ cross-owner session sharing policy, or arbitrary in-place Core mutation. Native
 Core migration retains its existing boundary. Independent multi-host live
 ownership transfer and every context/hook failure combination require separate
 qualification.
+
+## Interactive chatbot example
+
+The [evolving Harness chatbot](../examples/cookbook/self_evolving_chatbot/README.md)
+extends the reference with two isolated tenants, an OpenRouter adapter, a browser
+inspector, per-turn reviewed-template proposals, runtime successor compilation,
+and chat/provider ledgers on SQLite or PostgreSQL. Its assistant can synthesize a
+reviewer after replacement, while the original orchestrator continues to await
+the same logical assistant.
+
+`RuntimeConfig::checkpoint_handler` lets a host enqueue a handle and move-only
+checkpoint lease after durable publication. Retaining the lease pauses the
+generator without blocking a scheduler thread. The callback must return promptly;
+perform compilation and replacement on the host's worker. On reconnect it also
+observes replay of the latest completed checkpoint. An explicit `next_handoff`
+request takes precedence.
+
+`ProgramRuntime::reserve_synthesis` debits one unallocated dynamic compile against
+the expected lineage head and refreshes that held lease's journal reference.
+The checkpoint identity and serialized handoff value remain unchanged. A stale
+head, foreign owner/runtime, expired wall budget, or compile budget allocated to
+descendants is rejected. The host must persist intent before reservation and
+record outcomes; an ambiguous acknowledgement cannot authorize a free retry.
+The chatbot uses this reservation in the ordinary `ProgramSynthesisGateway`, then
+passes the admitted target to `replace`.
+
+The chatbot's template gate is not proof of answer quality, and its model calls
+and generator control retain the `Unmanaged` guarantee. Pending provider effects
+after process loss require reconciliation instead of automatic redispatch.

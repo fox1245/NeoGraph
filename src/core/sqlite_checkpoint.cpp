@@ -527,7 +527,10 @@ void SqliteCheckpointStore::put_writes(
     const std::string& parent_checkpoint_id,
     const PendingWrite& write) {
     std::lock_guard lock(db_mutex_);
-    exec_ddl("BEGIN TRANSACTION;");
+    // Acquire the writer before reading seq. A deferred read transaction cannot
+    // upgrade its WAL snapshot after a different connection commits, even with
+    // busy_timeout; shared Program/chat databases exercise this path frequently.
+    exec_ddl("BEGIN IMMEDIATE;");
     try {
         // Allocate next seq inside the transaction so concurrent puts
         // (well, serialised by db_mutex_, but matching PG semantics

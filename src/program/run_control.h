@@ -220,7 +220,8 @@ public:
     bool                                  has_active_handoff_request() const noexcept;
     bool                                          has_held_handoff() const noexcept;
     void                                  reach_latest_handoff_if_requested();
-    asio::awaitable<void>                 hold_latest_handoff_if_requested();
+    std::function<void(std::uint64_t)>            checkpoint_handler;
+    asio::awaitable<void>                 hold_latest_handoff_if_requested(std::uint64_t ordinal);
     void                                  release_handoff(std::uint64_t request_id) noexcept;
     std::shared_ptr<graph::GraphSafePointRequest> graph_safe_point_request() const;
     std::uint64_t request_graph_migration();

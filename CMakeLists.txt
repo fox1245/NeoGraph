@@ -1480,9 +1480,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_multi_tenant_live PRIVATE
                 neograph::core neograph::llm cppdotenv)
 
-            # Self-evolving chatbot — multi-tenant + LLM judge → graph_def
-            # 가 사용자 행동 보고 in-place 진화. NG 만 가능한 카테고리
-            # (LangGraph 의 StateGraph 는 Python 객체라 runtime reshape 불가).
+            # Legacy Core demos choose a topology for the next request.
             add_executable(cookbook_self_evolving_chatbot
                 examples/cookbook/self_evolving_chatbot/server.cpp)
             target_link_libraries(cookbook_self_evolving_chatbot PRIVATE
@@ -1494,6 +1492,28 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/self_evolving_chatbot/server_multi.cpp)
             target_link_libraries(cookbook_self_evolving_chatbot_multi PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            if(NEOGRAPH_BUILD_PROGRAM AND NEOGRAPH_BUILD_QUICKJS_CONTROL AND
+               (NEOGRAPH_BUILD_SQLITE OR NEOGRAPH_BUILD_POSTGRES))
+                add_executable(cookbook_program_chatbot
+                    examples/cookbook/self_evolving_chatbot/program_server.cpp
+                    examples/cookbook/self_evolving_chatbot/program_chat.cpp
+                    examples/cookbook/self_evolving_chatbot/chat_store.cpp)
+                target_link_libraries(cookbook_program_chatbot PRIVATE
+                    neograph::program neograph::llm httplib OpenSSL::Crypto)
+                target_compile_definitions(cookbook_program_chatbot PRIVATE
+                    CHAT_PAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/program_chat.html")
+                if(NEOGRAPH_BUILD_SQLITE)
+                    target_compile_definitions(cookbook_program_chatbot PRIVATE CHAT_SQLITE)
+                    target_link_libraries(cookbook_program_chatbot PRIVATE
+                        neograph::program_sqlite neograph::sqlite SQLite::SQLite3)
+                endif()
+                if(NEOGRAPH_BUILD_POSTGRES)
+                    target_compile_definitions(cookbook_program_chatbot PRIVATE CHAT_POSTGRES)
+                    target_link_libraries(cookbook_program_chatbot PRIVATE
+                        neograph::program_postgres neograph::postgres PostgreSQL::PostgreSQL)
+                endif()
+            endif()
 
             # "The Beast" — a self-evolving agent that WRITES its own
             # harness as strict Core JSON, gates it through strict compile +

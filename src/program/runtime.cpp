@@ -2863,7 +2863,8 @@ void RunControl::reach_latest_handoff_if_requested() {
     });
 }
 
-asio::awaitable<void> RunControl::hold_latest_handoff_if_requested() {
+asio::awaitable<void> RunControl::hold_latest_handoff_if_requested(std::uint64_t ordinal) {
+    if (checkpoint_handler) checkpoint_handler(ordinal);
     reach_latest_handoff_if_requested();
 
     const auto executor = co_await asio::this_coro::executor;
@@ -4246,6 +4247,30 @@ struct ProgramRuntime::Impl {
             }
         }
         configure_child_launcher(control);
+        if (config.checkpoint_handler) {
+            control->checkpoint_handler = [weak = std::weak_ptr<detail::RunControl>(control),
+                                           handler =
+                                               config.checkpoint_handler](std::uint64_t ordinal) {
+                auto live = weak.lock();
+                if (!live || live->has_active_handoff_request()) return;
+                const auto commands =
+                    live->transitions->load_javascript_commands(live->owner_scope, live->run_id);
+                if (commands.empty() || commands.back().command_ordinal() != ordinal ||
+                    !live->latest_handoff())
+                    return;
+                ProgramHandle                 handle(live);
+                std::optional<ProgramHandoff> lease;
+                try {
+                    lease.emplace(handle.next_handoff());
+                } catch (const std::logic_error&) {
+                    // A concurrent explicit host request has priority.
+                    if (live->has_active_handoff_request()) return;
+                    throw;
+                }
+                live->reach_latest_handoff_if_requested();
+                handler(std::move(handle), std::move(*lease));
+            };
+        }
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
         control->set_handoff_coordination_mutex(
             process_state->transition_mutex,
@@ -6512,6 +6537,75 @@ std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view own
     }
     return recovered;
 }
+ProgramSynthesisReservation ProgramRuntime::reserve_synthesis(
+    std::string_view                owner_scope,
+    const ProgramHandle&            source,
+    ProgramHandoff&                 handoff,
+    const ProgramSynthesisProposal& proposal,
+    std::string_view                expected_lineage_head) {
+    if (!source.control_ || !handoff.impl_ || handoff.impl_->consumed.load() ||
+        handoff.impl_->control != source.control_ || source.control_->owner_scope != owner_scope ||
+        !same_process_coordination_backend(*source.control_->transitions,
+                                           *impl_->config.transitions))
+        throw_runtime_diagnostic("P_SYNTHESIS_GENERATION",
+                                 "Synthesis requires this runtime's held checkpoint");
+    (void)handoff.value();
+    if (impl_->find_control(owner_scope, source.run_id()) != source.control_)
+        throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis requires the owning runtime");
+    std::lock_guard lock(child_relation_publication_mutex(*impl_->config.transitions, owner_scope,
+                                                          source.logical_run_id()));
+    const auto      run     = source.snapshot();
+    const auto      journal = impl_->config.transitions->latest(owner_scope, source.run_id());
+    const auto      active  = load_active_run_lineage(*impl_->config.transitions, run);
+    if (!journal || journal->id != run.journal_head() || !active ||
+        active->lineage.id() != expected_lineage_head ||
+        proposal.data().owner_scope != owner_scope ||
+        proposal.data().parent_run_id != source.run_id() ||
+        proposal.data().lineage_id != active->lineage.lineage_id() ||
+        source.control_->cancellation_cause() != detail::CancellationCause::None)
+        throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis source head is not active");
+    auto remaining = run.remaining_budget();
+    if (remaining.max_dynamic_compiles <=
+        active->lineage.committed_descendant_budget().max_dynamic_compiles)
+        throw_runtime_diagnostic("P_SYNTHESIS_BUDGET", "No unallocated compilation budget remains");
+    --remaining.max_dynamic_compiles;
+    const auto timestamp = std::max(now_ms(), run.updated_at_ms());
+    remaining.wall_time_ms -= std::min(remaining.wall_time_ms,
+                                       static_cast<std::uint64_t>(timestamp - run.updated_at_ms()));
+    if (!remaining.wall_time_ms)
+        throw_runtime_diagnostic("P_SYNTHESIS_BUDGET", "Synthesis deadline has expired");
+    auto publication =
+        attach_run_lineage(*impl_->config.transitions,
+                           continuing_running_publication(run, *journal, remaining, timestamp,
+                                                          journal->inflight_reservation));
+    auto reservation = ProgramSynthesisReservation::create(
+        {proposal.id(), proposal.data().lineage_id, active->lineage.id(),
+         publication.run_lineage->id(), run.remaining_budget(), remaining});
+    const auto reserved_journal_head = publication.run_record.journal_head();
+    const auto lease =
+        impl_->config.transitions->load_execution_lease(owner_scope, source.run_id());
+    ProgramTransitionPublishResult published;
+    try {
+        published = lease
+                        ? impl_->config.transitions->compare_publish_execution(
+                              owner_scope, run.journal_head(), std::move(publication), lease, lease)
+                        : impl_->config.transitions->compare_publish(
+                              owner_scope, run.journal_head(), std::move(publication));
+    } catch (...) {
+        // A lost acknowledgement cannot restore compile authority in this live attempt.
+        source.control_->limit_dynamic_compiles(remaining.max_dynamic_compiles);
+        throw;
+    }
+    if (published == ProgramTransitionPublishResult::Conflict)
+        throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis reservation lost its CAS");
+    source.control_->limit_dynamic_compiles(remaining.max_dynamic_compiles);
+    {
+        std::lock_guard resolve_lock(handoff.impl_->resolve_mutex);
+        handoff.impl_->handoff->reference.source_journal_head = reserved_journal_head;
+    }
+    return reservation;
+}
+
 ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
     std::string_view                  owner_scope,
     const ProgramHandle&              parent,

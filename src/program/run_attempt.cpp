@@ -4053,7 +4053,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             unreconciled_javascript_remaining = durable_replay->remaining_budget();
                         }
                         if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
-                            co_await control->hold_latest_handoff_if_requested();
+                            co_await control->hold_latest_handoff_if_requested(ordinal);
                         }
                         response = std::move(recorded.output);
                         continue;
@@ -4256,7 +4256,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (command_result.status != ProgramTerminalStatus::Completed)
                     co_return command_result;
                 if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
-                    co_await control->hold_latest_handoff_if_requested();
+                    co_await control->hold_latest_handoff_if_requested(ordinal);
                 }
                 response = std::move(command_result.output);
             }

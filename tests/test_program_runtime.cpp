@@ -10473,6 +10473,110 @@ TEST(ProgramCatalogTest, SQLiteCatalogWaitsForShortSharedDatabaseWriter) {
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, HostSuccessorReservationBindsOwnerAndExactHead) {
+    ChildSynthesisFixture test(backend(), true, program_backend(), checkpoint_backend());
+    auto                  proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            before   = test.handle->snapshot();
+    const auto head = test.journal->load_run_lineage("tenant:runtime", test.handle->run_id());
+    EXPECT_THROW(test.fixture.runtime->reserve_synthesis("tenant:other", *test.handle, *test.hold,
+                                                         proposal, head->id()),
+                 ProgramDiagnosticError);
+    EXPECT_EQ(test.handle->snapshot().id(), before.id());
+    ProgramRuntime other(
+        RuntimeConfig{test.fixture.catalog, test.fixture.checkpoints, {}, test.journal, 1});
+    EXPECT_THROW(
+        other.reserve_synthesis("tenant:runtime", *test.handle, *test.hold, proposal, head->id()),
+        ProgramDiagnosticError);
+    auto reserved = test.fixture.runtime->reserve_synthesis("tenant:runtime", *test.handle,
+                                                            *test.hold, proposal, head->id());
+    EXPECT_EQ(reserved.data().remaining_after_reservation.max_dynamic_compiles, 2U);
+    EXPECT_EQ(test.hold->reference().source_journal_head, test.handle->snapshot().journal_head());
+    EXPECT_THROW(test.fixture.runtime->reserve_synthesis("tenant:runtime", *test.handle, *test.hold,
+                                                         proposal, head->id()),
+                 ProgramDiagnosticError);
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    auto reopened = GetParam() == "Memory" ? test.journal : backend();
+    EXPECT_EQ(reopened->load_run_lineage("tenant:runtime", test.handle->run_id())
+                  ->remaining_budget()
+                  .max_dynamic_compiles,
+              2U);
+}
+
+TEST_P(ProgramChildSynthesisPersistence, SuccessorReservationLostAcknowledgementDoesNotRefund) {
+    ChildSynthesisFixture test(backend(), true, program_backend(), checkpoint_backend());
+    auto                  proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto head = test.journal->load_run_lineage("tenant:runtime", test.handle->run_id());
+    bool       lost = false;
+    test.journal->after_publication = [&](const auto& publication) {
+        if (!lost && publication.run_record.run_id() == test.handle->run_id() &&
+            publication.run_record.remaining_budget().max_dynamic_compiles == 2) {
+            lost = true;
+            throw std::runtime_error("lost successor reservation acknowledgement");
+        }
+    };
+    EXPECT_THROW(test.fixture.runtime->reserve_synthesis("tenant:runtime", *test.handle, *test.hold,
+                                                         proposal, head->id()),
+                 std::runtime_error);
+    EXPECT_TRUE(lost);
+    EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
+    EXPECT_THROW(test.fixture.runtime->reserve_synthesis("tenant:runtime", *test.handle, *test.hold,
+                                                         proposal, head->id()),
+                 ProgramDiagnosticError);
+    test.journal->after_publication = {};
+}
+
+TEST(ProgramRuntimeTest, HostCheckpointHandlerHoldsEachDurableBoundaryBeforeContinuation) {
+    AdmittedRuntime             fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    std::mutex                  mutex;
+    std::condition_variable     condition;
+    std::vector<ProgramHandoff> holds;
+    unsigned                    observed = 0;
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 2};
+    config.checkpoint_handler = [&](ProgramHandle, ProgramHandoff lease) {
+        std::lock_guard lock(mutex);
+        holds.push_back(std::move(lease));
+        ++observed;
+        condition.notify_all();
+    };
+    ProgramRuntime  runtime(std::move(config));
+    ProgramCompiler compiler(fixture.registry, {"program-runtime-test/v1"});
+    const auto      bundle = compiler.compile(
+        ProgramSource::from_javascript(
+            "host-checkpoint.js",
+            javascript_runtime_source("runtime-completed",
+                                           "yield ng.checkpoint({turn:1},'one');yield "
+                                                "ng.checkpoint({turn:2},'two');return {done:true};")),
+        ProgramBudgetBounds{RunBudget{1, 0, 0, 1, 1, 1, 0, 0, 0},
+                            RunBudget{10000, 0, 0, 1, 8, 8, 0, 0, 0}});
+    const auto version = fixture.catalog->admit(
+        bundle, ProgramAdmission{"tenant:runtime", fixture.profile, fixture.policy, {}});
+    auto handle = runtime.start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), RunBudget{10000, 0, 0, 1, 8, 8, 0, 0, 0}, {}, {}});
+    for (unsigned turn = 1; turn <= 2; ++turn) {
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(
+            condition.wait_for(lock, std::chrono::seconds(3), [&] { return observed >= turn; }));
+        EXPECT_EQ(observed, turn);
+        EXPECT_EQ(holds.back().value().at("turn"), turn);
+        EXPECT_FALSE(handle.try_result());
+        holds.clear();
+    }
+    EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Completed);
+}
+
+TEST(ProgramRuntimeTest, PersistedChildInvocationComparesNestedInputCanonically) {
+    ProgramPersistedInvocation original;
+    original.input = json{
+        {"payload", {{"phase", "critique"}, {"task", {{"z", 2}, {"a", 1}}}, {"draft", "text"}}}};
+    auto reopened = original;
+    reopened.input =
+        json::parse(R"({"payload":{"draft":"text","phase":"critique","task":{"a":1,"z":2}}})");
+    EXPECT_EQ(original, reopened);
+    reopened.input["payload"]["draft"] = "changed";
+    EXPECT_NE(original, reopened);
+}
+
 TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedCompileBudget) {
     RecursiveHarnessFixture test(backend(), program_backend());
     const auto              leaf = recursive_graph_source(1, "return {}; ");
@@ -10501,6 +10605,21 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedComp
         ProgramChildSynthesisError);
     EXPECT_EQ(test.root->snapshot().id(), before.id());
     EXPECT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.root->run_id()).size(), 1U);
+    ProgramSynthesisProposalData request;
+    request.owner_scope      = "tenant:runtime";
+    request.parent_run_id    = test.root->run_id();
+    request.lineage_id       = lineage->lineage_id();
+    request.source           = ProgramSource::from_javascript("reused-budget.js", leaf);
+    request.requested_budget = RunBudget{1, 0, 0, 1, 1, 1, 0, 0, 0};
+    auto       proposal      = ProgramSynthesisProposal::create(request);
+    const auto reserved      = test.host.runtime->reserve_synthesis(
+        "tenant:runtime", *test.root, *test.root_hold, proposal, lineage->id());
+    EXPECT_EQ(reserved.data().remaining_after_reservation.max_dynamic_compiles, 2U);
+    const auto next_head = test.journal->load_run_lineage("tenant:runtime", test.root->run_id());
+    EXPECT_THROW(test.host.runtime->reserve_synthesis("tenant:runtime", *test.root, *test.root_hold,
+                                                      proposal, next_head->id()),
+                 ProgramDiagnosticError);
+    EXPECT_EQ(test.root->snapshot().remaining_budget().max_dynamic_compiles, 2U);
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
@@ -10549,7 +10668,8 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveConcurrentReconnectUsesTheRegi
     auto attached = observer.get();
     EXPECT_EQ(attached.run_id(), test.replacement->run_id());
     test.grandchild_hold.reset();
-    EXPECT_EQ(test.root->wait().status(), ProgramTerminalStatus::Completed);
+    const auto result = test.root->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
     EXPECT_EQ(attached.wait().id(), test.replacement->wait().id());
     EXPECT_EQ(completed_calls.load(), 10U);
 }

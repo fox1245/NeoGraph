@@ -146,6 +146,11 @@ struct ProgramChildQuotaConfig {
       ProgramRuntimeRecoveryHandler             runtime_recovery_handler;
       std::shared_ptr<ProgramSynthesisGateway>  child_synthesis_gateway;
       ProgramChildSynthesisGrantResolver        child_synthesis_grant_resolver;
+      /// Host checkpoint consumer, called after durable publication or latest-checkpoint replay.
+      /// Enqueue the move-only lease and return promptly; never block the scheduler here.
+      /// Retaining the lease pauses this generation. Destroying it releases the generator.
+      /// Explicit next_handoff requests take precedence. Programs cannot install this handler.
+      std::function<void(ProgramHandle, ProgramHandoff)> checkpoint_handler;
   };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
@@ -187,6 +192,15 @@ public:
                               const ModuleLinkReceipt& link,
                               const ProgramVersion&    version,
                               ProgramInvocation        invocation);
+    /// Debit one successor compilation at this runtime's held checkpoint by lineage CAS.
+    /// Persist intent before calling and record the outcome. The lease's journal head is
+    /// refreshed after the debit; its checkpoint identity is retained. An old head fails,
+    /// and an ambiguous acknowledgement never permits a free retry.
+    ProgramSynthesisReservation reserve_synthesis(std::string_view                owner_scope,
+                                                  const ProgramHandle&            source,
+                                                  ProgramHandoff&                 handoff,
+                                                  const ProgramSynthesisProposal& proposal,
+                                                  std::string_view expected_lineage_head);
     /** Host-only synthesis at a held top-level checkpoint, bound to this exact run generation. */
     ProgramChildSynthesisRecord prepare_child_synthesis(std::string_view                owner_scope,
                                                         const ProgramHandle&            parent,

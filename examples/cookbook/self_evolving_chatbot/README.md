@@ -1,230 +1,137 @@
-# Self-Evolving Chatbot
+# Evolving Harness Chat
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+**Languages:** [English](README.md) | [한국어](README.ko.md)
 
-**The chatbot harness reshapes *its own* topology at runtime based on user behavior.
-This capability is unique to NeoGraph; LangGraph cannot reshape a graph at runtime.**
+A runnable, two-tenant chatbot built on NeoGraph Program. Each turn produces a
+bounded Harness proposal. The host keeps the current topology or compiles and
+admits an immutable successor, then replaces the assistant at its durable
+checkpoint. The orchestrator keeps waiting on the same logical assistant.
 
-Natural extension of [multi_tenant_chatbot](../multi_tenant_chatbot/) cookbook — that one has
-customer harnesses *fixed*, this one *evolves*. Same compile cache + thread_id isolation
-with one more LLM judge step.
+- **Alice and Bob:** separate messages, owner scopes, catalogs, engine caches,
+  Program families, model-call ledgers and nonrenewable budgets.
+- **Recursive agents:** orchestrator → assistant → reviewer. A review Harness
+  drafts an answer, synthesizes an admitted reviewer child, waits for its critique,
+  then refines the answer. Every reviewer has its own Program identity.
+- **Inspector:** current compiled Core JSON, DSL, agent tree, generation, remaining
+  Program budgets, proposal reason, topology differences and admission outcome.
+- **Persistence:** SQLite or PostgreSQL stores Program artifacts, transitions,
+  chat messages, model reservations/results and evolution decisions.
+- **OpenRouter:** uses the existing native OpenAI-compatible provider. An explicit
+  offline demo mode exercises the same compiler, admission and runtime APIs.
 
-## Two Demos
-
-| File | Scenario | Cost | Wall time |
-|---|---|---|---|
-| [server.cpp](server.cpp) | Alice 1 person × 5 turns — minimal evolution mechanism demo | ~$0.003 | 16 s |
-| [server_multi.cpp](server_multi.cpp) | **5 customers × 5 turns — Each separate evolution timeline + emergent cluster** | ~$0.02 | 7 min |
-
-Build / run (both):
+## Build and run
 
 ```bash
-cmake --build build --target cookbook_self_evolving_chatbot cookbook_self_evolving_chatbot_multi
-./build/cookbook_self_evolving_chatbot         # single (alice)
-./build/cookbook_self_evolving_chatbot_multi   # multi (5 customers)
+cmake -S . -B build-chat -G Ninja \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON
+cmake --build build-chat --target cookbook_program_chatbot -j 4
+./build-chat/cookbook_program_chatbot --mock --db evolving-chat.sqlite
 ```
 
-## Why Only NG Can Do This
+Open http://127.0.0.1:8768. Switch between Alice and Bob. In demo mode, a message
+containing `review`, `검토`, or `비교` proposes the review Harness. The first answer
+uses the current Harness; an approved change applies when the next turn resumes
+that assistant. The force checkbox alternates the two reviewed plans for a demo;
+it does not assert that the new plan is better.
 
-| Attempt | LangGraph | NeoGraph |
-|---|---|---|
-| Different harness per customer | ❌ StateGraph = Python object | ✅ graph_def JSON row |
-| Harness reshapes itself at runtime | ❌ Module reload + in-flight state loss | **✅ One DB UPDATE + new engine compile on next request** |
-| 1000 customers' 1000 different graphs | ❌ Process per customer = 80 GB | ✅ One process / distinct shape cache |
-| Emergent cluster discovery | N/A | **✅ graph_def hash distribution = customer behavior cluster** |
+For OpenRouter, set credentials and an available model in the environment:
 
-LangChain/LangGraph's StateGraph is Python class instance — pickle also bundles import path,
-runtime node/edge reshaping requires Python module reload, in-flight conversation state lost.
-**NG's graph-as-JSON means evolution = one JSON modification.**
-
-## Core Mechanism
-
-At end of each turn, the pinned DeepSeek model via OpenRouter acts as the
-LLM judge: it looks at conversation history + current topology and responds
-with the best fit in one word:
-
-- `simple` — 1 LLM call, short direct answer (suitable for factual Q)
-- `reflexive` — 3 LLM calls (draft → critique → final) (suitable for accuracy-seeking)
-- `fanout` — 3 parallel LLM perspectives → merge (suitable for multi-view requirements)
-
-If judgment differs, in-place update customer DB's graph_def. Next turn uses new topology —
-**0 deploy, 0 restart, in-flight state preserved**.
-
-```cpp
-std::string suggested = llm_judge_topology(
-    provider, customer.history, customer.topology_name);
-
-if (suggested != customer.topology_name) {
-    customer.topology_def  = topo_registry[suggested]();   // New graph_def
-    customer.topology_name = suggested;
-    // Cache sees new hash next turn and automatically compiles new engine.
-    // Real production: DB UPDATE customer_graphs SET graph_def = ...
-}
+```bash
+export OPENROUTER_API_KEY='...'
+export OPENROUTER_MODEL='your-provider/model-id'
+./build-chat/cookbook_program_chatbot --live --session openrouter-demo
 ```
 
-## Demo 1 — Alice 1 Person (server.cpp)
+OpenRouter uses the existing cookbook's ZDR routing option. Choose a model with
+an eligible route. No model or price is hardcoded. The application does not read `.env` files. Do not
+put credentials in the DSL, database, HTTP body or source. Changing the provider,
+model or build requires a new explicit `--session`; reopening a session retains
+its stored budget limits. `NEOGRAPH_CHAT_BASE_URL` can select another compatible
+endpoint; plain HTTP requires `--allow-loopback-provider` and a literal loopback
+address, intended for protocol tests.
 
-Gradual evolution over 5 turns. User naturally moves from factual question → multi-perspective
-question, harness follows simple → fanout evolution.
+The native adapter sends the output limit as `max_completion_tokens`, supported
+by the [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request).
 
-```
-── Turn 1 [topology=simple] ──
-User: What is a cloud?
-Bot:  A cloud is a visible mass of condensed water vapor...
-[Evaluating harness fit...] judge → simple
+For PostgreSQL, run native Docker inside WSL and set the connection string in that
+same shell. Use a dedicated database; the example creates its own tables but is
+not a production deployment/migration manager.
 
-── Turn 3 [topology=simple] ──
-User: Now explain blockchain to me — I want both the
-      technical view and the economic view.
-Bot:  **Technical View:** Blockchain is a decentralized digital ledger...
-[Evaluating harness fit...] judge → fanout
-  ⟹ EVOLVE: simple → fanout (in-place, deploy 0)
-
-── Turn 4-5 [topology=fanout] ──
-... multi-perspective response after ...
-
-Evolution timeline:
-  Turn 0:  simple   (initial)
-  Turn 3:  fanout   (evolved)
+```bash
+export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
+./build-chat/cookbook_program_chatbot --mock --session postgres-demo
 ```
 
-## Demo 2 — Multi-Customer (server_multi.cpp) ⭐
+When the variable is present, both chat and Program persistence use PostgreSQL.
+Without it, `--db` selects SQLite. Either backend can be disabled at build time.
 
-**Real impact is here.** 5 customers show different behavior patterns, each with
-separate evolution timeline. Emergent cluster discovery demo.
+## What is synthesized
 
-Each customer's behavior pattern hypothesis + actual result:
+The model returns `{plan, reason, confidence}`. The host accepts only `direct` or
+`review`, a bounded reason and confidence in [0,1]. Below 0.7, invalid JSON or an
+unknown plan is rejected. An unchanged plan is recorded as `kept`.
 
-| Customer | Behavior pattern | Hypothesis | Actual evolution | Verification |
-|---|---|---|---|---|
-| **alice** | Gradual (factual → multi-view) | fanout mid-way | `simple → fanout(t3)` | ✅ |
-| **bob** | Factual only ("What is X?" × 5) | simple maintained | `simple` all 5 turns | ✅ |
-| **charlie** | Accuracy-seeking ("verify your answer") | reflexive | `simple → reflexive(t1)` immediately | ✅ |
-| **david** | From start "compare X vs Y multi-angle" | fast fanout | `simple → fanout(t1)` immediately | ✅ |
-| **eve** | Mixed (factual ↔ multi-view ↔ careful oscillation) | oscillation risk | `simple → fanout(t2) → reflexive(t4) → fanout(t5)` **oscillation** | ✅ |
+These parameters instantiate reviewed JavaScript templates. A candidate must pass
+source identity checks, bounded compilation, host semantic/template validation,
+Catalog admission and generation CAS. Child proposals pass the durable child
+synthesis gateway and an independently persisted host grant. The model cannot
+supply grants, credentials, arbitrary imports, native code or a larger budget.
 
-### Summary Results
+The example deliberately qualifies **reviewed-template synthesis**, not arbitrary
+model-written JavaScript. Template validation establishes an allowed behavior
+shape; it is not proof of answer quality. QuickJS generator control and the model
+node report **Unmanaged** execution guarantee. Do not interpret the inspector as
+claiming strict replay of an unknown external model effect.
 
-```
-=== Aggregate stats ===
-Customers:           5
-Total turns:         25
-Total main LLM:      51
-Total judge LLM:     25
-Total LLM calls:     76
-Wall time:           424 s
-Peak RSS:            18.99 MB
-Compile cache size:  3   ← 5 customers → 3 distinct engine
+## Accounting and recovery
 
-=== Final topology distribution ===
-  fanout:    3 customers  (alice, david, eve)
-  reflexive: 1 customer   (charlie)
-  simple:    1 customer   (bob)
-```
+Each tenant has a finite session (default 12 turns / 100 model calls / 200,000
+model tokens). Provider calls reserve tokens before dispatch. Known usage settles
+the reservation; missing usage retains it. Prompt reservation uses UTF-8 bytes
+plus framing/output allowances, not a model-specific tokenizer. Reported usage
+above the reservation remains charged. Monetary cost is shown as unknown: this
+example does not provide a monetary ceiling or assume token prices.
 
-### Key Observations
+Program compile, operation, Core-step, child/depth and wall-time budgets remain
+nonrenewable through replacement and restart. Idle time consumes the session's
+wall-time allowance. Dynamic successor compilation calls the host-only
+`ProgramRuntime::reserve_synthesis` at the held checkpoint before compilation.
 
-1. **Behavior pattern hypothesis 4/5 accurately verified** — Human's predicted evolution path
-   and LLM judge's actual evolution decision match exactly. I.e., **LLM judge reliably detects
-   user intent shift**.
+Reopen the same database, session, provider and model after process loss. The first
+new turn reconnects the existing family and reconciles the last checkpoint. Stored
+call results are reused; a pending/uncertain provider call is never automatically
+sent again. An interrupted compilation intent is retained for reconciliation,
+without a free recompile. An admitted successor saved before replacement can be
+published from its exact held checkpoint; an already committed replacement is
+resolved through the lineage.
 
-2. **Eve's oscillation actually observed ⚠️** — Utterances [factual → multi → factual
-   → careful → factual] cause topology to oscillate [simple → fanout →
-   fanout(maintain) → reflexive → fanout]. **Need anti-flapping guard**
-   verified by data (cooldown or hysteresis enhancement needed).
+This example supports one server process per database/session. The fixed local
+`alice-demo` / `bob-demo` bearer tokens illustrate server-side owner selection;
+they are not production authentication. The HTTP listener binds loopback. Explicit
+cancellation closes the family; it is different from a process-loss restart.
 
-3. **Emergent cluster discovery** — 5 customers' diverse utterance patterns naturally
-   classify into **3 topology clusters**. Compile cache size =
-   3 = distinct cluster count.
+## Verify
 
-   **This is the truly interesting emergent property** — NG's graph-as-data naturally
-   becomes customer behavior cluster discovery mechanism. graph_def
-   distribution = customer behavior's essential cluster shape.
-
-4. **Memory efficiency** — 5 customers → 3 engines. 2 customers' engine
-   memory saved via cache sharing. **Scale-up to 1000 customers, if distinct shapes
-   converge to ~10, engine memory stays nearly constant → real
-   1000+ customer multi-tenant fits in one process.**
-
-5. **Sequential simulation takes only 7 minutes wall time** — In production, each customer is
-   independent so parallel possible. 5 customers parallel = ~1.5 minutes +
-   compile cache is concurrent access safe (`std::shared_mutex`) so no race.
-
-## Production Scenario — Actual Implementation
-
-```sql
-CREATE TABLE customer_graphs (
-    customer_id   TEXT PRIMARY KEY,
-    graph_def     JSONB NOT NULL,
-    topology_name TEXT,
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE customer_evolution_log (
-    id            SERIAL PRIMARY KEY,
-    customer_id   TEXT REFERENCES customer_graphs(customer_id),
-    turn          INT,
-    from_topology TEXT,
-    to_topology   TEXT,
-    judge_reason  TEXT,
-    evolved_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE customer_sessions (
-    thread_id     TEXT PRIMARY KEY,
-    customer_id   TEXT,
-    history       JSONB,
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
+```bash
+python3 examples/cookbook/self_evolving_chatbot/test_program_chat.py \
+  ./build-chat/cookbook_program_chatbot
+# Run the same command with NEOGRAPH_CHAT_POSTGRES_URL for PostgreSQL.
 ```
 
-Each request processing flow:
+The black-box suite covers two tenants concurrently, keep/swap, recursive reviewer
+creation, idempotent requests, process restart, budget exhaustion, authorization
+and a local HTTP fixture using the real provider adapter. The fixture does not
+claim a successful external OpenRouter request.
 
-```cpp
-auto& cust    = db.fetch_customer(customer_id);  // graph_def + topology_name
-auto  engine  = cache.get_or_compile(cust.graph_def, ctx);  // Hash-based cache
-auto  history = db.fetch_history(thread_id);     // Session isolation key
-RunConfig rcfg;
-rcfg.thread_id = thread_id;
-rcfg.input = {{"messages", history + user_msg}};
-auto result = engine->run(rcfg);
+For a reproducible terminal scenario, `--script scenario.json` accepts an array of
+`{tenant, request_id, message, force_swap?}`. `--crash-after-script` intentionally
+exits after committed snapshots without cancelling the family, for restart tests.
 
-db.append_history(thread_id, user_msg, result);
+## Earlier Core examples
 
-if (turn % EVAL_INTERVAL == 0) {
-    auto suggested = llm_judge_topology(provider, history, cust.topology_name);
-    if (suggested != cust.topology_name && !in_cooldown(cust)) {
-        db.update_customer_graph(customer_id, topo_registry[suggested](),
-                                  suggested);
-        db.log_evolution(customer_id, turn, cust.topology_name, suggested);
-    }
-}
-```
-
-## Future Extensions
-
-- **Anti-oscillation guard** — Handle eve case. Lockout if evolved in last N turns,
-  or hysteresis (don't change if current topology not N% lower than next-candidate).
-- **LLM-generated graph_def** — Currently selects from 3 pre-defined topologies.
-  More ambitiously, an LLM can generate graph_def JSON from scratch. The
-  [`the-beast/`](../the-beast/) cookbook demonstrates the same
-  model-authored topology plus compile/validation gates.
-- **Parallel customer processing** — Sequential demo 7 minutes, parallel per customer = ~1.5 minutes.
-  Use `asio::thread_pool` + compile cache directly.
-- **A/B framework** — Operate 2 topologies for same customer simultaneously, decide winner by
-  response satisfaction. Sticky split by graph_id.
-- **CheckpointStore integration** — Postgres + above SQL schema for real
-  production-ready.
-- **Adaptive evolution rate** — Adjust eval-interval based on customer history stability
-  (stable = every 10 turns, unstable = every turn).
-
-## Core Message
-
-> **Self-evolving + multi-tenant combination is NG's real essence.** The vision of "AI agent
-> that builds itself" is **practically implementable** with NG's graph-as-data paradigm.
-> LLM outputs its own harness → DB UPDATE → immediate application — closed path for
-> LangGraph's StateGraph-as-Python model, NG is **the only player** in this market.
->
-> *"5 customers × 5 turns = 19 MB / 3 distinct engine / emergent cluster
-> discovery / oscillation diagnosis. Starting point for real self-improving multi-tenant agent
-> infrastructure."*
+`server.cpp` / `server_multi.cpp` and their original CMake targets remain available.
+They select a graph configuration for the next request. The new
+`cookbook_program_chatbot` demonstrates Program generations and recursive child
+synthesis; the older examples do not demonstrate live Program replacement.
