@@ -33,6 +33,9 @@ public:
 
     std::string process_coordination_key() const override;
 
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const override;
+
     std::optional<ProgramRunRecord> load(std::string_view owner_scope,
                                          std::string_view run_id) const override;
     std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,

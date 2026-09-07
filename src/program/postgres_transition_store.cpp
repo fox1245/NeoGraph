@@ -1,6 +1,7 @@
 #include <neograph/program/postgres_transition_store.h>
 
 #include "canonical_json.h"
+#include "command_publication_head.h"
 
 #include <libpq-fe.h>
 
@@ -1224,6 +1225,36 @@ PostgreSQLProgramTransitionStore::~PostgreSQLProgramTransitionStore() = default;
 
 std::string PostgreSQLProgramTransitionStore::process_coordination_key() const {
     return impl_->coordination_key;
+}
+
+std::optional<ProgramCommandPublicationHead>
+PostgreSQLProgramTransitionStore::load_command_publication_head(std::string_view owner,
+                                                               std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    // One statement observes the head and tail under the same MVCC snapshot.
+    auto rows = exec_params(impl_->connection,
+        "SELECT h.run_record_bytes, h.journal_record_bytes, c.sequence, c.coordinate_id, "
+        "c.canonical_bytes FROM neograph_program_transition_run_heads_v2 h "
+        "LEFT JOIN neograph_program_transition_javascript_command_log_v2 c "
+        "ON c.owner_scope = h.owner_scope AND c.run_id = h.run_id AND c.sequence = "
+        "(SELECT MAX(t.sequence) FROM neograph_program_transition_javascript_command_log_v2 t "
+        "WHERE t.owner_scope = h.owner_scope AND t.run_id = h.run_id) "
+        "WHERE h.owner_scope = $1 AND h.run_id = $2", {std::string(owner), std::string(run_id)});
+    if (PQntuples(rows.get()) == 0) return std::nullopt;
+    if (PQntuples(rows.get()) != 1 || PQnfields(rows.get()) != 5)
+        throw std::invalid_argument("Stored PostgreSQL command publication head shape is invalid");
+    ProgramCommandPublicationHead head{
+        ProgramRunRecord::parse(row_text(rows, 0, 0)),
+        ProgramJournalRecord::parse(row_text(rows, 0, 1)), std::nullopt};
+    if (!PQgetisnull(rows.get(), 0, 2)) {
+        head.latest_command = ProgramJavaScriptCommandJournalEntry::parse(row_text(rows, 0, 4));
+        if (head.latest_command->sequence() != parse_u64(row_text(rows, 0, 2), "command sequence") ||
+            head.latest_command->coordinate_id() != row_text(rows, 0, 3)) {
+            throw std::invalid_argument("Stored PostgreSQL command publication head is corrupt");
+        }
+    }
+    detail::validate_command_publication_head(head, owner, run_id);
+    return head;
 }
 
 std::optional<ProgramRunRecord> PostgreSQLProgramTransitionStore::load(

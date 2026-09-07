@@ -5,6 +5,10 @@ baseline for deciding which Program costs to optimize. They do not change
 runtime semantics and do not replace the preregistered QuickJS performance gate.
 No LLM, network model call, or model credential is needed.
 
+For an implementation comparison, `scripts/compare_program_costs.py` alternates
+two frozen `bench_program_cost` binaries in fresh process pairs. The first such
+comparison is documented in [Command publication head optimization](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md).
+
 ## Build and run
 
 Use an optimized build on a native filesystem. For example, on Linux:

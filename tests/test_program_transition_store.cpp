@@ -20,9 +20,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <future>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 namespace {
 using namespace neograph::program;
 using neograph::ContextArtifact;
@@ -550,13 +552,24 @@ ReplacementBoundary publish_replacement_boundary(ProgramTransitionStore& store,
 }
 
 void exercise_javascript_command_history(ProgramTransitionStore& store) {
+    EXPECT_FALSE(store.load_command_publication_head("owner-a", "run-1"));
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start),
               ProgramTransitionPublishResult::Published);
+    const auto empty_head = store.load_command_publication_head("owner-a", "run-1");
+    ASSERT_TRUE(empty_head);
+    EXPECT_EQ(empty_head->run_record.id(), start.run_record.id());
+    EXPECT_EQ(empty_head->journal_record.id, start.journal_record.id);
+    EXPECT_FALSE(empty_head->latest_command);
+    EXPECT_FALSE(store.load_command_publication_head("owner-b", "run-1"));
     const auto pending =
         javascript_command_publication(start, javascript_command_entry(1, false), 20);
     ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
               ProgramTransitionPublishResult::Published);
+    const auto held_pending = store.load_command_publication_head("owner-a", "run-1");
+    ASSERT_TRUE(held_pending && held_pending->latest_command);
+    EXPECT_TRUE(held_pending->latest_command->pending());
+    EXPECT_EQ(held_pending->latest_command->sequence(), 1U);
     const auto out_of_order =
         javascript_command_publication(pending, javascript_command_entry(2, false, 2), 25);
     EXPECT_EQ(store.compare_publish("owner-a", pending.journal_record.id, out_of_order),
@@ -586,7 +599,86 @@ void exercise_javascript_command_history(ProgramTransitionStore& store) {
     EXPECT_TRUE(commands[3].completed());
     EXPECT_EQ(commands[0].coordinate_id(), commands[1].coordinate_id());
     EXPECT_EQ(commands[2].coordinate_id(), commands[3].coordinate_id());
+    const auto head = store.load_command_publication_head("owner-a", "run-1");
+    ASSERT_TRUE(head && head->latest_command);
+    EXPECT_EQ(head->run_record.id(), second_completed.run_record.id());
+    EXPECT_EQ(head->journal_record.id, second_completed.journal_record.id);
+    EXPECT_EQ(head->latest_command->id(), commands.back().id());
+    EXPECT_TRUE(held_pending->latest_command->pending());
+    EXPECT_EQ(held_pending->run_record.id(), pending.run_record.id());
+    EXPECT_FALSE(empty_head->latest_command);
 }
+
+void exercise_command_head_concurrency(ProgramTransitionStore& writer,
+                                       ProgramTransitionStore& reader) {
+    auto publication = start_publication();
+    ASSERT_EQ(writer.compare_publish("owner-a", {}, publication), ProgramTransitionPublishResult::Published);
+    std::atomic<bool> done{false};
+    std::promise<void> started;
+    auto observing = std::async(std::launch::async, [&] {
+        started.set_value();
+        std::size_t reads = 0;
+        do {
+            const auto head = reader.load_command_publication_head("owner-a", "run-1");
+            if (!head || head->run_record.journal_head() != head->journal_record.id ||
+                (head->latest_command ? head->latest_command->sequence() : 0) + 1 !=
+                    head->journal_record.sequence) {
+                throw std::runtime_error("command publication read mixed two committed snapshots");
+            }
+            ++reads;
+        } while (!done.load());
+        return reads;
+    });
+    started.get_future().wait();
+    // Always release the reader, including when a backend throws on a write.
+    try {
+        for (std::uint64_t sequence = 1; sequence <= 32; ++sequence) {
+            auto next = javascript_command_publication(
+                publication, javascript_command_entry(sequence, sequence % 2 == 0, (sequence + 1) / 2),
+                20 + static_cast<std::int64_t>(sequence));
+            if (writer.compare_publish("owner-a", publication.journal_record.id, next) !=
+                ProgramTransitionPublishResult::Published) {
+                throw std::runtime_error("command publication writer failed");
+            }
+            publication = std::move(next);
+        }
+    } catch (...) {
+        done.store(true);
+        observing.wait();
+        throw;
+    }
+    done.store(true);
+    EXPECT_GT(observing.get(), 0U);
+}
+
+// An existing user wrapper need not implement the new virtual read.
+class LegacyCommandHeadStore final : public ProgramTransitionStore {
+public:
+    InMemoryProgramTransitionStore backend;
+    mutable std::function<void()> after_command_read;
+    std::optional<ProgramRunRecord> load(std::string_view owner, std::string_view run) const override {
+        return backend.load(owner, run);
+    }
+    std::optional<ProgramJournalRecord> latest(std::string_view owner, std::string_view run) const override {
+        return backend.latest(owner, run);
+    }
+    std::vector<ProgramEvent> load_events(std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        return backend.load_events(owner, run, after);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        return backend.load_effects(owner, run, after);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        auto values = backend.load_javascript_commands(owner, run, after);
+        if (auto callback = std::exchange(after_command_read, {})) callback();
+        return values;
+    }
+    ProgramTransitionPublishResult compare_publish(std::string_view owner, std::string_view previous,
+                                                  ProgramTransitionPublication publication) override {
+        return backend.compare_publish(owner, previous, std::move(publication));
+    }
+};
 void exercise_javascript_command_reservation_settlement(ProgramTransitionStore& store) {
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start),
@@ -1377,6 +1469,28 @@ TEST(ProgramTransitionStoreTest, ContextPublicationFaultLeavesNoPartialSnapshotA
 TEST(ProgramTransitionStoreTest, InMemoryJavaScriptCommandHistoryIsAppendOnly) {
     InMemoryProgramTransitionStore store;
     exercise_javascript_command_history(store);
+}
+TEST(ProgramTransitionStoreTest, CommandPublicationHeadSupportsLegacyWrappers) {
+    LegacyCommandHeadStore store;
+    exercise_javascript_command_history(store);
+}
+TEST(ProgramTransitionStoreTest, CommandPublicationHeadRejectsTornLegacyReads) {
+    LegacyCommandHeadStore store;
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start), ProgramTransitionPublishResult::Published);
+    const auto pending = javascript_command_publication(start, javascript_command_entry(1, false), 20);
+    store.after_command_read = [&] {
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
+                  ProgramTransitionPublishResult::Published);
+    };
+    EXPECT_FALSE(store.load_command_publication_head("owner-a", "run-1"));
+    const auto fresh = store.load_command_publication_head("owner-a", "run-1");
+    ASSERT_TRUE(fresh && fresh->latest_command);
+    EXPECT_EQ(fresh->run_record.id(), pending.run_record.id());
+}
+TEST(ProgramTransitionStoreTest, InMemoryCommandPublicationHeadIsCoherentDuringWrites) {
+    InMemoryProgramTransitionStore store;
+    exercise_command_head_concurrency(store, store);
 }
 TEST(ProgramTransitionStoreTest, InMemoryCommandSettlementRefundIsUsageBounded) {
     InMemoryProgramTransitionStore store;
@@ -2769,6 +2883,32 @@ TEST(ProgramTransitionStoreTest, SQLiteJavaScriptCommandHistorySurvivesReopen) {
     }
     std::filesystem::remove(path);
 }
+TEST(ProgramTransitionStoreTest, SQLiteCommandPublicationHeadIsCoherentAcrossConnections) {
+    const auto path = (std::filesystem::temp_directory_path() / "neograph-command-head-concurrency.db").string();
+    std::filesystem::remove(path);
+    {
+        SQLiteProgramTransitionStore writer(path), reader(path);
+        exercise_command_head_concurrency(writer, reader);
+    }
+    std::filesystem::remove(path);
+}
+TEST(ProgramTransitionStoreTest, SQLiteCommandPublicationHeadReadsOnlyTailAndRejectsTailCorruption) {
+    const auto path = (std::filesystem::temp_directory_path() / "neograph-command-head-corruption.db").string();
+    std::filesystem::remove(path);
+    {
+        SQLiteProgramTransitionStore store(path);
+        exercise_javascript_command_history(store);
+        TestSqliteDatabase db(path);
+        db.execute("UPDATE program_transition_javascript_command_log_v2 SET canonical_bytes = 'broken' WHERE sequence = 1");
+        const auto head = store.load_command_publication_head("owner-a", "run-1");
+        ASSERT_TRUE(head && head->latest_command);
+        EXPECT_EQ(head->latest_command->sequence(), 4U);
+        EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::exception);
+        db.execute("UPDATE program_transition_javascript_command_log_v2 SET coordinate_id = 'broken' WHERE sequence = 4");
+        EXPECT_THROW((void)store.load_command_publication_head("owner-a", "run-1"), std::invalid_argument);
+    }
+    std::filesystem::remove(path);
+}
 TEST(ProgramTransitionStoreTest, SQLiteContextPublicationIsAtomicAcrossReopenAndCorruption) {
     static std::atomic<unsigned> sequence{0};
     const auto path =
@@ -3174,6 +3314,33 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReopensAtomicLineageAndOwnerIsolation
         ASSERT_TRUE(initial);
         EXPECT_EQ(initial->run_record.id(), publication.run_record.id());
     }
+}
+TEST(ProgramTransitionStoreTest, PostgreSQLCommandPublicationHeadIsCoherentAcrossConnections) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    PostgreSQLProgramTransitionStore writer(url), reader(url);
+    exercise_command_head_concurrency(writer, reader);
+}
+TEST(ProgramTransitionStoreTest, PostgreSQLCommandPublicationHeadReadsOnlyTailAndRejectsTailCorruption) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    PostgreSQLProgramTransitionStore store(url);
+    exercise_javascript_command_history(store);
+    std::unique_ptr<PGconn, decltype(&PQfinish)> connection(PQconnectdb(url), PQfinish);
+    ASSERT_EQ(PQstatus(connection.get()), CONNECTION_OK);
+    const auto execute = [&](const char* sql) {
+        std::unique_ptr<PGresult, decltype(&PQclear)> result(PQexec(connection.get(), sql), PQclear);
+        ASSERT_EQ(PQresultStatus(result.get()), PGRES_COMMAND_OK);
+    };
+    execute("UPDATE neograph_program_transition_javascript_command_log_v2 SET canonical_bytes = 'broken' WHERE sequence = 1");
+    const auto head = store.load_command_publication_head("owner-a", "run-1");
+    ASSERT_TRUE(head && head->latest_command);
+    EXPECT_EQ(head->latest_command->sequence(), 4U);
+    EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::exception);
+    execute("UPDATE neograph_program_transition_javascript_command_log_v2 SET coordinate_id = 'broken' WHERE sequence = 4");
+    EXPECT_THROW((void)store.load_command_publication_head("owner-a", "run-1"), std::invalid_argument);
 }
 
 TEST(ProgramTransitionStoreTest, PostgreSQLConcurrentInitialCasHasOneWinner) {

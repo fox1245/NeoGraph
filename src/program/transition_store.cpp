@@ -1,5 +1,7 @@
 #include <neograph/program/transition_store.h>
 
+#include "command_publication_head.h"
+
 #include "canonical_json.h"
 
 #include <algorithm>
@@ -1200,6 +1202,22 @@ std::vector<ProgramJavaScriptCommandJournalEntry> ProgramTransitionStore::load_j
         "ProgramTransitionStore does not support durable JavaScript command-history reads");
 }
 
+std::optional<ProgramCommandPublicationHead> ProgramTransitionStore::load_command_publication_head(
+    std::string_view owner, std::string_view run_id) const {
+    const auto run = load(owner, run_id);
+    if (!run) return std::nullopt;
+    const auto journal = latest(owner, run_id);
+    if (!journal || run->journal_head() != journal->id) return std::nullopt;
+    const auto commands = load_javascript_commands(owner, run_id);
+    const auto after = load(owner, run_id);
+    if (!after || after->id() != run->id()) return std::nullopt;
+    ProgramCommandPublicationHead head{
+        *run, *journal, commands.empty() ? std::nullopt
+                                        : std::optional<ProgramJavaScriptCommandJournalEntry>(commands.back())};
+    detail::validate_command_publication_head(head, owner, run_id);
+    return head;
+}
+
 std::vector<ProgramContextPublication> ProgramTransitionStore::load_context_publications(
     std::string_view, std::string_view, std::uint64_t) const {
     throw std::runtime_error(
@@ -1491,6 +1509,25 @@ void InMemoryProgramTransitionStore::fail_next_publication_for_testing(
     ProgramTransitionFaultPoint point) {
     std::lock_guard lock(impl_->mutex);
     impl_->fault = point;
+}
+
+std::optional<ProgramCommandPublicationHead>
+InMemoryProgramTransitionStore::load_command_publication_head(std::string_view owner,
+                                                             std::string_view run_id) const {
+    if (owner.empty() || run_id.empty()) return std::nullopt;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto found = impl_->runs.find(key(owner, run_id));
+        if (found == impl_->runs.end()) return std::nullopt;
+        snapshot = found->second;
+    }
+    ProgramCommandPublicationHead head{
+        snapshot->run, snapshot->journal,
+        snapshot->commands.empty() ? std::nullopt
+                                   : std::optional<ProgramJavaScriptCommandJournalEntry>(snapshot->commands.back())};
+    detail::validate_command_publication_head(head, owner, run_id);
+    return head;
 }
 std::optional<ProgramRunRecord> InMemoryProgramTransitionStore::load(std::string_view o,
                                                                      std::string_view r) const {

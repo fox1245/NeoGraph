@@ -144,6 +144,13 @@ enum class ProgramTransitionFaultPoint : std::uint8_t {
     BeforeCommit,
 };
 
+/** One publication head and its newest command from the same committed snapshot. */
+struct ProgramCommandPublicationHead {
+    ProgramRunRecord run_record;
+    ProgramJournalRecord journal_record;
+    std::optional<ProgramJavaScriptCommandJournalEntry> latest_command;
+};
+
 class NEOGRAPH_PROGRAM_API ProgramTransitionStore {
 public:
     virtual ~ProgramTransitionStore() = default;
@@ -174,6 +181,15 @@ public:
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence = 0) const;
+    /**
+     * Read one coherent run/journal head and the last command append.
+     * Native stores use a single snapshot without materializing command history.
+     * The compatibility implementation fences the existing virtual reads with a
+     * second head read; a changed head returns absence so publication fails closed.
+     * This read grants no write authority: publication must still CAS the head.
+     */
+    virtual std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const;
     /** Durable provider-context evidence, ordered by ContextEpoch sequence. */
     virtual std::vector<ProgramContextPublication> load_context_publications(
         std::string_view owner_scope,
@@ -272,6 +288,9 @@ public:
     InMemoryProgramTransitionStore& operator=(InMemoryProgramTransitionStore&&) noexcept;
     InMemoryProgramTransitionStore(const InMemoryProgramTransitionStore&) = delete;
     InMemoryProgramTransitionStore& operator=(const InMemoryProgramTransitionStore&) = delete;
+
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const override;
 
     std::optional<ProgramRunRecord> load(std::string_view owner_scope,
                                           std::string_view run_id) const override;

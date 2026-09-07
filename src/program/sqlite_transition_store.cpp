@@ -1,6 +1,7 @@
 #include <neograph/program/sqlite_transition_store.h>
 
 #include "canonical_json.h"
+#include "command_publication_head.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -1390,6 +1391,38 @@ SQLiteProgramTransitionStore::~SQLiteProgramTransitionStore() = default;
 
 std::string SQLiteProgramTransitionStore::process_coordination_key() const {
     return impl_->coordination_key;
+}
+
+std::optional<ProgramCommandPublicationHead>
+SQLiteProgramTransitionStore::load_command_publication_head(std::string_view owner,
+                                                           std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    // One statement pins a read snapshot even when another connection publishes.
+    // The existing (owner, run, sequence) primary key serves both bounded lookups.
+    Statement statement(impl_->db,
+        "SELECT h.run_record_bytes, h.journal_record_bytes, c.sequence, c.coordinate_id, "
+        "c.canonical_bytes FROM program_transition_run_heads_v2 h "
+        "LEFT JOIN program_transition_javascript_command_log_v2 c "
+        "ON c.owner_scope = h.owner_scope AND c.run_id = h.run_id AND c.sequence = "
+        "(SELECT MAX(t.sequence) FROM program_transition_javascript_command_log_v2 t "
+        "WHERE t.owner_scope = h.owner_scope AND t.run_id = h.run_id) "
+        "WHERE h.owner_scope = ?1 AND h.run_id = ?2");
+    statement.bind_text(1, owner);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) return std::nullopt;
+    ProgramCommandPublicationHead head{
+        ProgramRunRecord::parse(column_blob(statement.get(), 0)),
+        ProgramJournalRecord::parse(column_blob(statement.get(), 1)), std::nullopt};
+    if (sqlite3_column_type(statement.get(), 2) != SQLITE_NULL) {
+        head.latest_command = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 4));
+        const auto sequence = sqlite3_column_int64(statement.get(), 2);
+        if (sequence <= 0 || head.latest_command->sequence() != static_cast<std::uint64_t>(sequence) ||
+            head.latest_command->coordinate_id() != column_text(statement.get(), 3)) {
+            throw std::invalid_argument("Stored JavaScript command publication head is corrupt");
+        }
+    }
+    detail::validate_command_publication_head(head, owner, run_id);
+    return head;
 }
 
 std::optional<ProgramRunRecord> SQLiteProgramTransitionStore::load(

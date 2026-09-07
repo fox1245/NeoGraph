@@ -3568,19 +3568,29 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
     if (!command_ordinal) return ProgramTransitionPublishResult::Conflict;
 
     for (int retry = 0; retry < 3; ++retry) {
-        const auto previous         = transitions->load(owner_scope, run_id);
-        const auto previous_journal = transitions->latest(owner_scope, run_id);
+        const auto head = transitions->load_command_publication_head(owner_scope, run_id);
+        const auto* previous = head ? &head->run_record : nullptr;
+        const auto* previous_journal = head ? &head->journal_record : nullptr;
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt) {
             return ProgramTransitionPublishResult::Conflict;
         }
 
-        const auto existing = transitions->load_javascript_commands(owner_scope, run_id);
-        const auto found = std::find_if(existing.rbegin(), existing.rend(), [&](const auto& entry) {
-            return entry.command_ordinal() == command_ordinal;
-        });
-        if (found != existing.rend()) {
+        auto found = head->latest_command;
+        if (found && found->command_ordinal() > command_ordinal) {
+            // Older-coordinate retries still inspect the complete immutable history.
+            // Normal append/settlement needs only the newest command, not every row.
+            const auto existing = transitions->load_javascript_commands(owner_scope, run_id);
+            const auto older = std::find_if(existing.rbegin(), existing.rend(), [&](const auto& entry) {
+                return entry.command_ordinal() == command_ordinal;
+            });
+            found = older == existing.rend() ? std::nullopt
+                                             : std::optional<ProgramJavaScriptCommandJournalEntry>(*older);
+        } else if (found && found->command_ordinal() != command_ordinal) {
+            found.reset();
+        }
+        if (found) {
             if (found->bundle_id() != bundle_id ||
                 detail::canonical_json_bytes(found->command().to_json()) !=
                     detail::canonical_json_bytes(command.to_json()) ||
@@ -3595,7 +3605,7 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
             if (!terminal_result) return ProgramTransitionPublishResult::AlreadyPresent;
         }
 
-        const auto sequence = existing.empty() ? 1 : existing.back().sequence() + 1;
+        const auto sequence = head->latest_command ? head->latest_command->sequence() + 1 : 1;
         ProgramJavaScriptCommandJournalEntry entry(ProgramJavaScriptCommandJournalEntryData{
             sequence, bundle_id, command_ordinal, command, effect_identity, terminal_result});
         // A completed command becomes replayable as soon as its terminal
