@@ -11,7 +11,9 @@
 #include <asio/awaitable.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -268,13 +270,30 @@ int main(int argc, char** argv) {
             64 * 1024});
 
         const auto synthesized = gateway.synthesize(proposal);
+        const auto source_program = ProgramSource::from_javascript(
+            "runtime-swap-source.js", source_boundary_program());
+        const auto source_bundle = compiler->compile(source_program, source_budget());
+        const auto source_version = catalog->admit(
+            source_bundle,
+            ProgramAdmission{"model-synthesis-probe", profile, policy, {}});
+        const auto migration_plan = catalog->plan_migration(
+            "model-synthesis-probe", source_version.id(), synthesized.version.id());
+
+        std::promise<ProgramHandoff> source_handoff;
+        auto handoff_ready = source_handoff.get_future();
         auto transitions = std::make_shared<InMemoryProgramTransitionStore>();
-        ProgramRuntime runtime(RuntimeConfig{
+        RuntimeConfig runtime_config{
             catalog,
             std::make_shared<InMemoryCheckpointStore>(),
             {},
             transitions,
-            1});
+            1};
+        // Subscribe before start: this checkpoint can publish before start returns.
+        runtime_config.checkpoint_handler = [&](ProgramHandle handle, ProgramHandoff handoff) {
+            if (handle.program_version_id() == source_version.id())
+                source_handoff.set_value(std::move(handoff));
+        };
+        ProgramRuntime runtime(std::move(runtime_config));
         const auto direct_execution = runtime.run(
             "model-synthesis-probe",
             synthesized.version,
@@ -293,15 +312,6 @@ int main(int argc, char** argv) {
         const bool direct_calls_ok =
             seed_calls == 1 && double_calls == 1 && finish_calls == 1;
 
-        const auto source_program = ProgramSource::from_javascript(
-            "runtime-swap-source.js", source_boundary_program());
-        const auto source_bundle = compiler->compile(source_program, source_budget());
-        const auto source_version = catalog->admit(
-            source_bundle,
-            ProgramAdmission{"model-synthesis-probe", profile, policy, {}});
-        const auto migration_plan = catalog->plan_migration(
-            "model-synthesis-probe", source_version.id(), synthesized.version.id());
-
         seed_calls = 0;
         double_calls = 0;
         finish_calls = 0;
@@ -310,7 +320,11 @@ int main(int argc, char** argv) {
             "model-synthesis-probe",
             source_version,
             ProgramInvocation{json::object(), source_budget(), "model-swap-source-trace", {}});
-        auto handoff = source_handle.next_handoff();
+        if (handoff_ready.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            source_handle.cancel();
+            throw std::runtime_error("Source checkpoint was not delivered to the host");
+        }
+        auto handoff = handoff_ready.get();
         const auto handoff_value = handoff.value();
         const auto source_run_id = source_handle.run_id();
         const auto source_lineage_before_swap = transitions->load_run_lineage(

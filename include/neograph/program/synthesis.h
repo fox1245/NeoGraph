@@ -256,6 +256,14 @@ struct ProgramChildSynthesisAuthorizationData {
     ExecutionGuarantee minimum_execution_guarantee = ExecutionGuarantee::Strict;
 };
 
+class NEOGRAPH_PROGRAM_API ProgramChildSynthesisAuthorization;
+
+/** Pure, fail-closed validation before reservation, compilation, or admission. */
+NEOGRAPH_PROGRAM_API ProgramChildSynthesisAuthorization
+authorize_program_child_synthesis(const ProgramSynthesisProposal&    proposal,
+                                  const ProgramChildSynthesisGrant&  grant,
+                                  const ProgramChildSynthesisParent& parent);
+
 /**
  * Read-only preflight evidence, not a compile debit, child binding, or spawn
  * permission. The reservation callback must CAS the exact source lineage head;
@@ -271,18 +279,12 @@ public:
 private:
     struct Impl;
     explicit ProgramChildSynthesisAuthorization(std::shared_ptr<const Impl> impl);
-    std::shared_ptr<const Impl>               impl_;
-    friend ProgramChildSynthesisAuthorization authorize_program_child_synthesis(
+    std::shared_ptr<const Impl> impl_;
+    friend NEOGRAPH_PROGRAM_API ProgramChildSynthesisAuthorization authorize_program_child_synthesis(
         const ProgramSynthesisProposal&,
         const ProgramChildSynthesisGrant&,
         const ProgramChildSynthesisParent&);
 };
-
-/** Pure, fail-closed validation before reservation, compilation, or admission. */
-NEOGRAPH_PROGRAM_API ProgramChildSynthesisAuthorization
-authorize_program_child_synthesis(const ProgramSynthesisProposal&    proposal,
-                                  const ProgramChildSynthesisGrant&  grant,
-                                  const ProgramChildSynthesisParent& parent);
 
 NEOGRAPH_PROGRAM_API void validate_program_child_synthesis_reservation(
     const ProgramChildSynthesisAuthorization& authorization,

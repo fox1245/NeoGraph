@@ -39,6 +39,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #ifndef _WIN32
 #include <spawn.h>
 #include <sys/wait.h>
@@ -9704,7 +9707,17 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
     }
     if (boundary() == "ConcurrentRecovery") {
         setenv("NEOGRAPH_N3_CRASH_DB", database.c_str(), 1);
+#ifdef __APPLE__
+        std::vector<char> executable_buffer(1024);
+        auto buffer_size = static_cast<std::uint32_t>(executable_buffer.size());
+        if (_NSGetExecutablePath(executable_buffer.data(), &buffer_size) != 0) {
+            executable_buffer.resize(buffer_size);
+            ASSERT_EQ(_NSGetExecutablePath(executable_buffer.data(), &buffer_size), 0);
+        }
+        const auto executable = std::filesystem::canonical(executable_buffer.data()).string();
+#else
         const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
+#endif
         const auto filter =
             "--gtest_filter=Boundaries/"
             "ProgramChildSynthesisCrash.ProcessLossPreservesBudgetIdentityAndRecordedOutcomes/" +
