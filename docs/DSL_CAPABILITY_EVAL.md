@@ -58,11 +58,16 @@ build\tests\Release\neograph_program_tests.exe `
 The opt-in runner asks for source using natural-language semantics plus the
 public API signatures. It does not give the model the checked-in answer. Every
 response is sent to the same native probe used by deterministic CTest.
+The runner loads `skills/neograph-harness-authoring/SKILL.md` and its
+`references/quickjs-authoring.md` into the model's context and records the guidance
+digest in the report. `--skill` selects another entrypoint with that companion
+reference. The host invokes the actual compiler bridge; the model returns source
+and receives diagnostics for bounded repair. The skill grants no runtime authority.
 
 ```powershell
 bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --probe build\tests\Release\program_dsl_capability_probe.exe `
-  --model deepseek/deepseek-v4-flash-0731 `
+  --model z-ai/glm-5.3-flash `
   --repair-attempts 2 `
   --output dsl-capability-evidence.json
 ```
@@ -71,6 +76,9 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
 one-shot trials, and `--repair-attempts` returns the authoritative probe
 diagnostic to the model with the rejected full source. Provider/response
 failure is kept separate from compile or semantic rejection.
+The default model is `z-ai/glm-5.3-flash`; each generation is capped at 4,096
+completion tokens and uses the cookbook's ZDR provider-routing setting. The
+historical DeepSeek evidence below predates this skill-loading configuration.
 
 ## Observed DeepSeek result
 

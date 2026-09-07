@@ -37,6 +37,8 @@ class Server:
         self.port = free_port()
         self.session = "test-" + uuid.uuid4().hex
         self.extra = list(extra)
+        if "--env-file" not in self.extra:
+            self.extra.append("--no-env")
         self.env = dict(os.environ)
         self.env.pop("OPENROUTER_API_KEY", None)
         self.env.pop("OPENROUTER_MODEL", None)
@@ -168,6 +170,19 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(s.state("alice")["limits"]["calls"], 1)
         self.assertEqual(s.state("alice")["usage"]["calls"], 1)
 
+    def test_dotenv_environment_and_model_override_precedence(self):
+        path = Path(self.temp.name) / "settings.env"
+        path.write_text("OPENROUTER_API_KEY=fixture-env-secret\nOPENROUTER_MODEL=dotenv-model\n", encoding="utf-8")
+        from_file = self.server(["--env-file", str(path)])
+        self.assertEqual(from_file.state("alice")["settings"]["model"], "dotenv-model")
+        self.assertNotIn("fixture-env-secret", json.dumps(from_file.state("alice")))
+        from_env = self.server(["--env-file", str(path)], {"OPENROUTER_MODEL": "environment-model"})
+        self.assertEqual(from_env.state("alice")["settings"]["model"], "environment-model")
+        from_cli = self.server(["--env-file", str(path), "--model", "z-ai/glm-5.3-flash"],
+                               {"OPENROUTER_MODEL": "environment-model"})
+        self.assertEqual(from_cli.state("alice")["settings"]["model"], "z-ai/glm-5.3-flash")
+        self.assertTrue(from_cli.state("alice")["settings"]["skill_sha256"].startswith("sha256:"))
+
     def test_provider_adapter_rejects_invalid_proposal_and_retains_unknown_usage(self):
         seen = []
 
@@ -206,6 +221,8 @@ class ChatTest(unittest.TestCase):
                 self.assertEqual(state["usage"]["prompt_tokens"], 0)
                 self.assertEqual(seen[0]["model"], "fixture-model")
                 self.assertGreater(seen[0].get("max_completion_tokens", seen[0].get("max_tokens", 0)), 0)
+                skill = (Path(__file__).resolve().parents[3] / "skills/neograph-harness-authoring/SKILL.md").read_text(encoding="utf-8")
+                self.assertIn(skill, seen[1]["messages"][0]["content"].replace("\r\n", "\n"))
             finally:
                 provider.shutdown()
                 thread.join()

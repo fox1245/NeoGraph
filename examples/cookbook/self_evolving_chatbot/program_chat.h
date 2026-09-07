@@ -15,12 +15,15 @@ struct Options {
     std::string session = "demo";
     std::string model;
     std::string api_key;
-    std::string base_url       = "https://openrouter.ai/api/v1";
-    bool        mock           = true;
-    bool        allow_loopback = false;
-    unsigned    max_turns      = 12;
-    unsigned    max_calls      = 100;
-    unsigned    max_tokens     = 200000;
+    std::string base_url          = "https://openrouter.ai/api/v1";
+    bool        mock              = true;
+    bool        allow_loopback    = false;
+    unsigned    max_turns         = 12;
+    unsigned    max_calls         = 100;
+    unsigned    max_tokens        = 200000;
+    unsigned    max_output_tokens = 2048;
+    /// Trusted host guidance; empty selects the packaged skill and chat-mode reference.
+    std::string authoring_guidance;
 };
 
 // One process hosts both tenants. Each tenant has a separate registry capture,

@@ -28,14 +28,22 @@ cmake --build build-chat --target cookbook_program_chatbot -j 4
 `review`를 포함한 요청이 review 하니스를 제안합니다. 승인된 변경은 다음 턴에
 사용됩니다. 강제 교체 체크박스는 두 템플릿을 번갈아 시연하며 품질 향상을 뜻하지 않습니다.
 
-OpenRouter 연결은 키와 모델명을 환경변수로 지정합니다. 기존 예제의 ZDR 라우팅을
-유지하므로 해당 경로를 지원하는 모델을 사용합니다. `.env` 자동 로드는 하지 않습니다.
+OpenRouter 연결은 환경변수 또는 `.env`에서 읽습니다. 기존 예제의 ZDR 라우팅을
+유지하며 기본 모델은 `z-ai/glm-5.3-flash`입니다.
 
 ```bash
 export OPENROUTER_API_KEY='...'
-export OPENROUTER_MODEL='provider/model-id'
+export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
 ./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+# 기존 파일을 사용할 때:
+./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
+  --model z-ai/glm-5.3-flash --session glm-demo
 ```
+
+`--model`은 모델 환경변수보다 우선하고, 프로세스 환경변수는 `.env`보다 우선합니다.
+파일을 지정하지 않으면 현재 폴더에서 가장 가까운 `.env`를 찾습니다. `--no-env`로
+탐색을 끌 수 있습니다. 키는 출력·저장하지 않습니다. 출력 한도는 호출당 기본
+2,048토큰이며 `--max-output-tokens`로 1~8,192 범위에서 지정합니다.
 
 PostgreSQL은 WSL native Docker에서 전용 DB를 실행한 뒤 같은 WSL 셸에
 `NEOGRAPH_CHAT_POSTGRES_URL`을 설정합니다. 설정하면 대화와 Program 저장소
@@ -52,6 +60,17 @@ JavaScript를 실행하지 않습니다. 제안이 자신의 권한이나 예산
 자식 하니스도 독립된 host grant와 컴파일·승인·게시·바인딩을 통과해야 합니다.
 템플릿 승인은 답변 품질의 증명이 아닙니다. QuickJS와 모델 노드의 실행 보장은
 `Unmanaged`로 표시합니다.
+
+host는 [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md)와
+`references/chat-template-proposals.md`를 실제 하니스 제안 모델의 문맥에 넣습니다.
+답변·reviewer 호출에는 각 역할의 지침을 사용합니다. SKILL 해시와 출력 한도를 세션에
+기록하고 실제 프롬프트도 호출 식별자에 포함합니다. 지침이나 모델, 빌드가 바뀌면
+새 `--session`을 사용해야 하며 기존 예산을 조용히 초기화하지 않습니다.
+
+같은 스킬의 별도 참고 문서는 QuickJS 소스 작성과 컴파일 진단 수정, 재귀 자식 생성,
+체크포인트 교체를 안내합니다. DSL 생성 평가기는 이 작성 지침과 네이티브 API 명세를
+모델에 제공하고 반환된 소스를 실제 컴파일러로 검증합니다. 챗봇의 템플릿 제안 모드는
+모델에게 컴파일러 도구를 직접 노출하지 않습니다. 이전 v1 예제 DB에는 새 세션을 만드세요.
 
 기본 세션 한도는 tenant마다 12턴·모델 호출 100회·20만 토큰입니다. 호출 전에
 예약하고 실제 사용량으로 정산하며, 사용량이 없으면 예약량을 유지합니다. 입력 예약은

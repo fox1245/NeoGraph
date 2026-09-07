@@ -1500,9 +1500,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                     examples/cookbook/self_evolving_chatbot/program_chat.cpp
                     examples/cookbook/self_evolving_chatbot/chat_store.cpp)
                 target_link_libraries(cookbook_program_chatbot PRIVATE
-                    neograph::program neograph::llm httplib OpenSSL::Crypto)
+                    neograph::program neograph::llm httplib OpenSSL::Crypto cppdotenv)
                 target_compile_definitions(cookbook_program_chatbot PRIVATE
-                    CHAT_PAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/program_chat.html")
+                    CHAT_PAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/program_chat.html"
+                    CHAT_SKILL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/skills/neograph-harness-authoring/SKILL.md"
+                    CHAT_SKILL_MODE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/skills/neograph-harness-authoring/references/chat-template-proposals.md")
                 if(NEOGRAPH_BUILD_SQLITE)
                     target_compile_definitions(cookbook_program_chatbot PRIVATE CHAT_SQLITE)
                     target_link_libraries(cookbook_program_chatbot PRIVATE

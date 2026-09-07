@@ -1,5 +1,5 @@
 import { parseArgs } from "util"
-import { join } from "path"
+import { dirname, join } from "path"
 
 type CapabilityCase = {
   id: string
@@ -20,7 +20,8 @@ const args = parseArgs({
   args: process.argv.slice(2),
   options: {
     probe: { type: "string" },
-    model: { type: "string", default: "deepseek/deepseek-v4-flash-0731" },
+    model: { type: "string", default: "z-ai/glm-5.3-flash" },
+    skill: { type: "string" },
     manifest: { type: "string" },
     case: { type: "string" },
     attempts: { type: "string", default: "1" },
@@ -34,6 +35,12 @@ if (!probe) throw new Error("--probe is required")
 const apiKey = process.env.OPENROUTER_API_KEY
 if (!apiKey) throw new Error("OPENROUTER_API_KEY is required")
 const model = args.values.model!
+const skillPath = args.values.skill ?? join(import.meta.dir, "..", "skills", "neograph-harness-authoring", "SKILL.md")
+const skillText = await Bun.file(skillPath).text()
+const authoringReference = await Bun.file(join(dirname(skillPath), "references", "quickjs-authoring.md")).text()
+const guidance = `${skillText}\n\n${authoringReference}`
+if (Buffer.byteLength(guidance, "utf8") > 32768) throw new Error("authoring guidance exceeds 32 KiB")
+const skillSha256 = new Bun.CryptoHasher("sha256").update(guidance).digest("hex")
 const attempts = Number.parseInt(args.values.attempts!, 10)
 if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10)
   throw new Error("--attempts must be an integer from 1 through 10")
@@ -136,12 +143,14 @@ async function generate(
     body: JSON.stringify({
       model,
       temperature: 0,
+      max_completion_tokens: 4096,
+      provider: { zdr: true },
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "You author bounded NeoGraph QuickJS Programs. Return one JSON object with exactly one string field named source. The host compiler is authoritative.",
+            "Active host surface: JavaScript source authoring through the capability evaluation bridge. Return one JSON object with exactly one string field named source. The host runs the compiler and returns diagnostics; do not invent tool calls. The supplied native manifest and case contract are authoritative.\n\n" + guidance,
         },
         {
           role: "user",
@@ -264,6 +273,7 @@ const report = {
   schemaVersion: 1,
   provider: "openrouter",
   model,
+  skillSha256,
   dslProfile: manifest.dslProfile,
   ngApiVersion: manifest.ngApiVersion,
   startedAt,

@@ -1,19 +1,17 @@
 #include <neograph/program/program.h>
 
 #include "program_chat.h"
+#include <cppdotenv/dotenv.hpp>
 #include <httplib.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 
 using evolving_chat::json;
 namespace {
-std::string env(const char* key) {
-    const auto* value = std::getenv(key);
-    return value ? value : "";
-}
 std::string tenant(const httplib::Request& request) {
     const auto token = request.get_header_value("Authorization");
     if (token == "Bearer alice-demo") return "alice";
@@ -24,14 +22,11 @@ std::string tenant(const httplib::Request& request) {
 int main(int argc, char** argv) {
     try {
         evolving_chat::Options options;
-        options.api_key      = env("OPENROUTER_API_KEY");
-        options.model        = env("OPENROUTER_MODEL");
-        options.postgres_url = env("NEOGRAPH_CHAT_POSTGRES_URL");
-        if (!env("NEOGRAPH_CHAT_BASE_URL").empty())
-            options.base_url = env("NEOGRAPH_CHAT_BASE_URL");
-        unsigned    port = 8768;
-        std::string script;
-        bool        crash_after_script = false;
+        std::string            env_file;
+        bool                   no_env = false;
+        unsigned               port   = 8768;
+        std::string            script;
+        bool                   crash_after_script = false;
         for (int i = 1; i < argc; ++i) {
             std::string arg   = argv[i];
             auto        value = [&]() -> std::string {
@@ -46,12 +41,20 @@ int main(int argc, char** argv) {
                 options.database = value();
             else if (arg == "--session")
                 options.session = value();
+            else if (arg == "--model")
+                options.model = value();
+            else if (arg == "--env-file")
+                env_file = value();
+            else if (arg == "--no-env")
+                no_env = true;
             else if (arg == "--port")
                 port = std::stoul(value());
             else if (arg == "--max-tokens")
                 options.max_tokens = std::stoul(value());
             else if (arg == "--max-calls")
                 options.max_calls = std::stoul(value());
+            else if (arg == "--max-output-tokens")
+                options.max_output_tokens = std::stoul(value());
             else if (arg == "--script")
                 script = value();
             else if (arg == "--crash-after-script")
@@ -64,6 +67,10 @@ int main(int argc, char** argv) {
                        "8768]\n"
                        "OpenRouter: OPENROUTER_API_KEY + OPENROUTER_MODEL. PostgreSQL: "
                        "NEOGRAPH_CHAT_POSTGRES_URL.\n"
+                       "--env-file PATH selects a dotenv file; otherwise discover .env from cwd.\n"
+                       "--no-env disables discovery. Existing environment values take precedence.\n"
+                       "--model overrides OPENROUTER_MODEL; live default: z-ai/glm-5.3-flash.\n"
+                       "--max-output-tokens 2048 bounds each model completion.\n"
                        "--script JSON_FILE runs [{tenant,request_id,message,force_swap?}, ...].\n"
                        "--crash-after-script exits without cancelling runs for recovery testing.\n";
                 return 0;
@@ -71,6 +78,29 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("Unknown option: " + arg);
         }
         if (!port || port > 65535) throw std::invalid_argument("Invalid port");
+        if (no_env && !env_file.empty())
+            throw std::invalid_argument("Choose --env-file or --no-env");
+        const auto      path = no_env             ? std::filesystem::path{}
+                               : env_file.empty() ? cppdotenv::find_dotenv()
+                                                  : std::filesystem::path(env_file);
+        cppdotenv::Dict values;
+        if (!path.empty()) {
+            if (!std::filesystem::is_regular_file(path) ||
+                std::filesystem::file_size(path) > 1024 * 1024)
+                throw std::runtime_error("Dotenv file is missing, unreadable or too large");
+            values = cppdotenv::dotenv_values(path);
+        }
+        const auto setting = [&](const char* key) -> std::string {
+            if (const char* value = std::getenv(key)) return value;
+            const auto found = values.find(key);
+            return found == values.end() ? "" : found->second;
+        };
+        options.api_key = setting("OPENROUTER_API_KEY");
+        if (options.model.empty()) options.model = setting("OPENROUTER_MODEL");
+        if (!options.mock && options.model.empty()) options.model = "z-ai/glm-5.3-flash";
+        options.postgres_url = setting("NEOGRAPH_CHAT_POSTGRES_URL");
+        if (!setting("NEOGRAPH_CHAT_BASE_URL").empty())
+            options.base_url = setting("NEOGRAPH_CHAT_BASE_URL");
         evolving_chat::Chat chat(options);
         if (!script.empty()) {
             std::ifstream file(script);

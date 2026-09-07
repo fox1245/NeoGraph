@@ -40,20 +40,30 @@ For OpenRouter, set credentials and an available model in the environment:
 
 ```bash
 export OPENROUTER_API_KEY='...'
-export OPENROUTER_MODEL='your-provider/model-id'
+export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
 ./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+# Or read an existing dotenv file without printing its values:
+./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
+  --model z-ai/glm-5.3-flash --session glm-demo
 ```
 
+The live CLI defaults to `z-ai/glm-5.3-flash`. `--model` overrides
+`OPENROUTER_MODEL`; process environment values override dotenv values. Without
+`--env-file`, the CLI discovers the nearest `.env` from the working directory.
+`--no-env` disables this discovery. Only named chatbot settings are consumed;
+the file is parsed as data, not sourced as a shell script.
+
 OpenRouter uses the existing cookbook's ZDR routing option. Choose a model with
-an eligible route. No model or price is hardcoded. The application does not read `.env` files. Do not
+an eligible route. No token price is assumed. Do not
 put credentials in the DSL, database, HTTP body or source. Changing the provider,
-model or build requires a new explicit `--session`; reopening a session retains
+model, skill content, output cap or build requires a new explicit `--session`; reopening a session retains
 its stored budget limits. `NEOGRAPH_CHAT_BASE_URL` can select another compatible
 endpoint; plain HTTP requires `--allow-loopback-provider` and a literal loopback
 address, intended for protocol tests.
 
 The native adapter sends the output limit as `max_completion_tokens`, supported
 by the [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request).
+The default is 2,048 per call; use `--max-output-tokens` to set 1..8,192.
 
 For PostgreSQL, run native Docker inside WSL and set the connection string in that
 same shell. Use a dedicated database; the example creates its own tables but is
@@ -84,6 +94,22 @@ model-written JavaScript. Template validation establishes an allowed behavior
 shape; it is not proof of answer quality. QuickJS generator control and the model
 node report **Unmanaged** execution guarantee. Do not interpret the inspector as
 claiming strict replay of an unknown external model effect.
+
+## Agent authoring skill
+
+The host loads [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md) and
+its `references/chat-template-proposals.md` into the evolution model's system
+context. Ordinary answer/reviewer calls keep their role-specific prompts. The
+loaded skill digest is persisted with the session, and model-call identities bind
+the actual prompt and output cap, so reopening cannot silently change guidance.
+This version changes the example build/registry identity; use a new session for
+old v1 demo databases.
+
+The skill also has separate QuickJS authoring and native runtime-handoff guides.
+The source-generation evaluator loads the QuickJS route, gives the model the
+native compiler manifest, compiles returned source and feeds rejected diagnostics
+back for bounded repair. See [DSL capability evaluation](../../../docs/DSL_CAPABILITY_EVAL.md).
+The chatbot template route itself does not expose model-callable compiler tools.
 
 ## Accounting and recovery
 
