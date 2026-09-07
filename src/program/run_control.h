@@ -90,7 +90,8 @@ public:
                std::shared_ptr<graph::CheckpointStore>    checkpoints,
                std::shared_ptr<graph::Store>              state_store,
                std::shared_ptr<ProgramTransitionStore>    transitions,
-               std::optional<ProgramExecutionLease>       execution_lease = std::nullopt);
+               std::optional<ProgramExecutionLease>       execution_lease = std::nullopt,
+               std::string                                logical_run_id  = {});
     RunControl(ProgramRunRecord record,
                std::shared_ptr<ProgramTransitionStore> transitions);
 
@@ -104,6 +105,9 @@ public:
      * completed handle can start the next Program.
      */
     void add_terminal_cleanup(TerminalCleanup cleanup);
+    void                        add_logical_cleanup(TerminalCleanup cleanup);
+    void                        retire_to(const std::shared_ptr<RunControl>& successor);
+    std::shared_ptr<RunControl> following_successor() const;
     /**
      * Registers the host-owned policy/store boundary used by
      * expand_task_graph.  The callback is consulted only after the proposal
@@ -127,6 +131,9 @@ public:
 
     const std::string                                owner_scope;
     const std::string                                run_id;
+    const std::string                                logical_run_id;
+    /// Set before dispatch from the immutable publication that created this generation.
+    std::vector<ProgramChildRecord>                   inherited_children;
     const std::string                                program_version_id;
     const std::string                                bundle_id;
     const std::string                                binding_fingerprint;
@@ -211,6 +218,7 @@ public:
     HeldProgramHandoff                    wait_handoff(std::uint64_t request_id);
     asio::awaitable<HeldProgramHandoff>   wait_handoff_async(std::uint64_t request_id);
     bool                                  has_active_handoff_request() const noexcept;
+    bool                                          has_held_handoff() const noexcept;
     void                                  reach_latest_handoff_if_requested();
     asio::awaitable<void>                 hold_latest_handoff_if_requested();
     void                                  release_handoff(std::uint64_t request_id) noexcept;
@@ -247,6 +255,9 @@ private:
     CompletionCallback                     completion_callback_;
     mutable std::vector<AsyncWaiter>       waiters_;
     std::vector<TerminalCleanup>           terminal_cleanups_;
+    std::vector<TerminalCleanup>                  logical_cleanups_;
+    std::shared_ptr<RunControl>                   successor_;
+    bool                                          follow_successor_ = false;
     ChildLaunchCallback                     child_launch_callback_;
     ChildRecoveryCallback                         child_recovery_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;

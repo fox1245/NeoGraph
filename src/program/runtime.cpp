@@ -149,6 +149,7 @@ ProgramTransitionPublication continuing_running_publication(
     ProgramRunRecordData data;
     data.owner_scope = previous.owner_scope();
     data.run_id = previous.run_id();
+    data.logical_run_id                   = previous.logical_run_id();
     data.program_version_id = previous.program_version_id();
     data.bundle_id = previous.bundle_id();
     data.binding_fingerprint = previous.binding_fingerprint();
@@ -1249,6 +1250,19 @@ std::mutex& child_relation_publication_mutex(const ProgramTransitionStore& trans
     return locks[key % locks.size()];
 }
 
+std::optional<ProgramRunRecord> load_active_agent_run(
+    const std::shared_ptr<ProgramTransitionStore>& transitions,
+    std::string_view                               owner,
+    std::string_view                               run) {
+    const auto lineage = transitions->load_run_lineage(owner, run);
+    if (!lineage) return transitions->load(owner, run);
+    const auto generation =
+        transitions->load_generation(owner, lineage->lineage_id(), lineage->active_generation());
+    if (!generation || generation->id() != lineage->active_generation_id())
+        throw_runtime_diagnostic("P_RUN_LINEAGE", "Agent has no active generation");
+    return transitions->load(owner, generation->run_id());
+}
+
 struct ChildRecordPublication {
     ProgramTransitionPublishResult  result = ProgramTransitionPublishResult::Conflict;
     std::optional<ProgramRunRecord> record;
@@ -1263,7 +1277,7 @@ ChildRecordPublication publish_child_record_unlocked(
     const std::shared_ptr<ProgramTransitionStore>& transitions,
     ProgramChildRecord                             child) {
     for (int attempt = 0; attempt < 5; ++attempt) {
-        const auto previous = transitions->load(owner_scope, parent_run_id);
+        const auto previous = load_active_agent_run(transitions, owner_scope, parent_run_id);
         if (!previous) return {};
         const auto existing = find_child(*previous, child.child_run_id);
         if (existing) {
@@ -1294,12 +1308,14 @@ ChildRecordPublication publish_child_record_unlocked(
             }
             const auto next_state  = child.state;
             const auto next_result = child.terminal_result;
+            const auto next_generation = child.terminal_generation;
             child                  = *existing;
             child.state            = next_state;
             child.terminal_result  = next_result;
+            child.terminal_generation  = next_generation;
         }
         if (previous->continuation().state != ContinuationState::Running) return {};
-        const auto previous_journal = transitions->latest(owner_scope, parent_run_id);
+        const auto previous_journal = transitions->latest(owner_scope, previous->run_id());
         if (!previous_journal || previous_journal->id != previous->journal_head()) return {};
 
         auto children = previous->children();
@@ -1312,13 +1328,14 @@ ChildRecordPublication publish_child_record_unlocked(
             children.push_back(child);
         }
         auto                 journal = ProgramJournalRecord::create(ProgramJournalRecordData{
-            previous->journal_head(), std::string(parent_run_id), previous->program_version_id(),
+            previous->journal_head(), previous->run_id(), previous->program_version_id(),
             previous->bundle_id(), previous_journal->sequence + 1, previous_journal->continuation,
             previous->remaining_budget(), previous_journal->inflight_reservation,
-            previous->exact_checkpoint(), now_ms()});
+            previous->exact_checkpoint(), std::max(now_ms(), previous->updated_at_ms())});
         ProgramRunRecordData data;
         data.owner_scope                      = previous->owner_scope();
         data.run_id                           = previous->run_id();
+        data.logical_run_id                   = previous->logical_run_id();
         data.program_version_id               = previous->program_version_id();
         data.bundle_id                        = previous->bundle_id();
         data.binding_fingerprint              = previous->binding_fingerprint();
@@ -1348,7 +1365,7 @@ ChildRecordPublication publish_child_record_unlocked(
             *transitions, owner_scope, previous->journal_head(), std::move(publication));
         if (result == ProgramTransitionPublishResult::Published ||
             result == ProgramTransitionPublishResult::AlreadyPresent) {
-            return {result, transitions->load(owner_scope, parent_run_id)};
+            return {result, load_active_agent_run(transitions, owner_scope, parent_run_id)};
         }
     }
     return {};
@@ -1366,7 +1383,7 @@ ChildRecordPublication publish_child_record(
 
 ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunControl>& parent,
                                             ProgramChildRecord                         child) {
-    return publish_child_record(parent->owner_scope, parent->run_id, parent->transitions,
+    return publish_child_record(parent->owner_scope, parent->logical_run_id, parent->transitions,
                                 std::move(child));
 }
 
@@ -1378,8 +1395,17 @@ bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& tra
     try {
         std::lock_guard lock(
             child_relation_publication_mutex(*transitions, owner_scope, parent_run_id));
+        std::uint64_t terminal_generation = 0;
+        const auto    child_lineage = transitions->load_run_lineage(owner_scope, child_run_id);
+        if (child_lineage) {
+            const auto active = transitions->load_generation(
+                owner_scope, child_lineage->lineage_id(), child_lineage->active_generation());
+            if (!active || active->run_id() != result.run_id()) return false;
+            if (result.run_id() != child_run_id) terminal_generation = active->generation();
+        } else if (result.run_id() != child_run_id)
+            return false;
         for (;;) {
-            const auto record = transitions->load(owner_scope, parent_run_id);
+            const auto record = load_active_agent_run(transitions, owner_scope, parent_run_id);
             if (!record) return false;
             const auto existing = find_child(*record, child_run_id);
             if (!existing) return false;
@@ -1390,14 +1416,15 @@ bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& tra
             const auto publication = publish_child_record_unlocked(
                 owner_scope, parent_run_id, transitions,
                 ProgramChildRecord{existing->child_run_id, existing->link_id,
-                                   existing->link_receipt, existing->invocation, state, result});
+                                   existing->link_receipt, existing->invocation, state, result,
+                                   terminal_generation});
             if (publication.result == ProgramTransitionPublishResult::Published ||
                 publication.result == ProgramTransitionPublishResult::AlreadyPresent)
                 return true;
 
             // A remote writer may advance this CAS chain.  Keep retrying while
             // the parent can still accept the child's terminal transition.
-            const auto current = transitions->load(owner_scope, parent_run_id);
+            const auto current = load_active_agent_run(transitions, owner_scope, parent_run_id);
             if (!current || current->continuation().state != ContinuationState::Running)
                 return false;
             std::this_thread::yield();
@@ -1453,21 +1480,24 @@ ProgramJournalRecord initial_record(
 ProgramTransitionPublication initial_publication(
     const detail::RunControl&               control,
     const ProgramEvent&                     started,
-    std::optional<CoreCheckpointIdentity>   checkpoint           = std::nullopt,
-    std::optional<ForkCompatibilityReceipt> fork_receipt         = std::nullopt,
-    std::optional<std::string>              recorded_binding_set = std::nullopt,
-    std::optional<ProgramPendingInput>      pending_input        = std::nullopt,
-    std::optional<ProgramPendingEffect>     pending_effect       = std::nullopt,
-    std::optional<std::int64_t>             timestamp            = std::nullopt,
-    std::optional<std::string>              checkpoint_content_id = std::nullopt) {
+    std::optional<CoreCheckpointIdentity>   checkpoint            = std::nullopt,
+    std::optional<ForkCompatibilityReceipt> fork_receipt          = std::nullopt,
+    std::optional<std::string>              recorded_binding_set  = std::nullopt,
+    std::optional<ProgramPendingInput>      pending_input         = std::nullopt,
+    std::optional<ProgramPendingEffect>     pending_effect        = std::nullopt,
+    std::optional<std::int64_t>             timestamp             = std::nullopt,
+    std::optional<std::string>              checkpoint_content_id = std::nullopt,
+    std::vector<ProgramChildRecord>         inherited_children    = {}) {
     auto journal = initial_record(control, checkpoint, timestamp);
     ProgramRunRecordData data;
     data.owner_scope         = control.owner_scope;
     data.run_id              = control.run_id;
+    data.logical_run_id              = control.logical_run_id;
     data.program_version_id  = control.program_version_id;
     data.bundle_id           = control.bundle_id;
     data.binding_fingerprint = control.binding_fingerprint;
     data.invocation          = control.invocation;
+    data.children                    = std::move(inherited_children);
     data.child_depth         = control.persisted_invocation.child_depth;
     data.continuation        = journal.continuation;
     data.remaining_budget    = control.granted_budget;
@@ -1563,7 +1593,7 @@ enum class TerminalPublicationResult : std::uint8_t {
 TerminalPublicationResult publish_terminal_record(const detail::RunControl& control,
                                                   const ProgramResult&      result) {
     std::lock_guard lock(child_relation_publication_mutex(*control.transitions, control.owner_scope,
-                                                          control.run_id));
+                                                          control.logical_run_id));
     for (int retry = 0; retry < 3; ++retry) {
         std::optional<ProgramRunRecord> previous;
         try {
@@ -1627,6 +1657,7 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             ProgramRunRecordData data;
             data.owner_scope         = control.owner_scope;
             data.run_id              = control.run_id;
+            data.logical_run_id      = control.logical_run_id;
             data.program_version_id  = control.program_version_id;
             data.bundle_id           = control.bundle_id;
             data.binding_fingerprint = previous->binding_fingerprint();
@@ -1741,9 +1772,11 @@ RunControl::RunControl(std::string                                owner,
                        std::shared_ptr<graph::CheckpointStore>    checkpoint_store,
                        std::shared_ptr<graph::Store>              store,
                        std::shared_ptr<ProgramTransitionStore>    transition_store,
-                       std::optional<ProgramExecutionLease>       execution_lease)
+                       std::optional<ProgramExecutionLease>       execution_lease,
+                       std::string                                logical_identity)
     : owner_scope(std::move(owner)),
       run_id(std::move(run)),
+      logical_run_id(logical_identity.empty() ? run_id : std::move(logical_identity)),
       program_version_id(pinned->version.id()),
       bundle_id(pinned->bundle.id()),
       binding_fingerprint(std::move(binding)),
@@ -1792,6 +1825,7 @@ RunControl::RunControl(ProgramRunRecord                        record,
                        std::shared_ptr<ProgramTransitionStore> transition_store)
     : owner_scope(record.owner_scope()),
       run_id(record.run_id()),
+      logical_run_id(record.logical_run_id()),
       program_version_id(record.program_version_id()),
       bundle_id(record.bundle_id()),
       binding_fingerprint(record.binding_fingerprint()),
@@ -1820,8 +1854,69 @@ RunControl::RunControl(ProgramRunRecord                        record,
       terminal_decided_(result_.has_value()),
       completion_claimed_(result_.has_value()) {}
 void RunControl::set_completion_callback(CompletionCallback callback) noexcept {
+    std::shared_ptr<RunControl> next;
+    {
+        std::lock_guard lock(mutex_);
+        next = successor_;
+        if (!next) completion_callback_ = std::move(callback);
+    }
+    if (next) next->set_completion_callback(std::move(callback));
+}
+
+void RunControl::add_logical_cleanup(TerminalCleanup cleanup) {
+    std::shared_ptr<RunControl> next;
+    bool                        run_now = false;
+    {
+        std::lock_guard lock(mutex_);
+        next = successor_;
+        if (!next) {
+            run_now = terminal_decided_ || result_.has_value();
+            if (!run_now) logical_cleanups_.push_back(std::move(cleanup));
+        }
+    }
+    if (next)
+        next->add_logical_cleanup(std::move(cleanup));
+    else if (run_now && cleanup)
+        cleanup();
+}
+std::shared_ptr<RunControl> RunControl::following_successor() const {
     std::lock_guard lock(mutex_);
-    completion_callback_ = std::move(callback);
+    return follow_successor_ ? successor_ : nullptr;
+}
+void RunControl::retire_to(const std::shared_ptr<RunControl>& successor) {
+    if (!successor || successor.get() == this || successor->owner_scope != owner_scope ||
+        successor->logical_run_id != logical_run_id)
+        throw std::invalid_argument("Invalid Program successor control");
+    std::vector<std::shared_ptr<RunControl>> children;
+    std::vector<TerminalCleanup>             cleanups;
+    CompletionCallback                       callback;
+    std::vector<AsyncWaiter>                 waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (successor_) return;
+        successor_        = successor;
+        follow_successor_ = !invocation.parent_run_id.empty();
+        for (const auto& weak : children_)
+            if (auto child = weak.lock()) children.push_back(child);
+        children_.clear();
+        cleanups.swap(logical_cleanups_);
+        callback            = std::move(completion_callback_);
+        cancellation_cause_ = CancellationCause::ParentTerminal;
+        if (follow_successor_) waiters.swap(waiters_);
+    }
+    for (const auto& child : children)
+        successor->attach_child(child);
+    for (auto& cleanup : cleanups)
+        successor->add_logical_cleanup(std::move(cleanup));
+    if (callback) successor->set_completion_callback(std::move(callback));
+    cancel_token->cancel();
+    abort_handoff();
+    abort_graph_migration();
+    cv_.notify_all();
+    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+        for (const auto& waiter : waiters)
+            if (auto timer = waiter.timer.lock()) timer->cancel();
+    });
 }
 
 void RunControl::add_terminal_cleanup(TerminalCleanup cleanup) {
@@ -2000,6 +2095,7 @@ void RunControl::attach_child(const std::shared_ptr<RunControl>& child) noexcept
 }
 bool RunControl::cancel(CancellationCause cause) noexcept {
     try {
+        if (const auto next = following_successor()) return next->cancel(cause);
         std::shared_ptr<std::recursive_mutex> coordination_mutex;
         {
             std::lock_guard lock(mutex_);
@@ -2058,6 +2154,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 ProgramRunRecordData data;
                 data.owner_scope                    = owner_scope;
                 data.run_id                         = run_id;
+                data.logical_run_id                 = logical_run_id;
                 data.program_version_id             = program_version_id;
                 data.bundle_id                      = bundle_id;
                 data.binding_fingerprint            = previous->binding_fingerprint();
@@ -2363,11 +2460,41 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             completion_claimed_ = true;
             terminal_decided_   = true;
             terminal_cleanups.swap(terminal_cleanups_);
+            terminal_cleanups.insert(terminal_cleanups.end(),
+                                     std::make_move_iterator(logical_cleanups_.begin()),
+                                     std::make_move_iterator(logical_cleanups_.end()));
+            logical_cleanups_.clear();
         }
         abort_handoff();
         abort_graph_migration();
         for (auto& cleanup : terminal_cleanups) {
             if (cleanup) cleanup();
+        }
+        bool retired = false;
+        {
+            std::lock_guard lock(mutex_);
+            retired = static_cast<bool>(successor_);
+        }
+        if (retired) {
+            // Retirement is not a logical agent termination. Its children and
+            // logical cleanups belong to the successor; no terminal hook or
+            // checkpoint is published for the superseded execution.
+            outcome.status = ProgramTerminalStatus::Cancelled;
+            outcome.failure.reset();
+            auto                     result = make_result(outcome);
+            std::vector<AsyncWaiter> waiters;
+            {
+                std::lock_guard lock(mutex_);
+                result_ = std::move(result);
+                sink_.reset();
+                waiters.swap(waiters_);
+                cv_.notify_all();
+            }
+            asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+                for (const auto& waiter : waiters)
+                    if (auto timer = waiter.timer.lock()) timer->cancel();
+            });
+            return;
         }
         const auto current_cause = cancellation_cause();
         cancel_children(current_cause == CancellationCause::None ? CancellationCause::ParentTerminal
@@ -2511,39 +2638,52 @@ void RunControl::complete(RunOutcome outcome) noexcept {
 
 ProgramResult RunControl::wait() const {
     std::unique_lock lock(mutex_);
-    cv_.wait(lock, [this] { return result_.has_value(); });
+    cv_.wait(lock, [this] { return result_.has_value() || (follow_successor_ && successor_); });
+    if (follow_successor_ && successor_) {
+        auto next = successor_;
+        lock.unlock();
+        return next->wait();
+    }
     return *result_;
 }
-
 asio::awaitable<ProgramResult> RunControl::wait_async() const {
     return wait_async_with_control(shared_from_this());
 }
-
 asio::awaitable<ProgramResult> RunControl::wait_async_with_control(
     std::shared_ptr<const RunControl> control) {
     auto timer = std::make_shared<asio::steady_timer>(control->waiter_strand);
-    timer->expires_at((asio::steady_timer::time_point::max)());
+    timer->expires_at((std::chrono::steady_clock::time_point::max)());
     co_await asio::co_spawn(
         control->waiter_strand,
         [control, timer]() -> asio::awaitable<void> {
             {
                 std::lock_guard lock(control->mutex_);
-                if (control->result_) co_return;
+                if (control->result_ || (control->follow_successor_ && control->successor_))
+                    co_return;
                 control->waiters_.push_back(AsyncWaiter{timer});
             }
             asio::error_code error;
             co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
         },
         asio::use_awaitable);
-
-    std::lock_guard lock(control->mutex_);
-    if (!control->result_)
-        throw std::runtime_error("Program wait ended before terminal publication");
-    co_return * control->result_;
+    std::shared_ptr<RunControl>  next;
+    std::optional<ProgramResult> result;
+    {
+        std::lock_guard lock(control->mutex_);
+        if (control->follow_successor_) next = control->successor_;
+        if (!next) result = control->result_;
+    }
+    if (next) co_return co_await next->wait_async();
+    if (!result) throw std::runtime_error("Program wait ended before terminal publication");
+    co_return* result;
 }
-
 std::optional<ProgramResult> RunControl::try_result() const {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
+    if (follow_successor_ && successor_) {
+        auto next = successor_;
+        lock.unlock();
+        return next->try_result();
+    }
     return result_;
 }
 
@@ -2687,6 +2827,11 @@ asio::awaitable<HeldProgramHandoff> RunControl::wait_handoff_async(
 bool RunControl::has_active_handoff_request() const noexcept {
     std::lock_guard lock(mutex_);
     return handoff_request_id_ != 0;
+}
+
+bool RunControl::has_held_handoff() const noexcept {
+    std::lock_guard lock(mutex_);
+    return handoff_request_id_ != 0 && held_handoff_.has_value();
 }
 
 void RunControl::reach_latest_handoff_if_requested() {
@@ -2982,6 +3127,7 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         ProgramRunRecordData data;
         data.owner_scope = previous->owner_scope();
         data.run_id = previous->run_id();
+        data.logical_run_id              = previous->logical_run_id();
         data.program_version_id = previous->program_version_id();
         data.bundle_id = previous->bundle_id();
         data.binding_fingerprint = previous->binding_fingerprint();
@@ -3228,6 +3374,7 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
                     ProgramRunRecordData data;
                     data.owner_scope = previous->owner_scope();
                     data.run_id = previous->run_id();
+                    data.logical_run_id      = previous->logical_run_id();
                     data.program_version_id = previous->program_version_id();
                     data.bundle_id = previous->bundle_id();
                     data.binding_fingerprint = previous->binding_fingerprint();
@@ -3355,6 +3502,10 @@ bool RunControl::consume_dynamic_compile() {
             return false;
         }
 
+        const auto lineage = transitions->load_run_lineage(owner_scope, run_id);
+        if (lineage && previous->remaining_budget().max_dynamic_compiles <=
+                           lineage->committed_descendant_budget().max_dynamic_compiles)
+            return false;
         auto remaining = previous->remaining_budget();
         --remaining.max_dynamic_compiles;
         auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
@@ -3366,6 +3517,7 @@ bool RunControl::consume_dynamic_compile() {
         ProgramRunRecordData data;
         data.owner_scope                      = previous->owner_scope();
         data.run_id                           = previous->run_id();
+        data.logical_run_id                   = previous->logical_run_id();
         data.program_version_id               = previous->program_version_id();
         data.bundle_id                        = previous->bundle_id();
         data.binding_fingerprint              = previous->binding_fingerprint();
@@ -3472,6 +3624,7 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         ProgramRunRecordData data;
         data.owner_scope                      = owner_scope;
         data.run_id                           = run_id;
+        data.logical_run_id                   = logical_run_id;
         data.program_version_id               = program_version_id;
         data.bundle_id                        = bundle_id;
         data.binding_fingerprint              = previous->binding_fingerprint();
@@ -3659,6 +3812,9 @@ ProgramHandle::~ProgramHandle() = default;
 const std::string& ProgramHandle::run_id() const noexcept {
     return control_->run_id;
 }
+const std::string& ProgramHandle::logical_run_id() const noexcept {
+    return control_->logical_run_id;
+}
 const std::string& ProgramHandle::program_version_id() const noexcept {
     return control_->program_version_id;
 }
@@ -3839,8 +3995,34 @@ struct ProgramRuntime::Impl {
         return std::nullopt;
     }
 
+    std::optional<ProgramChildRecord> inherited_child(
+        const std::shared_ptr<detail::RunControl>& parent, std::string_view name) const {
+        if (parent->inherited_children.empty()) return std::nullopt;
+        const auto run = parent->snapshot();
+        const auto lineage =
+            config.transitions->load_run_lineage(parent->owner_scope, parent->run_id);
+        if (!lineage || lineage->active_run_record_id() != run.id() ||
+            run.logical_run_id() != parent->logical_run_id)
+            throw_runtime_diagnostic("P_CHILD_GENERATION",
+                                     "Inherited child requires the active parent generation");
+        for (const auto& inherited : parent->inherited_children) {
+            const auto link = ModuleLinkReceipt::parse(inherited.link_receipt);
+            if (link.child_name() == name) return find_child(run, inherited.child_run_id);
+        }
+        return std::nullopt;
+    }
+
     std::optional<ProgramRuntimeChildBinding> resolve_child_binding(
         const std::shared_ptr<detail::RunControl>& parent, std::string_view name) const {
+        if (const auto child = inherited_child(parent, name)) {
+            auto link    = ModuleLinkReceipt::parse(child->link_receipt);
+            auto version = config.catalog->resolve_version(parent->owner_scope,
+                                                           link.child_program_version_id());
+            if (!version)
+                throw_runtime_diagnostic("P_CHILD_BINDING",
+                                         "Inherited child version is unavailable");
+            return ProgramRuntimeChildBinding{std::move(link), std::move(*version)};
+        }
         if (auto record = synthesis_binding(parent, name)) {
             const auto& a    = record->data().artifacts;
             auto        link = ModuleLinkReceipt::parse(detail::canonical_json_bytes(a.at("link")));
@@ -3872,6 +4054,9 @@ struct ProgramRuntime::Impl {
                                                                       std::string_view operation) {
                 const auto parent = weak_control.lock();
                 if (!parent) return false;
+                if (const auto child = inherited_child(parent, binding))
+                    return detail::canonical_json_bytes(child->invocation.input) ==
+                           detail::canonical_json_bytes(input);
                 const auto synthesis = synthesis_binding(parent, binding);
                 if (!synthesis) return false;
                 if (synthesis->data().state == ProgramChildSynthesisState::Bound) return true;
@@ -3937,6 +4122,21 @@ struct ProgramRuntime::Impl {
                     json{{"binding", std::string(binding_name)},
                          {"receipt_child_name", resolved->receipt.child_name()},
                          {"operation_id", std::string(operation_id)}});
+            if (const auto child = inherited_child(parent, binding_name)) {
+                if (detail::canonical_json_bytes(child->invocation.input) !=
+                    detail::canonical_json_bytes(input))
+                    throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                             "Inherited child invocation cannot be changed");
+                ProgramInvocation invocation{
+                    child->invocation.input,      child->invocation.granted_budget,
+                    child->invocation.trace_id,   {},
+                    child->child_run_id,          child->invocation.parent_run_id,
+                    child->invocation.child_depth};
+                return owner
+                    ->start_child(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
+                                  resolved->version, std::move(invocation))
+                    .control_;
+            }
             const auto& limits = resolved->receipt.budget();
             RunBudget   budget{limits.wall_time_ms,           limits.model_tokens,
                              limits.monetary_microunits,    limits.max_concurrency,
@@ -4001,7 +4201,7 @@ struct ProgramRuntime::Impl {
                                              std::string(execution_key),
                                          {},
                                          child_run_id,
-                                         parent->run_id,
+                                         parent->logical_run_id,
                                          parent->persisted_invocation.child_depth + 1};
             ProgramHandle     child =
                 owner->start_child(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
@@ -4028,6 +4228,23 @@ struct ProgramRuntime::Impl {
     ControlRegistration register_control(const std::shared_ptr<detail::RunControl>& control,
                                           bool process_unique = false) {
         control->set_hook_runtime(config.hook_runtime);
+        if (control->logical_run_id != control->run_id) {
+            const auto run = control->snapshot();
+            if (!run.children().empty()) {
+                const auto lineage =
+                    config.transitions->load_run_lineage(control->owner_scope, control->run_id);
+                const auto initial = lineage
+                                         ? config.transitions->load_generation_initial_publication(
+                                               control->owner_scope, lineage->lineage_id(),
+                                               lineage->active_generation())
+                                         : std::nullopt;
+                if (!initial || initial->run_record.run_id() != control->run_id)
+                    throw_runtime_diagnostic(
+                        "P_CHILD_GENERATION",
+                        "Inherited child bindings need their generation publication");
+                control->inherited_children = initial->run_record.children();
+            }
+        }
         configure_child_launcher(control);
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
         control->set_handoff_coordination_mutex(
@@ -4127,7 +4344,7 @@ struct ProgramRuntime::Impl {
                              std::shared_ptr<ChildQuotaReservation>&    reservation) {
         if (!reservation) return;
         const auto held = reservation;
-        control->add_terminal_cleanup([held] { held->release(); });
+        control->add_logical_cleanup([held] { held->release(); });
         reservation.reset();
     }
 
@@ -4254,12 +4471,12 @@ struct ProgramRuntime::Impl {
                                         std::string_view                           parent_run_id,
                                         std::string_view                           child_run_id) {
         const auto parent      = std::string(parent_run_id);
-        const auto child_id    = std::string(child_run_id);
+        const auto child_id    = child->logical_run_id;
         const auto concurrency = child->granted_budget.max_concurrency;
         // Resource release is independent of the parent join CAS.  A transient
         // publication failure must not strand the parent's active-concurrency
         // lease while the durable child record remains recoverable.
-        child->add_terminal_cleanup([this, parent, child_id, concurrency] {
+        child->add_logical_cleanup([this, parent, child_id, concurrency] {
             release_child_concurrency(parent, child_id, concurrency);
         });
         ::neograph::program::bind_child_completion(child, owner_scope, parent, child_id);
@@ -4374,7 +4591,7 @@ struct ProgramRuntime::Impl {
         }
 
         std::lock_guard lock(mutex);
-        auto&           state = child_reservations[parent.run_id()];
+        auto&           state = child_reservations[parent.logical_run_id()];
         for (const auto& child : children) {
             const auto permanent = permanent_child_reservation(child.invocation.granted_budget);
             const bool in_flight = child_execution_active(child);
@@ -4417,13 +4634,20 @@ struct ProgramRuntime::Impl {
     ParentChildBudget hydrate_parent_child_budget(std::string_view owner_scope,
                                                   std::string_view parent_run_id,
                                                   std::string_view child_run_id) {
-        const auto parent = config.transitions->load(owner_scope, parent_run_id);
+        const auto child_lineage = config.transitions->load_run_lineage(owner_scope, child_run_id);
+        if (child_lineage) child_run_id = child_lineage->root_run_id();
+        const auto parent = load_active_agent_run(config.transitions, owner_scope, parent_run_id);
         if (!parent) {
             throw_runtime_diagnostic("P_CHILD_PARENT",
                                      "Child recovery requires its durable parent run",
                                      json{{"parent_run_id", std::string(parent_run_id)},
                                           {"child_run_id", std::string(child_run_id)}});
         }
+        const auto parent_state = parent->continuation().state;
+        if (parent_state != ContinuationState::Running &&
+            parent_state != ContinuationState::Interrupted &&
+            parent_state != ContinuationState::AmbiguousEffect)
+            throw_runtime_diagnostic("P_CHILD_PARENT", "Closed parent cannot restart child work");
         const auto child = find_child(*parent, child_run_id);
         if (!child || child->invocation.parent_run_id != parent_run_id) {
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
@@ -4649,7 +4873,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     const auto parent_depth = parent.control_->persisted_invocation.child_depth;
     if (parent_depth == std::numeric_limits<std::uint32_t>::max())
         throw_runtime_diagnostic("P_CHILD_DEPTH", "Child depth exceeds uint32 range");
-    const std::string parent_run_id(parent.run_id());
+    const std::string parent_run_id(parent.control_->logical_run_id);
     invocation.parent_run_id    = parent_run_id;
     invocation.child_depth      = parent_depth + 1;
     const auto run_id           = child_run_id_for(parent_run_id, link, invocation);
@@ -4668,7 +4892,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     }
     auto existing = find_child(parent_record, run_id);
     if (occupied && !existing) {
-        const auto durable_parent = impl_->config.transitions->load(owner_scope, parent_run_id);
+        const auto durable_parent =
+            load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
         if (!durable_parent || durable_parent->continuation().state != ContinuationState::Running)
             throw_runtime_diagnostic(
                 "P_CHILD_PARENT", "Durable parent is no longer running for child recovery",
@@ -4761,7 +4986,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
 
     bool replay_initial_dispatch = false;
     if (const auto child_record = impl_->config.transitions->load(owner_scope, run_id)) {
-        const auto durable_parent = impl_->config.transitions->load(owner_scope, parent_run_id);
+        const auto durable_parent =
+            load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
         const auto durable_child  = durable_parent ? find_child(*durable_parent, run_id)
                                                    : std::optional<ProgramChildRecord>{};
         replay_initial_dispatch =
@@ -4877,7 +5103,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                              run_id, *result);
                 return reconnected;
             }
-            const auto current_parent = impl_->config.transitions->load(owner_scope, parent_run_id);
+            const auto current_parent =
+                load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
             if (current_parent &&
                 current_parent->continuation().state != ContinuationState::Running)
                 (void)control->cancel(detail::CancellationCause::ParentTerminal);
@@ -5333,10 +5560,6 @@ ProgramHandle ProgramRuntime::replace(ExactProgramHandoffReference source,
                                       RunInvocation                invocation,
                                       std::shared_ptr<ProgramEventSink> events) {
     invocation.validate();
-    if (!invocation.parent_run_id.empty()) {
-        throw std::invalid_argument(
-            "Top-level replacement invocation must not carry parent_run_id");
-    }
     const auto owner_scope = invocation.owner_scope;
     const auto resolved =
         impl_->config.catalog->resolve_version(owner_scope, invocation.program_version_id);
@@ -5366,7 +5589,8 @@ ProgramHandle ProgramRuntime::replace(ProgramHandoff&&             source,
     try {
         auto result = replace(source.reference(), std::move(invocation), std::move(events));
         source.consume();
-        (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+        if (!source.impl_->control->following_successor())
+            (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
         return result;
     } catch (...) {
         bool definitely_uncommitted = false;
@@ -5378,7 +5602,8 @@ ProgramHandle ProgramRuntime::replace(ProgramHandoff&&             source,
         } catch (...) {}
         if (!definitely_uncommitted) {
             source.consume();
-            (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+            if (!source.impl_->control->following_successor())
+                (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
         }
         throw;
     }
@@ -5391,9 +5616,6 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     std::unique_lock transition_lock(impl_->fork_mutex);
     std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
-    if (!invocation.parent_run_id.empty() || invocation.child_depth != 0) {
-        throw std::invalid_argument("Program replacement invocation must be top-level");
-    }
     if (source.source_run_id.empty() || source.source_journal_head.empty() ||
         source.command_coordinate_id.empty() || source.command_entry_id.empty()) {
         throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
@@ -5429,8 +5651,13 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         throw_runtime_diagnostic("P_REPLACEMENT_SAME_RUN",
                                  "Replacement target run must differ from its source");
     }
-    const auto cancel_source_control = [&] {
-        impl_->cancel_process_controls(owner_scope, source.source_run_id);
+    std::shared_ptr<detail::RunControl> replacement_control;
+    const auto                          cancel_source_control = [&] {
+        auto live = impl_->find_process_control(owner_scope, source.source_run_id);
+        if (live && replacement_control)
+            live->retire_to(replacement_control);
+        else
+            impl_->cancel_process_controls(owner_scope, source.source_run_id);
     };
     const auto reconnect_existing = [&]() -> std::optional<ProgramHandle> {
         const auto existing = impl_->config.transitions->load(owner_scope, run_id);
@@ -5443,8 +5670,12 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         const auto receipt = generation ? generation->replacement_receipt() : std::nullopt;
         auto retry_projection = invocation;
         retry_projection.budget = existing->invocation().budget;
+        retry_projection.parent_run_id = existing->invocation().parent_run_id;
+        retry_projection.child_depth   = existing->child_depth();
         if (retry_projection.canonical_request) {
             retry_projection.canonical_request->budget = existing->invocation().budget;
+            retry_projection.canonical_request->parent_run_id =
+                existing->invocation().parent_run_id;
         }
         const auto retry_canonical =
             bind_runtime_invocation(retry_projection, owner_scope, target.id(), run_id);
@@ -5466,6 +5697,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
             receipt->target_initial_journal_head() == generation->initial_journal_head() &&
             receipt->matches_target_input(invocation.input)) {
             auto reconnected = reconnect(owner_scope, run_id);
+            replacement_control = reconnected.control_;
             cancel_source_control();
             return reconnected;
         }
@@ -5488,16 +5720,59 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     const auto source_lineage =
         load_active_run_lineage(*impl_->config.transitions, *source_record);
     if (!source_lineage || source_record->continuation().state != ContinuationState::Running ||
-        source_record->child_depth() != 0 ||
-        !source_record->invocation().parent_run_id.empty() || source_record->pending_input() ||
-        source_record->pending_effect() || source_record->terminal_result() ||
-        !source_record->children().empty() ||
-        source_lineage->lineage.inflight_reservation() != RunBudget{} ||
-        source_lineage->lineage.committed_descendant_budget() != RunBudget{}) {
+        source_record->pending_input() || source_record->pending_effect() ||
+        source_record->terminal_result() ||
+        source_lineage->lineage.inflight_reservation() != RunBudget{}) {
         throw_runtime_diagnostic(
             "P_REPLACEMENT_STATE",
             "Program replacement source is not at an admitted quiescent boundary");
     }
+    if ((!invocation.parent_run_id.empty() &&
+         invocation.parent_run_id != source_record->invocation().parent_run_id) ||
+        (invocation.child_depth && invocation.child_depth != source_record->child_depth()))
+        throw_runtime_diagnostic("P_REPLACEMENT_PARENT",
+                                 "Replacement cannot change its parent or depth");
+    invocation.parent_run_id = source_record->invocation().parent_run_id;
+    invocation.child_depth   = source_record->child_depth();
+    if (invocation.canonical_request)
+        invocation.canonical_request->parent_run_id = invocation.parent_run_id;
+    std::set<std::string> inherited_names;
+    for (const auto& child : source_record->children()) {
+        if (child.terminal_result && child.state == ProgramChildState::Dispatched)
+            throw_runtime_diagnostic(
+                "P_REPLACEMENT_CHILD",
+                "An interrupted child requires disposition before replacement");
+        const auto link = ModuleLinkReceipt::parse(child.link_receipt);
+        if (!inherited_names.insert(link.child_name()).second)
+            throw_runtime_diagnostic("P_REPLACEMENT_CHILD_BINDING",
+                                     "Retained children require unique binding names");
+
+        const auto policy = resolved_target->policy_snapshot();
+        const auto allows = [](const auto& allowed, const auto& required) {
+            return std::all_of(required.begin(), required.end(), [&](const auto& item) {
+                return std::find(allowed.begin(), allowed.end(), item) != allowed.end();
+            });
+        };
+        if (!allows(policy.allowed_capabilities(), link.granted_capabilities()) ||
+            !allows(policy.allowed_effects(), link.granted_effects()) ||
+            execution_guarantee_rank(link.minimum_execution_guarantee()) <
+                execution_guarantee_rank(resolved_target->execution_guarantee()))
+            throw_runtime_diagnostic("P_REPLACEMENT_CHILD_AUTHORITY",
+                                     "Target cannot retain the admitted child authority");
+    }
+    if (!source_record->invocation().parent_run_id.empty() || !source_record->children().empty()) {
+        if (const auto live = impl_->find_process_control(owner_scope, source.source_run_id)) {
+            if (!live->has_held_handoff() ||
+                impl_->find_control(owner_scope, source.source_run_id) != live)
+                throw_runtime_diagnostic(
+                    "P_REPLACEMENT_FAMILY_HANDOFF",
+                    "Replace a live agent tree through its owning runtime and held checkpoint");
+        }
+    }
+    if (const auto live = impl_->find_process_control(owner_scope, source.source_run_id);
+        live && live->cancellation_cause() != detail::CancellationCause::None)
+        throw_runtime_diagnostic("P_REPLACEMENT_CANCELLED",
+                                 "Cancelled source cannot select another generation");
     const auto source_journal =
         impl_->config.transitions->latest(owner_scope, source.source_run_id);
     if (!source_journal || source_journal->id != source.source_journal_head ||
@@ -5560,6 +5835,11 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
             "Program replacement target authority is not an attenuation of the source");
     }
 
+    if (!source_record->invocation().parent_run_id.empty() &&
+        contract_fingerprint(source_pinned->bundle.output_contract()) !=
+            contract_fingerprint(target_pinned->bundle.output_contract()))
+        throw_runtime_diagnostic("P_REPLACEMENT_CHILD_OUTPUT",
+                                 "Child replacement must preserve the parent's result contract");
     const auto requested_budget = source_lineage->lineage.remaining_budget();
     if (invocation.budget != requested_budget) {
         throw_runtime_diagnostic(
@@ -5571,7 +5851,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         *source_record, source_lineage->lineage, transition_time);
     invocation.budget = remaining;
     if (invocation.canonical_request) invocation.canonical_request->budget = remaining;
-    validate_invocation(*target_pinned, invocation);
+    validate_invocation(*target_pinned, invocation, true);
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, target.id(), run_id);
 
     const auto target_thread_id =
@@ -5579,18 +5859,20 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     const auto binding_fingerprint = capability_binding_receipt_root(
         resolved_target->core_materialization_receipt().capability_bindings);
     ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
-                                         canonical.correlation_id, canonical.parent_run_id, 0};
-    auto control = std::make_shared<detail::RunControl>(
+                                         canonical.correlation_id, canonical.parent_run_id,
+                                         invocation.child_depth};
+    auto                       control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, 1, std::move(target_pinned), binding_fingerprint,
         std::move(persisted), canonical, target_thread_id, 0, std::move(invocation.events),
-        impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
-        impl_->config.state_store, impl_->config.transitions);
+        impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
+        impl_->config.transitions, std::nullopt, source_record->logical_run_id());
+    replacement_control = control;
     control->set_hook_runtime(impl_->config.hook_runtime);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{remaining});
-    auto publication = initial_publication(*control, started, std::nullopt, std::nullopt,
-                                           std::nullopt, std::nullopt, std::nullopt,
-                                           transition_time);
+    auto publication = initial_publication(
+        *control, started, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        transition_time, std::nullopt, source_record->children());
     if (!source_contexts.empty()) {
         publication.context_publication =
             transfer_context_to_run(source_contexts.back(), run_id);
@@ -5641,11 +5923,11 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
                 : std::nullopt,
             std::move(hook_references)});
     }
-    auto successor = ProgramRunGeneration::create(ProgramRunGenerationData{
+    auto successor                 = ProgramRunGeneration::create(ProgramRunGenerationData{
         std::string(owner_scope), source_lineage->lineage.lineage_id(),
         source_lineage->generation.generation() + 1, run_id, target.id(), target.bundle_id(),
-        publication.run_record.id(), publication.journal_record.id,
-        source_lineage->generation.id(), publication.run_record.created_at_ms(), 0,
+        publication.run_record.id(), publication.journal_record.id, source_lineage->generation.id(),
+        publication.run_record.created_at_ms(), invocation.child_depth,
         std::move(replacement_receipt), std::nullopt, transfer_receipt});
     publication.run_generation = successor;
     publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
@@ -5675,7 +5957,9 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
             committed = durable && durable->id() == successor.id();
             if (committed) cancel_source_control();
         } catch (...) {}
-        if (!committed || !execution_lease) throw;
+        if (!committed || (!execution_lease && source_record->invocation().parent_run_id.empty() &&
+                           source_record->children().empty()))
+            throw;
         published = ProgramTransitionPublishResult::AlreadyPresent;
     }
     if (published != ProgramTransitionPublishResult::Published &&
@@ -5684,20 +5968,55 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         throw_runtime_diagnostic("P_REPLACEMENT_CONFLICT",
                                  "Program lineage already selected another successor");
     }
+    if (!source_record->invocation().parent_run_id.empty() &&
+        !impl_->find_process_control(owner_scope, source.source_run_id)) {
+        const auto budgets = impl_->hydrate_parent_child_budget(
+            owner_scope, invocation.parent_run_id, control->logical_run_id);
+        auto quota = impl_->reserve_active_child(owner_scope);
+        if (!impl_->activate_child_concurrency(invocation.parent_run_id, control->logical_run_id,
+                                               budgets.parent, budgets.child))
+            throw_runtime_diagnostic("P_CHILD_CONCURRENCY",
+                                     "Replacement child exceeds parent concurrency");
+        impl_->commit_active_child(control, quota);
+        impl_->bind_budgeted_child_completion(control, owner_scope, invocation.parent_run_id,
+                                              control->logical_run_id);
+    }
+    const bool family =
+        !source_record->invocation().parent_run_id.empty() || !source_record->children().empty();
+    std::optional<Impl::ControlRegistration> family_registration;
+    if (family) {
+        if (execution_lease) control->set_execution_lease(*execution_lease);
+        family_registration = impl_->register_control(control, true);
+        replacement_control = family_registration->control;
+    }
     cancel_source_control();
     reconnect_lock.unlock();
     transition_lock.unlock();
-    if (transfer_receipt) {
-        ProgramRuntimeRecoveryState recovery{
-            std::string(owner_scope), run_id,
-            transferred_context
-                ? std::vector<ProgramContextPublication>{*transferred_context}
-                : std::vector<ProgramContextPublication>{},
-            {}, unresolved_source_hooks, transfer_receipt};
-        impl_->config.runtime_recovery_handler(recovery);
+    try {
+        if (transfer_receipt) {
+            ProgramRuntimeRecoveryState recovery{
+                std::string(owner_scope),
+                run_id,
+                transferred_context ? std::vector<ProgramContextPublication>{*transferred_context}
+                                    : std::vector<ProgramContextPublication>{},
+                {},
+                unresolved_source_hooks,
+                transfer_receipt};
+            impl_->config.runtime_recovery_handler(recovery);
+        }
+    } catch (const std::exception& error) {
+        if (!family) throw;
+        detail::RunOutcome failed;
+        failed.status           = ProgramTerminalStatus::Failed;
+        failed.remaining_budget = remaining;
+        failed.failure          = ProgramFailure{
+            "P_RUNTIME_RECOVERY_UNAVAILABLE", error.what(), "root", "", 0, json::object()};
+        replacement_control->complete(std::move(failed));
+        return ProgramHandle(replacement_control);
     }
     if (execution_lease) control->set_execution_lease(*execution_lease);
-    auto registration = impl_->register_control(control, true);
+    auto registration =
+        family_registration ? *family_registration : impl_->register_control(control, true);
     if (!registration.inserted) return ProgramHandle(std::move(registration.control));
     if (!admit_started(control, started, remaining)) {
         return ProgramHandle(std::move(control));
@@ -5738,7 +6057,8 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
     try {
         auto result = replace(owner_scope, source.reference(), target, std::move(invocation));
         source.consume();
-        (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+        if (!source.impl_->control->following_successor())
+            (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
         return result;
     } catch (...) {
         bool definitely_uncommitted = false;
@@ -5750,7 +6070,8 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
         } catch (...) {}
         if (!definitely_uncommitted) {
             source.consume();
-            (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
+            if (!source.impl_->control->following_successor())
+                (void)source.impl_->control->cancel(detail::CancellationCause::ParentTerminal);
         }
         throw;
     }
@@ -5979,11 +6300,11 @@ ProgramHandle ProgramRuntime::migrate_graph(
     const auto binding_fingerprint = capability_binding_receipt_root(
         target_version->core_materialization_receipt().capability_bindings);
     auto control = std::make_shared<detail::RunControl>(
-        owner_scope, target_run_id, source_record->continuation().attempt,
-        std::move(target_pinned), binding_fingerprint, std::move(persisted),
-        target_invocation, target_snapshot.thread_id, 0, std::move(target.events),
-        impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
-        impl_->config.state_store, impl_->config.transitions);
+        owner_scope, target_run_id, source_record->continuation().attempt, std::move(target_pinned),
+        binding_fingerprint, std::move(persisted), target_invocation, target_snapshot.thread_id, 0,
+        std::move(target.events), impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+        impl_->config.state_store, impl_->config.transitions, std::nullopt,
+        source_record->logical_run_id());
     control->set_hook_runtime(impl_->config.hook_runtime);
     auto started = control->preview_event(
         1, ProgramEventKind::Started, ProgramStartedEvent{remaining});
@@ -6138,7 +6459,8 @@ std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view own
     if (parent_run_id.empty())
         throw std::invalid_argument("Program child recovery parent_run_id must not be empty");
 
-    const auto parent_record = impl_->config.transitions->load(owner_scope, parent_run_id);
+    const auto parent_record =
+        load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
     if (!parent_record)
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program parent run was not found");
     auto parent = reconnect(owner_scope, parent_run_id);
@@ -6221,6 +6543,11 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
             existing.data().reservation.data().remaining_after_reservation.max_dynamic_compiles);
         return impl_->config.child_synthesis_gateway->continue_child(
             existing, [&](const auto& next) { impl_->publish_synthesis(next, parent.control_); });
+    }
+    for (const auto& child : parent.snapshot().children()) {
+        if (ModuleLinkReceipt::parse(child.link_receipt).child_name() == binding_name)
+            throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
+                                     "Synthesis name already belongs to an attached child");
     }
     if (impl_->config.child_binding_resolver &&
         impl_->config.child_binding_resolver(owner_scope, parent.program_version_id(),
@@ -6645,6 +6972,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             ProgramRunRecordData data;
             data.owner_scope = record->owner_scope();
             data.run_id = record->run_id();
+            data.logical_run_id              = record->logical_run_id();
             data.program_version_id = record->program_version_id();
             data.bundle_id = record->bundle_id();
             data.binding_fingerprint = record->binding_fingerprint();
@@ -6833,10 +7161,11 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         std::shared_ptr<ChildQuotaReservation> global_quota;
         if (!record->invocation().parent_run_id.empty()) {
             const auto parent_child = impl_->hydrate_parent_child_budget(
-                owner_scope, record->invocation().parent_run_id, run_id);
+                owner_scope, record->invocation().parent_run_id, record->logical_run_id());
             global_quota = impl_->reserve_active_child(owner_scope);
-            if (!impl_->activate_child_concurrency(record->invocation().parent_run_id, run_id,
-                                                   parent_child.parent, parent_child.child)) {
+            if (!impl_->activate_child_concurrency(record->invocation().parent_run_id,
+                                                   record->logical_run_id(), parent_child.parent,
+                                                   parent_child.child)) {
                 throw_runtime_diagnostic(
                     "P_CHILD_CONCURRENCY",
                     "Recovered child exceeds the parent's active concurrency budget",
@@ -6856,6 +7185,18 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                                        recovery_journal->inflight_reservation),
             record->invocation().correlation_id, record->invocation().parent_run_id,
             record->child_depth()};
+        if (!record->invocation().parent_run_id.empty() && record->continuation().attempt == 1) {
+            const auto granted = record->invocation().budget.wall_time_ms;
+            if (granted > static_cast<std::uint64_t>(INT64_MAX - record->created_at_ms()))
+                throw_runtime_diagnostic("P_CHILD_BUDGET", "Child deadline is out of range");
+            const auto deadline = record->created_at_ms() + static_cast<std::int64_t>(granted);
+            const auto now      = now_ms();
+            if (now >= deadline)
+                throw_runtime_diagnostic("P_CHILD_BUDGET",
+                                         "Child deadline expired before recovery");
+            invocation.granted_budget.wall_time_ms = std::min(
+                invocation.granted_budget.wall_time_ms, static_cast<std::uint64_t>(deadline - now));
+        }
         if (synthesis_deadline) {
             const auto now = now_ms();
             if (now >= *synthesis_deadline)
@@ -6870,11 +7211,12 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             std::move(pinned), record->binding_fingerprint(), std::move(invocation),
             record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
             std::shared_ptr<ProgramEventSink>{}, impl_->deadline_pool.get_executor(),
-            impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+            impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
+            std::nullopt, record->logical_run_id());
         impl_->commit_active_child(control, global_quota);
         if (!record->invocation().parent_run_id.empty())
-            impl_->bind_budgeted_child_completion(control, owner_scope,
-                                                  record->invocation().parent_run_id, run_id);
+            impl_->bind_budgeted_child_completion(
+                control, owner_scope, record->invocation().parent_run_id, record->logical_run_id());
         if (!record->invocation().parent_run_id.empty()) {
             if (auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id))
                 parent->attach_child(control);
@@ -6894,8 +7236,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     auto control = std::make_shared<detail::RunControl>(*record, impl_->config.transitions);
     control->set_hook_runtime(impl_->config.hook_runtime);
     if (!record->invocation().parent_run_id.empty())
-        impl_->bind_budgeted_child_completion(control, owner_scope,
-                                              record->invocation().parent_run_id, run_id);
+        impl_->bind_budgeted_child_completion(
+            control, owner_scope, record->invocation().parent_run_id, record->logical_run_id());
     return ProgramHandle(std::move(control));
 }
 
@@ -7004,6 +7346,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         ProgramRunRecordData expired_data;
         expired_data.owner_scope                    = std::string(owner_scope);
         expired_data.run_id                         = std::string(run_id);
+        expired_data.logical_run_id                 = previous->logical_run_id();
         expired_data.program_version_id             = previous->program_version_id();
         expired_data.bundle_id                      = previous->bundle_id();
         expired_data.binding_fingerprint            = previous->binding_fingerprint();
@@ -7176,7 +7519,8 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         std::move(pinned), previous->binding_fingerprint(), std::move(attempt_invocation),
         previous->invocation(), checkpoint.core_thread_id, previous->event_sequence(),
         std::move(resume_value.events), impl_->deadline_pool.get_executor(),
-        impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+        impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
+        std::nullopt, previous->logical_run_id());
     impl_->commit_active_child(control, global_quota);
     if (!previous->invocation().parent_run_id.empty())
         impl_->bind_budgeted_child_completion(control, owner_scope,
@@ -7193,6 +7537,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     ProgramRunRecordData data;
     data.owner_scope                      = std::string(owner_scope);
     data.run_id                           = std::string(run_id);
+    data.logical_run_id                   = previous->logical_run_id();
     data.program_version_id               = previous->program_version_id();
     data.bundle_id                        = previous->bundle_id();
     data.binding_fingerprint              = previous->binding_fingerprint();
@@ -7486,7 +7831,8 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             previous->binding_fingerprint(), std::move(invocation), previous->invocation(),
             checkpoint.core_thread_id, previous->event_sequence(), std::move(resolution.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
-            impl_->config.state_store, impl_->config.transitions);
+            impl_->config.state_store, impl_->config.transitions, std::nullopt,
+            previous->logical_run_id());
         impl_->commit_active_child(live_control, global_quota);
         if (!previous->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(live_control, owner_scope,
@@ -7536,6 +7882,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     ProgramRunRecordData data;
     data.owner_scope                      = std::string(owner_scope);
     data.run_id                           = std::string(run_id);
+    data.logical_run_id                   = previous->logical_run_id();
     data.program_version_id               = previous->program_version_id();
     data.bundle_id                        = previous->bundle_id();
     data.binding_fingerprint              = previous->binding_fingerprint();

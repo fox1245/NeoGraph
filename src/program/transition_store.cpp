@@ -725,6 +725,10 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         run.exact_checkpoint() != journal.core_checkpoint) {
         throw std::invalid_argument("Program snapshot and journal do not match");
     }
+    if (run.logical_run_id() != run.run_id() &&
+        (!publication.run_lineage ||
+         (publication.run_generation && publication.run_generation->generation() == 1)))
+        throw std::invalid_argument("Logical agent identity requires the exact lineage");
     if (publication.context_publication) {
         validate_context_publication(*publication.context_publication, run);
     }
@@ -965,6 +969,23 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     return bytes;
 }
 }  // namespace
+bool does_program_child_generation_result_bind(const ProgramRunRecord&     parent,
+                                               const ProgramChildRecord&   child,
+                                               const ProgramRunGeneration& generation,
+                                               const ProgramRunLineage&    lineage,
+                                               const ProgramRunRecord&     result_run) noexcept {
+    return child.terminal_result && result_run.terminal_result() &&
+           parent.owner_scope() == result_run.owner_scope() &&
+           child.invocation.parent_run_id == parent.logical_run_id() &&
+           lineage.root_run_id() == child.child_run_id &&
+           child.terminal_generation == generation.generation() && child.terminal_generation >= 2 &&
+           generation.replacement_receipt().has_value() &&
+           does_program_run_generation_bind(generation, lineage, result_run) &&
+           result_run.invocation().parent_run_id == parent.logical_run_id() &&
+           result_run.child_depth() == child.invocation.child_depth &&
+           child.terminal_result->id() == result_run.terminal_result()->id();
+}
+
 struct ProgramEffectOutboxEntry::Impl {
     Impl(std::uint64_t s, ProgramPendingEffect e) : sequence(s), effect(std::move(e)) {
         auto b = json{{"format", std::string(EFFECT_FORMAT)},
@@ -1936,6 +1957,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             publication.run_record.recorded_binding_set_fingerprint() !=
                 old.run.recorded_binding_set_fingerprint() ||
             publication.run_record.invocation() != old.run.invocation() ||
+            publication.run_record.logical_run_id() != old.run.logical_run_id() ||
             (publication.run_record.exact_checkpoint() == old.run.exact_checkpoint() &&
              publication.run_record.exact_checkpoint_content_id() !=
                  old.run.exact_checkpoint_content_id()) ||
@@ -1976,6 +1998,33 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     if (current == impl_->runs.end() &&
         !valid_hook_history_append({}, publication.hook_outbox_entries, publication.run_record))
         return ProgramTransitionPublishResult::Conflict;
+
+    for (const auto& child : publication.run_record.children()) {
+        if (!child.terminal_generation) continue;
+        // A generation transfer copies the exact already-verified relation set.
+        if (publication.run_generation && publication.run_generation->replacement_receipt())
+            continue;
+        bool unchanged = false;
+        if (current != impl_->runs.end())
+            for (const auto& old : current->second->run.children())
+                if (old.child_run_id == child.child_run_id &&
+                    old.terminal_generation == child.terminal_generation && old.terminal_result &&
+                    child.terminal_result &&
+                    old.terminal_result->id() == child.terminal_result->id())
+                    unchanged = true;
+        if (unchanged) continue;
+        const auto lineage =
+            impl_->lineages.find(key(owner, program_run_lineage_id(owner, child.child_run_id)));
+        if (lineage == impl_->lineages.end()) return ProgramTransitionPublishResult::Conflict;
+        const auto generation = lineage->second->generations.find(child.terminal_generation);
+        const auto run        = generation == lineage->second->generations.end()
+                                    ? impl_->runs.end()
+                                    : impl_->runs.find(key(owner, generation->second.run_id()));
+        if (run == impl_->runs.end() || !does_program_child_generation_result_bind(
+                                            publication.run_record, child, generation->second,
+                                            lineage->second->head, run->second->run))
+            return ProgramTransitionPublishResult::Conflict;
+    }
 
     const auto synthesis_heads = current == impl_->runs.end()
                                      ? std::vector<ProgramChildSynthesisRecord>{}

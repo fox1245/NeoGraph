@@ -1500,6 +1500,7 @@ public:
         return inner_->load_child_syntheses(owner, run);
     }
     std::vector<ProgramTransitionPublication> synthesis_publications;
+    std::mutex                                               synthesis_observation_mutex;
     std::optional<ProgramChildSynthesisState> fail_synthesis_after;
     std::function<void(const ProgramTransitionPublication&)> after_publication;
     mutable std::atomic<unsigned>                            synthesis_read_failures{0};
@@ -1561,6 +1562,10 @@ public:
         }
         return inner_->load_generation(owner, lineage_id, generation);
     }
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+        std::string_view owner, std::string_view lineage, std::uint64_t generation) const override {
+        return inner_->load_generation_initial_publication(owner, lineage, generation);
+    }
     std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
         std::string_view owner,
         std::string_view source_run_id,
@@ -1589,7 +1594,10 @@ public:
             throw std::runtime_error("simulated replacement failure before publication");
         }
         const auto synthesis = publication.child_synthesis_records;
-        if (!synthesis.empty()) synthesis_publications.push_back(publication);
+        if (!synthesis.empty()) {
+            std::lock_guard lock(synthesis_observation_mutex);
+            synthesis_publications.push_back(publication);
+        }
         const auto observed  = after_publication
                                    ? std::optional<ProgramTransitionPublication>(publication)
                                    : std::nullopt;
@@ -9069,6 +9077,18 @@ protected:
             std::filesystem::remove(database + "-shm");
         }
     }
+    std::shared_ptr<CheckpointStore> checkpoint_backend() {
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT
+        if (GetParam() == "SQLite")
+            return std::make_shared<neograph::graph::SqliteCheckpointStore>(database);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT
+        if (GetParam() == "PostgreSQL")
+            return std::make_shared<neograph::graph::PostgresCheckpointStore>(
+                std::getenv("NEOGRAPH_TEST_POSTGRES_URL"), 2);
+#endif
+        return std::make_shared<InMemoryCheckpointStore>();
+    }
     std::shared_ptr<ProgramStore> program_backend() {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
@@ -9990,5 +10010,547 @@ TEST_P(ProgramChildSynthesisPersistence, LiveReconnectDoesNotMisclassifyAnActive
                   .data()
                   .state,
               ProgramChildSynthesisState::Spawned);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+namespace {
+std::string recursive_graph_source(unsigned nodes, const std::string& body) {
+    std::string source =
+        "export function define() { const g=ng.graph('main'); "
+        "g.channel('value',{reducer:'runtime-overwrite',initial:''});\n";
+    for (unsigned i = 0; i < nodes; ++i) {
+        source += "g.node('n" + std::to_string(i) + "',{type:'runtime-completed'});\n";
+        if (i) source += "g.edge('n" + std::to_string(i - 1) + "','n" + std::to_string(i) + "');\n";
+    }
+    return source + "g.entry('n0');g.exit('n" + std::to_string(nodes - 1) +
+           "');return g;}\nexport function* main(input){\n" + body + "\n}";
+}
+struct RecursiveCheckpointGate {
+    std::mutex                         mutex;
+    std::condition_variable            condition;
+    std::map<std::string, std::string> reached;
+    std::set<std::string>              released;
+    bool                               stopped = false;
+    void                               observe(const ProgramTransitionPublication& publication) {
+        for (const auto& command : publication.commands) {
+            if (!command.completed() ||
+                command.command().kind() != JavaScriptCommandKind::Checkpoint)
+                continue;
+            const auto site = command.command().source_site();
+            if (site != "main:propose" && site != "main:budget" && site != "child:propose" &&
+                site != "child:swap" && site != "grandchild:ready")
+                continue;
+            std::unique_lock lock(mutex);
+            reached[site] = publication.run_record.run_id();
+            condition.notify_all();
+            condition.wait_for(lock, std::chrono::seconds(30),
+                                                             [&] { return stopped || released.contains(site); });
+        }
+    }
+    std::string wait(std::string site) {
+        std::unique_lock lock(mutex);
+        if (!condition.wait_for(lock, std::chrono::seconds(15),
+                                [&] { return reached.contains(site); }))
+            throw std::runtime_error("Missing recursive checkpoint: " + site);
+        return reached.at(site);
+    }
+    void release(std::string site) {
+        std::lock_guard lock(mutex);
+        released.insert(std::move(site));
+        condition.notify_all();
+    }
+    void stop() {
+        std::lock_guard lock(mutex);
+        stopped = true;
+        condition.notify_all();
+    }
+};
+struct RecursiveHarnessFixture {
+    std::shared_ptr<RecursiveCheckpointGate> gate = std::make_shared<RecursiveCheckpointGate>();
+    std::shared_ptr<BlockAfterJavaScriptResultJournal> journal;
+    AdmittedRuntime                                    host;
+    std::shared_ptr<ProgramStore>                      program_store;
+    std::shared_ptr<ProgramCompiler>                   compiler;
+    std::mutex                                         grants_mutex;
+    std::map<std::string, ProgramChildSynthesisGrant>  grants;
+    std::map<std::string, std::string>                 approved_sources;
+    std::optional<ProgramHandle>                       root, child, grandchild, replacement;
+    std::optional<ProgramHandoff>                      root_hold, child_hold, grandchild_hold;
+    std::optional<ProgramVersion>                      root_version, replacement_version;
+    std::optional<ProgramChildSynthesisRecord>         child_synthesis, grandchild_synthesis;
+    std::string                                        grand_source, child_source, root_source;
+    RunBudget root_budget{60000, 1000, 1000, 4, 32, 100, 4, 3, 12};
+    RunBudget child_budget{45000, 500, 500, 2, 16, 50, 2, 2, 4};
+    RunBudget grand_budget{30000, 100, 100, 1, 8, 20, 0, 0, 0};
+    RecursiveHarnessFixture(std::shared_ptr<ProgramTransitionStore> transitions,
+                            std::shared_ptr<ProgramStore>           programs,
+                            std::shared_ptr<CheckpointStore>        checkpoints = {})
+        : journal(std::make_shared<BlockAfterJavaScriptResultJournal>(std::move(transitions))),
+          host(4, std::move(checkpoints), journal, {}, ExecutionGuarantee::Strict, true),
+          program_store(programs),
+          compiler(std::make_shared<ProgramCompiler>(
+              host.registry, ProgramCompilerConfig{"program-runtime-test/v1"})) {
+        completed_calls.store(0);
+        host.profile =
+            AdmittedRuntime::make_profile(host.registry, ExecutionGuarantee::Unmanaged, true);
+        host.policy =
+            AdmittedRuntime::make_policy(host.profile, ExecutionGuarantee::Unmanaged, true);
+        host.catalog = std::make_shared<ProgramCatalog>(CatalogConfig{
+            std::move(programs), host.registry, host.engines, "program-runtime-test/v1"});
+        journal->release_result();
+        journal->after_publication = [gate = gate](const auto& publication) {
+            gate->observe(publication);
+        };
+        ProgramSynthesisGatewayConfig gateway;
+        gateway.compiler           = compiler;
+        gateway.catalog            = host.catalog;
+        gateway.validate_semantics = [](const auto& proposal, const auto& bundle, const auto&) {
+            return ProgramSynthesisSemanticDecision{
+                digest('b'), digest('c'), true,
+                json{{"source", proposal.source().source_hash()}, {"bundle", bundle.id()}}};
+        };
+        gateway.admission = [this](const auto&, const auto&, const auto&) {
+            return ProgramAdmission{"tenant:runtime", host.profile, host.policy, {}};
+        };
+        RuntimeConfig config{host.catalog, host.checkpoints, {}, journal, 4};
+        config.child_synthesis_gateway =
+            std::make_shared<ProgramSynthesisGateway>(std::move(gateway));
+        config.child_synthesis_grant_resolver =
+            [this](std::string_view owner, std::string_view parent,
+                   std::string_view id) -> std::optional<ProgramChildSynthesisGrant> {
+            std::lock_guard lock(grants_mutex);
+            auto            found = grants.find(std::string(id));
+            if (found != grants.end() && found->second.data().owner_scope == owner &&
+                found->second.data().parent_run_id == parent)
+                return found->second;
+            return std::nullopt;
+        };
+        host.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+        grand_source =
+            recursive_graph_source(4,
+                                   "yield ng.checkpoint({ready:true},'grandchild:ready');return "
+                                   "yield ng.callCore('main',{},'grandchild:work');");
+        child_source = recursive_graph_source(
+            2,
+            "yield ng.callCore('main',{},'child:work');const source=" + json(grand_source).dump() +
+                ";yield ng.checkpoint({source:source},'child:propose');const descendant=yield "
+                "ng.spawn('grandchild',{},'child:spawn');yield "
+                "ng.checkpoint({child:descendant.child_run_id,replacement:'child-v2.json'},'child:"
+                "swap');yield ng.callCore('main',{},'retired:forbidden');throw new Error('Retired "
+                "child ran');");
+        root_source = recursive_graph_source(
+            1,
+            "yield ng.callCore('main',{},'main:work');const source=" + json(child_source).dump() +
+                ";yield ng.checkpoint({source:source},'main:propose');return yield "
+                "ng.await(ng.spawn('child',{},'main:spawn'),55000,'main:await');");
+        approved_sources.emplace("child.js", child_source);
+        approved_sources.emplace("grandchild.js", grand_source);
+        // This is the already-admitted JSON swap target, compiled before the session starts.
+        replacement_version =
+            admit("child-v2.js",
+                  recursive_graph_source(
+                      3,
+                      "const result=yield "
+                      "ng.await(ng.spawn('grandchild',{},'replacement:join'),30000,'replacement:"
+                      "await');yield ng.callCore('main',{},'replacement:work');return "
+                      "{generation:2,result:result};"),
+                  child_budget);
+    }
+    ~RecursiveHarnessFixture() {
+        gate->stop();
+        if (root) root->cancel();
+        root_hold.reset();
+        child_hold.reset();
+        grandchild_hold.reset();
+        if (root) (void)root->wait();
+    }
+    ProgramVersion admit(std::string name, std::string source, RunBudget budget) {
+        const RunBudget floor{1, 0, 0, 1, 1, 1, 0, 0, 0};
+        auto            bundle =
+            compiler->compile(ProgramSource::from_javascript(std::move(name), std::move(source)),
+                              ProgramBudgetBounds{floor, budget});
+        return host.catalog->admit(
+            ProgramBundle::parse(bundle.serialize_canonical()),
+            ProgramAdmission{"tenant:runtime", host.profile, host.policy, {}});
+    }
+    ProgramHandoff hold(ProgramHandle& handle, const std::string& site) {
+        EXPECT_EQ(gate->wait(site), handle.run_id());
+        auto point = handle.next_handoff();
+        gate->release(site);
+        (void)point.value();
+        return point;
+    }
+    ProgramChildSynthesisRecord synthesize(ProgramHandle&  parent,
+                                           ProgramHandoff& point,
+                                           std::string     source_name,
+                                           RunBudget       budget,
+                                           std::string     binding) {
+        const auto source = ProgramSource::from_javascript(
+            source_name, point.value().at("source").get<std::string>());
+        const auto approved = approved_sources.find(source_name);
+        if (approved == approved_sources.end() ||
+            source.source_hash() !=
+                ProgramSource::from_javascript(source_name, approved->second).source_hash())
+            throw std::runtime_error("Source is not an independently reviewed template instance");
+        const auto run     = parent.snapshot();
+        const auto lineage = journal->load_run_lineage("tenant:runtime", parent.run_id());
+        const auto version =
+            host.catalog->resolve_version("tenant:runtime", parent.program_version_id());
+        ProgramSynthesisProposalData request;
+        request.owner_scope      = "tenant:runtime";
+        request.parent_run_id    = parent.run_id();
+        request.lineage_id       = lineage->lineage_id();
+        request.source           = source;
+        request.requested_budget = budget;
+        request.created_at_ms    = run.updated_at_ms();
+        ProgramChildSynthesisGrantData grant;
+        grant.owner_scope                 = request.owner_scope;
+        grant.parent_run_id               = parent.run_id();
+        grant.parent_program_version_id   = version->id();
+        grant.parent_policy_fingerprint   = version->policy_snapshot().fingerprint();
+        grant.lineage_id                  = lineage->lineage_id();
+        grant.expected_lineage_head_id    = lineage->id();
+        grant.template_identity           = digest('a');
+        grant.reviewed_source_identity    = program_synthesis_source_identity(source);
+        grant.semantic_validator_identity = digest('b');
+        grant.semantic_contract_identity  = digest('c');
+        grant.child_budget_ceiling        = budget;
+        grant.minimum_execution_guarantee = ExecutionGuarantee::Unmanaged;
+        auto trusted                      = ProgramChildSynthesisGrant::create(std::move(grant));
+        {
+            std::lock_guard lock(grants_mutex);
+            grants.emplace(trusted.id(), trusted);
+        }
+        return host.runtime->prepare_child_synthesis(
+            "tenant:runtime", parent, point, ProgramSynthesisProposal::create(std::move(request)),
+            trusted, std::move(binding));
+    }
+    void prepare_tree() {
+        root_version = admit("orchestrator.js", root_source, root_budget);
+        root         = host.runtime->start(
+            "tenant:runtime", *root_version,
+            ProgramInvocation{json::object(), root_budget, "session:recursive", {}});
+        root_hold.emplace(hold(*root, "main:propose"));
+        child_synthesis = synthesize(*root, *root_hold, "child.js", child_budget, "child");
+        root_hold.reset();
+        child = host.runtime->reconnect("tenant:runtime", gate->wait("child:propose"));
+        child_hold.emplace(hold(*child, "child:propose"));
+        grandchild_synthesis =
+            synthesize(*child, *child_hold, "grandchild.js", grand_budget, "grandchild");
+        child_hold.reset();
+        grandchild = host.runtime->reconnect("tenant:runtime", gate->wait("grandchild:ready"));
+        grandchild_hold.emplace(hold(*grandchild, "grandchild:ready"));
+        child_hold.emplace(hold(*child, "child:swap"));
+    }
+    void replace_child() {
+        const auto target = *replacement_version;
+        const auto state  = child_hold->value();
+        replacement       = host.runtime->replace(
+            "tenant:runtime", std::move(*child_hold), target,
+            ProgramInvocation{json{{"handoff", state}, {"previous_run_id", child->run_id()}},
+                              child->snapshot().remaining_budget(),
+                              "session:recursive/replacement",
+                                    {}});
+        child_hold.reset();
+    }
+};
+}  // namespace
+TEST_P(ProgramChildSynthesisPersistence,
+       RecursiveDifferentTopologiesRetainGrandchildAcrossChildReplacement) {
+    RecursiveHarnessFixture test(backend(), program_backend());
+    test.prepare_tree();
+    const auto child_root = test.child->run_id(), grandchild_root = test.grandchild->run_id();
+    EXPECT_EQ(test.child->snapshot().child_depth(), 1U);
+    EXPECT_EQ(test.grandchild->snapshot().child_depth(), 2U);
+    EXPECT_EQ(test.child->snapshot().remaining_budget().max_dynamic_compiles, 1U);
+    test.replace_child();
+    const auto initial = test.journal->load("tenant:runtime", test.replacement->run_id());
+    ASSERT_TRUE(initial);
+    EXPECT_EQ(initial->logical_run_id(), child_root);
+    ASSERT_EQ(initial->children().size(), 1U);
+    EXPECT_EQ(initial->children().front().child_run_id, grandchild_root);
+    test.grandchild_hold.reset();
+    const auto result = test.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output().at("generation"), 2);
+    EXPECT_EQ(test.child->wait().id(), test.replacement->wait().id());
+    EXPECT_EQ(completed_calls.load(), 10U);
+    const auto main = test.root->snapshot();
+    ASSERT_EQ(main.children().size(), 1U);
+    EXPECT_EQ(main.children().front().child_run_id, child_root);
+    EXPECT_EQ(main.children().front().terminal_generation, 2U);
+    EXPECT_EQ(main.children().front().terminal_result->run_id(), test.replacement->run_id());
+    const auto lineage = test.journal->load_run_lineage("tenant:runtime", child_root);
+    const auto generation =
+        test.journal->load_generation("tenant:runtime", lineage->lineage_id(), 2);
+    EXPECT_TRUE(does_program_child_generation_result_bind(
+        main, main.children().front(), *generation, *lineage, test.replacement->snapshot()));
+    auto forged                = main.children().front();
+    forged.terminal_generation = 3;
+    EXPECT_FALSE(does_program_child_generation_result_bind(main, forged, *generation, *lineage,
+                                                           test.replacement->snapshot()));
+    forged              = main.children().front();
+    forged.child_run_id = grandchild_root;
+    EXPECT_FALSE(does_program_child_generation_result_bind(main, forged, *generation, *lineage,
+                                                           test.replacement->snapshot()));
+    EXPECT_EQ(test.replacement->snapshot().children().front().child_run_id, grandchild_root);
+    EXPECT_EQ(test.replacement->wait().remaining_budget().max_dynamic_compiles, 1U);
+    std::set<std::string> topologies;
+    for (const auto& id :
+         {test.root_version->bundle_id(),
+          test.child_synthesis->data().artifacts.at("bundle").at("id").get<std::string>(),
+          test.grandchild_synthesis->data().artifacts.at("bundle").at("id").get<std::string>(),
+          test.host.catalog
+              ->resolve_version("tenant:runtime", test.replacement->program_version_id())
+              ->bundle_id()}) {
+        const auto bundle = test.program_store->get_bundle(id);
+        ASSERT_TRUE(bundle);
+        topologies.insert(bundle->core_plan_identities().front().compiled_plan_identity);
+    }
+    EXPECT_EQ(topologies.size(), 4U);
+    if (const auto* directory = std::getenv("NEOGRAPH_RECURSIVE_ARTIFACT_DIR")) {
+        std::filesystem::create_directories(directory);
+        const std::vector<std::pair<std::string, std::string>> bundles{
+            {"main", test.root_version->bundle_id()},
+            {"child-v1",
+             test.child_synthesis->data().artifacts.at("bundle").at("id").get<std::string>()},
+            {"child-v2", test.replacement_version->bundle_id()},
+            {"grandchild",
+             test.grandchild_synthesis->data().artifacts.at("bundle").at("id").get<std::string>()}};
+        for (const auto& [name, id] : bundles) {
+            std::ofstream file(std::filesystem::path(directory) / (name + ".json"));
+            file << test.program_store->get_bundle(id)->serialize_canonical();
+        }
+        std::ofstream manifest(std::filesystem::path(directory) / "session.json");
+        manifest << json{{"session", "session:recursive"},
+                         {"main", main.run_id()},
+                         {"child", child_root},
+                         {"active_child_run", test.replacement->run_id()},
+                         {"grandchild", grandchild_root},
+                         {"child_generation", 2},
+                         {"result", json::parse(result.serialize_canonical())}}
+                        .dump(2);
+    }
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && !defined(_WIN32)
+TEST_P(ProgramChildSynthesisPersistence, RecursiveTreeReopensAfterNestedReplacementCommit) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_RECURSIVE_DB")) database = inherited;
+    setenv("NEOGRAPH_RECURSIVE_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(([&] {
+                    RecursiveHarnessFixture test(backend(), program_backend(),
+                                                 checkpoint_backend());
+                    test.prepare_tree();
+                    {
+                        json grants = json::array();
+                        for (const auto& [_, grant] : test.grants)
+                            grants.push_back(grant.serialize_canonical());
+                        std::ofstream saved(database + ".tree");
+                        saved << json{{"root", test.root->run_id()},
+                                      {"child", test.child->run_id()},
+                                      {"grandchild", test.grandchild->run_id()},
+                                      {"grants", grants},
+                                      {"executed", completed_calls.load()}}
+                                     .dump();
+                    }
+                    test.journal->after_publication = [&](const auto& publication) {
+                        if (publication.run_generation &&
+                            publication.run_generation->replacement_receipt() &&
+                            publication.run_record.child_depth() == 1)
+                            std::_Exit(77);
+                        test.gate->observe(publication);
+                    };
+                    test.replace_child();
+                    std::_Exit(78);
+                }()),
+                ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_RECURSIVE_DB");
+    std::ifstream input(database + ".tree");
+    const auto    saved   = json::parse(std::string(std::istreambuf_iterator<char>(input), {}));
+    const auto    root    = saved.at("root").get<std::string>(),
+               child      = saved.at("child").get<std::string>(),
+               grandchild = saved.at("grandchild").get<std::string>();
+    RecursiveHarnessFixture recovered(backend(), program_backend(), checkpoint_backend());
+    for (const auto& encoded : saved.at("grants")) {
+        auto grant = ProgramChildSynthesisGrant::parse(encoded.get<std::string>());
+        recovered.grants.emplace(grant.id(), grant);
+    }
+    recovered.root    = recovered.host.runtime->reconnect("tenant:runtime", root);
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output().at("generation"), 2);
+    EXPECT_EQ(completed_calls.load() + saved.at("executed").get<unsigned>(), 10U);
+    const auto parent = recovered.root->snapshot();
+    ASSERT_EQ(parent.children().size(), 1U);
+    EXPECT_EQ(parent.children().front().child_run_id, child);
+    EXPECT_EQ(parent.children().front().terminal_generation, 2U);
+    const auto active = recovered.host.runtime->reconnect("tenant:runtime", child);
+    EXPECT_EQ(active.snapshot().logical_run_id(), child);
+    ASSERT_EQ(active.snapshot().children().size(), 1U);
+    EXPECT_EQ(active.snapshot().children().front().child_run_id, grandchild);
+    EXPECT_EQ(active.wait().remaining_budget().max_dynamic_compiles, 1U);
+    input.close();
+    std::filesystem::remove(database + ".tree");
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, RecursiveCancellationFollowsTheReplacementAndGrandchild) {
+    RecursiveHarnessFixture test(backend(), program_backend(), checkpoint_backend());
+    test.prepare_tree();
+    test.replace_child();
+    EXPECT_TRUE(test.root->cancel());
+    test.grandchild_hold.reset();
+    EXPECT_EQ(test.root->wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(test.child->wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(test.replacement->wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(test.grandchild->wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(test.replacement->wait().remaining_budget().max_dynamic_compiles, 1U);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence,
+       RecursiveReplacementRejectsParentAndOutputContractChanges) {
+    RecursiveHarnessFixture test(backend(), program_backend());
+    test.prepare_tree();
+    const auto before = test.child->snapshot();
+    auto       target =
+        test.admit("valid-target.js", recursive_graph_source(3, "return {};"), test.child_budget);
+    const auto call = [&](const ProgramVersion& version, std::string parent) {
+        return test.host.runtime->replace(
+            "tenant:runtime", test.child_hold->reference(), version,
+            ProgramInvocation{json{{"handoff", test.child_hold->value()},
+                                   {"previous_run_id", test.child->run_id()}},
+                              before.remaining_budget(),
+                              "recursive-negative",
+                              {},
+                              "",
+                              std::move(parent),
+                              1});
+    };
+    EXPECT_THROW(call(target, "foreign-parent"), ProgramDiagnosticError);
+    auto bundle = test.compiler->compile(
+        ProgramSource::from_javascript("wrong-output.js",
+                                       recursive_graph_source(3, "return 'wrong';")),
+        before.remaining_budget(), ContractRecord{}, ContractRecord{1, json{{"type", "string"}}});
+    auto incompatible = test.host.catalog->admit(
+        bundle, ProgramAdmission{"tenant:runtime", test.host.profile, test.host.policy, {}});
+    try {
+        (void)call(incompatible, test.root->run_id());
+        FAIL() << "Expected output contract rejection";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_REPLACEMENT_CHILD_OUTPUT");
+    }
+    EXPECT_EQ(test.child->snapshot().id(), before.id());
+    EXPECT_FALSE(test.grandchild->try_result());
+}
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramCatalogTest, SQLiteCatalogWaitsForShortSharedDatabaseWriter) {
+    AdmittedRuntime host;
+    const auto      version = host.admit("runtime-completed");
+    const auto      bundle  = host.store->get_bundle(version.bundle_id());
+    const auto      path    = (std::filesystem::temp_directory_path() /
+                       ("neograph-catalog-busy-" + Checkpoint::generate_id() + ".db"))
+                          .string();
+    {
+        SQLiteProgramStore store(path);
+        store.publish_admitted(*bundle, version);
+        sqlite3* writer = nullptr;
+        ASSERT_EQ(sqlite3_open(path.c_str(), &writer), SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(writer, "BEGIN EXCLUSIVE", nullptr, nullptr, nullptr), SQLITE_OK);
+        auto read = std::async(std::launch::async,
+                               [&] { return store.get_version("tenant:runtime", version.id()); });
+        EXPECT_EQ(read.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+        EXPECT_EQ(sqlite3_exec(writer, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(writer);
+        const auto result = read.get();
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->id(), version.id());
+    }
+    std::filesystem::remove(path);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedCompileBudget) {
+    RecursiveHarnessFixture test(backend(), program_backend());
+    const auto              leaf = recursive_graph_source(1, "return {}; ");
+    test.approved_sources.emplace("reused-budget.js", leaf);
+    test.root_source = recursive_graph_source(
+        1, "yield ng.checkpoint({source:" + json(test.child_source).dump() +
+               "},'main:propose');yield ng.spawn('child',{},'main:spawn');yield "
+               "ng.checkpoint({source:" +
+               json(leaf).dump() + "},'main:budget');return {}; ");
+    test.root_version = test.admit("budget-parent.js", test.root_source, test.root_budget);
+    test.root         = test.host.runtime->start(
+        "tenant:runtime", *test.root_version,
+        ProgramInvocation{json::object(), test.root_budget, "session:budget", {}});
+    test.root_hold.emplace(test.hold(*test.root, "main:propose"));
+    test.child_synthesis =
+        test.synthesize(*test.root, *test.root_hold, "child.js", test.child_budget, "child");
+    test.root_hold.reset();
+    test.root_hold.emplace(test.hold(*test.root, "main:budget"));
+    const auto before  = test.root->snapshot();
+    const auto lineage = test.journal->load_run_lineage("tenant:runtime", test.root->run_id());
+    EXPECT_EQ(before.remaining_budget().max_dynamic_compiles, 3U);
+    EXPECT_EQ(lineage->committed_descendant_budget().max_dynamic_compiles, 2U);
+    const RunBudget attempted{1000, 10, 10, 1, 4, 4, 1, 1, 1};
+    EXPECT_THROW(
+        test.synthesize(*test.root, *test.root_hold, "reused-budget.js", attempted, "second-child"),
+        ProgramChildSynthesisError);
+    EXPECT_EQ(test.root->snapshot().id(), before.id());
+    EXPECT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.root->run_id()).size(), 1U);
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence,
+       RecursiveReplacementLostAcknowledgementKeepsLogicalWaiters) {
+    std::atomic<bool>       lost{false};
+    RecursiveHarnessFixture test(backend(), program_backend(), checkpoint_backend());
+    test.prepare_tree();
+    test.journal->after_publication = [&](const auto& publication) {
+        if (publication.run_generation && publication.run_generation->replacement_receipt() &&
+            publication.run_record.child_depth() == 1 && !lost.exchange(true))
+            throw std::runtime_error("lost family replacement acknowledgement");
+        test.gate->observe(publication);
+    };
+    test.replace_child();
+    test.grandchild_hold.reset();
+    const auto result = test.root->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_TRUE(lost.load());
+    EXPECT_EQ(completed_calls.load(), 10U);
+    EXPECT_EQ(test.child->wait().id(), test.replacement->wait().id());
+}
+TEST_P(ProgramChildSynthesisPersistence, RecursiveConcurrentReconnectUsesTheRegisteredSuccessor) {
+    std::promise<void>      committed, release;
+    auto                    reached = committed.get_future();
+    auto                    proceed = release.get_future().share();
+    std::atomic<bool>       observed{false};
+    RecursiveHarnessFixture test(backend(), program_backend(), checkpoint_backend());
+    test.prepare_tree();
+    const auto identity             = test.child->logical_run_id();
+    test.journal->after_publication = [&](const auto& publication) {
+        if (publication.run_generation && publication.run_generation->replacement_receipt() &&
+            publication.run_record.child_depth() == 1 && !observed.exchange(true)) {
+            committed.set_value();
+            (void)proceed.wait_for(std::chrono::seconds(10));
+        }
+        test.gate->observe(publication);
+    };
+    auto replacing = std::async(std::launch::async, [&] { test.replace_child(); });
+    EXPECT_EQ(reached.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    auto observer = std::async(std::launch::async, [&] {
+        return test.host.runtime->reconnect("tenant:runtime", identity);
+    });
+    release.set_value();
+    replacing.get();
+    auto attached = observer.get();
+    EXPECT_EQ(attached.run_id(), test.replacement->run_id());
+    test.grandchild_hold.reset();
+    EXPECT_EQ(test.root->wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(attached.wait().id(), test.replacement->wait().id());
+    EXPECT_EQ(completed_calls.load(), 10U);
 }
 #endif

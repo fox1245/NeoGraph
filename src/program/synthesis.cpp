@@ -669,6 +669,20 @@ ProgramChildSynthesisAuthorization authorize_program_child_synthesis(
                                          "Child grant cannot lower the parent guarantee floor");
     }
     auto        available = parent.lineage.remaining_budget();
+    const auto  committed = parent.lineage.committed_descendant_budget();
+    const auto  debit     = [](auto& remaining, auto allocated) {
+        if (allocated > remaining)
+            throw ProgramChildSynthesisError("P_CHILD_SYNTHESIS_BUDGET",
+                                                  "Descendant grants exhaust the parent budget");
+        remaining -= allocated;
+    };
+    debit(available.wall_time_ms, committed.wall_time_ms);
+    debit(available.model_tokens, committed.model_tokens);
+    debit(available.monetary_microunits, committed.monetary_microunits);
+    debit(available.max_program_operations, committed.max_program_operations);
+    debit(available.max_core_steps, committed.max_core_steps);
+    debit(available.max_dynamic_compiles, committed.max_dynamic_compiles);
+    debit(available.max_total_children, committed.max_total_children);
     const auto& requested = request.requested_budget;
     if (!available.max_dynamic_compiles || !available.max_child_depth ||
         !available.max_total_children || !requested.wall_time_ms || !requested.max_concurrency ||

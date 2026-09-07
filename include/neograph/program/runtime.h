@@ -233,7 +233,9 @@ public:
     /**
      * Replace the active source generation at one exact completed ng.checkpoint.
      * The target is already admitted and starts fresh from invocation.input;
-     * only input.handoff crosses the generation boundary.
+     * application state crosses through input.handoff. Nested agents retain
+     * their logical parent, child relations, and nonrenewable budget. A live
+     * family replacement requires this runtime's held checkpoint.
      */
     ProgramHandle replace(ExactProgramHandoffReference source,
                            RunInvocation                invocation,

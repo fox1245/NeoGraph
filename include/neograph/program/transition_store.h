@@ -23,6 +23,14 @@
 
 namespace neograph::program {
 
+/** Bind a child result from an admitted replacement generation to its stable relation. */
+NEOGRAPH_PROGRAM_API bool does_program_child_generation_result_bind(
+    const ProgramRunRecord&     parent,
+    const ProgramChildRecord&   child,
+    const ProgramRunGeneration& generation,
+    const ProgramRunLineage&    lineage,
+    const ProgramRunRecord&     result_run) noexcept;
+
 /** Exact context evidence selected for one Program transition. */
 struct NEOGRAPH_PROGRAM_API ProgramContextPublication {
     ContextEpoch                 epoch;

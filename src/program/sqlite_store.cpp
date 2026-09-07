@@ -179,6 +179,8 @@ SQLiteProgramStore::SQLiteProgramStore(std::string database_path)
     if (sqlite3_open_v2(impl_->path.c_str(), &impl_->db, flags, nullptr) != SQLITE_OK)
         throw_sqlite(impl_->db, "open");
     try {
+        if (sqlite3_busy_timeout(impl_->db, 5000) != SQLITE_OK)
+            throw_sqlite(impl_->db, "busy timeout");
         exec(impl_->db, "PRAGMA foreign_keys = ON");
         exec(impl_->db,
              "CREATE TABLE IF NOT EXISTS program_bundles ("

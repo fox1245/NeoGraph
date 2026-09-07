@@ -311,26 +311,30 @@ bool is_valid_program_replacement_transition(
                source.id() == previous_lineage.active_run_record_id() &&
                source.journal_head() == previous_lineage.active_journal_head() &&
                predecessor.id() == previous_lineage.active_generation_id() &&
-                predecessor.run_id() == source.run_id() &&
-                source.continuation().state == ContinuationState::Running &&
-                !source.recorded_binding_set_fingerprint() &&
-                !source.pending_input() && !source.pending_effect() && !source.terminal_result() &&
-               source.children().empty() && source.child_depth() == 0 &&
-               source.invocation().parent_run_id.empty() &&
+               predecessor.run_id() == source.run_id() &&
+               source.continuation().state == ContinuationState::Running &&
+               !source.recorded_binding_set_fingerprint() && !source.pending_input() &&
+               !source.pending_effect() && !source.terminal_result() &&
+               target.children() == source.children() &&
+               target.child_depth() == source.child_depth() &&
+               target.invocation().parent_run_id == source.invocation().parent_run_id &&
                previous_lineage.inflight_reservation() == RunBudget{} &&
-               previous_lineage.committed_descendant_budget() == RunBudget{} &&
-               target.run_id() != source.run_id() && target.child_depth() == 0 &&
-               target.invocation().parent_run_id.empty() &&
+               target.run_id() != source.run_id() &&
+               (target.logical_run_id() == source.logical_run_id() ||
+                (target.logical_run_id() == target.run_id() && source.children().empty() &&
+                 target.children().empty() && source.child_depth() == 0 &&
+                 target.child_depth() == 0)) &&
                target.continuation().state == ContinuationState::Running &&
                !target.pending_input() && !target.pending_effect() && !target.terminal_result() &&
-               !target.exact_checkpoint() && target.children().empty() &&
-               !target.fork_receipt() && target.created_at_ms() >= source.updated_at_ms() &&
+               !target.exact_checkpoint() && !target.fork_receipt() &&
+               target.created_at_ms() >= source.updated_at_ms() &&
                successor.child_depth() == predecessor.child_depth() &&
-               next_lineage.remaining_budget() == program_replacement_remaining_budget(
-                                                        source, previous_lineage,
+               next_lineage.remaining_budget() ==
+                   program_replacement_remaining_budget(source, previous_lineage,
                                                         target.created_at_ms()) &&
                next_lineage.inflight_reservation() == RunBudget{} &&
-               next_lineage.committed_descendant_budget() == RunBudget{} &&
+               next_lineage.committed_descendant_budget() ==
+                   previous_lineage.committed_descendant_budget() &&
                target.remaining_budget() == next_lineage.remaining_budget() &&
                target.invocation().budget == next_lineage.remaining_budget();
     } catch (const std::exception&) {

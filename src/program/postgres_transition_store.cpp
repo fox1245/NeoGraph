@@ -751,6 +751,7 @@ bool valid_increment(PGconn* connection, std::string_view owner_scope,
         !same_fork(old_run, next_run) ||
         next_run.recorded_binding_set_fingerprint() != old_run.recorded_binding_set_fingerprint() ||
         next_run.invocation() != old_run.invocation() ||
+        next_run.logical_run_id() != old_run.logical_run_id() ||
         (next_run.exact_checkpoint() == old_run.exact_checkpoint() &&
          next_run.exact_checkpoint_content_id() != old_run.exact_checkpoint_content_id()) ||
         !valid_children_transition(old_run, next_run) ||
@@ -1508,6 +1509,32 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
                                 safe_point_capsule, expected_lease)) {
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
+    }
+
+    for (const auto& child : publication.run_record.children()) {
+        if (!child.terminal_generation ||
+            (publication.run_generation && publication.run_generation->replacement_receipt()))
+            continue;
+        bool unchanged = false;
+        if (current)
+            for (const auto& old : current->run_record.children())
+                if (old.child_run_id == child.child_run_id &&
+                    old.terminal_generation == child.terminal_generation && old.terminal_result &&
+                    child.terminal_result &&
+                    old.terminal_result->id() == child.terminal_result->id())
+                    unchanged = true;
+        if (unchanged) continue;
+        const auto lineage_id = program_run_lineage_id(owner_scope, child.child_run_id);
+        const auto lineage = load_current_lineage_head(impl_->connection, owner_scope, lineage_id);
+        const auto generation = load_generation_record(impl_->connection, owner_scope, lineage_id,
+                                                       child.terminal_generation);
+        const auto run        = generation
+                                    ? load_head(impl_->connection, owner_scope, generation->run_id())
+                                    : std::nullopt;
+        if (!lineage || !generation || !run ||
+            !does_program_child_generation_result_bind(publication.run_record, child, *generation,
+                                                       *lineage, run->run_record))
+            return ProgramTransitionPublishResult::Conflict;
     }
 
     const auto context_history = load_context_publication_history(

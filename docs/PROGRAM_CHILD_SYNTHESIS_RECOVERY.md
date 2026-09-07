@@ -88,7 +88,9 @@ automatic reconciliation approval API is supplied by this change.
   version, cached synthesis evidence cannot execute it. Automatic collection of
   retention roots from all synthesis histories remains a host responsibility.
 - Program replacement retains the compile debit and does not transfer the old
-  run's generated binding into the successor generation.
+  run's unattached generated binding into the successor generation. Attached
+  descendants can now be retained through the
+  [recursive Harness contract](PROGRAM_RECURSIVE_HARNESSES.md).
 - PostgreSQL tests share the existing CTest database resource lock, including
   the process-exit matrix and connection-termination case.
 

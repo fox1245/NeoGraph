@@ -49,8 +49,10 @@ struct ProgramChildRecord {
     ProgramChildState          state = ProgramChildState::Publishing;
     /** Terminal outcome published with the parent join record, when available. */
     std::optional<ProgramResult> terminal_result;
+    /// Nonzero only when the terminal result belongs to a replacement generation.
+    std::uint64_t terminal_generation = 0;
 
-    bool operator==(const ProgramChildRecord&) const = default;
+    NEOGRAPH_PROGRAM_API bool operator==(const ProgramChildRecord&) const;
 };
 
 struct ProgramRunRecordData {
@@ -80,18 +82,21 @@ struct ProgramRunRecordData {
     std::uint64_t                         effect_sequence = 0;
     std::int64_t                          created_at_ms    = 0;
     std::int64_t                          updated_at_ms    = 0;
+    /// Stable agent identity across replacement generations; empty means run_id.
+    std::string logical_run_id;
 };
 
 /** Deep-owned, content-addressed run snapshot used for reconnect and CAS publication. */
 class NEOGRAPH_PROGRAM_API ProgramRunRecord {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 3;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 4;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
     static ProgramRunRecord parse(std::string_view stored_bytes);
 
     const std::string& owner_scope() const noexcept;
     const std::string& run_id() const noexcept;
+    const std::string&                      logical_run_id() const noexcept;
     const std::string& program_version_id() const noexcept;
     const std::string& bundle_id() const noexcept;
     const std::string& binding_fingerprint() const noexcept;
