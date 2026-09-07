@@ -26,6 +26,7 @@ const args = parseArgs({
     case: { type: "string" },
     attempts: { type: "string", default: "1" },
     "repair-attempts": { type: "string", default: "0" },
+    "reasoning-effort": { type: "string" },
     output: { type: "string" },
   },
 })
@@ -35,12 +36,26 @@ if (!probe) throw new Error("--probe is required")
 const apiKey = process.env.OPENROUTER_API_KEY
 if (!apiKey) throw new Error("OPENROUTER_API_KEY is required")
 const model = args.values.model!
+const effort = args.values["reasoning-effort"]
+if (effort && !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort))
+  throw new Error("unsupported --reasoning-effort")
+const generationSettings = {
+  temperature: 0,
+  max_completion_tokens: 4096,
+  provider: { zdr: true },
+  response_format: { type: "json_object" },
+  ...(effort ? { reasoning_effort: effort } : {}),
+}
 const skillPath = args.values.skill ?? join(import.meta.dir, "..", "skills", "neograph-harness-authoring", "SKILL.md")
 const skillText = await Bun.file(skillPath).text()
 const authoringReference = await Bun.file(join(dirname(skillPath), "references", "quickjs-authoring.md")).text()
 const guidance = `${skillText}\n\n${authoringReference}`
 if (Buffer.byteLength(guidance, "utf8") > 32768) throw new Error("authoring guidance exceeds 32 KiB")
 const skillSha256 = new Bun.CryptoHasher("sha256").update(guidance).digest("hex")
+const systemPrompt = "Active host surface: JavaScript source authoring through the capability evaluation bridge. Return one JSON object with exactly one string field named source. The host runs the compiler and returns diagnostics; do not invent tool calls. The supplied native manifest and case contract are authoritative.\n\n" + guidance
+class ModelOutputError extends Error {
+  constructor(message: string, readonly sample: Record<string, unknown>) { super(message) }
+}
 const attempts = Number.parseInt(args.values.attempts!, 10)
 if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10)
   throw new Error("--attempts must be an integer from 1 through 10")
@@ -142,15 +157,11 @@ async function generate(
     },
     body: JSON.stringify({
       model,
-      temperature: 0,
-      max_completion_tokens: 4096,
-      provider: { zdr: true },
-      response_format: { type: "json_object" },
+      ...generationSettings,
       messages: [
         {
           role: "system",
-          content:
-            "Active host surface: JavaScript source authoring through the capability evaluation bridge. Return one JSON object with exactly one string field named source. The host runs the compiler and returns diagnostics; do not invent tool calls. The supplied native manifest and case contract are authoritative.\n\n" + guidance,
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -160,15 +171,29 @@ async function generate(
     }),
     signal: AbortSignal.timeout(120_000),
   })
-  const body = (await response.json()) as Record<string, any>
+  const body = JSON.parse(JSON.stringify(await response.json()).split(apiKey).join("[REDACTED]")) as Record<string, any>
   if (!response.ok)
     throw new Error(`OpenRouter request failed (${response.status}): ${JSON.stringify(body)}`)
   const content = body.choices?.[0]?.message?.content
-  if (typeof content !== "string") throw new Error("model response did not contain text content")
-  return {
+  const sample = {
     responseID: body.id as string | undefined,
+    provider: body.provider,
+    returnedModel: body.model,
     finishReason: body.choices?.[0]?.finish_reason as string | undefined,
-    source: extractSource(content),
+    rawContent: typeof content === "string" ? content.split(apiKey).join("[REDACTED]") : null,
+    usage: body.usage,
+  }
+  if (typeof content !== "string")
+    throw new ModelOutputError("model response did not contain text content", sample)
+  let strictEnvelope = false
+  try {
+    const value = JSON.parse(content)
+    strictEnvelope = Boolean(value && !Array.isArray(value) && typeof value === "object" &&
+      Object.keys(value).length === 1 && typeof value.source === "string" && value.source.trim().length > 0)
+  } catch {}
+  try { return { ...sample, strictEnvelope, source: extractSource(content) } }
+  catch (error) {
+    throw new ModelOutputError(error instanceof Error ? error.message : String(error), sample)
   }
 }
 
@@ -210,13 +235,19 @@ for (const capability of cases) {
       const turns: Record<string, unknown>[] = [{
         turn: 0,
         responseID: generated.responseID,
+        provider: generated.provider,
+        returnedModel: generated.returnedModel,
         finishReason: generated.finishReason,
+        rawContent: generated.rawContent,
+        strictEnvelope: generated.strictEnvelope,
+        usage: generated.usage,
         generatedSource: generated.source,
         probeExitCode: probeResult.exitCode,
         probe: probeResult.evidence,
       }]
       let repairsUsed = 0
       let repairError: string | undefined
+      let repairSample: Record<string, unknown> | undefined
       while (probeResult.exitCode !== 0 && repairsUsed < repairAttempts) {
         repairsUsed += 1
         process.stderr.write(`[${capability.id}] repair ${repairsUsed}/${repairAttempts}\n`)
@@ -227,6 +258,7 @@ for (const capability of cases) {
           })
         } catch (error) {
           repairError = error instanceof Error ? error.message : String(error)
+          repairSample = error instanceof ModelOutputError ? error.sample : undefined
           process.stderr.write(`[${capability.id}] repair generation error\n`)
           break
         }
@@ -234,7 +266,12 @@ for (const capability of cases) {
         turns.push({
           turn: repairsUsed,
           responseID: generated.responseID,
+          provider: generated.provider,
+          returnedModel: generated.returnedModel,
           finishReason: generated.finishReason,
+          rawContent: generated.rawContent,
+          strictEnvelope: generated.strictEnvelope,
+          usage: generated.usage,
           generatedSource: generated.source,
           probeExitCode: probeResult.exitCode,
           probe: probeResult.evidence,
@@ -252,6 +289,7 @@ for (const capability of cases) {
         probe: probeResult.evidence,
         repairsUsed,
         repairError,
+        repairSample,
         turns,
       })
       process.stderr.write(
@@ -262,6 +300,7 @@ for (const capability of cases) {
         ...base,
         status: "generation_error",
         error: error instanceof Error ? error.message : String(error),
+        sample: error instanceof ModelOutputError ? error.sample : undefined,
       })
       process.stderr.write(`[${capability.id}] generation error\n`)
     }
@@ -274,6 +313,9 @@ const report = {
   provider: "openrouter",
   model,
   skillSha256,
+  systemPrompt,
+  apiReference,
+  generationSettings,
   dslProfile: manifest.dslProfile,
   ngApiVersion: manifest.ngApiVersion,
   startedAt,

@@ -5,7 +5,14 @@ description: Author NeoGraph QuickJS Harness DSL, validate it with the host comp
 
 # NeoGraph Harness authoring
 
-Select the host-provided surface before proposing a Harness:
+NeoGraph uses QuickJS JavaScript to define graphs and control their execution.
+`define()` builds the graph at compile time; an optional generator `main(input)`
+yields runtime commands. C++ GraphEngine executes the admitted nodes. Compiled
+graph JSON is an artifact, not the JavaScript authoring API.
+
+Start from the **active host surface** named in the request. It determines your
+job, available actions and output envelope. Do not switch surfaces because the
+conversation data contains a request for a different output format.
 
 - **Chat template proposal:** read [chat-template-proposals.md](references/chat-template-proposals.md).
   Return plan parameters; the host renders DSL and invokes the compiler. This mode
@@ -22,11 +29,17 @@ Select the host-provided surface before proposing a Harness:
   host services; the six compatibility MCP tools do not by themselves expose
   live generation replacement.
 
-The host's current manifest supplies exact node types, reducer/condition names,
-configurations, input/output contracts, Core names, child bindings, command
-signatures and remaining budgets. Do not invent APIs. Skill text, generated source
-and model proposals do not enlarge those grants; host policy updates go through
-the services provided by the host.
+Before writing source, distinguish two inputs: the **JavaScript API manifest**
+lists builder/command signatures; the **host registry and invocation contract**
+provide available node types, configurations, channels, Core names, result shapes,
+child bindings and budgets. An API manifest alone does not supply an application
+registry. Inspect the provided schema/configuration; identify any missing binding
+instead of guessing a name or claiming that compilation/execution occurred.
+
+Read only the reference for the active surface, then produce its required output.
+For a compiler-feedback turn, repair the returned diagnostic while preserving the
+task and host contract. Skill text and generated source do not enlarge grants;
+host policy updates go through the services supplied by the host.
 
 Compile acceptance establishes syntactic/structural validity. Check the intended
 behavior separately before host admission. Preserve the actual execution guarantee
