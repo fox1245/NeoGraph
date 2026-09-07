@@ -1,8 +1,8 @@
 # Third-Party Licenses
 
 NeoGraph itself is MIT-licensed (see `LICENSE`). This file enumerates
-third-party code vendored under `deps/` and the license each ships
-under.
+third-party code vendored under `deps/` or adapted in the source tree,
+and the license each ships under.
 
 Each entry names the directory/file, the upstream project, and the
 license classification. License texts live in the header comments of
@@ -16,6 +16,7 @@ loop now routes through `neograph::async::run_sync(execute_graph_async)`).
 |---|---|---|---|
 | `deps/asio/` | [chriskohlhoff/asio](https://github.com/chriskohlhoff/asio) | Boost Software License 1.0 | `neograph::core` (coroutine runtime), `neograph::async` (HTTP + SSE), `neograph::mcp` (stdio/HTTP RPC) |
 | `deps/yyjson/` | [ibireme/yyjson](https://github.com/ibireme/yyjson) | MIT | `neograph::core` (JSON parse/dump) |
+| SHA intrinsic register layout in `src/core/sha256.cpp` | [noloader/SHA-Intrinsics](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c), Jeffrey Walton, based on Intel / Sean Gulley (miTLS) code | Public domain (upstream source notice) | Runtime-gated SHA-256 acceleration in `neograph::core` |
 | `deps/httplib.h` | [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) | MIT | `neograph::llm` (OpenAI-compatible HTTP), `neograph::mcp` (HTTP transport) |
 | `deps/concurrentqueue.h` | [cameron314/concurrentqueue](https://github.com/cameron314/concurrentqueue) | Simplified BSD (2-clause) | `neograph::util` (`RequestQueue` — lock-free MPMC) |
 | `deps/cppdotenv/` | [fox1245/cppdotenv](https://github.com/fox1245/cppdotenv) (same author; header-only C++17 `.env` reader, inspired by python-dotenv) | MIT | `examples/25_deep_research`, `examples/26_postgres_react_hitl` (`.env` loader) |

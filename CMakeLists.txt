@@ -44,6 +44,7 @@ endif()
 # Detect via CMAKE_CXX_FLAGS containing `-fsanitize=`.
 # ===========================================================================
 option(NEOGRAPH_ENABLE_HARDENING "Hardening flags in Release builds (canaries, FORTIFY, CFI)" ON)
+option(NEOGRAPH_ENABLE_SHA256_ACCELERATION "Use runtime-gated SHA-256 CPU acceleration" ON)
 if(NEOGRAPH_ENABLE_HARDENING
    AND NOT CMAKE_CXX_FLAGS MATCHES "fsanitize="
    AND NOT MSVC)
@@ -518,6 +519,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 set(NEOGRAPH_CORE_SOURCES
     src/core/json.cpp
     src/core/canonical_json.cpp
+    src/core/sha256.cpp
     src/core/cancel.cpp
     src/core/graph_invocation.cpp
     src/core/provider.cpp
@@ -579,6 +581,9 @@ target_include_directories(neograph_core
 # libraries) must see dllimport — which is what they get when this
 # define is absent from their compile line.
 target_compile_definitions(neograph_core PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+if(NOT NEOGRAPH_ENABLE_SHA256_ACCELERATION)
+    target_compile_definitions(neograph_core PRIVATE NEOGRAPH_DISABLE_SHA256_ACCELERATION=1)
+endif()
 # Stamp the version (single source of truth: pyproject.toml, parsed near
 # the top of this file into NEOGRAPH_VERSION) into the binary so
 # NodeFactory::export_schema() can emit it for drift detection by
@@ -1867,6 +1872,8 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
     add_executable(bench_canonical_json benchmarks/bench_canonical_json.cpp)
     target_link_libraries(bench_canonical_json PRIVATE neograph::core)
+    add_executable(bench_sha256 benchmarks/bench_sha256.cpp)
+    target_link_libraries(bench_sha256 PRIVATE neograph::core)
     add_executable(bench_core_quickjs_probe
         benchmarks/bench_core_quickjs_probe.cpp)
     target_link_libraries(bench_core_quickjs_probe PRIVATE neograph::core)
@@ -2061,7 +2068,7 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     if(_neograph_benchmark_build_type STREQUAL "")
         set(_neograph_benchmark_build_type "unspecified")
     endif()
-    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe bench_canonical_json)
+    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe bench_canonical_json bench_sha256)
     if(NEOGRAPH_BUILD_PROGRAM)
         list(APPEND _neograph_benchmark_targets
             bench_program bench_program_dispatch
