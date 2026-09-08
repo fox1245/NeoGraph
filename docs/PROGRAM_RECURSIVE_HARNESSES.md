@@ -81,6 +81,37 @@ admission path. Source proposals must match independently reviewed host template
 instances; the reference host does not approve a source merely because an agent
 included it in a checkpoint.
 
+## Recovering pre-admitted children after process loss
+
+A host that restores its admitted child bindings can explicitly allow unfinished
+JavaScript `spawn`/`await` commands to reconnect to already-published children:
+
+```cpp
+config.recover_existing_child_commands = true; // default: false
+```
+
+This works for ordinary static bindings and children inherited through a
+replacement, without a synthesis gateway. The parent relation, link receipt,
+owner, exact invocation, child depth, and persisted child run must agree. Static
+commands must derive the same child ID from their recorded command coordinate;
+inherited children retain the ID admitted in the generation-creation
+publication. The historical Program versions and host grants must still be
+available. A configured host admission resolver continues to admit the child
+attempt normally.
+
+Recovery uses a dedicated reconnect path: a child that disappears after the
+check cannot fall through to new child creation. Missing runs, changed inputs,
+or unavailable bindings leave the existing command pending for reconciliation.
+The command reservation and descendant accounting survive recovery. The flag
+does not authorize replay of unknown provider, tool, native, or other external
+effects. The separately granted synthesis recovery protocol is unchanged.
+
+The `*StaticChild*` tests cover SQLite and PostgreSQL process exit, static and
+inherited recursive children, unchanged child identities and receipts, and a
+grandchild's 32 checkpoints producing exactly 64 journal entries. They also
+exercise absent opt-in, missing runs/bindings, altered input/receipts, and a run
+disappearing between recovery admission and dispatch.
+
 ## JSON artifacts and accounting
 
 JSON is a serialized, validated Program bundle. Loading a different JSON selects
