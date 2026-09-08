@@ -1506,13 +1506,26 @@ public:
     std::mutex                                               synthesis_observation_mutex;
     std::optional<ProgramChildSynthesisState> fail_synthesis_after;
     std::function<void(const ProgramTransitionPublication&)> after_publication;
+    std::function<void(const ProgramTransitionPublication&)> before_publication;
+    std::function<std::optional<ProgramRunRecord>(std::string_view,
+                                                 std::optional<ProgramRunRecord>)> filter_run_read;
     mutable std::atomic<unsigned>                            synthesis_read_failures{0};
+    mutable std::atomic<unsigned>                            command_head_misses{0};
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner, std::string_view run) const override {
+        auto remaining = command_head_misses.load();
+        while (remaining &&
+               !command_head_misses.compare_exchange_weak(remaining, remaining - 1)) {}
+        if (remaining) return std::nullopt;
+        return ProgramTransitionStore::load_command_publication_head(owner, run);
+    }
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
         if (throw_next_load_.exchange(false)) {
             throw std::runtime_error("simulated Program run read failure");
         }
-        return inner_->load(owner, run_id);
+        auto record = inner_->load(owner, run_id);
+        return filter_run_read ? filter_run_read(run_id, std::move(record)) : std::move(record);
     }
     std::optional<ProgramJournalRecord> latest(std::string_view owner,
                                                std::string_view run_id) const override {
@@ -1583,6 +1596,7 @@ public:
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
+        if (before_publication) before_publication(publication);
         const bool command_result =
             !publication.commands.empty() && publication.commands.back().completed();
         const bool replacement =
@@ -1633,6 +1647,7 @@ public:
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
+        if (before_publication) before_publication(publication);
         const bool replacement =
             publication.run_generation && publication.run_generation->replacement_receipt();
         if (replacement && throw_before_replacement_.exchange(false)) {
@@ -7118,22 +7133,23 @@ TEST(ProgramRuntimeTest, MapExecutesItemsSerially) {
 }
 
 TEST(ProgramRuntimeTest, AwaitTimeoutCancelsTheChildOperation) {
-    AdmittedRuntime fixture(2);
-    const auto      started = std::chrono::steady_clock::now();
-    const auto      result  = run_orchestration(
-        fixture,
-        orchestration_document(
-            json{{"op", "await"}, {"timeout_ms", 10}, {"body", json{{"op", "call_core"}}}},
-            "runtime-blocking"),
-        json::object(), "trace-await");
+    for (const auto threads : {1U, 2U, 4U}) {
+        SCOPED_TRACE(threads);
+        AdmittedRuntime fixture(threads);
+        const auto      started = std::chrono::steady_clock::now();
+        const auto      result  = run_orchestration(
+            fixture,
+            orchestration_document(
+                json{{"op", "await"}, {"timeout_ms", 10}, {"body", json{{"op", "call_core"}}}},
+                "runtime-blocking"),
+            json::object(), "trace-await");
 
-    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
-    ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
-    EXPECT_LT(
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started)
-            .count(),
-        2);
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+        ASSERT_TRUE(result.failure().has_value());
+        EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+        EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(
+                      std::chrono::steady_clock::now() - started).count(), 2);
+    }
 }
 
 TEST(ProgramRuntimeTest, AwaitPropagatesChildFailureBeforeTimeout) {
@@ -9065,6 +9081,8 @@ TEST(ProgramSynthesisGateway, SemanticRejectionConsumesReservationAndPreventsAdm
 namespace {
 class ProgramChildSynthesisPersistence : public ::testing::TestWithParam<std::string> {
 protected:
+    void check_static_child_recovery(bool replace, bool recover = true,
+                                     std::string_view fault = {});
     std::string database;
     void        SetUp() override {
         if (GetParam() == "PostgreSQL" && !std::getenv("NEOGRAPH_TEST_POSTGRES_URL"))
@@ -10420,6 +10438,430 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveCancellationFollowsTheReplacem
     EXPECT_EQ(test.replacement->wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(test.grandchild->wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(test.replacement->wait().remaining_budget().max_dynamic_compiles, 1U);
+}
+
+namespace {
+struct StaticChildRecoveryFixture {
+    std::shared_ptr<BlockAfterJavaScriptResultJournal> journal;
+    AdmittedRuntime                                    host;
+    std::optional<ProgramVersion> root_version, child_version, grand_version, successor_version;
+    std::optional<ProgramHandle>  root;
+    std::mutex                    mutex;
+    std::condition_variable       ready;
+    std::optional<ProgramHandoff> root_hold, grand_hold;
+    RunBudget                     root_budget{60000, 1000, 1000, 4, 128, 100, 1, 3, 8};
+    RunBudget                     child_budget{45000, 500, 500, 2, 64, 50, 0, 2, 4};
+    RunBudget                     grand_budget{30000, 100, 100, 1, 32, 20, 0, 0, 0};
+    std::function<void()>         binding_observer;
+    std::atomic<bool>             hold_checkpoints{true};
+
+    StaticChildRecoveryFixture(std::shared_ptr<ProgramTransitionStore> transitions,
+                               std::shared_ptr<CheckpointStore>        checkpoints,
+                               bool                                    recover,
+                               bool                                    hold,
+                               bool                                    replace,
+                               bool                                    external_effect = false)
+        : journal(std::make_shared<BlockAfterJavaScriptResultJournal>(std::move(transitions))),
+          host(4, std::move(checkpoints), journal, {}, ExecutionGuarantee::Unmanaged, true) {
+        journal->release_result();
+        PolicySnapshotBuilder policy;
+        policy.id("static-recovery-policy")
+            .semantic_version("1.0.0")
+            .owner_scope("tenant:runtime")
+            .admission_profile(host.profile)
+            .budget_ceiling(BudgetLimits{60000, 10000, 1000000, 4, 256, 100, 4, 4, 32})
+            .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged);
+        host.policy      = std::move(policy).build();
+        const auto admit = [&](int topology, std::string body, RunBudget budget) {
+            ProgramCompiler compiler(host.registry, {"program-runtime-test/v1"});
+            auto            bundle = compiler.compile(
+                ProgramSource::from_javascript("static-child-recovery.js",
+                                                          recursive_graph_source(topology, std::move(body))),
+                ProgramBudgetBounds{RunBudget{1, 0, 0, 1, 1, 1, 0, 0, 0}, budget});
+            return host.catalog->admit(
+                bundle, ProgramAdmission{"tenant:runtime", host.profile, host.policy, {}});
+        };
+        grand_version = admit(3, external_effect
+            ? "for(let i=0;i<11;i++)yield ng.checkpoint({cursor:i},'auditor:checkpoint');"
+              "yield ng.emit({unknown:true},'auditor:external');return {answer:42};"
+            : "for(let i=0;i<32;i++)yield ng.checkpoint({cursor:i},'auditor:checkpoint');"
+              "return {answer:42};", grand_budget);
+        child_version = admit(2,
+                              "return yield ng.await(ng.spawn('child',{marker:2},'child:spawn'),"
+                              "40000,'child:await');",
+                              child_budget);
+        root_version =
+            admit(1,
+                  replace ? "yield ng.spawn('child',{marker:1},'root:spawn');"
+                            "yield ng.checkpoint({cursor:1},'root:swap');return {};"
+                          : "return yield ng.await(ng.spawn('child',{marker:1},'root:spawn'),"
+                            "55000,'root:await');",
+                  root_budget);
+        successor_version =
+            admit(4,
+                  "return yield ng.await(ng.spawn('child',{marker:1},'successor:spawn'),"
+                  "55000,'successor:await');",
+                  root_budget);
+        const auto limits = [](const RunBudget& b) {
+            return BudgetLimits{b.wall_time_ms,
+                                b.model_tokens,
+                                b.monetary_microunits,
+                                b.max_concurrency,
+                                b.max_program_operations,
+                                b.max_core_steps,
+                                static_cast<std::uint32_t>(b.max_dynamic_compiles),
+                                b.max_child_depth,
+                                b.max_total_children};
+        };
+        link_child_versions(host, *root_version, *child_version, limits(child_budget),
+                            ExecutionGuarantee::Unmanaged);
+        link_child_versions(host, *child_version, *grand_version, limits(grand_budget),
+                            ExecutionGuarantee::Unmanaged);
+        RuntimeConfig config{
+            host.catalog,
+            host.checkpoints,
+            {},
+            journal,
+            4,
+            [this, bindings = host.child_bindings](std::string_view owner, std::string_view version,
+                                                   std::string_view name) {
+                if (binding_observer) binding_observer();
+                return bindings->resolve(owner, version, name);
+            }};
+        config.recover_existing_child_commands = recover;
+        if (hold)
+            config.checkpoint_handler = [this](ProgramHandle handle, ProgramHandoff point) {
+                if (!hold_checkpoints.load()) return;
+                std::lock_guard lock(mutex);
+                if (handle.program_version_id() == grand_version->id())
+                    grand_hold.emplace(std::move(point));
+                else
+                    root_hold.emplace(std::move(point));
+                ready.notify_all();
+            };
+        host.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+    }
+    ~StaticChildRecoveryFixture() {
+        journal->after_publication = {};
+        if (root) root->cancel();
+        root_hold.reset();
+        grand_hold.reset();
+        host.runtime.reset();
+    }
+    void start(bool replace) {
+        root = host.runtime->start(
+            "tenant:runtime", *root_version,
+            ProgramInvocation{json::object(), root_budget, "static-family", {}});
+        std::unique_lock lock(mutex);
+        if (!ready.wait_for(lock, std::chrono::seconds(10),
+                            [&] { return grand_hold && (!replace || root_hold); }))
+            throw std::runtime_error("Static family did not reach its held checkpoints");
+    }
+};
+}  // namespace
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && !defined(_WIN32)
+void ProgramChildSynthesisPersistence::check_static_child_recovery(bool             replace,
+                                                                   bool             recover,
+                                                                   std::string_view fault) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    const bool checkpoint_crash = fault == "pending_checkpoint";
+    const bool effect_crash = fault == "unknown_effect";
+    if (const auto* inherited = std::getenv("NEOGRAPH_STATIC_CHILD_DB")) database = inherited;
+    setenv("NEOGRAPH_STATIC_CHILD_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            StaticChildRecoveryFixture test(backend(), checkpoint_backend(), true, true, replace,
+                                            effect_crash);
+            test.start(replace);
+            const auto save = [&](const ProgramRunRecord& active) {
+                const auto    child      = active.children().front();
+                const auto    descendant = test.journal->load("tenant:runtime", child.child_run_id);
+                std::ofstream saved(database + ".static-family");
+                saved << json{{"root", test.root->run_id()},
+                              {"active", active.run_id()},
+                              {"child", child.child_run_id},
+                              {"child_record_id", descendant->id()},
+                              {"grandchild", descendant->children().front().child_run_id},
+                              {"root_children", active.children().size()},
+                              {"child_record", json::parse(child.link_receipt)},
+                              {"dynamic_compiles", active.remaining_budget().max_dynamic_compiles},
+                              {"root_budget",
+                               active.remaining_budget().model_tokens +
+                                   test.journal->latest("tenant:runtime", active.run_id())
+                                       ->inflight_reservation.model_tokens}}
+                             .dump();
+                saved.close();
+                std::_Exit(77);
+            };
+            if (!replace) save(test.root->snapshot());
+            std::optional<ProgramHandle> successor;
+            test.journal->after_publication = [&](const auto& publication) {
+                if (checkpoint_crash || effect_crash) {
+                    if (publication.run_record.program_version_id() == test.grand_version->id() &&
+                        !publication.commands.empty() && !publication.commands.back().completed() &&
+                        publication.commands.back().command_ordinal() == 12)
+                        save(*test.journal->load("tenant:runtime", successor->run_id()));
+                    return;
+                }
+                if (publication.run_record.program_version_id() == test.successor_version->id() &&
+                    !publication.commands.empty() && !publication.commands.back().completed())
+                    save(publication.run_record);
+            };
+            const auto state     = test.root_hold->value();
+            successor = test.host.runtime->replace(
+                "tenant:runtime", std::move(*test.root_hold), *test.successor_version,
+                ProgramInvocation{
+                    json{{"handoff", state}, {"previous_run_id", test.root->run_id()}},
+                    test.root->snapshot().remaining_budget(),
+                    "static-family:replacement",
+                          {}});
+            if (checkpoint_crash || effect_crash) {
+                test.hold_checkpoints.store(false);
+                test.grand_hold.reset();
+            }
+            (void)successor->wait();
+            std::_Exit(78);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_STATIC_CHILD_DB");
+    std::ifstream saved_file(database + ".static-family");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+    StaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), recover, false, replace,
+                                          effect_crash);
+    const auto                 child_id = saved.at("child").get<std::string>();
+    if (fault == "missing_run" || fault == "disappearing_run") {
+        auto hidden = std::make_shared<std::atomic<bool>>(fault == "missing_run");
+        recovered.journal->filter_run_read = [child_id, hidden](auto id, auto record) {
+            return id == child_id && hidden->load() ? std::nullopt : record;
+        };
+        if (fault == "disappearing_run") {
+            auto resolutions           = std::make_shared<unsigned>(0);
+            recovered.binding_observer = [hidden, resolutions] {
+                // The second binding read is command preflight, after the
+                // existing-child recovery decision but before dispatch.
+                if (++*resolutions == 2) hidden->store(true);
+            };
+        }
+    } else if (fault == "changed_link") {
+        recovered.host.clear_child_bindings();
+    } else if (fault == "changed_receipt") {
+        auto binding = recovered.host.child_bindings->resolve(
+            "tenant:runtime", recovered.root_version->id(), "child");
+        const auto& old  = binding->receipt;
+        binding->receipt = ModuleLinkReceipt::create(ModuleLinkReceiptData{
+            old.owner_scope(), digest('9'), old.dependency_merkle_root(), old.child_name(),
+            old.child_program_version_id(), old.child_bundle_id(),
+            old.child_input_contract_fingerprint(), old.child_output_contract_fingerprint(),
+            old.granted_capabilities(), old.granted_effects(), old.budget(),
+            old.minimum_execution_guarantee()});
+        recovered.host.bind_child(*recovered.root_version, "child", std::move(*binding));
+    } else if (fault == "changed_input") {
+        recovered.journal->filter_run_read = [child_id](auto id, auto record) {
+            if (id != child_id || !record) return record;
+            ProgramRunRecordData d;
+            d.owner_scope         = record->owner_scope();
+            d.run_id              = record->run_id();
+            d.logical_run_id      = record->logical_run_id();
+            d.program_version_id  = record->program_version_id();
+            d.bundle_id           = record->bundle_id();
+            d.binding_fingerprint = record->binding_fingerprint();
+            d.invocation          = record->invocation();
+            d.invocation.input    = json{{"marker", "changed"}};
+            d.child_depth         = record->child_depth();
+            d.continuation        = record->continuation();
+            d.remaining_budget    = record->remaining_budget();
+            d.children            = record->children();
+            d.journal_head        = record->journal_head();
+            d.event_sequence      = record->event_sequence();
+            d.effect_sequence     = record->effect_sequence();
+            d.created_at_ms       = record->created_at_ms();
+            d.updated_at_ms       = record->updated_at_ms();
+            return std::optional<ProgramRunRecord>(ProgramRunRecord::create(std::move(d)));
+        };
+    }
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    const auto result = recovered.root->wait();
+    if (effect_crash) {
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Interrupted) << result.serialize_canonical();
+        const auto child = recovered.journal->load("tenant:runtime", child_id);
+        const auto grand = recovered.journal->load("tenant:runtime",
+                                                   saved.at("grandchild").get<std::string>());
+        ASSERT_TRUE(child);
+        ASSERT_TRUE(grand);
+        EXPECT_EQ(child->continuation().state, ContinuationState::Interrupted);
+        EXPECT_EQ(grand->continuation().state, ContinuationState::Interrupted);
+        ASSERT_EQ(child->children().size(), 1U);
+        EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
+        ASSERT_EQ(recovered.root->snapshot().children().size(), 1U);
+        EXPECT_EQ(recovered.root->snapshot().children().front().state, ProgramChildState::Dispatched);
+        EXPECT_EQ(recovered.journal->load_javascript_commands("tenant:runtime", grand->run_id(), 0)
+                      .size(), 23U);
+        const auto events = recovered.journal->load_events("tenant:runtime", grand->run_id(), 0);
+        EXPECT_TRUE(std::none_of(events.begin(), events.end(), [](const auto& event) {
+            return event.kind == ProgramEventKind::Emit;
+        }));
+        std::filesystem::remove(database + ".static-family");
+        return;
+    }
+    if (!recover || (!fault.empty() && !checkpoint_crash)) {
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Interrupted)
+            << result.serialize_canonical();
+        ASSERT_TRUE(result.interrupt());
+        EXPECT_TRUE(result.interrupt()->pending_effect);
+        const auto storage = backend();
+        ASSERT_TRUE(storage->load("tenant:runtime", child_id));
+        EXPECT_EQ(storage->load("tenant:runtime", child_id)->id(),
+                  saved.at("child_record_id").get<std::string>());
+        EXPECT_EQ(storage
+                      ->load_javascript_commands("tenant:runtime",
+                                                 saved.at("grandchild").get<std::string>())
+                      .size(),
+                  2U);
+        EXPECT_EQ(recovered.root->snapshot().children().size(), 1U);
+        std::filesystem::remove(database + ".static-family");
+        return;
+    }
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(), (json{{"answer", 42}}));
+    EXPECT_EQ(result.remaining_budget().max_dynamic_compiles,
+              saved.at("dynamic_compiles").get<std::uint64_t>());
+    EXPECT_EQ(recovered.root->run_id(), saved.at("active").get<std::string>());
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 1U);
+    EXPECT_EQ(active.children().front().child_run_id, saved.at("child").get<std::string>());
+    EXPECT_EQ(json::parse(active.children().front().link_receipt), saved.at("child_record"));
+    EXPECT_EQ(active.remaining_budget().model_tokens, saved.at("root_budget").get<std::uint64_t>());
+    const auto child =
+        recovered.journal->load("tenant:runtime", saved.at("child").get<std::string>());
+    ASSERT_TRUE(child);
+    ASSERT_EQ(child->children().size(), 1U);
+    EXPECT_EQ(child->children().front().child_run_id, saved.at("grandchild").get<std::string>());
+    EXPECT_EQ(recovered.journal
+                  ->load_javascript_commands("tenant:runtime",
+                                             saved.at("grandchild").get<std::string>(), 0)
+                  .size(),
+              64U);
+    std::filesystem::remove(database + ".static-family");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildCommandsRecoverAfterProcessLoss) {
+    check_static_child_recovery(false);
+}
+TEST_P(ProgramChildSynthesisPersistence, InheritedStaticChildCommandsRecoverAfterReplacement) {
+    check_static_child_recovery(true);
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryRequiresHostOptIn) {
+    EXPECT_FALSE(RuntimeConfig{}.recover_existing_child_commands);
+    check_static_child_recovery(false, false);
+}
+TEST_P(ProgramChildSynthesisPersistence, InheritedStaticChildRecoveryRequiresHostOptIn) {
+    check_static_child_recovery(true, false);
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryRejectsMissingRun) {
+    check_static_child_recovery(false, true, "missing_run");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryRejectsChangedInput) {
+    check_static_child_recovery(false, true, "changed_input");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryRejectsMissingBinding) {
+    check_static_child_recovery(false, true, "changed_link");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryRejectsChangedReceipt) {
+    check_static_child_recovery(false, true, "changed_receipt");
+}
+TEST_P(ProgramChildSynthesisPersistence, InheritedStaticChildRecoveryRejectsMissingRun) {
+    check_static_child_recovery(true, true, "missing_run");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryCannotCreateAfterRunDisappears) {
+    check_static_child_recovery(false, true, "disappearing_run");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryCompletesPendingCheckpoint) {
+    check_static_child_recovery(true, true, "pending_checkpoint");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryPreservesUnknownDescendantEffect) {
+    check_static_child_recovery(true, true, "unknown_effect");
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, CommandResultRetriesAnOptimisticSnapshotMiss) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>(backend());
+    journal->release_result();
+    journal->after_publication = [weak = std::weak_ptr(journal)](const auto& publication) {
+        if (!publication.commands.empty() && !publication.commands.back().completed())
+            if (const auto store = weak.lock()) store->command_head_misses.store(1);
+    };
+    AdmittedRuntime host(2, checkpoint_backend(), journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = host.admit_javascript(javascript_runtime_source("runtime-completed",
+        "return yield ng.checkpoint({done:true},'snapshot:checkpoint');"));
+    const auto result = host.runtime->run("tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "snapshot-miss", {}});
+    journal->after_publication = {};
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(), (json{{"done", true}}));
+    EXPECT_EQ(journal->load_javascript_commands("tenant:runtime", result.run_id(), 0).size(), 2U);
+}
+
+TEST_P(ProgramChildSynthesisPersistence, FailedResultPublicationPersistsAmbiguousEffect) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>(backend());
+    journal->release_result();
+    std::atomic<bool> failed{false};
+    journal->before_publication = [&](const auto& publication) {
+        if (!publication.commands.empty() && publication.commands.back().completed() &&
+            !failed.exchange(true))
+            throw std::runtime_error("injected command result publication failure");
+    };
+    AdmittedRuntime host(2, checkpoint_backend(), journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = host.admit_javascript(javascript_runtime_source("runtime-completed",
+        "yield ng.emit({effect:'once'},'ambiguous:emit');return {};"));
+    const auto result = host.runtime->run("tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "ambiguous-publication", {}});
+    journal->before_publication = {};
+    EXPECT_TRUE(failed.load());
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::AmbiguousEffect) << result.serialize_canonical();
+    ASSERT_TRUE(result.interrupt());
+    ASSERT_TRUE(result.interrupt()->pending_effect);
+    EXPECT_EQ(result.interrupt()->pending_effect->state(), ProgramPendingState::Ambiguous);
+    const auto stored = journal->load("tenant:runtime", result.run_id());
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->continuation().state, ContinuationState::AmbiguousEffect);
+    EXPECT_EQ(journal->load_effects("tenant:runtime", result.run_id(), 0).size(), 1U);
+    EXPECT_EQ(journal->load_javascript_commands("tenant:runtime", result.run_id(), 0).size(), 1U);
+    auto recovered = host.runtime->reconnect("tenant:runtime", result.run_id());
+    EXPECT_FALSE(recovered.cancel());
+    EXPECT_EQ(recovered.wait().id(), result.id());
+}
+
+TEST_P(ProgramChildSynthesisPersistence, AmbiguousDescendantDoesNotStrandFamilyCompletion) {
+    StaticChildRecoveryFixture test(backend(), checkpoint_backend(), true, false, false, true);
+    std::atomic<bool> failed{false};
+    test.journal->before_publication = [&](const auto& publication) {
+        if (publication.run_record.program_version_id() == test.grand_version->id() &&
+            !publication.commands.empty() && publication.commands.back().completed() &&
+            publication.commands.back().command().kind() == JavaScriptCommandKind::Emit &&
+            !failed.exchange(true))
+            throw std::runtime_error("injected descendant result publication failure");
+    };
+    test.root = test.host.runtime->start("tenant:runtime", *test.root_version,
+        ProgramInvocation{json::object(), test.root_budget, "ambiguous-family", {}});
+    const auto result = test.root->wait();
+    test.journal->before_publication = {};
+    EXPECT_TRUE(failed.load());
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::AmbiguousEffect) << result.serialize_canonical();
+    const auto root = test.root->snapshot();
+    ASSERT_EQ(root.children().size(), 1U);
+    EXPECT_EQ(root.children().front().state, ProgramChildState::Dispatched);
+    const auto child = test.journal->load("tenant:runtime", root.children().front().child_run_id);
+    ASSERT_TRUE(child);
+    ASSERT_EQ(child->children().size(), 1U);
+    EXPECT_EQ(child->continuation().state, ContinuationState::AmbiguousEffect);
+    EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
+    const auto grand = test.journal->load("tenant:runtime", child->children().front().child_run_id);
+    ASSERT_TRUE(grand);
+    EXPECT_EQ(grand->continuation().state, ContinuationState::AmbiguousEffect);
+    EXPECT_FALSE(test.root->cancel());
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)

@@ -151,6 +151,10 @@ struct ProgramChildQuotaConfig {
       /// Retaining the lease pauses this generation. Destroying it releases the generator.
       /// Explicit next_handoff requests take precedence. Programs cannot install this handler.
       std::function<void(ProgramHandle, ProgramHandoff)> checkpoint_handler;
+      /// Opt in to reconnecting exact, already-published child runs when a
+      /// recorded spawn/await command is unfinished after process loss. This
+      /// never authorizes a new child or replay of an unknown external effect.
+      bool recover_existing_child_commands = false;
   };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:

@@ -66,7 +66,10 @@ bool valid_effect_outbox_binding(const ProgramRunRecord& run,
     // the run interrupted; a caller cannot smuggle a second effect through a
     // transition publication.
     const auto pending = run.pending_effect();
-    if (!pending || pending->state() != ProgramPendingState::Awaiting || effects.size() != 1 ||
+    if (!pending ||
+        (pending->state() != ProgramPendingState::Awaiting &&
+         !(pending->state() == ProgramPendingState::Ambiguous &&
+           run.continuation().state == ContinuationState::AmbiguousEffect)) || effects.size() != 1 ||
         effects.front().effect() != *pending) {
         return false;
     }

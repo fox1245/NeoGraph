@@ -502,7 +502,10 @@ bool valid_effect_outbox_binding(const ProgramRunRecord& run,
                                  const std::vector<ProgramEffectOutboxEntry>& effects) {
     if (effects.empty()) return true;
     const auto pending = run.pending_effect();
-    return pending && pending->state() == ProgramPendingState::Awaiting && effects.size() == 1 &&
+    return pending && (pending->state() == ProgramPendingState::Awaiting ||
+                       (pending->state() == ProgramPendingState::Ambiguous &&
+                        run.continuation().state == ContinuationState::AmbiguousEffect)) &&
+           effects.size() == 1 &&
            effects.front().effect() == *pending;
 }
 

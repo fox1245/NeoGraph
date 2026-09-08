@@ -458,8 +458,13 @@ ProgramPendingEffect pending_effect() {
 }
 
 ProgramTransitionPublication publication_with_effect(
-    const Fixture& fixture, const ProgramTransitionPublication& initial) {
+    const Fixture& fixture, const ProgramTransitionPublication& initial, bool ambiguous = false) {
     auto pending = pending_effect();
+    if (ambiguous) pending = pending.mark_outcome_unknown(10).value;
+    const auto status = ambiguous ? ProgramTerminalStatus::AmbiguousEffect
+                                  : ProgramTerminalStatus::Interrupted;
+    const auto state = ambiguous ? ContinuationState::AmbiguousEffect
+                                 : ContinuationState::Interrupted;
     const CoreCheckpointIdentity checkpoint{
         "main", digest('5'),
         program_root_core_thread_id(initial.run_record.run_id(), digest('5')),
@@ -469,14 +474,14 @@ ProgramTransitionPublication publication_with_effect(
                                                  fixture.version_value.id(),
                                                  fixture.bundle_value.id(),
                                                  2,
-                                                 {"root", ContinuationState::Interrupted, 1},
+                                                 {"root", state, 1},
                                                  budget(),
                                                  {},
                                                  checkpoint,
                                                  10});
 
     ProgramResultData result_data;
-    result_data.status             = ProgramTerminalStatus::Interrupted;
+    result_data.status             = status;
     result_data.run_id             = initial.run_record.run_id();
     result_data.program_version_id = fixture.version_value.id();
     result_data.bundle_id          = fixture.bundle_value.id();
@@ -510,7 +515,7 @@ ProgramTransitionPublication publication_with_effect(
     publication.journal_record = std::move(journal);
     publication.events = {event(fixture, initial.run_record.run_id(), 2,
                                  ProgramEventKind::Terminal,
-                                 ProgramTerminalEvent{ProgramTerminalStatus::Interrupted}, 10)};
+                                 ProgramTerminalEvent{status}, 10)};
     publication.effects.emplace_back(1, std::move(pending));
     return publication;
 }
@@ -1259,6 +1264,28 @@ TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPubli
         fixture.artifact.owner_scope(), initial.run_record.run_id()));
 }
 
+
+TEST(HarnessProgramStoreTest, SqlitePublishesAnInitiallyAmbiguousEffect) {
+    TempDb db;
+    Fixture fixture;
+    auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto transitions = persist_and_bind(store, fixture);
+    const auto initial = initial_publication(fixture);
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+              ProgramTransitionPublishResult::Published);
+    const auto ambiguous = publication_with_effect(fixture, initial, true);
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(),
+                                           initial.journal_record.id, ambiguous),
+              ProgramTransitionPublishResult::Published);
+    const auto run = transitions->load(fixture.artifact.owner_scope(), "run-one");
+    ASSERT_TRUE(run);
+    EXPECT_EQ(run->continuation().state, ContinuationState::AmbiguousEffect);
+    ASSERT_TRUE(run->pending_effect());
+    EXPECT_EQ(run->pending_effect()->state(), ProgramPendingState::Ambiguous);
+    const auto effects = transitions->load_effects(fixture.artifact.owner_scope(), "run-one");
+    ASSERT_EQ(effects.size(), 1U);
+    EXPECT_EQ(effects.front().effect().state(), ProgramPendingState::Ambiguous);
+}
 
 TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublication) {
     TempDb db;

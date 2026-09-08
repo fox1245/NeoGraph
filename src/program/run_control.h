@@ -59,7 +59,11 @@ using ChildLaunchCallback =
                                               std::string_view,
                                               std::optional<TaskGraphBudget>)>;
 using ChildBindingValidationCallback = std::function<void(std::string_view, std::string_view)>;
-using ChildRecoveryCallback = std::function<bool(std::string_view, const json&, std::string_view)>;
+enum class ChildRecoveryMode { None, Synthesis, Existing };
+using ChildRecoveryCallback =
+    std::function<ChildRecoveryMode(std::string_view, const json&, std::string_view)>;
+using ExistingChildReconnectCallback =
+    std::function<std::shared_ptr<RunControl>(std::string_view, const json&, std::string_view)>;
 
 struct AsyncWaiter {
     std::weak_ptr<asio::steady_timer> timer;
@@ -121,7 +125,11 @@ public:
         std::string_view expansion_operation_id) const;
     void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
     void set_child_recovery_callback(ChildRecoveryCallback callback) noexcept;
-    bool can_recover_child(std::string_view binding,
+    void set_existing_child_reconnect_callback(ExistingChildReconnectCallback callback) noexcept;
+    std::shared_ptr<RunControl> reconnect_existing_child(std::string_view binding,
+                                                        const json& input,
+                                                        std::string_view operation) const;
+    ChildRecoveryMode can_recover_child(std::string_view binding,
                            const json&      input,
                            std::string_view operation) const;
     void set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept;
@@ -261,6 +269,7 @@ private:
     bool                                          follow_successor_ = false;
     ChildLaunchCallback                     child_launch_callback_;
     ChildRecoveryCallback                         child_recovery_callback_;
+    ExistingChildReconnectCallback                existing_child_reconnect_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;
     std::shared_ptr<HookRuntime>               hook_runtime_;
     std::atomic<bool>                          hook_runtime_enabled_{false};

@@ -1427,6 +1427,10 @@ bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& tra
             const auto current = load_active_agent_run(transitions, owner_scope, parent_run_id);
             if (!current || current->continuation().state != ContinuationState::Running)
                 return false;
+            // A rejection against an unchanged head is a validation/storage
+            // failure, not competing publication. Do not strand completion
+            // waiters in an infinite retry loop for a permanent rejection.
+            if (current->journal_head() == record->journal_head()) return false;
             std::this_thread::yield();
         }
     } catch (...) {
@@ -1663,7 +1667,10 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             data.binding_fingerprint = previous->binding_fingerprint();
             data.invocation          = previous->invocation();
             data.child_depth         = previous->child_depth();
-            data.children            = terminal_children(previous->children());
+            const bool resumable = result.status() == ProgramTerminalStatus::Interrupted ||
+                                   result.status() == ProgramTerminalStatus::AmbiguousEffect;
+            data.children            = resumable ? previous->children()
+                                                : terminal_children(previous->children());
             data.continuation        = journal.continuation;
             data.remaining_budget    = result.remaining_budget();
             data.exact_checkpoint    = result.checkpoint();
@@ -1939,7 +1946,7 @@ void RunControl::set_child_recovery_callback(ChildRecoveryCallback callback) noe
     std::lock_guard lock(mutex_);
     child_recovery_callback_ = std::move(callback);
 }
-bool RunControl::can_recover_child(std::string_view binding,
+ChildRecoveryMode RunControl::can_recover_child(std::string_view binding,
                                    const json&      input,
                                    std::string_view operation) const {
     ChildRecoveryCallback callback;
@@ -1947,7 +1954,23 @@ bool RunControl::can_recover_child(std::string_view binding,
         std::lock_guard lock(mutex_);
         callback = child_recovery_callback_;
     }
-    return callback && callback(binding, input, operation);
+    return callback ? callback(binding, input, operation) : ChildRecoveryMode::None;
+}
+void RunControl::set_existing_child_reconnect_callback(
+    ExistingChildReconnectCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    existing_child_reconnect_callback_ = std::move(callback);
+}
+std::shared_ptr<RunControl> RunControl::reconnect_existing_child(
+    std::string_view binding, const json& input, std::string_view operation) const {
+    ExistingChildReconnectCallback callback;
+    {
+        std::lock_guard lock(mutex_);
+        callback = existing_child_reconnect_callback_;
+    }
+    if (!callback)
+        throw_runtime_diagnostic("P_CHILD_RECOVERY", "Existing child reconnect is not configured");
+    return callback(binding, input, operation);
 }
 void RunControl::set_child_binding_validation_callback(
     ChildBindingValidationCallback callback) noexcept {
@@ -2497,8 +2520,12 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             return;
         }
         const auto current_cause = cancellation_cause();
-        cancel_children(current_cause == CancellationCause::None ? CancellationCause::ParentTerminal
-                                                                 : current_cause);
+        const bool retained_children = current_cause == CancellationCause::None &&
+            (outcome.status == ProgramTerminalStatus::Interrupted ||
+             outcome.status == ProgramTerminalStatus::AmbiguousEffect);
+        if (!retained_children)
+            cancel_children(current_cause == CancellationCause::None
+                                ? CancellationCause::ParentTerminal : current_cause);
         ensure_terminal_checkpoint(*this, outcome);
 
         std::vector<ProgramEvent> terminal_events;
@@ -2556,6 +2583,9 @@ void RunControl::complete(RunOutcome outcome) noexcept {
                                     terminal_events.back(), outcome.status, false);
             } catch (...) {}
         }
+        if (retained_children && outcome.status != ProgramTerminalStatus::Interrupted &&
+            outcome.status != ProgramTerminalStatus::AmbiguousEffect)
+            cancel_children(CancellationCause::ParentTerminal);
         auto       result       = make_result(outcome);
         const auto publication  = publish_terminal_record(*this, result);
         const bool is_published = publication == TerminalPublicationResult::Published;
@@ -3569,6 +3599,10 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
 
     for (int retry = 0; retry < 3; ++retry) {
         const auto head = transitions->load_command_publication_head(owner_scope, run_id);
+        // The default store implementation reads optimistically. A child join
+        // can advance its head between reads; retry that miss before treating
+        // a command-result publication as an unresolved external outcome.
+        if (!head) continue;
         const auto* previous = head ? &head->run_record : nullptr;
         const auto* previous_journal = head ? &head->journal_record : nullptr;
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
@@ -4050,27 +4084,127 @@ struct ProgramRuntime::Impl {
                    : std::nullopt;
     }
 
+    std::optional<ProgramChildRecord> recoverable_existing_child(
+        const std::shared_ptr<detail::RunControl>& parent, std::string_view binding,
+        const json& input, std::string_view operation) const {
+        const auto run = parent->snapshot();
+        if (run.owner_scope() != parent->owner_scope ||
+            run.logical_run_id() != parent->logical_run_id ||
+            run.continuation().state != ContinuationState::Running ||
+            parent->cancellation_cause() != detail::CancellationCause::None)
+            return std::nullopt;
+        const auto resolved = resolve_child_binding(parent, binding);
+        if (!resolved) return std::nullopt;
+        const auto& link = resolved->receipt;
+        if (link.owner_scope() != parent->owner_scope || link.child_name() != binding ||
+            link.child_program_version_id() != resolved->version.id())
+            return std::nullopt;
+
+        auto child = inherited_child(parent, binding);
+        if (child) {
+            const auto inherited = std::find_if(
+                parent->inherited_children.begin(), parent->inherited_children.end(),
+                [&](const auto& admitted) { return same_child_metadata(admitted, *child); });
+            if (inherited == parent->inherited_children.end()) return std::nullopt;
+        } else {
+            const auto expected_id = detail::sha256_identity(
+                "program-dsl-child/v1",
+                detail::canonical_json_bytes(
+                    json{{"owner_scope", parent->owner_scope},
+                         {"parent_run_id", parent->run_id},
+                         {"parent_program_version_id", parent->program_version_id},
+                         {"link_id", link.id()},
+                         {"operation_id", std::string(operation)},
+                         {"execution_key", std::string(operation)}}));
+            child = find_child(run, expected_id);
+        }
+        if (!child || child->link_id != link.id() ||
+            child->link_receipt != link.serialize_canonical() ||
+            child->invocation.parent_run_id != parent->logical_run_id ||
+            child->invocation.child_depth != parent->persisted_invocation.child_depth + 1 ||
+            detail::canonical_json_bytes(child->invocation.input) !=
+                detail::canonical_json_bytes(input))
+            return std::nullopt;
+        const auto persisted = config.transitions->load(parent->owner_scope, child->child_run_id);
+        if (!persisted || persisted->owner_scope() != parent->owner_scope ||
+            persisted->run_id() != child->child_run_id ||
+            persisted->program_version_id() != resolved->version.id() ||
+            persisted->bundle_id() != resolved->version.bundle_id() ||
+            persisted->child_depth() != child->invocation.child_depth)
+            return std::nullopt;
+        ProgramInvocation invocation{
+            child->invocation.input, child->invocation.granted_budget,
+            child->invocation.trace_id, {}, child->child_run_id,
+            child->invocation.parent_run_id, child->invocation.child_depth};
+        if (persisted->invocation() != bind_runtime_invocation(
+                invocation, parent->owner_scope, resolved->version.id(), child->child_run_id))
+            return std::nullopt;
+        return child;
+    }
+
     void configure_child_launcher(const std::shared_ptr<detail::RunControl>& control) {
         if (!owner) return;
-        if (!config.child_binding_resolver && !config.child_synthesis_gateway) {
+        if (!config.child_binding_resolver && !config.child_synthesis_gateway &&
+            !config.recover_existing_child_commands) {
             if (config.task_graph_fragments && config.task_graph_policy_resolver)
                 control->set_task_graph_expansion_context(config.task_graph_fragments,
                                                           config.task_graph_policy_resolver);
             return;
         }
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
-        if (config.child_synthesis_gateway) {
+        if (config.recover_existing_child_commands) {
+            control->set_existing_child_reconnect_callback(
+                [this, weak_control](std::string_view binding, const json& input,
+                                     std::string_view operation) {
+                    const auto parent = weak_control.lock();
+                    const auto child = parent
+                                           ? recoverable_existing_child(parent, binding, input,
+                                                                         operation)
+                                           : std::nullopt;
+                    if (!child)
+                        throw_runtime_diagnostic("P_CHILD_RECOVERY",
+                                                 "Existing child recovery binding changed");
+                    // Reconnect cannot create a missing run. Do not fall through
+                    // to start_child if publication disappears after validation.
+                    auto reconnected = [&] {
+                        try {
+                            return owner->reconnect(parent->owner_scope, child->child_run_id);
+                        } catch (const ProgramDiagnosticError& error) {
+                            if (error.diagnostic().code == "P_RUN_NOT_FOUND")
+                                throw_runtime_diagnostic("P_CHILD_RECOVERY",
+                                                         "Existing child run disappeared");
+                            throw;
+                        }
+                    }();
+                    bind_budgeted_child_completion(reconnected.control_, parent->owner_scope,
+                                                     parent->logical_run_id, child->child_run_id);
+                    parent->attach_child(reconnected.control_);
+                    if (const auto result = reconnected.try_result())
+                        publish_child_completion(config.transitions, parent->owner_scope,
+                                                 parent->logical_run_id, child->child_run_id, *result);
+                    return reconnected.control_;
+                });
+        }
+        if (config.child_synthesis_gateway || config.recover_existing_child_commands) {
             control->set_child_recovery_callback([this, weak_control](std::string_view binding,
                                                                       const json&      input,
                                                                       std::string_view operation) {
                 const auto parent = weak_control.lock();
-                if (!parent) return false;
+                using Mode = detail::ChildRecoveryMode;
+                if (!parent) return Mode::None;
+                if (config.recover_existing_child_commands &&
+                    recoverable_existing_child(parent, binding, input, operation))
+                    return Mode::Existing;
+                if (!config.child_synthesis_gateway) return Mode::None;
                 if (const auto child = inherited_child(parent, binding))
-                    return detail::canonical_json_bytes(child->invocation.input) ==
-                           detail::canonical_json_bytes(input);
+                    return !config.recover_existing_child_commands &&
+                                   detail::canonical_json_bytes(child->invocation.input) ==
+                                       detail::canonical_json_bytes(input)
+                               ? Mode::Synthesis : Mode::None;
                 const auto synthesis = synthesis_binding(parent, binding);
-                if (!synthesis) return false;
-                if (synthesis->data().state == ProgramChildSynthesisState::Bound) return true;
+                if (!synthesis) return Mode::None;
+                if (synthesis->data().state == ProgramChildSynthesisState::Bound)
+                    return Mode::Synthesis;
                 const auto& artifacts = synthesis->data().artifacts;
                 const auto  link =
                     ModuleLinkReceipt::parse(detail::canonical_json_bytes(artifacts.at("link")));
@@ -4084,8 +4218,9 @@ struct ProgramRuntime::Impl {
                              {"operation_id", std::string(operation)},
                              {"execution_key", std::string(operation)}}));
                 return artifacts.at("child_run_id") == expected_id &&
-                       detail::canonical_json_bytes(artifacts.at("child_input")) ==
-                           detail::canonical_json_bytes(input);
+                               detail::canonical_json_bytes(artifacts.at("child_input")) ==
+                                   detail::canonical_json_bytes(input)
+                           ? Mode::Synthesis : Mode::None;
             });
         }
 
