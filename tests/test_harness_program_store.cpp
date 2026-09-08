@@ -11,7 +11,9 @@
 #include <atomic>
 #include <barrier>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <stdexcept>
@@ -71,6 +73,54 @@ void sqlite_exec(const std::filesystem::path& path, const char* sql) {
     }
     sqlite3_close(db);
 }
+
+// Capture only a newly opened test connection, without exposing database handles
+// through the production store API. Other auto-extensions remain registered.
+struct SqliteConnectionCapture {
+    SqliteConnectionCapture() {
+        connection = nullptr;
+        if (sqlite3_auto_extension(reinterpret_cast<void (*)()>(capture)) != SQLITE_OK) {
+            throw std::runtime_error("Could not register SQLite connection capture");
+        }
+    }
+    ~SqliteConnectionCapture() {
+        sqlite3_cancel_auto_extension(reinterpret_cast<void (*)()>(capture));
+    }
+    static int capture(sqlite3* db, char**, const sqlite3_api_routines*) {
+        connection = db;
+        return SQLITE_OK;
+    }
+    static inline thread_local sqlite3* connection = nullptr;
+};
+
+struct PublishAfterRunRead {
+    explicit PublishAfterRunRead(sqlite3* connection, std::function<void()> publish)
+        : db(connection), publish(std::move(publish)) {
+        sqlite3_trace_v2(db, SQLITE_TRACE_ROW, trace, this);
+    }
+    ~PublishAfterRunRead() { sqlite3_trace_v2(db, 0, nullptr, nullptr); }
+
+    static int trace(unsigned, void* context, void* statement, void*) noexcept {
+        auto& self = *static_cast<PublishAfterRunRead*>(context);
+        const std::string_view sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+        if (self.fired || sql.find("SELECT record_json, artifact_id") == sql.npos ||
+            sql.find("FROM neograph_harness_runs") == sql.npos) {
+            return 0;
+        }
+        self.fired = true;
+        try {
+            self.publish();
+        } catch (...) {
+            self.error = std::current_exception();
+        }
+        return 0;
+    }
+
+    sqlite3* db;
+    std::function<void()> publish;
+    bool fired = false;
+    std::exception_ptr error;
+};
 
 RegistrySnapshot registry() {
     RegistrySnapshotBuilder builder;
@@ -1259,6 +1309,65 @@ TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPubli
         fixture.artifact.owner_scope(), initial.run_record.run_id()));
 }
 
+
+TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublication) {
+    TempDb db;
+    Fixture fixture;
+    auto writer_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto writer = persist_and_bind(writer_store, fixture);
+    const auto initial = initial_publication(fixture);
+    ASSERT_EQ(writer->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+              ProgramTransitionPublishResult::Published);
+    const auto completed = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                ContinuationState::Completed, 20);
+
+    std::shared_ptr<SqliteHarnessRecordStore> reader_store;
+    sqlite3* reader_connection = nullptr;
+    {
+        SqliteConnectionCapture capture;
+        reader_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        reader_connection = capture.connection;
+    }
+    ASSERT_NE(reader_connection, nullptr);
+    auto reader = reader_store->bind_program_transitions(fixture.artifact);
+    {
+        // Commit through another WAL connection while latest() holds a run row.
+        // The reader must finish on that snapshot, then see the new head on its
+        // next call. No sleeps or scheduler luck are needed to hit the race.
+        PublishAfterRunRead interleave(reader_connection, [&] {
+            EXPECT_EQ(writer->compare_publish(fixture.artifact.owner_scope(),
+                                              initial.journal_record.id, completed),
+                      ProgramTransitionPublishResult::Published);
+        });
+        const auto journal = reader->latest(fixture.artifact.owner_scope(), "run-one");
+        if (interleave.error) std::rethrow_exception(interleave.error);
+        ASSERT_TRUE(interleave.fired);
+        ASSERT_TRUE(journal);
+        EXPECT_EQ(journal->id, initial.journal_record.id);
+    }
+    const auto journal = reader->latest(fixture.artifact.owner_scope(), "run-one");
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->id, completed.journal_record.id);
+}
+
+TEST(HarnessProgramStoreTest, SqliteLatestRejectsMissingOrMisboundJournal) {
+    for (const auto* mutation : {
+             "DELETE FROM neograph_harness_program_journal",
+             "UPDATE neograph_harness_program_journal SET owner_scope='different-owner'"}) {
+        TempDb db;
+        Fixture fixture;
+        auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        const auto initial = initial_publication(fixture);
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_FALSE(transitions->latest("different-owner", "run-one"));
+        EXPECT_FALSE(transitions->latest(fixture.artifact.owner_scope(), "missing-run"));
+        sqlite_exec(db.path, mutation);
+        EXPECT_THROW((void)transitions->latest(fixture.artifact.owner_scope(), "run-one"),
+                     std::invalid_argument);
+    }
+}
 
 TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInvalidBatch) {
     TempDb  db;

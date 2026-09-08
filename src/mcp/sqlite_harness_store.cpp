@@ -1046,14 +1046,12 @@ public:
     std::optional<program::ProgramJournalRecord> latest(std::string_view owner_scope,
                                                         std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
-        const auto wrapper = load_wrapper(owner_scope, run_id);
-        if (!wrapper) return std::nullopt;
         std::lock_guard lock(impl_->mutex);
         Statement       query(impl_->db,
                               "SELECT j.record_json, r.bundle_id, r.program_version_id, "
                                     "j.owner_scope, j.bundle_id, j.program_version_id "
-                                    "FROM neograph_harness_program_journal j "
-                                    "JOIN neograph_harness_runs r ON r.run_id=j.run_id "
+                                    "FROM neograph_harness_runs r "
+                                    "LEFT JOIN neograph_harness_program_journal j ON r.run_id=j.run_id "
                                     "WHERE r.owner_scope=? AND r.run_id=? AND r.program_run_id<>'' "
                                     "ORDER BY j.sequence DESC LIMIT 1");
         query.bind_text(1, std::string(owner_scope));
@@ -1061,6 +1059,12 @@ public:
         const auto result = query.step();
         if (result == SQLITE_DONE) return std::nullopt;
         if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program journal read failed");
+        // Keep this stepped SELECT alive while validating the wrapper. Its read
+        // snapshot includes both records even if another WAL connection commits
+        // a newer head. The LEFT JOIN also retains runs with a missing journal
+        // so the ordinary publication validation still rejects corruption.
+        const auto wrapper = load_wrapper_locked(owner_scope, run_id);
+        if (!wrapper) throw std::invalid_argument("Stored Program journal run is missing");
         auto record = program::ProgramJournalRecord::parse(query.text(0));
         if (record.id != wrapper->run_record().journal_head() || record.run_id != run_id ||
             record.bundle_id != query.text(1) || record.program_version_id != query.text(2) ||
