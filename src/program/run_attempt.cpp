@@ -4024,6 +4024,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     prior_commands.rbegin(), prior_commands.rend(),
                     [&](const auto& entry) { return entry.command_ordinal() == ordinal; });
                 bool      exact_resume_authorized = false;
+                bool      checkpoint_resume_authorized = false;
                 RunBudget resource_reservation;
 
                 if (prior != prior_commands.rend()) {
@@ -4069,7 +4070,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
 
                     child_recovery_mode = can_resume_child();
-                    if (child_recovery_mode != ChildRecoveryMode::None) {
+                    if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
+                        if (auto failure =
+                                validate_javascript_command(command_value, operation_id, 0))
+                            co_return std::move(*failure);
+                        // A checkpoint only returns its journaled value and
+                        // stages internal events. No external dispatch needs
+                        // reconciliation when its result publication was lost.
+                        checkpoint_resume_authorized = true;
+                    } else if (child_recovery_mode != ChildRecoveryMode::None) {
                         if (auto failure =
                                 validate_javascript_command(command_value, operation_id, 0))
                             co_return std::move(*failure);
@@ -4107,7 +4116,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                     }
                 }
-                if (exact_resume_authorized || child_resume_authorized) {
+                if (exact_resume_authorized || child_resume_authorized ||
+                    checkpoint_resume_authorized) {
                     const auto durable_resumed =
                         control->transitions->latest(control->owner_scope, control->run_id);
                     if (!durable_resumed ||
@@ -4117,6 +4127,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             "Exact Core resume has no durable command resource reservation");
                     }
                     resource_reservation = durable_resumed->inflight_reservation;
+                    unreconciled_javascript_remaining = durable_resumed->remaining_budget;
                     active_javascript_command =
                         ActiveJavaScriptCommand{ordinal, command_value, effect_id};
                 }
@@ -4127,7 +4138,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     operations_before = operation_count;
                 }
                 std::size_t command_count = 0;
-                if (!exact_resume_authorized && !child_resume_authorized) {
+                if (!exact_resume_authorized && !child_resume_authorized &&
+                    !checkpoint_resume_authorized) {
                     try {
                         command_count = javascript_command_tree_size(command_value);
                     } catch (const ProgramDiagnosticError& error) {

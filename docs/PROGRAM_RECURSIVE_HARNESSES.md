@@ -106,6 +106,14 @@ The command reservation and descendant accounting survive recovery. The flag
 does not authorize replay of unknown provider, tool, native, or other external
 effects. The separately granted synthesis recovery protocol is unchanged.
 
+Independently of this flag, replay of a running attempt completes an unfinished
+sealed `ng.checkpoint` from its exact journaled value and original command
+reservation. It performs no external dispatch.
+Other unknown effects still pause the family for reconciliation: an
+interrupted child remains a dispatched, resumable relation, and its parent
+retains the in-flight command reservation instead of cancelling the relation
+or crediting that reservation twice.
+
 The `*StaticChild*` tests cover SQLite and PostgreSQL process exit, static and
 inherited recursive children, unchanged child identities and receipts, and a
 grandchild's 32 checkpoints producing exactly 64 journal entries. They also

@@ -1663,7 +1663,10 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             data.binding_fingerprint = previous->binding_fingerprint();
             data.invocation          = previous->invocation();
             data.child_depth         = previous->child_depth();
-            data.children            = terminal_children(previous->children());
+            const bool resumable = result.status() == ProgramTerminalStatus::Interrupted ||
+                                   result.status() == ProgramTerminalStatus::AmbiguousEffect;
+            data.children            = resumable ? previous->children()
+                                                : terminal_children(previous->children());
             data.continuation        = journal.continuation;
             data.remaining_budget    = result.remaining_budget();
             data.exact_checkpoint    = result.checkpoint();
@@ -2513,8 +2516,12 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             return;
         }
         const auto current_cause = cancellation_cause();
-        cancel_children(current_cause == CancellationCause::None ? CancellationCause::ParentTerminal
-                                                                 : current_cause);
+        const bool retained_children = current_cause == CancellationCause::None &&
+            (outcome.status == ProgramTerminalStatus::Interrupted ||
+             outcome.status == ProgramTerminalStatus::AmbiguousEffect);
+        if (!retained_children)
+            cancel_children(current_cause == CancellationCause::None
+                                ? CancellationCause::ParentTerminal : current_cause);
         ensure_terminal_checkpoint(*this, outcome);
 
         std::vector<ProgramEvent> terminal_events;
@@ -2572,6 +2579,9 @@ void RunControl::complete(RunOutcome outcome) noexcept {
                                     terminal_events.back(), outcome.status, false);
             } catch (...) {}
         }
+        if (retained_children && outcome.status != ProgramTerminalStatus::Interrupted &&
+            outcome.status != ProgramTerminalStatus::AmbiguousEffect)
+            cancel_children(CancellationCause::ParentTerminal);
         auto       result       = make_result(outcome);
         const auto publication  = publish_terminal_record(*this, result);
         const bool is_published = publication == TerminalPublicationResult::Published;

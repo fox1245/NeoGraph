@@ -10440,12 +10440,14 @@ struct StaticChildRecoveryFixture {
     RunBudget                     child_budget{45000, 500, 500, 2, 64, 50, 0, 2, 4};
     RunBudget                     grand_budget{30000, 100, 100, 1, 32, 20, 0, 0, 0};
     std::function<void()>         binding_observer;
+    std::atomic<bool>             hold_checkpoints{true};
 
     StaticChildRecoveryFixture(std::shared_ptr<ProgramTransitionStore> transitions,
                                std::shared_ptr<CheckpointStore>        checkpoints,
                                bool                                    recover,
                                bool                                    hold,
-                               bool                                    replace)
+                               bool                                    replace,
+                               bool                                    external_effect = false)
         : journal(std::make_shared<BlockAfterJavaScriptResultJournal>(std::move(transitions))),
           host(4, std::move(checkpoints), journal, {}, ExecutionGuarantee::Unmanaged, true) {
         journal->release_result();
@@ -10466,11 +10468,11 @@ struct StaticChildRecoveryFixture {
             return host.catalog->admit(
                 bundle, ProgramAdmission{"tenant:runtime", host.profile, host.policy, {}});
         };
-        grand_version =
-            admit(3,
-                  "for(let i=0;i<32;i++)yield ng.checkpoint({cursor:i},'auditor:checkpoint');"
-                  "return {answer:42};",
-                  grand_budget);
+        grand_version = admit(3, external_effect
+            ? "for(let i=0;i<11;i++)yield ng.checkpoint({cursor:i},'auditor:checkpoint');"
+              "yield ng.emit({unknown:true},'auditor:external');return {answer:42};"
+            : "for(let i=0;i<32;i++)yield ng.checkpoint({cursor:i},'auditor:checkpoint');"
+              "return {answer:42};", grand_budget);
         child_version = admit(2,
                               "return yield ng.await(ng.spawn('child',{marker:2},'child:spawn'),"
                               "40000,'child:await');",
@@ -10516,6 +10518,7 @@ struct StaticChildRecoveryFixture {
         config.recover_existing_child_commands = recover;
         if (hold)
             config.checkpoint_handler = [this](ProgramHandle handle, ProgramHandoff point) {
+                if (!hold_checkpoints.load()) return;
                 std::lock_guard lock(mutex);
                 if (handle.program_version_id() == grand_version->id())
                     grand_hold.emplace(std::move(point));
@@ -10549,12 +10552,15 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
                                                                    bool             recover,
                                                                    std::string_view fault) {
     if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    const bool checkpoint_crash = fault == "pending_checkpoint";
+    const bool effect_crash = fault == "unknown_effect";
     if (const auto* inherited = std::getenv("NEOGRAPH_STATIC_CHILD_DB")) database = inherited;
     setenv("NEOGRAPH_STATIC_CHILD_DB", database.c_str(), 1);
     ::testing::FLAGS_gtest_death_test_style = "threadsafe";
     ASSERT_EXIT(
         ([&] {
-            StaticChildRecoveryFixture test(backend(), checkpoint_backend(), true, true, replace);
+            StaticChildRecoveryFixture test(backend(), checkpoint_backend(), true, true, replace,
+                                            effect_crash);
             test.start(replace);
             const auto save = [&](const ProgramRunRecord& active) {
                 const auto    child      = active.children().front();
@@ -10577,20 +10583,32 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
                 std::_Exit(77);
             };
             if (!replace) save(test.root->snapshot());
+            std::optional<ProgramHandle> successor;
             test.journal->after_publication = [&](const auto& publication) {
+                if (checkpoint_crash || effect_crash) {
+                    if (publication.run_record.program_version_id() == test.grand_version->id() &&
+                        !publication.commands.empty() && !publication.commands.back().completed() &&
+                        publication.commands.back().command_ordinal() == 12)
+                        save(*test.journal->load("tenant:runtime", successor->run_id()));
+                    return;
+                }
                 if (publication.run_record.program_version_id() == test.successor_version->id() &&
                     !publication.commands.empty() && !publication.commands.back().completed())
                     save(publication.run_record);
             };
             const auto state     = test.root_hold->value();
-            auto       successor = test.host.runtime->replace(
+            successor = test.host.runtime->replace(
                 "tenant:runtime", std::move(*test.root_hold), *test.successor_version,
                 ProgramInvocation{
                     json{{"handoff", state}, {"previous_run_id", test.root->run_id()}},
                     test.root->snapshot().remaining_budget(),
                     "static-family:replacement",
                           {}});
-            (void)successor.wait();
+            if (checkpoint_crash || effect_crash) {
+                test.hold_checkpoints.store(false);
+                test.grand_hold.reset();
+            }
+            (void)successor->wait();
             std::_Exit(78);
         }()),
         ::testing::ExitedWithCode(77), "");
@@ -10598,7 +10616,8 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
     std::ifstream saved_file(database + ".static-family");
     const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
     saved_file.close();
-    StaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), recover, false, replace);
+    StaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), recover, false, replace,
+                                          effect_crash);
     const auto                 child_id = saved.at("child").get<std::string>();
     if (fault == "missing_run" || fault == "disappearing_run") {
         auto hidden = std::make_shared<std::atomic<bool>>(fault == "missing_run");
@@ -10653,7 +10672,29 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
     recovered.root =
         recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
     const auto result = recovered.root->wait();
-    if (!recover || !fault.empty()) {
+    if (effect_crash) {
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Interrupted) << result.serialize_canonical();
+        const auto child = recovered.journal->load("tenant:runtime", child_id);
+        const auto grand = recovered.journal->load("tenant:runtime",
+                                                   saved.at("grandchild").get<std::string>());
+        ASSERT_TRUE(child);
+        ASSERT_TRUE(grand);
+        EXPECT_EQ(child->continuation().state, ContinuationState::Interrupted);
+        EXPECT_EQ(grand->continuation().state, ContinuationState::Interrupted);
+        ASSERT_EQ(child->children().size(), 1U);
+        EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
+        ASSERT_EQ(recovered.root->snapshot().children().size(), 1U);
+        EXPECT_EQ(recovered.root->snapshot().children().front().state, ProgramChildState::Dispatched);
+        EXPECT_EQ(recovered.journal->load_javascript_commands("tenant:runtime", grand->run_id(), 0)
+                      .size(), 23U);
+        const auto events = recovered.journal->load_events("tenant:runtime", grand->run_id(), 0);
+        EXPECT_TRUE(std::none_of(events.begin(), events.end(), [](const auto& event) {
+            return event.kind == ProgramEventKind::Emit;
+        }));
+        std::filesystem::remove(database + ".static-family");
+        return;
+    }
+    if (!recover || (!fault.empty() && !checkpoint_crash)) {
         EXPECT_EQ(result.status(), ProgramTerminalStatus::Interrupted)
             << result.serialize_canonical();
         ASSERT_TRUE(result.interrupt());
@@ -10723,6 +10764,12 @@ TEST_P(ProgramChildSynthesisPersistence, InheritedStaticChildRecoveryRejectsMiss
 }
 TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryCannotCreateAfterRunDisappears) {
     check_static_child_recovery(false, true, "disappearing_run");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryCompletesPendingCheckpoint) {
+    check_static_child_recovery(true, true, "pending_checkpoint");
+}
+TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryPreservesUnknownDescendantEffect) {
+    check_static_child_recovery(true, true, "unknown_effect");
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
