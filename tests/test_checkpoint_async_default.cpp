@@ -69,6 +69,8 @@ public:
     std::atomic<bool> ran_off_thread{false};
 };
 
+class SyncFallbackStore final : public InMemoryCheckpointStore {};
+
 class CapabilityStore final : public CheckpointStoreCore,
                               public AsyncCheckpointStore,
                               public PendingWritesCheckpointStore {
@@ -290,6 +292,23 @@ TEST(CheckpointAsyncDefault, InMemorySubclassRetainsBlockingPoolFallback) {
     EXPECT_TRUE(completed);
     EXPECT_TRUE(store.ran_off_thread.load(std::memory_order_acquire));
     ASSERT_TRUE(store.load_latest("derived-sync-only").has_value());
+}
+
+TEST(CheckpointAsyncDefault, SyncFallbackReleasesStrandBeforeRunSyncReturns) {
+    // Every call owns a fresh io_context and cancellation strand. A fast
+    // completion must release the blocking worker's strand before run_sync
+    // returns and tears down the context, for both void and value operations.
+    for (int iteration = 0; iteration < 128; ++iteration) {
+        SyncFallbackStore store;
+        CancelToken cancel;
+        const auto cp = make_cp("short-lived-executor", iteration);
+        neograph::async::run_sync(store.save_async(cp), &cancel);
+        const auto loaded = neograph::async::run_sync(
+            store.load_latest_async(cp.thread_id), &cancel);
+        ASSERT_TRUE(loaded.has_value());
+        EXPECT_EQ(loaded->id, cp.id);
+        EXPECT_EQ(loaded->step, iteration);
+    }
 }
 
 TEST(CheckpointAsyncDefault, NeitherSideOverrideFailsClosed) {
