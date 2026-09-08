@@ -999,10 +999,16 @@ void cancel_deadline_timer(const asio::any_io_executor&        executor,
     });
 }
 asio::awaitable<void> cancel_after_timer(std::shared_ptr<asio::steady_timer> timer,
-                                         std::shared_ptr<graph::CancelToken> token) {
+                                         std::shared_ptr<graph::CancelToken> token,
+                                         std::shared_ptr<std::atomic<bool>> expired) {
     asio::error_code wait_error;
     co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
-    if (!wait_error) token->cancel();
+    if (!wait_error) {
+        // Cancelling the child can complete its branch before this timer's
+        // co_spawn completion is delivered. Record the cause first.
+        expired->store(true, std::memory_order_release);
+        token->cancel();
+    }
 }
 
 constexpr std::string_view PROGRAM_PENDING_KIND_FIELD = "__neograph_program_pending_kind";
@@ -3122,7 +3128,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 auto timeout        = std::make_shared<asio::steady_timer>(executor);
                 timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
                 auto child_token       = operation_token->fork();
-                auto timeout_operation = cancel_after_timer(timeout, child_token);
+                auto timeout_expired   = std::make_shared<std::atomic<bool>>(false);
+                auto timeout_operation = cancel_after_timer(timeout, child_token, timeout_expired);
                 // Await races the child completion (including a child error)
                 // against the timeout.  The awaitable `||` operator waits for
                 // one *successful* operation, which would mask an immediate
@@ -3138,7 +3145,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        asio::deferred),
                         asio::co_spawn(executor, std::move(timeout_operation), asio::deferred))
                         .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
-                if (order[0] == 0) {
+                if (order[0] == 0 && !timeout_expired->load(std::memory_order_acquire)) {
                     if (child_error) std::rethrow_exception(child_error);
                     co_return std::move(child_result);
                 }

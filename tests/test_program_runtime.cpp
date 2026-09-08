@@ -7121,22 +7121,23 @@ TEST(ProgramRuntimeTest, MapExecutesItemsSerially) {
 }
 
 TEST(ProgramRuntimeTest, AwaitTimeoutCancelsTheChildOperation) {
-    AdmittedRuntime fixture(2);
-    const auto      started = std::chrono::steady_clock::now();
-    const auto      result  = run_orchestration(
-        fixture,
-        orchestration_document(
-            json{{"op", "await"}, {"timeout_ms", 10}, {"body", json{{"op", "call_core"}}}},
-            "runtime-blocking"),
-        json::object(), "trace-await");
+    for (const auto threads : {1U, 2U, 4U}) {
+        SCOPED_TRACE(threads);
+        AdmittedRuntime fixture(threads);
+        const auto      started = std::chrono::steady_clock::now();
+        const auto      result  = run_orchestration(
+            fixture,
+            orchestration_document(
+                json{{"op", "await"}, {"timeout_ms", 10}, {"body", json{{"op", "call_core"}}}},
+                "runtime-blocking"),
+            json::object(), "trace-await");
 
-    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
-    ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
-    EXPECT_LT(
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started)
-            .count(),
-        2);
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+        ASSERT_TRUE(result.failure().has_value());
+        EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+        EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(
+                      std::chrono::steady_clock::now() - started).count(), 2);
+    }
 }
 
 TEST(ProgramRuntimeTest, AwaitPropagatesChildFailureBeforeTimeout) {
