@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -90,6 +91,9 @@ public:
                       const program::ProgramRunRecord&     run_record) const override;
 
 #ifdef NEOGRAPH_TESTING
+    /// Run once with the next Program run read snapshot held. The callback must
+    /// use another store connection if it accesses the database.
+    void after_next_program_run_read_for_testing(std::function<void()> callback);
     /// Fail one subsequent Program transition at the requested transaction point.
     void fail_next_program_transition_for_testing(SqliteHarnessProgramFaultPoint point);
     /// Crash the current process once at the requested transition point.

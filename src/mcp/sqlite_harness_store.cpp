@@ -1022,6 +1022,9 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
         "https://www.sqlite.org/lang_transaction.html (fetched 2026-07-31)";
     std::optional<SqliteHarnessProgramFaultPoint> program_fault;
     std::optional<SqliteHarnessProgramFaultPoint> program_crash;
+#ifdef NEOGRAPH_TESTING
+    std::function<void()> program_run_read_callback;
+#endif
 };
 
 class SqliteHarnessProgramTransitionStore final : public program::ProgramTransitionStore {
@@ -2499,6 +2502,9 @@ private:
         const auto result = query.step();
         if (result == SQLITE_DONE) return std::nullopt;
         if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program run read failed");
+#ifdef NEOGRAPH_TESTING
+        if (auto callback = std::exchange(impl_->program_run_read_callback, {})) callback();
+#endif
         auto wrapper = HarnessProgramRunRecord::parse(json::parse(query.text(0)));
         if (wrapper.run_record().run_id() != run_id) {
             throw std::invalid_argument("Stored Program run alias is corrupt");
@@ -2761,6 +2767,12 @@ SqliteHarnessRecordStore::SqliteHarnessRecordStore(const std::string&         db
 SqliteHarnessRecordStore::~SqliteHarnessRecordStore() = default;
 
 #ifdef NEOGRAPH_TESTING
+void SqliteHarnessRecordStore::after_next_program_run_read_for_testing(
+    std::function<void()> callback) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->program_run_read_callback = std::move(callback);
+}
+
 void SqliteHarnessRecordStore::fail_next_program_transition_for_testing(
     SqliteHarnessProgramFaultPoint point) {
     std::lock_guard lock(impl_->mutex);
