@@ -77,7 +77,7 @@ asio::thread_pool& blocking_checkpoint_pool() {
 }
 
 template <typename Handler>
-void post_checkpoint_completion(asio::any_io_executor caller_executor,
+void post_checkpoint_completion(asio::any_io_executor& caller_executor,
                                 std::shared_ptr<Handler> completion) {
     struct CompletionBarrier {
         std::condition_variable cv;
@@ -95,6 +95,10 @@ void post_checkpoint_completion(asio::any_io_executor caller_executor,
             (*completion)();
         });
 
+    // The resumed coroutine may finish run_sync and destroy its io_context.
+    // Release the pool worker's executor before allowing that to happen: a
+    // retained strand also touches the context's service during destruction.
+    caller_executor = {};
     {
         std::lock_guard lock(barrier->mutex);
         barrier->post_returned = true;
@@ -113,7 +117,7 @@ asio::awaitable<void> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation opera
     };
     auto result = std::make_shared<Result>();
 
-    const auto caller_executor = co_await asio::this_coro::executor;
+    auto caller_executor = co_await asio::this_coro::executor;
     auto caller_work = asio::make_work_guard(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
@@ -148,7 +152,7 @@ asio::awaitable<T> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operatio
     };
     auto result = std::make_shared<Result>();
 
-    const auto caller_executor = co_await asio::this_coro::executor;
+    auto caller_executor = co_await asio::this_coro::executor;
     auto caller_work = asio::make_work_guard(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(

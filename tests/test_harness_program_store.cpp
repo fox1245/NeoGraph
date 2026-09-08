@@ -1260,6 +1260,59 @@ TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPubli
 }
 
 
+TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublication) {
+    TempDb db;
+    Fixture fixture;
+    auto writer_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto writer = persist_and_bind(writer_store, fixture);
+    const auto initial = initial_publication(fixture);
+    ASSERT_EQ(writer->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+              ProgramTransitionPublishResult::Published);
+    const auto completed = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                ContinuationState::Completed, 20);
+
+    auto reader_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto reader = reader_store->bind_program_transitions(fixture.artifact);
+    {
+        // Commit through another WAL connection while latest() holds a run row.
+        // The reader must finish on that snapshot, then see the new head on its
+        // next call. No sleeps or scheduler luck are needed to hit the race.
+        bool published = false;
+        reader_store->after_next_program_run_read_for_testing([&] {
+            EXPECT_EQ(writer->compare_publish(fixture.artifact.owner_scope(),
+                                              initial.journal_record.id, completed),
+                      ProgramTransitionPublishResult::Published);
+            published = true;
+        });
+        const auto journal = reader->latest(fixture.artifact.owner_scope(), "run-one");
+        ASSERT_TRUE(published);
+        ASSERT_TRUE(journal);
+        EXPECT_EQ(journal->id, initial.journal_record.id);
+    }
+    const auto journal = reader->latest(fixture.artifact.owner_scope(), "run-one");
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->id, completed.journal_record.id);
+}
+
+TEST(HarnessProgramStoreTest, SqliteLatestRejectsMissingOrMisboundJournal) {
+    for (const auto* mutation : {
+             "DELETE FROM neograph_harness_program_journal",
+             "UPDATE neograph_harness_program_journal SET owner_scope='different-owner'"}) {
+        TempDb db;
+        Fixture fixture;
+        auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        const auto initial = initial_publication(fixture);
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_FALSE(transitions->latest("different-owner", "run-one"));
+        EXPECT_FALSE(transitions->latest(fixture.artifact.owner_scope(), "missing-run"));
+        sqlite_exec(db.path, mutation);
+        EXPECT_THROW((void)transitions->latest(fixture.artifact.owner_scope(), "run-one"),
+                     std::invalid_argument);
+    }
+}
+
 TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInvalidBatch) {
     TempDb  db;
     Fixture fixture;
