@@ -3200,14 +3200,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
             using JsCommandExecutor = std::function<asio::awaitable<PlanExecution>(
                 const JavaScriptCommand&, std::string, std::shared_ptr<graph::CancelToken>,
-                std::shared_ptr<JavaScriptScopeState>, std::size_t, bool)>;
+                std::shared_ptr<JavaScriptScopeState>, std::size_t, bool, bool)>;
             JsCommandExecutor execute_command;
 
             execute_command = [&](const JavaScriptCommand& command, std::string operation_id,
                                   std::shared_ptr<graph::CancelToken>   operation_token,
                                   std::shared_ptr<JavaScriptScopeState> scope,
                                   std::size_t                           scope_depth,
-                                  bool reserve_budget) -> asio::awaitable<PlanExecution> {
+                                  bool reserve_budget,
+                                  bool reconnect_child_only) -> asio::awaitable<PlanExecution> {
                 if (scope_depth > kMaxJavaScriptStructuredScopeDepth)
                     co_return plan_failure(
                         ProgramTerminalStatus::Failed, "P_JS_SCOPE_LIMIT",
@@ -3437,8 +3438,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
                 if (command.kind() == JavaScriptCommandKind::Spawn) {
                     const auto binding = arguments.at("child_binding").get<std::string>();
-                    auto child = control->launch_child(binding, arguments.at("input"), operation_id,
-                                                       operation_id);
+                    auto child = reconnect_child_only
+                                     ? control->reconnect_existing_child(
+                                           binding, arguments.at("input"), operation_id)
+                                     : control->launch_child(binding, arguments.at("input"),
+                                                             operation_id, operation_id);
                     scope->attach(child);
                     PlanExecution result;
                     result.output        = json{{"child_run_id", child->run_id},
@@ -3459,7 +3463,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         -> asio::awaitable<PlanExecution> {
                         auto launched = co_await execute_command(child, operation_id + "/await",
                                                                  std::move(token), scope,
-                                                                 scope_depth + 1, false);
+                                                                 scope_depth + 1, false,
+                                                                 reconnect_child_only);
                         if (launched.status != ProgramTerminalStatus::Completed) co_return launched;
                         if (!launched.spawned_child) co_return std::move(launched);
                         co_return plan_result_from_child(
@@ -3670,7 +3675,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         completion_executor,
                         execute_command(
                             members[index], operation_id + "/member/" + std::to_string(index),
-                            state->tokens[index], state->scopes[index], scope_depth + 1, false),
+                            state->tokens[index], state->scopes[index], scope_depth + 1, false,
+                            false),
                         asio::bind_executor(
                             completion_executor,
                             [state, index, launch_member, &members, mode, collect, required, cap,
@@ -3996,17 +4002,20 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto prior_commands = control->transitions->load_javascript_commands(
                     control->owner_scope, control->run_id);
                 bool       child_resume_authorized      = false;
-                const auto can_resume_synthesized_child = [&] {
+                auto       child_recovery_mode = ChildRecoveryMode::None;
+                const auto can_resume_child = [&] {
                     auto        candidate       = command_value;
                     auto        child_operation = operation_id;
                     std::size_t depth           = 0;
                     while (candidate.kind() == JavaScriptCommandKind::Await) {
-                        if (++depth > kMaxJavaScriptStructuredScopeDepth) return false;
+                        if (++depth > kMaxJavaScriptStructuredScopeDepth)
+                            return ChildRecoveryMode::None;
                         candidate =
                             JavaScriptCommand::from_json(candidate.arguments().at("command"));
                         child_operation += "/await";
                     }
-                    if (candidate.kind() != JavaScriptCommandKind::Spawn) return false;
+                    if (candidate.kind() != JavaScriptCommandKind::Spawn)
+                        return ChildRecoveryMode::None;
                     const auto args = candidate.arguments();
                     return control->can_recover_child(args.at("child_binding").get<std::string>(),
                                                       args.at("input"), child_operation);
@@ -4059,7 +4068,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         continue;
                     }
 
-                    if (can_resume_synthesized_child()) {
+                    child_recovery_mode = can_resume_child();
+                    if (child_recovery_mode != ChildRecoveryMode::None) {
                         if (auto failure =
                                 validate_javascript_command(command_value, operation_id, 0))
                             co_return std::move(*failure);
@@ -4173,7 +4183,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 PlanExecution command_result;
                 try {
                     command_result = co_await execute_command(
-                        command_value, operation_id, control->cancel_token, root_scope, 0, false);
+                        command_value, operation_id, control->cancel_token, root_scope, 0, false,
+                        child_recovery_mode == ChildRecoveryMode::Existing);
                 } catch (const EventSinkError& error) {
                     command_result = plan_failure(ProgramTerminalStatus::Failed, "P_EVENT_SINK",
                                                   error.what(), operation_id);
@@ -4182,9 +4193,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
                                      error.what(), operation_id);
                 } catch (const ProgramDiagnosticError& error) {
-                    command_result =
-                        plan_failure(ProgramTerminalStatus::Failed, error.diagnostic().code,
-                                     error.diagnostic().message, operation_id);
+                    if (child_recovery_mode == ChildRecoveryMode::Existing &&
+                        error.diagnostic().code == "P_CHILD_RECOVERY") {
+                        if (const auto pending = control->transitions->load(
+                                control->owner_scope, control->run_id))
+                            unreconciled_javascript_remaining = pending->remaining_budget();
+                        active_javascript_command.reset();
+                        command_result.status = ProgramTerminalStatus::Interrupted;
+                        command_result.interrupt = ProgramInterrupt{
+                            "javascript", command_value.to_json(), std::nullopt,
+                            javascript_command_pending_effect(*control, ordinal, command_value,
+                                                              effect_id)};
+                    } else {
+                        command_result =
+                            plan_failure(ProgramTerminalStatus::Failed, error.diagnostic().code,
+                                         error.diagnostic().message, operation_id);
+                    }
                 } catch (const std::exception& error) {
                     command_result =
                         plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
