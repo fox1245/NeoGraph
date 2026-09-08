@@ -36,6 +36,8 @@ public:
     ~ProgramHandle();
 
     const std::string& run_id() const noexcept;
+    /** Stable agent identity; reconnect this id to inspect its active generation. */
+    const std::string& logical_run_id() const noexcept;
     const std::string& program_version_id() const noexcept;
     std::uint64_t      attempt() const noexcept;
 

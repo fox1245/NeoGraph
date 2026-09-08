@@ -1,4 +1,5 @@
 #include "canonical_json.h"
+#include "sha256.h"
 
 #include <algorithm>
 #include <array>
@@ -6,6 +7,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -72,10 +74,58 @@ std::size_t checked_json_size(std::size_t current, std::size_t additional) {
     return current + additional;
 }
 
+constexpr std::uint64_t BYTE_ONES = 0x0101010101010101ULL;
+constexpr std::uint64_t BYTE_HIGHS = 0x8080808080808080ULL;
+
+bool has_zero_byte(std::uint64_t word) noexcept {
+    return ((word - BYTE_ONES) & ~word & BYTE_HIGHS) != 0;
+}
+
+bool needs_json_escape(unsigned char byte) noexcept {
+    return byte < 0x20 || byte == '"' || byte == '\\';
+}
+
+// Only skip complete words proven to contain no escape byte. memcpy permits
+// unaligned views and the repeated-byte masks are independent of byte order.
+std::size_t unescaped_prefix(std::string_view value) noexcept {
+    std::size_t count = 0;
+    while (value.size() - count >= sizeof(std::uint64_t)) {
+        std::uint64_t word;
+        std::memcpy(&word, value.data() + count, sizeof(word));
+        const bool control = ((word - 0x2020202020202020ULL) & ~word & BYTE_HIGHS) != 0;
+        if (control || has_zero_byte(word ^ 0x2222222222222222ULL) ||
+            has_zero_byte(word ^ 0x5c5c5c5c5c5c5c5cULL)) break;
+        count += sizeof(word);
+    }
+    while (count < value.size() && !needs_json_escape(static_cast<unsigned char>(value[count])))
+        ++count;
+    return count;
+}
+
+std::size_t ascii_prefix(std::string_view value) noexcept {
+    std::size_t count = 0;
+    while (value.size() - count >= sizeof(std::uint64_t)) {
+        std::uint64_t word;
+        std::memcpy(&word, value.data() + count, sizeof(word));
+        if (word & BYTE_HIGHS) break;
+        count += sizeof(word);
+    }
+    while (count < value.size() && static_cast<unsigned char>(value[count]) < 0x80) ++count;
+    return count;
+}
+
 std::size_t escaped_json_string_size(std::string_view value) {
-    std::size_t size = 2;
-    for (const unsigned char byte : value) {
-        size = checked_json_size(size, byte < 0x20 ? 6 : ((byte == '"' || byte == '\\') ? 2 : 1));
+    // Reject oversized raw strings before scanning. Keep the existing
+    // conservative six-byte charge for every control character, including LF.
+    std::size_t size = checked_json_size(2, value.size());
+    while (!value.empty()) {
+        const auto byte = static_cast<unsigned char>(value.front());
+        if (!needs_json_escape(byte)) {
+            value.remove_prefix(unescaped_prefix(value));
+        } else {
+            size = checked_json_size(size, byte < 0x20 ? 5 : 1);
+            value.remove_prefix(1);
+        }
     }
     return size;
 }
@@ -168,7 +218,7 @@ bool valid_dot_identifiers(std::string_view value, bool prerelease) {
     }
 }
 
-std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t index) {
+std::size_t validated_utf8_prefix_length(std::string_view value, std::size_t index) {
     const auto byte_at = [&value](std::size_t offset) {
         return static_cast<unsigned char>(value[offset]);
     };
@@ -179,7 +229,7 @@ std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t i
     };
 
     const auto lead = byte_at(index);
-    if (lead < 0x80) return 1;
+    if (lead < 0x80) return ascii_prefix(value.substr(index));
     if (lead >= 0xc2 && lead <= 0xdf) {
         require_continuation(index + 1);
         return 2;
@@ -230,7 +280,7 @@ std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t i
 
 void validate_utf8_impl(std::string_view value) {
     for (std::size_t index = 0; index < value.size();) {
-        index += validated_utf8_sequence_length(value, index);
+        index += validated_utf8_prefix_length(value, index);
     }
 }
 
@@ -238,7 +288,15 @@ void append_escaped(std::string& out, std::string_view value) {
     validate_utf8_impl(value);
     static constexpr char hex[] = "0123456789abcdef";
     out.push_back('"');
-    for (const unsigned char c : value) {
+    while (!value.empty()) {
+        const auto c = static_cast<unsigned char>(value.front());
+        if (!needs_json_escape(c)) {
+            const auto count = unescaped_prefix(value);
+            out.append(value.data(), count);
+            value.remove_prefix(count);
+            continue;
+        }
+        value.remove_prefix(1);
         switch (c) {
             case '"':
                 out += "\\\"";
@@ -359,108 +417,6 @@ void append_value(std::string& out, const json& value) {
     }
 }
 
-constexpr std::array<std::uint32_t, 64> SHA256_K = {
-    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u,
-    0xab1c5ed5u, 0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu,
-    0x9bdc06a7u, 0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu, 0x2de92c6fu,
-    0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu,
-    0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u, 0xa2bfe8a1u, 0xa81a664bu,
-    0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u,
-    0x1e376c08u, 0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u,
-    0xc67178f2u,
-};
-
-std::array<std::uint8_t, 32> sha256(std::string_view input) {
-    std::array<std::uint32_t, 8> state = {
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
-    };
-
-    const auto compress = [&state](const std::uint8_t* block) {
-        std::array<std::uint32_t, 64> words{};
-        for (std::size_t i = 0; i < 16; ++i) {
-            const auto base = i * 4;
-            words[i]        = (static_cast<std::uint32_t>(block[base]) << 24) |
-                       (static_cast<std::uint32_t>(block[base + 1]) << 16) |
-                       (static_cast<std::uint32_t>(block[base + 2]) << 8) |
-                       static_cast<std::uint32_t>(block[base + 3]);
-        }
-        for (std::size_t i = 16; i < 64; ++i) {
-            const auto s0 =
-                std::rotr(words[i - 15], 7) ^ std::rotr(words[i - 15], 18) ^ (words[i - 15] >> 3);
-            const auto s1 =
-                std::rotr(words[i - 2], 17) ^ std::rotr(words[i - 2], 19) ^ (words[i - 2] >> 10);
-            words[i] = words[i - 16] + s0 + words[i - 7] + s1;
-        }
-
-        auto a = state[0];
-        auto b = state[1];
-        auto c = state[2];
-        auto d = state[3];
-        auto e = state[4];
-        auto f = state[5];
-        auto g = state[6];
-        auto h = state[7];
-        for (std::size_t i = 0; i < 64; ++i) {
-            const auto s1       = std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
-            const auto choose   = (e & f) ^ (~e & g);
-            const auto t1       = h + s1 + choose + SHA256_K[i] + words[i];
-            const auto s0       = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
-            const auto majority = (a & b) ^ (a & c) ^ (b & c);
-            const auto t2       = s0 + majority;
-            h                   = g;
-            g                   = f;
-            f                   = e;
-            e                   = d + t1;
-            d                   = c;
-            c                   = b;
-            b                   = a;
-            a                   = t1 + t2;
-        }
-        state[0] += a;
-        state[1] += b;
-        state[2] += c;
-        state[3] += d;
-        state[4] += e;
-        state[5] += f;
-        state[6] += g;
-        state[7] += h;
-    };
-
-    const auto full_blocks = input.size() / 64;
-    for (std::size_t i = 0; i < full_blocks; ++i) {
-        const auto* block = reinterpret_cast<const std::uint8_t*>(input.data() + i * 64);
-        compress(block);
-    }
-
-    std::array<std::uint8_t, 128> tail{};
-    const auto                    remainder = input.size() % 64;
-    for (std::size_t i = 0; i < remainder; ++i) {
-        tail[i] =
-            static_cast<std::uint8_t>(static_cast<unsigned char>(input[full_blocks * 64 + i]));
-    }
-    tail[remainder]              = 0x80;
-    const std::size_t tail_size  = remainder < 56 ? 64 : 128;
-    const auto        bit_length = static_cast<std::uint64_t>(input.size()) * 8;
-    for (std::size_t i = 0; i < 8; ++i) {
-        tail[tail_size - 1 - i] = static_cast<std::uint8_t>(bit_length >> (i * 8));
-    }
-    compress(tail.data());
-    if (tail_size == 128) {
-        compress(tail.data() + 64);
-    }
-
-    std::array<std::uint8_t, 32> digest{};
-    for (std::size_t i = 0; i < state.size(); ++i) {
-        digest[i * 4]     = static_cast<std::uint8_t>(state[i] >> 24);
-        digest[i * 4 + 1] = static_cast<std::uint8_t>(state[i] >> 16);
-        digest[i * 4 + 2] = static_cast<std::uint8_t>(state[i] >> 8);
-        digest[i * 4 + 3] = static_cast<std::uint8_t>(state[i]);
-    }
-    return digest;
-}
 
 }  // namespace
 
@@ -566,7 +522,7 @@ std::string sha256_identity(std::string_view preamble,
     input.append(bytes);
 
     static constexpr char hex[]  = "0123456789abcdef";
-    const auto            digest = sha256(input);
+    const auto            digest = sha256_digest(input);
     std::string           result = "sha256:";
     result.reserve(71);
     for (const auto byte : digest) {

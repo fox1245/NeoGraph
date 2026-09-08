@@ -2,6 +2,7 @@
 
 #include "canonical_json.h"
 
+#include <algorithm>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -125,6 +126,7 @@ json child_body(const ProgramChildRecord& child) {
                 {"link_receipt", child.link_receipt},
                 {"invocation", invocation_body(child.invocation)},
                 {"state", std::string(child_state_string(child.state))}};
+    if (child.terminal_generation) value["terminal_generation"] = child.terminal_generation;
     if (child.terminal_result)
         value["terminal_result"] =
             detail::parse_json_strict(child.terminal_result->serialize_canonical());
@@ -134,15 +136,16 @@ json child_body(const ProgramChildRecord& child) {
 ProgramChildRecord parse_child(const json& value) {
     if (!value.is_object())
         throw std::invalid_argument("Program child record must be an object");
-    detail::reject_unknown_fields(value,
-                                  "Program child record",
+    detail::reject_unknown_fields(value, "Program child record",
                                   {"child_run_id", "link_id", "link_receipt", "invocation", "state",
-                                   "terminal_result"});
+                                   "terminal_result", "terminal_generation"});
     ProgramChildRecord result{rs(value, "child_run_id"),
                               rs(value, "link_id"),
                               rs(value, "link_receipt"),
                               parse_invocation(rv(value, "invocation"), "Program child invocation"),
                               child_state_from_string(rs(value, "state"))};
+    if (value.contains("terminal_generation"))
+        result.terminal_generation = ru(value, "terminal_generation");
     if (value.contains("terminal_result") && !value.at("terminal_result").is_null())
         result.terminal_result = ProgramResult::parse(
             detail::canonical_json_bytes(value.at("terminal_result")));
@@ -321,6 +324,7 @@ void validate(const ProgramRunRecordData& d) {
             throw std::invalid_argument("Program fork receipt has no initial resume binding");
         }
     }
+    if (!d.logical_run_id.empty()) detail::validate_token(d.logical_run_id, "Program logical run");
     std::set<std::string, std::less<>> child_ids;
     for (const auto& child : d.children) {
         detail::validate_token(child.child_run_id, "Program child run_id");
@@ -331,7 +335,8 @@ void validate(const ProgramRunRecordData& d) {
         if (child.link_receipt.empty())
             throw std::invalid_argument("Program child link receipt must not be empty");
         detail::validate_utf8(child.link_receipt);
-        if (child.invocation.parent_run_id != d.run_id ||
+        if (child.invocation.parent_run_id !=
+                (d.logical_run_id.empty() ? d.run_id : d.logical_run_id) ||
             d.child_depth == std::numeric_limits<std::uint32_t>::max() ||
             child.invocation.child_depth != d.child_depth + 1) {
             throw std::invalid_argument("Program child invocation does not bind its parent");
@@ -343,6 +348,8 @@ void validate(const ProgramRunRecordData& d) {
             throw std::invalid_argument(
                 "Program child terminal result does not match its lifecycle state");
         }
+        if (child.terminal_generation && !child.terminal_result)
+            throw std::invalid_argument("Child generation requires a result");
         if (child.terminal_result) {
             const auto& result = *child.terminal_result;
             const bool failed_status =
@@ -350,9 +357,9 @@ void validate(const ProgramRunRecordData& d) {
                 result.status() == ProgramTerminalStatus::BudgetExhausted ||
                 result.status() == ProgramTerminalStatus::TimedOut ||
                 result.status() == ProgramTerminalStatus::CheckpointIncompatible;
-            if (result.run_id() != child.child_run_id ||
-                result.program_version_id().empty() ||
-                result.attempt() == 0 ||
+            if ((result.run_id() != child.child_run_id && child.terminal_generation < 2) ||
+                (result.run_id() == child.child_run_id && child.terminal_generation != 0) ||
+                result.program_version_id().empty() || result.attempt() == 0 ||
                 (child.state == ProgramChildState::Completed &&
                  result.status() != ProgramTerminalStatus::Completed) ||
                 (child.state == ProgramChildState::Cancelled &&
@@ -406,6 +413,7 @@ json body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
         value["exact_checkpoint_content_id"] = d.exact_checkpoint_content_id
             ? json(*d.exact_checkpoint_content_id) : json(nullptr);
     }
+    if (!d.logical_run_id.empty()) value["logical_run_id"] = d.logical_run_id;
     if (!d.children.empty()) {
         value["children"] = json::array();
         for (const auto& child : d.children) value["children"].push_back(child_body(child));
@@ -420,6 +428,15 @@ json stored_body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
     return value;
 }
 }  // namespace
+bool ProgramPersistedInvocation::operator==(const ProgramPersistedInvocation& other) const {
+    return granted_budget == other.granted_budget && trace_id == other.trace_id &&
+           parent_run_id == other.parent_run_id && child_depth == other.child_depth &&
+           detail::canonical_json_bytes(input) == detail::canonical_json_bytes(other.input);
+}
+bool ProgramChildRecord::operator==(const ProgramChildRecord& other) const {
+    return detail::canonical_json_bytes(child_body(*this)) ==
+           detail::canonical_json_bytes(child_body(other));
+}
 std::string_view to_string(ProgramChildState state) noexcept {
     return child_state_string(state);
 }
@@ -451,6 +468,7 @@ struct ProgramRunRecord::Impl {
 };
 ProgramRunRecord::ProgramRunRecord(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
 ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
+    if (d.logical_run_id == d.run_id) d.logical_run_id.clear();
     if (d.fork_receipt) {
         if (!d.fork_source_run_id) {
             d.fork_source_run_id = d.fork_receipt->source_run_id();
@@ -469,8 +487,13 @@ ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
         !detail::is_sha256_identity(*d.recorded_binding_set_fingerprint)) {
         throw std::invalid_argument("Recorded binding set fingerprint must be a sha256 identity");
     }
-    return ProgramRunRecord(
-        std::make_shared<const Impl>(std::move(d), STORAGE_SCHEMA_VERSION));
+    const auto schema =
+        !d.logical_run_id.empty() ||
+                std::any_of(d.children.begin(), d.children.end(),
+                            [](const auto& child) { return child.terminal_generation != 0; })
+            ? STORAGE_SCHEMA_VERSION
+            : 3;
+    return ProgramRunRecord(std::make_shared<const Impl>(std::move(d), schema));
 }
 ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     json v;
@@ -484,9 +507,11 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
         throw std::invalid_argument("Stored ProgramRunRecord has unknown format");
     }
     const auto schema_version = r32(v, "storage_schema_version");
-    if (schema_version != 2 && schema_version != STORAGE_SCHEMA_VERSION) {
+    if (schema_version != 2 && schema_version != 3 && schema_version != STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored ProgramRunRecord schema version is unsupported");
     }
+    if (schema_version < 4 && v.contains("logical_run_id"))
+        throw std::invalid_argument("Legacy run cannot carry logical identity");
     if (schema_version == 2) {
         detail::reject_unknown_fields(
             v, "Stored ProgramRunRecord",
@@ -499,16 +524,36 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
              "journal_head", "event_sequence", "effect_sequence", "created_at_ms",
              "updated_at_ms", "children"});
     } else {
-        detail::reject_unknown_fields(
-            v, "Stored ProgramRunRecord",
-            {"format", "storage_schema_version", "id", "owner_scope", "run_id",
-             "program_version_id", "bundle_id", "binding_fingerprint", "invocation",
-             "child_depth", "continuation", "remaining_budget", "exact_checkpoint",
-             "exact_checkpoint_content_id", "pending_input", "pending_effect",
-             "terminal_result", "fork_receipt", "fork_source_run_id",
-             "fork_source_program_version_id", "fork_source_checkpoint_id",
-             "recorded_binding_set_fingerprint", "journal_head", "event_sequence",
-             "effect_sequence", "created_at_ms", "updated_at_ms", "children"});
+        detail::reject_unknown_fields(v, "Stored ProgramRunRecord",
+                                      {"format",
+                                       "storage_schema_version",
+                                       "id",
+                                       "owner_scope",
+                                       "run_id",
+                                       "program_version_id",
+                                       "bundle_id",
+                                       "binding_fingerprint",
+                                       "invocation",
+                                       "child_depth",
+                                       "continuation",
+                                       "remaining_budget",
+                                       "exact_checkpoint",
+                                       "exact_checkpoint_content_id",
+                                       "pending_input",
+                                       "pending_effect",
+                                       "terminal_result",
+                                       "fork_receipt",
+                                       "fork_source_run_id",
+                                       "fork_source_program_version_id",
+                                       "fork_source_checkpoint_id",
+                                       "recorded_binding_set_fingerprint",
+                                       "journal_head",
+                                       "event_sequence",
+                                       "effect_sequence",
+                                       "created_at_ms",
+                                       "updated_at_ms",
+                                       "children",
+                                       "logical_run_id"});
     }
     ProgramRunRecordData d;
     d.owner_scope         = rs(v, "owner_scope");
@@ -518,6 +563,7 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.binding_fingerprint = rs(v, "binding_fingerprint");
     d.invocation = RunInvocation::parse(detail::canonical_json_bytes(rv(v, "invocation")));
     d.child_depth = r32(v, "child_depth");
+    if (v.contains("logical_run_id")) d.logical_run_id = rs(v, "logical_run_id");
     const auto& continuation = rv(v, "continuation");
     if (!continuation.is_object()) {
         throw std::invalid_argument("Program continuation must be an object");
@@ -546,6 +592,11 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
             throw std::invalid_argument("Program run children must be an array");
         d.children.reserve(children.size());
         for (const auto& child : children) d.children.push_back(parse_child(child));
+        if (schema_version < 4 &&
+            std::any_of(
+                d.children.begin(), d.children.end(),
+                [](const auto& child) { return child.terminal_generation != 0; }))
+            throw std::invalid_argument("Legacy child result cannot carry generation proof");
     }
     d.journal_head                     = rs(v, "journal_head");
     d.event_sequence                   = ru(v, "event_sequence");
@@ -583,6 +634,9 @@ const std::string& ProgramRunRecord::binding_fingerprint() const noexcept {
 }
 const RunInvocation& ProgramRunRecord::invocation() const noexcept {
     return impl_->data.invocation;
+}
+const std::string& ProgramRunRecord::logical_run_id() const noexcept {
+    return impl_->data.logical_run_id.empty() ? impl_->data.run_id : impl_->data.logical_run_id;
 }
 std::uint32_t ProgramRunRecord::child_depth() const noexcept {
     return impl_->data.child_depth;

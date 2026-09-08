@@ -5,12 +5,13 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/program/child_synthesis.h>
 #include <neograph/program/command_journal.h>
 #include <neograph/program/event.h>
 #include <neograph/program/lineage.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/run_record.h>
-#include <neograph/hook_outbox.h>
 #include <neograph/runtime_context.h>
 
 #include <cstdint>
@@ -21,6 +22,14 @@
 #include <vector>
 
 namespace neograph::program {
+
+/** Bind a child result from an admitted replacement generation to its stable relation. */
+NEOGRAPH_PROGRAM_API bool does_program_child_generation_result_bind(
+    const ProgramRunRecord&     parent,
+    const ProgramChildRecord&   child,
+    const ProgramRunGeneration& generation,
+    const ProgramRunLineage&    lineage,
+    const ProgramRunRecord&     result_run) noexcept;
 
 /** Exact context evidence selected for one Program transition. */
 struct NEOGRAPH_PROGRAM_API ProgramContextPublication {
@@ -111,6 +120,7 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     std::optional<ProgramContextPublication>  context_publication;
     /// Immutable hook outbox heads appended atomically with this transition.
     std::vector<HookOutboxEntry>               hook_outbox_entries;
+    std::vector<ProgramChildSynthesisRecord>   child_synthesis_records;
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
 };
@@ -132,6 +142,13 @@ enum class ProgramTransitionFaultPoint : std::uint8_t {
     AfterHookSnapshot,
     AfterLineageSnapshot,
     BeforeCommit,
+};
+
+/** One publication head and its newest command from the same committed snapshot. */
+struct ProgramCommandPublicationHead {
+    ProgramRunRecord run_record;
+    ProgramJournalRecord journal_record;
+    std::optional<ProgramJavaScriptCommandJournalEntry> latest_command;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramTransitionStore {
@@ -164,6 +181,15 @@ public:
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence = 0) const;
+    /**
+     * Read one coherent run/journal head and the last command append.
+     * Native stores use a single snapshot without materializing command history.
+     * The compatibility implementation fences the existing virtual reads with a
+     * second head read; a changed head returns absence so publication fails closed.
+     * This read grants no write authority: publication must still CAS the head.
+     */
+    virtual std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const;
     /** Durable provider-context evidence, ordered by ContextEpoch sequence. */
     virtual std::vector<ProgramContextPublication> load_context_publications(
         std::string_view owner_scope,
@@ -174,6 +200,9 @@ public:
         std::string_view owner_scope, std::string_view run_id) const;
     /** Target-local state plus source-origin hook heads authorized by its generation. */
     virtual ProgramEffectiveRuntimeState load_effective_runtime_state(
+        std::string_view owner_scope, std::string_view run_id) const;
+    /** Current synthesis heads. Unsupported stores fail closed, never report an empty journal. */
+    virtual std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
         std::string_view owner_scope, std::string_view run_id) const;
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>
@@ -260,6 +289,9 @@ public:
     InMemoryProgramTransitionStore(const InMemoryProgramTransitionStore&) = delete;
     InMemoryProgramTransitionStore& operator=(const InMemoryProgramTransitionStore&) = delete;
 
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const override;
+
     std::optional<ProgramRunRecord> load(std::string_view owner_scope,
                                           std::string_view run_id) const override;
     std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
@@ -280,6 +312,8 @@ public:
         std::string_view run_id,
                                std::uint64_t    after_sequence = 0) const override;
     std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override;
+    std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
         std::string_view owner_scope, std::string_view run_id) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;

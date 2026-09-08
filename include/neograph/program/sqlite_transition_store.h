@@ -33,6 +33,9 @@ public:
 
     std::string process_coordination_key() const override;
 
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const override;
+
     std::optional<ProgramRunRecord> load(std::string_view owner_scope,
                                          std::string_view run_id) const override;
     std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
@@ -53,6 +56,8 @@ public:
         std::string_view run_id,
          std::uint64_t    after_sequence = 0) const override;
     std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope, std::string_view run_id) const override;
+    std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
         std::string_view owner_scope, std::string_view run_id) const override;
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
                                                      std::string_view run_id) const override;

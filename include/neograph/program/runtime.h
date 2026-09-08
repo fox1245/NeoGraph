@@ -107,6 +107,9 @@ struct ProgramRuntimeRecoveryState {
 using ProgramRuntimeRecoveryHandler =
     std::function<void(const ProgramRuntimeRecoveryState&)>;
 
+using ProgramChildSynthesisGrantResolver = std::function<std::optional<ProgramChildSynthesisGrant>(
+    std::string_view owner_scope, std::string_view parent_run_id, std::string_view grant_id)>;
+
 struct ProgramChildQuotaConfig {
     /// Zero disables the corresponding global limit.
     std::uint64_t max_active_children = 0;
@@ -141,6 +144,13 @@ struct ProgramChildQuotaConfig {
       std::shared_ptr<HookRuntime>              hook_runtime;
       /// Required on reconnect when the run has durable context or hook state.
       ProgramRuntimeRecoveryHandler             runtime_recovery_handler;
+      std::shared_ptr<ProgramSynthesisGateway>  child_synthesis_gateway;
+      ProgramChildSynthesisGrantResolver        child_synthesis_grant_resolver;
+      /// Host checkpoint consumer, called after durable publication or latest-checkpoint replay.
+      /// Enqueue the move-only lease and return promptly; never block the scheduler here.
+      /// Retaining the lease pauses this generation. Destroying it releases the generator.
+      /// Explicit next_handoff requests take precedence. Programs cannot install this handler.
+      std::function<void(ProgramHandle, ProgramHandoff)> checkpoint_handler;
   };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
@@ -182,6 +192,27 @@ public:
                               const ModuleLinkReceipt& link,
                               const ProgramVersion&    version,
                               ProgramInvocation        invocation);
+    /// Debit one successor compilation at this runtime's held checkpoint by lineage CAS.
+    /// Persist intent before calling and record the outcome. The lease's journal head is
+    /// refreshed after the debit; its checkpoint identity is retained. An old head fails,
+    /// and an ambiguous acknowledgement never permits a free retry.
+    ProgramSynthesisReservation reserve_synthesis(std::string_view                owner_scope,
+                                                  const ProgramHandle&            source,
+                                                  ProgramHandoff&                 handoff,
+                                                  const ProgramSynthesisProposal& proposal,
+                                                  std::string_view expected_lineage_head);
+    /** Host-only synthesis at a held top-level checkpoint, bound to this exact run generation. */
+    ProgramChildSynthesisRecord prepare_child_synthesis(std::string_view                owner_scope,
+                                                        const ProgramHandle&            parent,
+                                                        const ProgramHandoff&           handoff,
+                                                        const ProgramSynthesisProposal& proposal,
+                                                        const ProgramChildSynthesisGrant& grant,
+                                                        std::string binding_name);
+    /** Finish durable stages before reconnect; uncommitted compile/validation requires
+     * reconciliation. */
+    ProgramChildSynthesisRecord recover_child_synthesis(std::string_view owner_scope,
+                                                        std::string_view parent_run_id,
+                                                        std::string_view proposal_id);
     ProgramHandle reconnect(std::string_view owner_scope, std::string_view run_id);
     /**
      * Reconcile the durable child join records for a parent. Existing terminal
@@ -216,7 +247,9 @@ public:
     /**
      * Replace the active source generation at one exact completed ng.checkpoint.
      * The target is already admitted and starts fresh from invocation.input;
-     * only input.handoff crosses the generation boundary.
+     * application state crosses through input.handoff. Nested agents retain
+     * their logical parent, child relations, and nonrenewable budget. A live
+     * family replacement requires this runtime's held checkpoint.
      */
     ProgramHandle replace(ExactProgramHandoffReference source,
                            RunInvocation                invocation,

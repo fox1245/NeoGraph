@@ -764,7 +764,8 @@ void validate_budgets(const ProgramBundle&  bundle,
                                 return node.operation() == ProgramOperationKind::ExpandTaskGraph;
                             });
             structural = has_dynamic_expansion ? budget.minimum >= 1
-                                                : (budget.minimum == 0 && budget.maximum == 0);
+                                               : (bundle.control_source().has_value() ||
+                                                  (budget.minimum == 0 && budget.maximum == 0));
         }
         if (!structural) {
             diagnostics.add("P_ADMIT_SEMANTIC_MISMATCH", "/declared_budget_requirements",

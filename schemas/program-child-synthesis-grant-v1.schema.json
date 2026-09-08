@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-child-synthesis-grant-v1.schema.json",
+  "title": "NeoGraph Host Child Synthesis Grant v1",
+  "description": "Host-selected policy for one reviewed template instantiation and parent head. A valid serialized value does not authenticate its issuer.",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "owner_scope", "parent_run_id", "parent_program_version_id", "parent_policy_fingerprint", "lineage_id", "expected_lineage_head_id", "template_identity", "reviewed_source_identity", "semantic_validator_identity", "semantic_contract_identity", "allowed_capabilities", "allowed_effects", "child_budget_ceiling", "minimum_execution_guarantee", "max_source_bytes", "max_sealed_modules"],
+  "properties": {
+    "format": {"const": "neograph-program-child-synthesis-grant"},
+    "storage_schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/sha256"},
+    "owner_scope": {"type": "string", "minLength": 1},
+    "parent_run_id": {"type": "string", "minLength": 1},
+    "parent_program_version_id": {"$ref": "#/$defs/sha256"},
+    "parent_policy_fingerprint": {"$ref": "#/$defs/sha256"},
+    "lineage_id": {"$ref": "#/$defs/sha256"},
+    "expected_lineage_head_id": {"$ref": "#/$defs/sha256"},
+    "template_identity": {"$ref": "#/$defs/sha256"},
+    "reviewed_source_identity": {"$ref": "#/$defs/sha256"},
+    "semantic_validator_identity": {"$ref": "#/$defs/sha256"},
+    "semantic_contract_identity": {"$ref": "#/$defs/sha256"},
+    "allowed_capabilities": {"$ref": "#/$defs/tokens"},
+    "allowed_effects": {"$ref": "#/$defs/tokens"},
+    "child_budget_ceiling": {"$ref": "#/$defs/budget"},
+    "minimum_execution_guarantee": {"enum": ["strict", "recorded", "unmanaged"]},
+    "max_source_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+    "max_sealed_modules": {"$ref": "#/$defs/u64"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "tokens": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "u64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "u32": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "budget": {
+      "type": "object",
+      "required": ["wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency", "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth", "max_total_children"],
+      "properties": {
+        "wall_time_ms": {"$ref": "#/$defs/u64"},
+        "model_tokens": {"$ref": "#/$defs/u64"},
+        "monetary_microunits": {"$ref": "#/$defs/u64"},
+        "max_concurrency": {"$ref": "#/$defs/u32"},
+        "max_program_operations": {"$ref": "#/$defs/u64"},
+        "max_core_steps": {"$ref": "#/$defs/u64"},
+        "max_dynamic_compiles": {"$ref": "#/$defs/u64"},
+        "max_child_depth": {"$ref": "#/$defs/u32"},
+        "max_total_children": {"$ref": "#/$defs/u64"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

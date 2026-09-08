@@ -1294,7 +1294,8 @@ bool contains_operation(const json& value, std::string_view wanted) {
 
 void validate_budgets(const json&            document,
                       ParsedProgram&         output,
-                      DiagnosticAccumulator& diagnostics) {
+                      DiagnosticAccumulator& diagnostics,
+                      bool                   has_javascript_control) {
     constexpr std::string_view pointer = "/declared_budget_requirements";
     if (!document.contains("declared_budget_requirements")) {
         diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
@@ -1384,8 +1385,9 @@ void validate_budgets(const json&            document,
             resource == "max_core_steps") {
             structural_valid = *minimum >= 1;
         } else if (resource == "max_dynamic_compiles") {
-            structural_valid = has_dynamic_expansion ? *minimum >= 1
-                                                     : (*minimum == 0 && *maximum == 0);
+            structural_valid = has_dynamic_expansion
+                                   ? *minimum >= 1
+                                   : (has_javascript_control || (*minimum == 0 && *maximum == 0));
         } else if (resource == "max_child_depth" || resource == "max_total_children") {
             structural_valid = true;
             if (has_child_dispatch) structural_valid = *minimum >= 1;
@@ -1463,7 +1465,8 @@ void validate_static_budget_requirements(const ParsedProgram&                   
 
 ParsedProgram parse_program(const ProgramSource&   source,
                             const json&            document,
-                            DiagnosticAccumulator& diagnostics) {
+                            DiagnosticAccumulator& diagnostics,
+                            bool                   has_javascript_control) {
     ParsedProgram result;
     if (!document.is_object()) {
         add_type(diagnostics, "", "object", document);
@@ -1476,7 +1479,7 @@ ParsedProgram parse_program(const ProgramSource&   source,
     validate_contract(document, "input_contract", result.input_contract, diagnostics);
     validate_contract(document, "output_contract", result.output_contract, diagnostics);
     validate_root(document, result, diagnostics);
-    validate_budgets(document, result, diagnostics);
+    validate_budgets(document, result, diagnostics, has_javascript_control);
     return result;
 }
 
@@ -2210,7 +2213,7 @@ struct ProgramCompiler::Impl {
                                 error.what(), error.witness(), error.source_span());
                 diagnostics.throw_error();
             }
-            auto parsed = parse_program(source, document, diagnostics);
+            auto parsed = parse_program(source, document, diagnostics, control_source.has_value());
             if (diagnostics.has_errors()) diagnostics.throw_error();
             const auto parse_report = detail::RegistrySnapshotAccess::parse_local_report(
                 registry, parsed.core_definition);

@@ -8,6 +8,11 @@ I/O, no sleep, no LLM calls**. The numbers reflect what the engine
 itself costs (node dispatch, state channel writes, reducer calls) — not
 the latency of any simulated work.
 
+For Program admission, JavaScript control, and SQLite/PostgreSQL runtime costs,
+see [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md). That separate
+matrix includes journal/checkpoint work and must not be presented as the
+checkpoint-free Core comparison below.
+
 Frameworks compared:
 
 | Framework | Version | Abstraction |

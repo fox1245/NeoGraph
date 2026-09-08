@@ -3995,6 +3995,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     javascript_command_effect_identity(*control, ordinal, command_value);
                 const auto prior_commands = control->transitions->load_javascript_commands(
                     control->owner_scope, control->run_id);
+                bool       child_resume_authorized      = false;
+                const auto can_resume_synthesized_child = [&] {
+                    auto        candidate       = command_value;
+                    auto        child_operation = operation_id;
+                    std::size_t depth           = 0;
+                    while (candidate.kind() == JavaScriptCommandKind::Await) {
+                        if (++depth > kMaxJavaScriptStructuredScopeDepth) return false;
+                        candidate =
+                            JavaScriptCommand::from_json(candidate.arguments().at("command"));
+                        child_operation += "/await";
+                    }
+                    if (candidate.kind() != JavaScriptCommandKind::Spawn) return false;
+                    const auto args = candidate.arguments();
+                    return control->can_recover_child(args.at("child_binding").get<std::string>(),
+                                                      args.at("input"), child_operation);
+                };
                 const auto prior = std::find_if(
                     prior_commands.rbegin(), prior_commands.rend(),
                     [&](const auto& entry) { return entry.command_ordinal() == ordinal; });
@@ -4037,13 +4053,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             unreconciled_javascript_remaining = durable_replay->remaining_budget();
                         }
                         if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
-                            co_await control->hold_latest_handoff_if_requested();
+                            co_await control->hold_latest_handoff_if_requested(ordinal);
                         }
                         response = std::move(recorded.output);
                         continue;
                     }
 
-                    if (checkpoint_id && resume_checkpoint) {
+                    if (can_resume_synthesized_child()) {
+                        if (auto failure =
+                                validate_javascript_command(command_value, operation_id, 0))
+                            co_return std::move(*failure);
+                        child_resume_authorized = true;
+                    } else if (checkpoint_id && resume_checkpoint) {
                         if (auto failure =
                                 validate_javascript_command(command_value, operation_id, 0))
                             co_return std::move(*failure);
@@ -4076,7 +4097,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                     }
                 }
-                if (exact_resume_authorized) {
+                if (exact_resume_authorized || child_resume_authorized) {
                     const auto durable_resumed =
                         control->transitions->latest(control->owner_scope, control->run_id);
                     if (!durable_resumed ||
@@ -4096,7 +4117,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     operations_before = operation_count;
                 }
                 std::size_t command_count = 0;
-                if (!exact_resume_authorized) {
+                if (!exact_resume_authorized && !child_resume_authorized) {
                     try {
                         command_count = javascript_command_tree_size(command_value);
                     } catch (const ProgramDiagnosticError& error) {
@@ -4235,7 +4256,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (command_result.status != ProgramTerminalStatus::Completed)
                     co_return command_result;
                 if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
-                    co_await control->hold_latest_handoff_if_requested();
+                    co_await control->hold_latest_handoff_if_requested(ordinal);
                 }
                 response = std::move(command_result.output);
             }
@@ -4440,8 +4461,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         }
     }
 
-    outcome.remaining_budget.max_dynamic_compiles = subtract_saturated(
-        control->granted_budget.max_dynamic_compiles, dynamic_compile_count);
+    outcome.remaining_budget.max_dynamic_compiles = std::min<std::uint64_t>(
+        control->dynamic_compile_ceiling.load(),
+        subtract_saturated(control->granted_budget.max_dynamic_compiles, dynamic_compile_count));
 
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
         control->cancellation_cause() == CancellationCause::None) {

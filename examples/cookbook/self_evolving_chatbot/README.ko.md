@@ -1,199 +1,113 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=14c932ce835be59435fe30b831344894d899490a1478a3bd34f442e9113414da -->
-# 자가 진화 챗봇
+# 매턴 하니스를 제안하는 챗봇
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+**Languages:** [English](README.md) | [한국어](README.ko.md)
 
-**챗봇 하니스가 런타임에 사용자 행동을 기반으로 *자체* 토폴로지를 재구성합니다. 이 기능은 NeoGraph에만 있는 기능입니다. LangGraph는 런타임에 그래프를 재구성할 수 없습니다.**
+`cookbook_program_chatbot`은 Alice와 Bob의 대화·예산·실행 계보를 분리하고,
+매턴 하니스 제안을 평가하는 Program 예제입니다. 승인된 후보는 새로운
+immutable ProgramVersion으로 컴파일·등록하고, 대화 중인 assistant의
+체크포인트에서 교체합니다. 메인 orchestrator는 같은 논리적 assistant를 기다립니다.
 
-[multi_tenant_chatbot](../multi_tenant_chatbot/) 요리책의 자연스러운 확장입니다. 해당 요리책은 고객 하니스가 *고정*되어 있고, 이 요리책은 *진화*합니다. 동일한 컴파일 캐시 + thread_id 격리를 사용하며, LLM 심사 단계가 하나 더 추가됩니다.
+- `direct`: 입력 → 답변 → 다음 하니스 제안
+- `review`: 입력 → 초안 → 별도 reviewer 하니스 합성·스폰·대기 → 수정 → 제안
+- 화면: 대화, 실제 컴파일된 Core JSON, DSL, 에이전트 트리, 세대, 변경 이유,
+  노드 차이, 승인/유지/거절 결과, 누적 모델 사용량과 남은 Program 예산
+- 영속화: SQLite와 PostgreSQL 모두 대화·호출 장부·Program 아티팩트·전환을 저장
 
-## 두 가지 데모
-
-| 파일 | 시나리오 | 비용 | 벽시계 시간 |
-|---|---|---|---|
-| [server.cpp](server.cpp) | Alice 1명 × 5턴 — 최소 진화 메커니즘 데모 | ~$0.003 | 16초 |
-| [server_multi.cpp](server_multi.cpp) | **고객 5명 × 5턴 — 각각의 개별 진화 타임라인 + 창발적 클러스터** | ~$0.02 | 7분 |
-
-빌드 / 실행 (모두):
+## 실행
 
 ```bash
-cmake --build build --target cookbook_self_evolving_chatbot cookbook_self_evolving_chatbot_multi
-./build/cookbook_self_evolving_chatbot         # single (alice)
-./build/cookbook_self_evolving_chatbot_multi   # multi (5 customers)
+cmake -S . -B build-chat -G Ninja \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON
+cmake --build build-chat --target cookbook_program_chatbot -j 4
+./build-chat/cookbook_program_chatbot --mock --db evolving-chat.sqlite
 ```
 
-## 왜 오직 NG만이 이것을 할 수 있는가
+브라우저에서 `http://127.0.0.1:8768`을 엽니다. 데모 모드에서는 `검토`, `비교`,
+`review`를 포함한 요청이 review 하니스를 제안합니다. 승인된 변경은 다음 턴에
+사용됩니다. 강제 교체 체크박스는 두 템플릿을 번갈아 시연하며 품질 향상을 뜻하지 않습니다.
 
-| 시도 | LangGraph | NeoGraph |
-|---|---|---|
-| 고객별로 다른 하네스 | ❌ StateGraph = Python 객체 | ✅ graph_def JSON 행 |
-| Harness는 런타임에 스스로 형태를 재구성함 | ❌ 모듈 리로드 + 진행 중 상태 손실 | **✅ DB UPDATE 1회 + 다음 요청 시 새 엔진 컴파일** |
-| 고객 1,000명의 서로 다른 그래프 1,000개 | ❌ 고객별 프로세스 = 80 GB | ✅ 단일 프로세스 / 고유 형태 캐시 |
-| 창발적 클러스터 발견 | N/A | **✅ graph_def 해시 분포 = 고객 행동 클러스터** |
+OpenRouter 연결은 환경변수 또는 `.env`에서 읽습니다. 기존 예제의 ZDR 라우팅을
+유지하며 기본 모델은 `z-ai/glm-5.3-flash`입니다.
 
-LangChain/LangGraph의 StateGraph는 Python 클래스 인스턴스 — pickle은 import 경로도 함께 번들링하므로, 런타임 노드/엣지 재구성에는 Python 모듈 리로드가 필요하고 진행 중 대화 상태가 손실됨. **NG의 graph-as-JSON은 진화 = JSON 수정 한 번을 의미.**
-
-## Core 메커니즘
-
-각 턴이 끝날 때, OpenRouter를 통해 고정된 DeepSeek 모델이 LLM 심판 역할을 수행: 대화 기록 + 현재 토폴로지를 확인하고 가장 적합한 답을 한 단어로 응답:
-
-- `simple` — LLM 호출 1회, 짧고 직접적인 답변 (사실적 Q에 적합)
-- `reflexive` — LLM 호출 3회 (초안 → 비평 → 최종) (정확성 추구에 적합)
-- `fanout` — 병렬 LLM 관점 3개 → 병합 (다중 관점 요구사항에 적합)
-
-판단이 다를 경우, 고객 DB의 graph_def를 제자리에서 업데이트합니다. 다음 턴은 새 토폴로지를 사용합니다 — **배포 0회, 재시작 0회, 진행 중 상태 보존**.
-
-```cpp
-std::string suggested = llm_judge_topology(
-    provider, customer.history, customer.topology_name);
-
-if (suggested != customer.topology_name) {
-    customer.topology_def  = topo_registry[suggested]();   // New graph_def
-    customer.topology_name = suggested;
-    // Cache sees new hash next turn and automatically compiles new engine.
-    // Real production: DB UPDATE customer_graphs SET graph_def = ...
-}
+```bash
+export OPENROUTER_API_KEY='...'
+export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
+./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+# 기존 파일을 사용할 때:
+./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
+  --model z-ai/glm-5.3-flash --session glm-demo
 ```
 
-## 데모 1 — Alice 1 Person (server.cpp)
+`--model`은 모델 환경변수보다 우선하고, 프로세스 환경변수는 `.env`보다 우선합니다.
+파일을 지정하지 않으면 현재 폴더에서 가장 가까운 `.env`를 찾습니다. `--no-env`로
+탐색을 끌 수 있습니다. 키는 출력·저장하지 않습니다. 출력 한도는 호출당 기본
+4,096토큰(제공자의 추론 토큰 포함)이며 `--max-output-tokens`로 1~8,192 범위에서 지정합니다.
+`--provider-timeout-seconds`는 호출당 제한을 1~120초로 지정하며 기본값은 120초입니다.
+체크포인트 대기는 그 사이의 순차 호출을 고려하고 reviewer의 자식 예산은 180초입니다.
+타임아웃된 호출은 예약 예산을 유지하며 자동 재호출하지 않습니다.
+GLM 5.3 Flash 채팅은 출력 한도 안에 실제 답변을 남기도록 추론 강도 `low`를 기본으로
+사용합니다. `--reasoning-effort default`로 제공자 기본 설정을 사용할 수 있으며,
+직접 지정한 값은 해당 모델이 지원해야 합니다. DSL 생성 평가기는 별도 설정을 유지합니다.
 
-5회에 걸친 점진적 진화. 사용자는 사실 질문 → 다중 관점 질문으로 자연스럽게 이동하며, 하네스는 단순 → fan-out 진화를 따릅니다.
+PostgreSQL은 WSL native Docker에서 전용 DB를 실행한 뒤 같은 WSL 셸에
+`NEOGRAPH_CHAT_POSTGRES_URL`을 설정합니다. 설정하면 대화와 Program 저장소
+모두 PostgreSQL을 사용하고, 없으면 `--db`의 SQLite 파일을 사용합니다.
 
-```
-── Turn 1 [topology=simple] ──
-User: What is a cloud?
-Bot:  A cloud is a visible mass of condensed water vapor...
-[Evaluating harness fit...] judge → simple
+## 구현 범위
 
-── Turn 3 [topology=simple] ──
-User: Now explain blockchain to me — I want both the
-      technical view and the economic view.
-Bot:  **Technical View:** Blockchain is a decentralized digital ledger...
-[Evaluating harness fit...] judge → fanout
-  ⟹ EVOLVE: simple → fanout (in-place, deploy 0)
+모델은 `{plan, reason, confidence}`를 제안합니다. host는 `direct`/`review`,
+길이가 제한된 이유, 0~1 범위의 confidence만 허용합니다. 0.7 미만이거나
+유효하지 않은 제안은 거절하고, 현재 plan과 같으면 유지합니다.
+제안 호출은 네이티브 provider의 JSON 응답 모드를 사용하며, 필드와 허용값은 host가
+별도로 검증합니다.
+빈 제안이나 출력이 잘린 제안은 거절하되 이미 생성된 답변은 유지합니다. 확인된 사용량은
+정산하고 종료 이유를 제안 진단에 남기며, 전송 결과가 불확실한 호출은 자동 재전송하지 않습니다.
 
-── Turn 4-5 [topology=fanout] ──
-... multi-perspective response after ...
+이번 예제는 **검토된 템플릿의 매개변수 합성**입니다. 모델이 작성한 임의의
+JavaScript를 실행하지 않습니다. 제안이 자신의 권한이나 예산을 발급할 수 없으며,
+자식 하니스도 독립된 host grant와 컴파일·승인·게시·바인딩을 통과해야 합니다.
+템플릿 승인은 답변 품질의 증명이 아닙니다. QuickJS와 모델 노드의 실행 보장은
+`Unmanaged`로 표시합니다.
 
-Evolution timeline:
-  Turn 0:  simple   (initial)
-  Turn 3:  fanout   (evolved)
-```
+host는 [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md)와
+`references/chat-template-proposals.md`를 실제 하니스 제안 모델의 문맥에 넣습니다.
+답변·reviewer 호출에는 각 역할의 지침을 사용합니다. SKILL 해시와 출력 한도를 세션에
+기록하고 실제 프롬프트도 호출 식별자에 포함합니다. 지침이나 모델, 빌드가 바뀌면
+새 `--session`을 사용해야 하며 기존 예산을 조용히 초기화하지 않습니다.
 
-## 데모 2 — Multi-Customer (server_multi.cpp) ⭐
+같은 스킬의 별도 참고 문서는 QuickJS 소스 작성과 컴파일 진단 수정, 재귀 자식 생성,
+체크포인트 교체를 안내합니다. DSL 생성 평가기는 이 작성 지침과 네이티브 API 명세를
+모델에 제공하고 반환된 소스를 실제 컴파일러로 검증합니다. 챗봇의 템플릿 제안 모드는
+모델에게 컴파일러 도구를 직접 노출하지 않습니다. 이전 빌드의 예제 DB에는 새 세션을 만드세요.
 
-**실제 영향력이 여기에 있습니다.** 5명의 고객이 서로 다른 행동 패턴을 보이며, 각각 별도의 진화 타임라인을 가집니다. 창발적 클러스터 발견 데모.
+기본 세션 한도는 tenant마다 12턴·모델 호출 100회·20만 토큰입니다. 호출 전에
+예약하고 실제 사용량으로 정산하며, 사용량이 없으면 예약량을 유지합니다. 입력 예약은
+UTF-8 바이트와 여유분을 사용하며 모델별 토크나이저의 정확한 계산은 아닙니다.
+금액은 가격을 가정하지 않고 미상으로 표시하며 금액 한도를 제공하지 않습니다.
+Program의 컴파일·연산·Core step·자식 수/깊이 예산은 교체나 재시작으로 초기화되지 않습니다.
+대기 시간도 세션의 wall-time 한도에 포함됩니다.
 
-각 고객의 행동 패턴 가설 + 실제 결과:
+프로세스 종료 후 같은 DB·session·모델로 실행하면 다음 요청에서 기존 계보를
+복구합니다. 결과가 불확실한 모델 호출은 자동 재전송하지 않습니다. 중단된 컴파일도
+무료 재시도하지 않고 조정이 필요한 상태로 남깁니다. 명시적 세션 취소는 복구용
+프로세스 종료와 달리 실행 가족을 종료합니다.
 
-| 고객 | 행동 패턴 | 가설 | 실제 진화 | 검증 |
-|---|---|---|---|---|
-| **alice** | 점진적(사실적 → 다중 시각) | 중간에 fan-out | `simple → fanout(t3)` | ✅ |
-| **bob** | 사실만 ("X는 무엇인가?" × 5) | simple 유지됨 | `simple` 전체 5턴 | ✅ |
-| **charlie** | 정확성 추구("답변 검증") | 반사적 | `simple → reflexive(t1)` 즉시 | ✅ |
-| **david** | 처음부터 "X vs Y 다각도 비교" | 빠른 fan-out | `simple → fanout(t1)` 즉시 | ✅ |
-| **eve** | 혼합(사실적 ↔ 다각도 ↔ 신중한 진동) | 진동 위험 | `simple → fanout(t2) → reflexive(t4) → fanout(t5)` **진동(oscillation)** | ✅ |
+단일 서버 프로세스용 예제입니다. loopback에 바인딩하며 `alice-demo`/`bob-demo`
+토큰은 owner 선택을 보여 주는 로컬 데모 인증입니다. 운영 인증 시스템은 아닙니다.
 
-### 요약 결과
+## 검증
 
-```
-=== Aggregate stats ===
-Customers:           5
-Total turns:         25
-Total main LLM:      51
-Total judge LLM:     25
-Total LLM calls:     76
-Wall time:           424 s
-Peak RSS:            18.99 MB
-Compile cache size:  3   ← 5 customers → 3 distinct engine
-
-=== Final topology distribution ===
-  fanout:    3 customers  (alice, david, eve)
-  reflexive: 1 customer   (charlie)
-  simple:    1 customer   (bob)
-```
-
-### 핵심 관찰
-
-1. **행동 패턴 가설 4/5 정확히 검증됨** — 인간의 예측된 진화 경로와 LLM 심판의 실제 진화 결정이 정확히 일치함. 즉, **LLM 심판이 사용자 의도 전환을 확실히 감지함**.
-
-2. **Eve의 진동이 실제로 관찰됨 ⚠️** — 발화 [사실적 → 다중 → 사실적 → 신중 → 사실적]이 토폴로지 진동 [단순 → fan-out → fan-out(유지) → 반사적 → fan-out]을 유발합니다. **데이터로 검증된 안티-플래핑 가드가 필요합니다**(쿨다운 또는 히스테리시스 강화 필요).
-
-3. **창발적 클러스터 발견** — 5명의 고객의 다양한 발화 패턴이 자연스럽게 **3개의 토폴로지 클러스터**로 분류됩니다. 컴파일 캐시 크기 = 3 = 고유 클러스터 개수.
-
-**이것이 진정으로 흥미로운 창발 속성입니다** — NG의 그래프-로서-데이터는 자연스럽게 고객 행동 클러스터 발견 메커니즘이 됩니다. graph_def 분포 = 고객 행동의 본질적인 클러스터 형태.
-
-4. **메모리 효율성** — 5명의 고객 → 3개의 엔진. 2명의 고객의 엔진 메모리는 캐시 공유로 절약됩니다. **1000명의 고객으로 확장할 때, 고유 형태가 약 10개로 수렴하면 엔진 메모리는 거의 일정하게 유지됩니다 → 실제 1000명 이상의 다중 테넌트가 단일 프로세스에 맞습니다.**
-
-5. **순차 시뮬레이션은 벽 시계 기준 7분만 걸립니다** — 운영 환경에서 각 고객은 독립적이므로 병렬화가 가능합니다. 5명의 고객 병렬 처리 = 약 1.5분 + 컴파일 캐시는 동시 접근에 안전하므로(`std::shared_mutex`) 레이스가 없습니다.
-
-## 운영 시나리오 — 실제 구현
-
-```sql
-CREATE TABLE customer_graphs (
-    customer_id   TEXT PRIMARY KEY,
-    graph_def     JSONB NOT NULL,
-    topology_name TEXT,
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE customer_evolution_log (
-    id            SERIAL PRIMARY KEY,
-    customer_id   TEXT REFERENCES customer_graphs(customer_id),
-    turn          INT,
-    from_topology TEXT,
-    to_topology   TEXT,
-    judge_reason  TEXT,
-    evolved_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE customer_sessions (
-    thread_id     TEXT PRIMARY KEY,
-    customer_id   TEXT,
-    history       JSONB,
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
+```bash
+python3 examples/cookbook/self_evolving_chatbot/test_program_chat.py \
+  ./build-chat/cookbook_program_chatbot
 ```
 
-각 요청 처리 흐름:
+SQLite 실행 후 `NEOGRAPH_CHAT_POSTGRES_URL`을 설정해 같은 검증을 PostgreSQL에서
+반복할 수 있습니다. 두 tenant 동시 실행, 유지/교체, reviewer 재귀 스폰, 중복 요청,
+프로세스 복구, 예산 소진, 인증, 실제 provider 어댑터의 로컬 HTTP 응답 처리를 검증합니다.
+외부 OpenRouter 호출 성공 여부는 별도 확인해야 합니다.
 
-```cpp
-auto& cust    = db.fetch_customer(customer_id);  // graph_def + topology_name
-auto  engine  = cache.get_or_compile(cust.graph_def, ctx);  // Hash-based cache
-auto  history = db.fetch_history(thread_id);     // Session isolation key
-RunConfig rcfg;
-rcfg.thread_id = thread_id;
-rcfg.input = {{"messages", history + user_msg}};
-auto result = engine->run(rcfg);
-
-db.append_history(thread_id, user_msg, result);
-
-if (turn % EVAL_INTERVAL == 0) {
-    auto suggested = llm_judge_topology(provider, history, cust.topology_name);
-    if (suggested != cust.topology_name && !in_cooldown(cust)) {
-        db.update_customer_graph(customer_id, topo_registry[suggested](),
-                                  suggested);
-        db.log_evolution(customer_id, turn, cust.topology_name, suggested);
-    }
-}
-```
-
-## 향후 확장
-
-- **안티-진동 가드** — Eve 사례를 처리합니다. 지난 N턴 내에 진화했으면 잠금, 또는 히스테리시스(현재 토폴로지가 다음 후보보다 N% 낮지 않으면 변경하지 않음).
-- **LLM 생성 graph_def** — 현재는 3개의 사전 정의된 토폴로지에서 선택합니다. 더 야심차게는, LLM이 graph_def JSON을 처음부터 생성할 수 있습니다. [`the-beast/`](../the-beast/)cookbook은 동일한 모델 작성 토폴로지와 컴파일/검증 게이트를 보여줍니다.
-- **병렬 고객 처리** — 순차 데모는 7분이고, 고객당 병렬 처리 = 약 1.5분입니다. `asio::thread_pool` + 컴파일 캐시를 직접 사용합니다.
-- **A/B 프레임워크** — 동일 고객에 대해 2개의 토폴로지를 동시 운영하고, 응답 만족도로 승자를 결정합니다. graph_id로 고정 분할을 수행합니다.
-- **CheckpointStore 통합** — Postgres + 위 SQL 스키마로 실제 운영 준비를 합니다.
-- **적응형 진화 속도** — 고객 기록 안정성에 따라 평가-간격을 조정합니다(안정적 = 10턴마다, 불안정 = 매턴).
-
-## Core 메시지
-
-> **자기 진화 + 다중 테넌트 조합이 NG의 진정한 본질입니다.** 5명의 고객이 3개의 엔진에 저장되고, 2개의 체크포인트가 유지됩니다. 고유한 토폴로지 수가 안정화되면서 서브에이전트 파생을 통해 메모리 오버헤드가 감소합니다. A/B 실험, 히스테리시스, 병렬 처리, LLM 생성 graph_def 파생을 통해 확장성, 메커니즘 지속성, 안정성, 공정성을 보장합니다.
-> 스스로를 구축하는 것"은 NG의 그래프-데이터 패러다임으로 **실질적으로 구현 가능**합니다.
-> LLM이 자체 하네스를 출력 → DB UPDATE → 즉시 적용 — 폐쇄된 경로를 위한
-> NG는 이 시장에서 **유일한 플레이어**입니다.
->
-> *"고객 5명 × 턴 5회 = 19MB / 3 distinct engine / emergent cluster
-> 발견 / 진동 진단. 실제 자기 개선형 멀티 테넌트 에이전트 인프라를 위한 출발점입니다.
-> 인프라."*
+기존 `server.cpp`, `server_multi.cpp`는 다음 요청의 Core 그래프를 선택하는 이전
+예제로 유지합니다. 새 예제의 Program 세대 교체와는 구현 범위가 다릅니다.

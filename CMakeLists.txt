@@ -44,6 +44,7 @@ endif()
 # Detect via CMAKE_CXX_FLAGS containing `-fsanitize=`.
 # ===========================================================================
 option(NEOGRAPH_ENABLE_HARDENING "Hardening flags in Release builds (canaries, FORTIFY, CFI)" ON)
+option(NEOGRAPH_ENABLE_SHA256_ACCELERATION "Use runtime-gated SHA-256 CPU acceleration" ON)
 if(NEOGRAPH_ENABLE_HARDENING
    AND NOT CMAKE_CXX_FLAGS MATCHES "fsanitize="
    AND NOT MSVC)
@@ -518,6 +519,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 set(NEOGRAPH_CORE_SOURCES
     src/core/json.cpp
     src/core/canonical_json.cpp
+    src/core/sha256.cpp
     src/core/cancel.cpp
     src/core/graph_invocation.cpp
     src/core/provider.cpp
@@ -579,6 +581,9 @@ target_include_directories(neograph_core
 # libraries) must see dllimport — which is what they get when this
 # define is absent from their compile line.
 target_compile_definitions(neograph_core PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+if(NOT NEOGRAPH_ENABLE_SHA256_ACCELERATION)
+    target_compile_definitions(neograph_core PRIVATE NEOGRAPH_DISABLE_SHA256_ACCELERATION=1)
+endif()
 # Stamp the version (single source of truth: pyproject.toml, parsed near
 # the top of this file into NEOGRAPH_VERSION) into the binary so
 # NodeFactory::export_schema() can emit it for drift detection by
@@ -630,6 +635,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/diagnostic.cpp
     src/program/source.cpp
     src/program/synthesis.cpp
+    src/program/child_synthesis.cpp
         src/program/javascript_capabilities.cpp
         src/program/task_graph_proposal.cpp
         src/program/task_graph_fragment.cpp
@@ -1479,9 +1485,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_multi_tenant_live PRIVATE
                 neograph::core neograph::llm cppdotenv)
 
-            # Self-evolving chatbot — multi-tenant + LLM judge → graph_def
-            # 가 사용자 행동 보고 in-place 진화. NG 만 가능한 카테고리
-            # (LangGraph 의 StateGraph 는 Python 객체라 runtime reshape 불가).
+            # Legacy Core demos choose a topology for the next request.
             add_executable(cookbook_self_evolving_chatbot
                 examples/cookbook/self_evolving_chatbot/server.cpp)
             target_link_libraries(cookbook_self_evolving_chatbot PRIVATE
@@ -1493,6 +1497,30 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/self_evolving_chatbot/server_multi.cpp)
             target_link_libraries(cookbook_self_evolving_chatbot_multi PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            if(NEOGRAPH_BUILD_PROGRAM AND NEOGRAPH_BUILD_QUICKJS_CONTROL AND
+               (NEOGRAPH_BUILD_SQLITE OR NEOGRAPH_BUILD_POSTGRES))
+                add_executable(cookbook_program_chatbot
+                    examples/cookbook/self_evolving_chatbot/program_server.cpp
+                    examples/cookbook/self_evolving_chatbot/program_chat.cpp
+                    examples/cookbook/self_evolving_chatbot/chat_store.cpp)
+                target_link_libraries(cookbook_program_chatbot PRIVATE
+                    neograph::program neograph::llm httplib OpenSSL::Crypto cppdotenv)
+                target_compile_definitions(cookbook_program_chatbot PRIVATE
+                    CHAT_PAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/program_chat.html"
+                    CHAT_SKILL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/skills/neograph-harness-authoring/SKILL.md"
+                    CHAT_SKILL_MODE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/skills/neograph-harness-authoring/references/chat-template-proposals.md")
+                if(NEOGRAPH_BUILD_SQLITE)
+                    target_compile_definitions(cookbook_program_chatbot PRIVATE CHAT_SQLITE)
+                    target_link_libraries(cookbook_program_chatbot PRIVATE
+                        neograph::program_sqlite neograph::sqlite SQLite::SQLite3)
+                endif()
+                if(NEOGRAPH_BUILD_POSTGRES)
+                    target_compile_definitions(cookbook_program_chatbot PRIVATE CHAT_POSTGRES)
+                    target_link_libraries(cookbook_program_chatbot PRIVATE
+                        neograph::program_postgres neograph::postgres PostgreSQL::PostgreSQL)
+                endif()
+            endif()
 
             # "The Beast" — a self-evolving agent that WRITES its own
             # harness as strict Core JSON, gates it through strict compile +
@@ -1842,6 +1870,10 @@ option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
+    add_executable(bench_canonical_json benchmarks/bench_canonical_json.cpp)
+    target_link_libraries(bench_canonical_json PRIVATE neograph::core)
+    add_executable(bench_sha256 benchmarks/bench_sha256.cpp)
+    target_link_libraries(bench_sha256 PRIVATE neograph::core)
     add_executable(bench_core_quickjs_probe
         benchmarks/bench_core_quickjs_probe.cpp)
     target_link_libraries(bench_core_quickjs_probe PRIVATE neograph::core)
@@ -1866,6 +1898,18 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
             target_include_directories(bench_quickjs_control PRIVATE
                 ${PROJECT_SOURCE_DIR}/src/program)
             target_link_libraries(bench_quickjs_control PRIVATE neograph::program)
+            add_executable(bench_program_cost benchmarks/bench_program_cost.cpp)
+            target_include_directories(bench_program_cost PRIVATE
+                ${PROJECT_SOURCE_DIR}/src/program)
+            target_link_libraries(bench_program_cost PRIVATE neograph::program)
+            if(NEOGRAPH_BUILD_SQLITE)
+                target_compile_definitions(bench_program_cost PRIVATE NEOGRAPH_COST_SQLITE=1)
+                target_link_libraries(bench_program_cost PRIVATE neograph::program_sqlite neograph::sqlite)
+            endif()
+            if(NEOGRAPH_BUILD_POSTGRES)
+                target_compile_definitions(bench_program_cost PRIVATE NEOGRAPH_COST_POSTGRES=1)
+                target_link_libraries(bench_program_cost PRIVATE neograph::program_postgres neograph::postgres)
+            endif()
         endif()
         add_executable(bench_program_serialization_poc
             benchmarks/bench_program_serialization_poc.cpp)
@@ -2024,13 +2068,13 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     if(_neograph_benchmark_build_type STREQUAL "")
         set(_neograph_benchmark_build_type "unspecified")
     endif()
-    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe)
+    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe bench_canonical_json bench_sha256)
     if(NEOGRAPH_BUILD_PROGRAM)
         list(APPEND _neograph_benchmark_targets
             bench_program bench_program_dispatch
             bench_program_serialization_poc bench_program_binary_poc)
         if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
-            list(APPEND _neograph_benchmark_targets bench_quickjs_control)
+            list(APPEND _neograph_benchmark_targets bench_quickjs_control bench_program_cost)
         endif()
         if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
             list(APPEND _neograph_benchmark_targets bench_program_codec_poc)

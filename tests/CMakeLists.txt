@@ -1,4 +1,6 @@
 add_executable(neograph_tests
+    test_canonical_json.cpp
+    test_sha256.cpp
     test_graph_state.cpp
     test_graph_engine.cpp
     test_engine_config.cpp
@@ -215,6 +217,10 @@ if(NEOGRAPH_BUILD_PROGRAM)
             neograph::program_postgres
             PostgreSQL::PostgreSQL
         )
+        if(TARGET neograph_postgres)
+            target_compile_definitions(neograph_program_tests PRIVATE NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT)
+            target_link_libraries(neograph_program_tests PRIVATE neograph::postgres)
+        endif()
     endif()
 endif()
 
@@ -578,7 +584,7 @@ if(TARGET neograph_program_tests)
         # Keep the Program PostgreSQL store integration cases off the shared
         # checkpoint fixture while other test cases remain parallelizable.
         set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
-            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*")
+            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*:*ProgramChildSynthesisPersistence.*/*PostgreSQL*:*ProgramChildSynthesisCrash.*/*PostgreSQL*:ProgramChildSynthesisPostgreSQL.*")
         gtest_discover_tests(neograph_program_tests
             TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
             PROPERTIES RESOURCE_LOCK postgres_test_db)
@@ -623,6 +629,19 @@ if(NEOGRAPH_BUILD_POSTGRES)
         COMMAND neograph_postgres_old_header_abi)
     set_tests_properties(PostgresCheckpointAbiTest.OldHeaderNewLibrary
         PROPERTIES RESOURCE_LOCK postgres_test_db)
+endif()
+
+if(TARGET cookbook_program_chatbot AND NEOGRAPH_BUILD_SQLITE)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ProgramChatbot.SQLite
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/test_program_chat.py
+                $<TARGET_FILE:cookbook_program_chatbot>)
+        set_tests_properties(ProgramChatbot.SQLite PROPERTIES
+            TIMEOUT 240 LABELS "program;example;integration"
+            ENVIRONMENT "NEOGRAPH_CHAT_POSTGRES_URL=")
+    endif()
 endif()
 
 # ThreadSanitizer ASLR notice: when CMAKE_CXX_FLAGS contains

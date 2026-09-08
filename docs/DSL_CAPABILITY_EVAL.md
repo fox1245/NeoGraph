@@ -58,11 +58,16 @@ build\tests\Release\neograph_program_tests.exe `
 The opt-in runner asks for source using natural-language semantics plus the
 public API signatures. It does not give the model the checked-in answer. Every
 response is sent to the same native probe used by deterministic CTest.
+The runner loads `skills/neograph-harness-authoring/SKILL.md` and its
+`references/quickjs-authoring.md` into the model's context and records the guidance
+digest in the report. `--skill` selects another entrypoint with that companion
+reference. The host invokes the actual compiler bridge; the model returns source
+and receives diagnostics for bounded repair. The skill grants no runtime authority.
 
 ```powershell
 bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --probe build\tests\Release\program_dsl_capability_probe.exe `
-  --model deepseek/deepseek-v4-flash-0731 `
+  --model z-ai/glm-5.3-flash `
   --repair-attempts 2 `
   --output dsl-capability-evidence.json
 ```
@@ -71,6 +76,43 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
 one-shot trials, and `--repair-attempts` returns the authoritative probe
 diagnostic to the model with the rejected full source. Provider/response
 failure is kept separate from compile or semantic rejection.
+The default model is `z-ai/glm-5.3-flash`; each generation is capped at 4,096
+completion tokens and uses the cookbook's ZDR provider-routing setting. The
+historical DeepSeek evidence below predates this skill-loading configuration.
+
+## Evaluate the instructions separately
+
+A passed source case measures the combined skill, supplied native API reference,
+case contract and model configuration. It does not establish that the skill by
+itself is sufficient. The runner retains the system prompt, API reference, raw
+model content, usage, stop reason and strict-envelope result in its evidence.
+The legacy source extractor may recover fenced JSON; strictEnvelope distinguishes
+that from compliance with the requested raw JSON envelope.
+
+Use --reasoning-effort only when explicitly selecting a separate comparison
+profile. Omission retains the provider default. Hold that value, model, sampling,
+output cap, task and compiler fixed within each before/after comparison.
+
+For the chatbot's internal Harness selector, the paired evaluator is:
+
+~~~powershell
+bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
+  --after skills/neograph-harness-authoring/SKILL.md `
+  --provider relace --repeats 2 --output skill-comparison.json
+~~~
+
+Both directories must contain references/chat-template-proposals.md. The default
+fixtures include a greeting, an ongoing request for independent review and a
+recorded review scenario. The expected plan stays outside the model's input.
+The evaluator fixes the live chat profile, alternates AB/BA order, retains raw
+responses and grades JSON shape separately from the expected plan/confidence.
+--provider pins a backend with fallback disabled; without it, routing policy is
+shared but the actual provider can differ. Returned provider/model names are
+recorded. Cases and repeats are bounded; no repair or silent retry is performed.
+
+This is a prompt-level evaluation, not runtime admission or a statistical claim
+about answer quality. Small repeated samples from a targeted case are regression
+evidence, not an estimate of general model reliability.
 
 ## Observed DeepSeek result
 

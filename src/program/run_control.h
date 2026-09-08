@@ -59,6 +59,7 @@ using ChildLaunchCallback =
                                               std::string_view,
                                               std::optional<TaskGraphBudget>)>;
 using ChildBindingValidationCallback = std::function<void(std::string_view, std::string_view)>;
+using ChildRecoveryCallback = std::function<bool(std::string_view, const json&, std::string_view)>;
 
 struct AsyncWaiter {
     std::weak_ptr<asio::steady_timer> timer;
@@ -89,7 +90,8 @@ public:
                std::shared_ptr<graph::CheckpointStore>    checkpoints,
                std::shared_ptr<graph::Store>              state_store,
                std::shared_ptr<ProgramTransitionStore>    transitions,
-               std::optional<ProgramExecutionLease>       execution_lease = std::nullopt);
+               std::optional<ProgramExecutionLease>       execution_lease = std::nullopt,
+               std::string                                logical_run_id  = {});
     RunControl(ProgramRunRecord record,
                std::shared_ptr<ProgramTransitionStore> transitions);
 
@@ -103,6 +105,9 @@ public:
      * completed handle can start the next Program.
      */
     void add_terminal_cleanup(TerminalCleanup cleanup);
+    void                        add_logical_cleanup(TerminalCleanup cleanup);
+    void                        retire_to(const std::shared_ptr<RunControl>& successor);
+    std::shared_ptr<RunControl> following_successor() const;
     /**
      * Registers the host-owned policy/store boundary used by
      * expand_task_graph.  The callback is consulted only after the proposal
@@ -115,6 +120,10 @@ public:
     std::optional<TaskGraphExpansionPolicy> task_graph_policy(
         std::string_view expansion_operation_id) const;
     void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
+    void set_child_recovery_callback(ChildRecoveryCallback callback) noexcept;
+    bool can_recover_child(std::string_view binding,
+                           const json&      input,
+                           std::string_view operation) const;
     void set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept;
     void emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
                              std::optional<ProgramTerminalStatus> status = {},
@@ -122,6 +131,9 @@ public:
 
     const std::string                                owner_scope;
     const std::string                                run_id;
+    const std::string                                logical_run_id;
+    /// Set before dispatch from the immutable publication that created this generation.
+    std::vector<ProgramChildRecord>                   inherited_children;
     const std::string                                program_version_id;
     const std::string                                bundle_id;
     const std::string                                binding_fingerprint;
@@ -180,6 +192,11 @@ public:
         std::optional<RunBudget>   inflight_reservation = std::nullopt);
     /** Durably consumes one nonrenewable dynamic-compilation unit before dispatch. */
     bool consume_dynamic_compile();
+    std::atomic<std::uint64_t> dynamic_compile_ceiling{UINT64_MAX};
+    void                       limit_dynamic_compiles(std::uint64_t remaining) noexcept {
+        auto old = dynamic_compile_ceiling.load();
+        while (old > remaining && !dynamic_compile_ceiling.compare_exchange_weak(old, remaining)) {}
+    }
     ProgramEvent make_event(std::string_view operation_id,
                             ProgramEventKind kind,
                             ProgramEventPayload payload);
@@ -201,8 +218,10 @@ public:
     HeldProgramHandoff                    wait_handoff(std::uint64_t request_id);
     asio::awaitable<HeldProgramHandoff>   wait_handoff_async(std::uint64_t request_id);
     bool                                  has_active_handoff_request() const noexcept;
+    bool                                          has_held_handoff() const noexcept;
     void                                  reach_latest_handoff_if_requested();
-    asio::awaitable<void>                 hold_latest_handoff_if_requested();
+    std::function<void(std::uint64_t)>            checkpoint_handler;
+    asio::awaitable<void>                 hold_latest_handoff_if_requested(std::uint64_t ordinal);
     void                                  release_handoff(std::uint64_t request_id) noexcept;
     std::shared_ptr<graph::GraphSafePointRequest> graph_safe_point_request() const;
     std::uint64_t request_graph_migration();
@@ -237,7 +256,11 @@ private:
     CompletionCallback                     completion_callback_;
     mutable std::vector<AsyncWaiter>       waiters_;
     std::vector<TerminalCleanup>           terminal_cleanups_;
+    std::vector<TerminalCleanup>                  logical_cleanups_;
+    std::shared_ptr<RunControl>                   successor_;
+    bool                                          follow_successor_ = false;
     ChildLaunchCallback                     child_launch_callback_;
+    ChildRecoveryCallback                         child_recovery_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;
     std::shared_ptr<HookRuntime>               hook_runtime_;
     std::atomic<bool>                          hook_runtime_enabled_{false};
