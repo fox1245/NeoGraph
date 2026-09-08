@@ -1148,7 +1148,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 "javascript", active_javascript_command->command.to_json(), std::nullopt,
                 javascript_command_pending_effect(*control, active_javascript_command->ordinal,
                                                   active_javascript_command->command,
-                                                  active_javascript_command->effect_identity)};
+                                                  active_javascript_command->effect_identity)
+                    .mark_outcome_unknown(static_cast<std::uint64_t>(latest->timestamp_ms)).value};
         } catch (...) {
             // The already-published reservation remains durable when the
             // transition store itself cannot be read during terminalization.

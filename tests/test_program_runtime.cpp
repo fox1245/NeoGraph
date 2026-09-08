@@ -1506,9 +1506,19 @@ public:
     std::mutex                                               synthesis_observation_mutex;
     std::optional<ProgramChildSynthesisState> fail_synthesis_after;
     std::function<void(const ProgramTransitionPublication&)> after_publication;
+    std::function<void(const ProgramTransitionPublication&)> before_publication;
     std::function<std::optional<ProgramRunRecord>(std::string_view,
                                                  std::optional<ProgramRunRecord>)> filter_run_read;
     mutable std::atomic<unsigned>                            synthesis_read_failures{0};
+    mutable std::atomic<unsigned>                            command_head_misses{0};
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+        std::string_view owner, std::string_view run) const override {
+        auto remaining = command_head_misses.load();
+        while (remaining &&
+               !command_head_misses.compare_exchange_weak(remaining, remaining - 1)) {}
+        if (remaining) return std::nullopt;
+        return ProgramTransitionStore::load_command_publication_head(owner, run);
+    }
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
         if (throw_next_load_.exchange(false)) {
@@ -1586,6 +1596,7 @@ public:
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
+        if (before_publication) before_publication(publication);
         const bool command_result =
             !publication.commands.empty() && publication.commands.back().completed();
         const bool replacement =
@@ -1636,6 +1647,7 @@ public:
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
+        if (before_publication) before_publication(publication);
         const bool replacement =
             publication.run_generation && publication.run_generation->replacement_receipt();
         if (replacement && throw_before_replacement_.exchange(false)) {
@@ -10771,6 +10783,85 @@ TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryCompletesPendingChec
 }
 TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryPreservesUnknownDescendantEffect) {
     check_static_child_recovery(true, true, "unknown_effect");
+}
+#endif
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST_P(ProgramChildSynthesisPersistence, CommandResultRetriesAnOptimisticSnapshotMiss) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>(backend());
+    journal->release_result();
+    journal->after_publication = [weak = std::weak_ptr(journal)](const auto& publication) {
+        if (!publication.commands.empty() && !publication.commands.back().completed())
+            if (const auto store = weak.lock()) store->command_head_misses.store(1);
+    };
+    AdmittedRuntime host(2, checkpoint_backend(), journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = host.admit_javascript(javascript_runtime_source("runtime-completed",
+        "return yield ng.checkpoint({done:true},'snapshot:checkpoint');"));
+    const auto result = host.runtime->run("tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "snapshot-miss", {}});
+    journal->after_publication = {};
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(), (json{{"done", true}}));
+    EXPECT_EQ(journal->load_javascript_commands("tenant:runtime", result.run_id(), 0).size(), 2U);
+}
+
+TEST_P(ProgramChildSynthesisPersistence, FailedResultPublicationPersistsAmbiguousEffect) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>(backend());
+    journal->release_result();
+    std::atomic<bool> failed{false};
+    journal->before_publication = [&](const auto& publication) {
+        if (!publication.commands.empty() && publication.commands.back().completed() &&
+            !failed.exchange(true))
+            throw std::runtime_error("injected command result publication failure");
+    };
+    AdmittedRuntime host(2, checkpoint_backend(), journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = host.admit_javascript(javascript_runtime_source("runtime-completed",
+        "yield ng.emit({effect:'once'},'ambiguous:emit');return {};"));
+    const auto result = host.runtime->run("tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "ambiguous-publication", {}});
+    journal->before_publication = {};
+    EXPECT_TRUE(failed.load());
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::AmbiguousEffect) << result.serialize_canonical();
+    ASSERT_TRUE(result.interrupt());
+    ASSERT_TRUE(result.interrupt()->pending_effect);
+    EXPECT_EQ(result.interrupt()->pending_effect->state(), ProgramPendingState::Ambiguous);
+    const auto stored = journal->load("tenant:runtime", result.run_id());
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->continuation().state, ContinuationState::AmbiguousEffect);
+    EXPECT_EQ(journal->load_effects("tenant:runtime", result.run_id(), 0).size(), 1U);
+    EXPECT_EQ(journal->load_javascript_commands("tenant:runtime", result.run_id(), 0).size(), 1U);
+    auto recovered = host.runtime->reconnect("tenant:runtime", result.run_id());
+    EXPECT_FALSE(recovered.cancel());
+    EXPECT_EQ(recovered.wait().id(), result.id());
+}
+
+TEST_P(ProgramChildSynthesisPersistence, AmbiguousDescendantDoesNotStrandFamilyCompletion) {
+    StaticChildRecoveryFixture test(backend(), checkpoint_backend(), true, false, false, true);
+    std::atomic<bool> failed{false};
+    test.journal->before_publication = [&](const auto& publication) {
+        if (publication.run_record.program_version_id() == test.grand_version->id() &&
+            !publication.commands.empty() && publication.commands.back().completed() &&
+            publication.commands.back().command().kind() == JavaScriptCommandKind::Emit &&
+            !failed.exchange(true))
+            throw std::runtime_error("injected descendant result publication failure");
+    };
+    test.root = test.host.runtime->start("tenant:runtime", *test.root_version,
+        ProgramInvocation{json::object(), test.root_budget, "ambiguous-family", {}});
+    const auto result = test.root->wait();
+    test.journal->before_publication = {};
+    EXPECT_TRUE(failed.load());
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::AmbiguousEffect) << result.serialize_canonical();
+    const auto root = test.root->snapshot();
+    ASSERT_EQ(root.children().size(), 1U);
+    EXPECT_EQ(root.children().front().state, ProgramChildState::Dispatched);
+    const auto child = test.journal->load("tenant:runtime", root.children().front().child_run_id);
+    ASSERT_TRUE(child);
+    ASSERT_EQ(child->children().size(), 1U);
+    EXPECT_EQ(child->continuation().state, ContinuationState::AmbiguousEffect);
+    EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
+    const auto grand = test.journal->load("tenant:runtime", child->children().front().child_run_id);
+    ASSERT_TRUE(grand);
+    EXPECT_EQ(grand->continuation().state, ContinuationState::AmbiguousEffect);
+    EXPECT_FALSE(test.root->cancel());
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)

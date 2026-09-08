@@ -1427,6 +1427,10 @@ bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& tra
             const auto current = load_active_agent_run(transitions, owner_scope, parent_run_id);
             if (!current || current->continuation().state != ContinuationState::Running)
                 return false;
+            // A rejection against an unchanged head is a validation/storage
+            // failure, not competing publication. Do not strand completion
+            // waiters in an infinite retry loop for a permanent rejection.
+            if (current->journal_head() == record->journal_head()) return false;
             std::this_thread::yield();
         }
     } catch (...) {
@@ -3595,6 +3599,10 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
 
     for (int retry = 0; retry < 3; ++retry) {
         const auto head = transitions->load_command_publication_head(owner_scope, run_id);
+        // The default store implementation reads optimistically. A child join
+        // can advance its head between reads; retry that miss before treating
+        // a command-result publication as an unresolved external outcome.
+        if (!head) continue;
         const auto* previous = head ? &head->run_record : nullptr;
         const auto* previous_journal = head ? &head->journal_record : nullptr;
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||

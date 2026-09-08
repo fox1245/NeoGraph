@@ -114,6 +114,13 @@ interrupted child remains a dispatched, resumable relation, and its parent
 retains the in-flight command reservation instead of cancelling the relation
 or crediting that reservation twice.
 
+If result publication fails while storage remains available, the dispatched
+command's outcome and pending effect are both published as `Ambiguous`;
+cancellation cannot erase that uncertainty. Optimistic command-head read
+collisions are retried, while a permanent rejection against an unchanged parent
+head cannot block child
+completion notifications indefinitely.
+
 The `*StaticChild*` tests cover SQLite and PostgreSQL process exit, static and
 inherited recursive children, unchanged child identities and receipts, and a
 grandchild's 32 checkpoints producing exactly 64 journal entries. They also

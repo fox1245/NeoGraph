@@ -132,7 +132,9 @@ bool valid_effect_outbox_binding(
     const std::vector<program::ProgramEffectOutboxEntry>& effects) {
     if (effects.empty()) return true;
     const auto pending = run.pending_effect();
-    return pending && pending->state() == program::ProgramPendingState::Awaiting &&
+    return pending && (pending->state() == program::ProgramPendingState::Awaiting ||
+                       (pending->state() == program::ProgramPendingState::Ambiguous &&
+                        run.continuation().state == program::ContinuationState::AmbiguousEffect)) &&
            effects.size() == 1 && effects.front().effect() == *pending;
 }
 bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
