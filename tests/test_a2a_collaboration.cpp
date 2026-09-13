@@ -840,6 +840,61 @@ TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
     server.stop();
 }
 
+TEST(A2ACollaboration, ReadOnlySnapshotsDoNotCreateExecutionOrCancellationHandles) {
+    ProgramAdapterFixture fixture;
+    auto adapter = std::make_shared<ProgramAgentAdapter>(
+        fixture.runtime, fixture.admitted_version(), "owner-b");
+    AgentCard card;
+    card.name = "read-only-snapshots";
+    card.url = "http://127.0.0.1:0/";
+    A2AServer server(adapter, card,
+        [](std::string_view token) -> std::optional<CollaborationPeerIdentity> {
+            if (token == "Bearer reader") return CollaborationPeerIdentity{"owner-b", "reader"};
+            return std::nullopt;
+        }, true);
+    std::atomic<int> reads{0};
+    server.set_task_snapshot_resolver(
+        [&reads](std::string_view id, const auto& peer) -> std::optional<Task> {
+            ++reads;
+            if (!peer || peer->owner_scope != "owner-b") throw std::runtime_error("hidden");
+            if (id == "missing") return std::nullopt;
+            if (id == "error") throw std::runtime_error("private diagnostic");
+            Task task;
+            task.id = id == "wrong-id" ? "another-task" : std::string(id);
+            task.context_id = "original-context";
+            task.status.state = id == "working" ? TaskState::Working : TaskState::Completed;
+            Message message;
+            message.message_id = "original-message";
+            message.role = Role::Agent;
+            message.parts.push_back(Part::text_part("original result"));
+            task.history.push_back(message);
+            message.message_id = "latest-message";
+            task.history.push_back(message);
+            return task;
+        });
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    EXPECT_THROW(server.set_task_snapshot_resolver({}), std::logic_error);
+    A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
+    EXPECT_THROW(client.get_task("historical"), std::runtime_error);
+    EXPECT_EQ(reads.load(), 0);
+    client.set_authorization_header("Bearer reader");
+    const auto task = client.get_task("historical", -1);
+    EXPECT_EQ(task.context_id, "original-context");
+    EXPECT_EQ(task.history.front().message_id, "original-message");
+    const auto limited = client.get_task("historical", 1);
+    ASSERT_EQ(limited.history.size(), 1U);
+    EXPECT_EQ(limited.history.front().message_id, "latest-message");
+    EXPECT_THROW(client.get_task("working"), std::runtime_error);
+    EXPECT_THROW(client.get_task("wrong-id"), std::runtime_error);
+    EXPECT_THROW(client.get_task("error"), std::runtime_error);
+    EXPECT_THROW(client.get_task("missing"), std::runtime_error);
+    const auto reads_before_cancel = reads.load();
+    EXPECT_THROW(client.cancel_task("historical"), std::runtime_error);
+    EXPECT_EQ(reads.load(), reads_before_cancel);
+    EXPECT_EQ(fixture.starts->load(), 0U);
+    server.stop();
+}
+
 #endif
 
 }  // namespace

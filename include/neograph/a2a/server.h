@@ -143,6 +143,18 @@ class NEOGRAPH_API A2AServer {
     using CollaborationAuthenticator = std::function<std::optional<CollaborationPeerIdentity>(
         std::string_view authorization_header)>;
 
+    /** Host-owned read-only projection, consulted only by authenticated tasks/get.
+     * The resolver must enforce its own owner/task visibility. A returned value
+     * must be terminal and match the requested id. It is never cached,
+     * acknowledged, reconnected, or used to authorize cancellation/execution.
+     * nullopt delegates to normal lookup; exceptions fail closed as not-found.
+     * Configure before starting the server; the callback may run concurrently.
+     */
+    using TaskSnapshotResolver = std::function<std::optional<Task>(
+        std::string_view task_id,
+        const std::optional<CollaborationPeerIdentity>& authenticated_peer)>;
+    void set_task_snapshot_resolver(TaskSnapshotResolver resolver);
+
     A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
               AgentCard card,
               CollaborationAuthenticator collaboration_authenticator = {},

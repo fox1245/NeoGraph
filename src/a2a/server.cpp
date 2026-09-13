@@ -258,6 +258,7 @@ struct A2AServer::Impl {
 #ifdef NEOGRAPH_A2A_PROGRAM
     std::shared_ptr<ProgramAgentAdapter>           program_adapter;
     A2AServer::CollaborationAuthenticator          collaboration_authenticator;
+    A2AServer::TaskSnapshotResolver                task_snapshot_resolver;
     bool                                            require_authenticated_requests = false;
 #endif
     httplib::Server                               svr;
@@ -943,6 +944,31 @@ void A2AServer::Impl::handle_tasks_get(const httplib::Request& req,
                         "application/json");
         return;
     }
+    if (authenticated_peer && task_snapshot_resolver) {
+        try {
+            if (auto snapshot = task_snapshot_resolver(task_id, authenticated_peer)) {
+                if (snapshot->id != task_id || !is_terminal(snapshot->status.state)) {
+                    throw std::invalid_argument("Invalid read-only task snapshot");
+                }
+                const auto hl = params.value("historyLength", -1);
+                if (hl >= 0 && snapshot->history.size() > static_cast<std::size_t>(hl)) {
+                    snapshot->history.erase(snapshot->history.begin(),
+                        snapshot->history.end() - hl);
+                }
+                neograph::json value;
+                to_json(value, *snapshot);
+                res.status = 200;
+                res.set_content(jsonrpc_result(std::move(value), id).dump(),
+                                "application/json");
+                return;
+            }
+        } catch (const std::exception&) {
+            res.status = 200;
+            res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
+                            "application/json");
+            return;
+        }
+    }
 #endif
     Task t;
     bool found = false;
@@ -1143,6 +1169,13 @@ A2AServer::A2AServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
 }
 
 #ifdef NEOGRAPH_A2A_PROGRAM
+void A2AServer::set_task_snapshot_resolver(TaskSnapshotResolver resolver) {
+    if (is_running()) {
+        throw std::logic_error("Configure the task snapshot resolver before starting A2AServer");
+    }
+    impl_->task_snapshot_resolver = std::move(resolver);
+}
+
 A2AServer::A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
                      AgentCard card,
                      CollaborationAuthenticator collaboration_authenticator,
