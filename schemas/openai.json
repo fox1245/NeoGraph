@@ -66,6 +66,7 @@
   },
   "image": {
     "strategy": "openai",
+    "remote_url_supported": true,
     "item": {
       "type": "image_url",
       "image_url": {

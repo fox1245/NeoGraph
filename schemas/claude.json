@@ -78,6 +78,13 @@
         "data": "$DATA"
       }
     },
+    "url_item": {
+      "type": "image",
+      "source": {
+        "type": "url",
+        "url": "$DATA_URL"
+      }
+    },
     "text_part": {
       "type": "text",
       "text": "$TEXT"

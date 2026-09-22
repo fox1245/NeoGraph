@@ -54,9 +54,10 @@ struct ConnPoolOptions {
     std::chrono::seconds idle_ttl{30};
 
     /// Maximum number of in-flight exchanges per (host, port, tls)
-    /// bucket. Waiters are queued asynchronously. Zero disables the
-    /// cap for callers that intentionally manage concurrency elsewhere.
-    std::size_t max_in_flight_per_host = 16;
+    /// bucket. Waiters are queued asynchronously. Zero (the default)
+    /// leaves the hot path uncapped; set a positive value when the caller
+    /// needs an explicit per-host concurrency budget.
+    std::size_t max_in_flight_per_host = 0;
 };
 
 class NEOGRAPH_API ConnPool {

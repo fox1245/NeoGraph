@@ -612,6 +612,41 @@ TEST(ConnPool, ZeroInFlightCapAllowsParallelExchanges) {
     EXPECT_GE(srv.max_active.load(), 2);
 }
 
+TEST(ConnPool, DefaultInFlightPathDoesNotImposeHiddenHostCap) {
+    MockServer srv;
+    srv.response_delay_ms = 100;
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+
+    constexpr int requests = 32;
+    std::atomic<int> finished{0};
+    for (int i = 0; i < requests; ++i) {
+        asio::co_spawn(io,
+            [&]() -> asio::awaitable<void> {
+                auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/x", "{}", {}, false);
+                EXPECT_EQ(response.status, 200);
+            },
+            [&finished](std::exception_ptr error) {
+                if (error) {
+                    try { std::rethrow_exception(error); }
+                    catch (const std::exception& ex) {
+                        ADD_FAILURE() << "coro: " << ex.what();
+                    }
+                }
+                ++finished;
+            });
+    }
+    std::thread t2([&]{ io.run(); });
+    io.run();
+    t2.join();
+
+    EXPECT_EQ(finished.load(), requests);
+    EXPECT_EQ(srv.requests.load(), requests);
+    EXPECT_GE(srv.max_active.load(), 17);
+}
+
 TEST(ConnPool, InFlightWaiterTimeoutCancelsGateWait) {
     MockServer srv;
     srv.response_delay_ms = 200;

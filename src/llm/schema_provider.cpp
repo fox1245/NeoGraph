@@ -389,6 +389,8 @@ void SchemaProvider::parse_schema()
     image_.strategy = img.value("strategy", "openai");
     if (img.contains("item")) image_.item_template = img["item"];
     if (img.contains("text_part")) image_.text_part_template = img["text_part"];
+    if (img.contains("url_item")) image_.url_item_template = img["url_item"];
+    image_.remote_url_supported = img.value("remote_url_supported", false);
 
     // --- Response ---
     auto resp = schema_["response"];
@@ -799,9 +801,20 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
             parts.push_back(substitute(image_.text_part_template, text_vars));
         }
         for (const auto& url : msg.image_urls) {
-            auto [mime, data] = parse_data_url(url);
             std::map<std::string, json> vars;
             vars["DATA_URL"] = url;
+
+            const bool is_data_url = url.rfind("data:", 0) == 0;
+            if (!is_data_url && !image_.url_item_template.is_null()) {
+                parts.push_back(substitute(image_.url_item_template, vars));
+                continue;
+            }
+            if (!is_data_url && !image_.remote_url_supported) {
+                throw std::invalid_argument(
+                    "SchemaProvider: image schema does not declare a remote URL representation");
+            }
+
+            auto [mime, data] = parse_data_url(url);
             vars["MIME"] = mime;
             vars["DATA"] = data;
             parts.push_back(substitute(image_.item_template, vars));

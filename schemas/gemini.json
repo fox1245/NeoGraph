@@ -73,6 +73,7 @@
   },
   "image": {
     "strategy": "gemini",
+    "remote_url_supported": false,
     "item": {
       "inline_data": {
         "mime_type": "$MIME",
