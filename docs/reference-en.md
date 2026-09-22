@@ -2732,6 +2732,10 @@ public:
     ChatCompletion complete(const CompletionParams& params) override;
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) override;
+    asio::awaitable<json> request_json_async(
+        const json& body, int timeout_seconds = -1,
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
+    json request_json(const json& body, int timeout_seconds = -1);
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
     std::string get_name() const override;
@@ -2757,6 +2761,7 @@ public:
 | `"openai"` | OpenAI | Same behavior as `OpenAIProvider` |
 | `"claude"` | Anthropic Claude | Uses SSE event-based streaming |
 | `"gemini"` | Google Gemini | Uses function declarations format |
+| `"openrouter_decisions"` | OpenRouter Typesafe/Jev | Raw JSON `POST /api/alpha/decisions`; use `request_json()` rather than Chat Completions |
 
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
@@ -2778,6 +2783,32 @@ auto custom = neograph::llm::SchemaProvider::create({
     .default_model = "my-model-v1"
 });
 ```
+
+**Raw JSON endpoints:** `SchemaProvider` can also use a schema's connection and
+authentication contract without forcing the response through `ChatCompletion`.
+The built-in `openrouter_decisions` schema targets OpenRouter's Typesafe/Jev
+alpha Decisions endpoint, which is separate from the Chat Completions endpoint.
+The endpoint contract is documented by [OpenRouter's Decisions API reference](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request).
+
+```cpp
+auto decisions = neograph::llm::SchemaProvider::create({
+    .schema_path = "openrouter_decisions",
+    .api_key = "sk-or-v1-...",
+    .default_model = "~typesafe/jev-latest"
+});
+
+const neograph::json result = decisions->request_json({
+    {"model", "~typesafe/jev-latest"},
+    {"questions", neograph::json::array({
+        {{"id", "topology"}, {"question", "Should the next branch expand?"}}
+    })},
+    {"state", {{"topology_version", 3}}}
+});
+```
+
+`request_json_async()` accepts an optional `CancelToken` and returns the decoded
+JSON response. The method does not infer topology changes or grant authority;
+callers must validate Jev's `answers` against their own bounded selector policy.
 
 **Internal strategy enums** (documented for custom schema authors):
 

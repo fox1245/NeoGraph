@@ -2726,6 +2726,10 @@ public:
     ChatCompletion complete(const CompletionParams& params) override;
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) override;
+    asio::awaitable<json> request_json_async(
+        const json& body, int timeout_seconds = -1,
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
+    json request_json(const json& body, int timeout_seconds = -1);
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
     std::string get_name() const override;
@@ -2751,6 +2755,7 @@ public:
 | `"openai"` | OpenAI | Same behavior as `OpenAIProvider` |
 | `"claude"` | Anthropic Claude | Uses SSE event-based streaming |
 | `"gemini"` | Google Gemini | Uses function declarations format |
+| `"openrouter_decisions"` | OpenRouter Typesafe/Jev | Raw JSON `POST /api/alpha/decisions`; Chat Completions 대신 `request_json()` 사용 |
 
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
@@ -2772,6 +2777,33 @@ auto custom = neograph::llm::SchemaProvider::create({
     .default_model = "my-model-v1"
 });
 ```
+
+**Raw JSON 엔드포인트:** `SchemaProvider`는 응답을 `ChatCompletion`으로
+강제 변환하지 않고도 스키마의 연결·인증 계약을 사용할 수 있습니다. 기본 제공
+`openrouter_decisions` 스키마는 Chat Completions와 별도인 OpenRouter
+Typesafe/Jev의 alpha Decisions 엔드포인트를 가리킵니다. 자세한 wire contract는
+[OpenRouter Decisions API reference](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request)를
+참조하세요.
+
+```cpp
+auto decisions = neograph::llm::SchemaProvider::create({
+    .schema_path = "openrouter_decisions",
+    .api_key = "sk-or-v1-...",
+    .default_model = "~typesafe/jev-latest"
+});
+
+const neograph::json result = decisions->request_json({
+    {"model", "~typesafe/jev-latest"},
+    {"questions", neograph::json::array({
+        {{"id", "topology"}, {"question", "Should the next branch expand?"}}
+    })},
+    {"state", {{"topology_version", 3}}}
+});
+```
+
+`request_json_async()`는 선택적인 `CancelToken`을 받고 디코딩된 JSON 응답을
+반환합니다. 이 메서드는 토폴로지 변경이나 권한을 자동으로 부여하지 않으므로,
+호출자가 Jev의 `answers`를 자체적인 제한된 selector 정책으로 검증해야 합니다.
 
 **Internal strategy enums** (documented for custom schema authors):
 

@@ -1512,6 +1512,122 @@ SchemaProvider::complete_async(const CompletionParams& params)
     co_return completion;
 }
 
+asio::awaitable<json>
+SchemaProvider::request_json_async(
+    const json& body,
+    int timeout_seconds,
+    std::shared_ptr<graph::CancelToken> cancel_token)
+{
+    // OpenRouter's alpha Decisions endpoint contract was verified against
+    // the upstream API reference on 2026-09-22:
+    // https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request
+    // This path deliberately bypasses build_body()/parse_response(). A
+    // schema-described endpoint is not necessarily a Chat Completions API;
+    // it still gets the same schema-owned connection, authentication,
+    // endpoint substitution, pooling, timeout, and cancellation semantics.
+    std::string body_str = body.dump();
+    std::string endpoint_path;
+    std::vector<std::pair<std::string, std::string>> headers;
+    async::AsyncEndpoint endpoint;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        const std::string api_key = get_api_key();
+        endpoint = async::validate_credential_endpoint(
+            conn_.base_url,
+            !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
+                !conn_.extra_headers.empty() || !api_key.empty(),
+            user_config_.allow_insecure_loopback);
+
+        // If the schema endpoint contains $MODEL, prefer the model in the
+        // caller-owned JSON body; otherwise use the provider default.
+        std::string model = user_config_.default_model;
+        if (!req_.model_field.empty() && body.is_object() &&
+            body.contains(req_.model_field) &&
+            body.at(req_.model_field).is_string()) {
+            model = body.at(req_.model_field).get<std::string>();
+        }
+        endpoint_path = endpoint.prefix + build_endpoint(model, false, api_key);
+        for (const auto& [k, v] : build_headers(api_key)) {
+            headers.emplace_back(k, v);
+        }
+
+        bool has_ct = false;
+        for (const auto& [k, _] : headers) {
+            if (k == "Content-Type" || k == "content-type") {
+                has_ct = true;
+                break;
+            }
+        }
+        if (!has_ct) headers.emplace_back("Content-Type", "application/json");
+    }
+
+    async::RequestOptions opts;
+    const int effective_timeout = timeout_seconds > 0
+        ? timeout_seconds
+        : user_config_.timeout_seconds;
+    if (effective_timeout > 0) {
+        opts.timeout = std::chrono::seconds(effective_timeout);
+    }
+
+    std::optional<asio::awaitable<async::HttpResponse>> request;
+    if (curl_pool_) {
+        const std::string default_port = endpoint.tls ? "443" : "80";
+        const std::string url_host = endpoint.host.find(':') != std::string::npos
+            ? "[" + endpoint.host + "]"
+            : endpoint.host;
+        std::string url = (endpoint.tls ? "https://" : "http://") + url_host
+                        + (endpoint.port == default_port
+                            ? "" : ":" + endpoint.port)
+                        + endpoint_path;
+        request.emplace(curl_pool_->async_post(
+            std::move(url), std::move(body_str), std::move(headers), opts));
+    } else {
+        request.emplace(conn_pool_->async_post(
+            endpoint.host,
+            endpoint.port,
+            endpoint_path,
+            std::move(body_str),
+            std::move(headers),
+            endpoint.tls,
+            opts));
+    }
+
+    auto executor = co_await asio::this_coro::executor;
+    auto operation = cancel_token
+        ? cancel_token->fork()
+        : std::shared_ptr<neograph::graph::CancelToken>{};
+    async::HttpResponse response;
+    if (operation) {
+        const auto operation_executor = operation->bind_executor(executor);
+        graph::CancelExecutorLease operation_lease(operation);
+        co_await asio::post(operation_executor, asio::use_awaitable);
+        operation->throw_if_cancelled("SchemaProvider JSON request entry");
+        response = co_await asio::co_spawn(
+            operation_executor, std::move(*request),
+            asio::bind_cancellation_slot(operation->slot(), asio::use_awaitable));
+    } else {
+        response = co_await std::move(*request);
+    }
+
+    if (response.status != 200) {
+        if (response.status == 429) {
+            throw RateLimitError(
+                "API error (HTTP 429): " + response.body,
+                parse_retry_after_string(response.retry_after));
+        }
+        throw std::runtime_error(
+            "API error (HTTP " + std::to_string(response.status) + "): "
+            + response.body);
+    }
+
+    co_return json::parse(response.body);
+}
+
+json SchemaProvider::request_json(const json& body, int timeout_seconds)
+{
+    return async::run_sync(request_json_async(body, timeout_seconds));
+}
+
 // ============================================================================
 // HTTP: complete_stream()
 // ============================================================================

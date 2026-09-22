@@ -119,6 +119,34 @@ public:
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) override;
 
+    /**
+     * @brief POST an arbitrary JSON body using the schema connection contract.
+     *
+     * This is the non-Chat endpoint escape hatch for schema-described APIs.
+     * The schema still owns the base URL, endpoint, authentication, and
+     * transport policy; the caller owns the endpoint-specific JSON body and
+     * receives the decoded JSON response without a ChatCompletion projection.
+     *
+     * For example, the built-in `openrouter_decisions` schema targets
+     * OpenRouter's alpha Decisions endpoint for Typesafe/Jev (verified
+     * against the upstream API reference on 2026-09-22):
+     * https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request
+     *
+     * @param body JSON request body sent verbatim after serialization.
+     * @param timeout_seconds Positive values override Config::timeout_seconds;
+     *        -1 keeps the provider default.
+     * @param cancel_token Optional operation token for async cancellation.
+     * @return Decoded JSON response body.
+     */
+    asio::awaitable<json>
+    request_json_async(
+        const json& body,
+        int timeout_seconds = -1,
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
+
+    /// Synchronous bridge for request_json_async().
+    json request_json(const json& body, int timeout_seconds = -1);
+
     /// Sync completion is inherited from `Provider::complete()`, which
     /// drives `complete_async` via `neograph::async::run_sync`.
 

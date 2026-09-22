@@ -1,0 +1,53 @@
+{
+  "name": "openrouter_decisions",
+  "description": "OpenRouter Typesafe/Jev alpha Decisions JSON endpoint.",
+  "documentation": "https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request",
+  "documentation_fetched": "2026-09-22",
+  "connection": {
+    "base_url": "https://openrouter.ai",
+    "endpoint": "/api/alpha/decisions",
+    "stream_endpoint": "/api/alpha/decisions",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "api_key_env": "OPENROUTER_API_KEY"
+  },
+  "request": {
+    "model_field": "model",
+    "messages_field": "messages",
+    "tools_field": "tools",
+    "temperature_path": null,
+    "max_tokens_path": "max_tokens",
+    "stream_field": "stream",
+    "extra_fields": {},
+    "per_call_fields": [
+      "model",
+      "questions",
+      "state"
+    ]
+  },
+  "system_prompt": {
+    "strategy": "in_messages"
+  },
+  "messages": {
+    "role_field": "role",
+    "content_field": "content"
+  },
+  "tool_definition": {
+    "wrapper": "none"
+  },
+  "tool_call_in_message": {
+    "strategy": "tool_calls_array"
+  },
+  "tool_result": {
+    "strategy": "flat"
+  },
+  "image": {
+    "strategy": "none"
+  },
+  "response": {
+    "strategy": "choices_message"
+  },
+  "streaming": {
+    "format": "sse_data"
+  }
+}

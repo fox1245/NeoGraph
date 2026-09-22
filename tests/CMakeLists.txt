@@ -46,6 +46,7 @@ add_executable(neograph_tests
     test_multi_send_routing.cpp
     test_schema_provider_concurrent.cpp
     test_schema_provider_async.cpp
+    test_schema_provider_json_endpoint.cpp
     test_schema_provider_stream_usage.cpp
     test_schema_provider_responses_stream.cpp
     test_schema_provider_stop_reason.cpp
