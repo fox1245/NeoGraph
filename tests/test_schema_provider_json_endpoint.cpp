@@ -42,12 +42,18 @@ struct DecisionsMock {
                         request_count.fetch_add(1, std::memory_order_release);
                         response.set_content(
                             R"({
-                                "answers": [{
-                                    "question_id": "topology",
-                                    "answer": "expand",
-                                    "probability": 0.91,
-                                    "confidence": 0.88
-                                }],
+                                "answers": {
+                                    "topology": {
+                                        "choice": "expand",
+                                        "probabilities": {
+                                            "keep": 0.02,
+                                            "expand": 0.91,
+                                            "contract": 0.07
+                                        },
+                                        "confidence": 0.88,
+                                        "type": "choice"
+                                    }
+                                },
                                 "state": {"version": 1}
                             })",
                             "application/json");
@@ -92,9 +98,13 @@ TEST(SchemaProviderJsonEndpoint, UsesSchemaEndpointAuthAndReturnsRawJson) {
     auto provider = llm::SchemaProvider::create(config);
     const json request = {
         {"model", "~typesafe/jev-latest"},
-        {"questions", json::array({
-            {{"id", "topology"}, {"question", "Should the retriever branch expand?"}}
-        })},
+        {"questions", {
+            {"topology", {
+                {"criteria", {"keep", "expand", "contract"}},
+                {"instructions", "Should the retriever branch expand?"},
+                {"type", "choice"}
+            }}
+        }},
         {"state", {{"topology_version", 3}}}
     };
 
@@ -105,7 +115,6 @@ TEST(SchemaProviderJsonEndpoint, UsesSchemaEndpointAuthAndReturnsRawJson) {
     EXPECT_EQ(mock.authorization, "Bearer test-key");
     EXPECT_EQ(mock.last_request(), request);
     ASSERT_TRUE(response.contains("answers"));
-    ASSERT_EQ(response.at("answers").size(), 1u);
-    EXPECT_EQ(response.at("answers").at(0).at("answer"), "expand");
+    EXPECT_EQ(response.at("answers").at("topology").at("choice"), "expand");
     EXPECT_EQ(response.at("state").at("version"), 1);
 }

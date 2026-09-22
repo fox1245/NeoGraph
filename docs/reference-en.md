@@ -2799,9 +2799,13 @@ auto decisions = neograph::llm::SchemaProvider::create({
 
 const neograph::json result = decisions->request_json({
     {"model", "~typesafe/jev-latest"},
-    {"questions", neograph::json::array({
-        {{"id", "topology"}, {"question", "Should the next branch expand?"}}
-    })},
+    {"questions", {
+        {"topology", {
+            {"criteria", {"keep", "expand", "contract"}},
+            {"instructions", "Should the next branch expand?"},
+            {"type", "choice"}
+        }}
+    }},
     {"state", {{"topology_version", 3}}}
 });
 ```
