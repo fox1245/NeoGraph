@@ -11,6 +11,7 @@
 #include <neograph/async/http_client.h>
 
 #include <asio/awaitable.hpp>
+#include <asio/buffers_iterator.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -31,6 +32,7 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -51,6 +53,9 @@ struct RoutedMock {
     std::thread             worker;
     Responder               responder;
     std::atomic<int>        requests{0};
+    std::atomic<bool>       split_response{false};
+    std::mutex              request_mu;
+    std::string             last_request;
     unsigned short          port = 0;
 
     explicit RoutedMock(Responder r) : responder(std::move(r)) {
@@ -75,6 +80,13 @@ struct RoutedMock {
             asio::streambuf buf;
             co_await asio::async_read_until(
                 sock, buf, "\r\n\r\n", asio::use_awaitable);
+
+            {
+                const auto data = buf.data();
+                std::lock_guard lock(request_mu);
+                last_request.assign(asio::buffers_begin(data),
+                                    asio::buffers_end(data));
+            }
 
             std::istream is(&buf);
             std::string req_line;
@@ -118,8 +130,25 @@ struct RoutedMock {
 
             ++requests;
             std::string resp = responder(path);
-            co_await asio::async_write(sock, asio::buffer(resp),
-                                       asio::use_awaitable);
+            if (!split_response.load()) {
+                co_await asio::async_write(sock, asio::buffer(resp),
+                                           asio::use_awaitable);
+            } else {
+                const auto marker = resp.find("\r\n\r\n");
+                if (marker == std::string::npos) {
+                    throw std::runtime_error("test response has no header terminator");
+                }
+                co_await asio::async_write(
+                    sock, asio::buffer(resp.data(), marker + 4),
+                    asio::use_awaitable);
+                asio::steady_timer timer(io);
+                timer.expires_after(std::chrono::milliseconds(2));
+                co_await timer.async_wait(asio::use_awaitable);
+                co_await asio::async_write(
+                    sock, asio::buffer(resp.data() + marker + 4,
+                                       resp.size() - marker - 4),
+                    asio::use_awaitable);
+            }
         } catch (...) { }
         asio::error_code ec;
         sock.close(ec);
@@ -166,6 +195,183 @@ TEST(RequestOptions, ConservativeInboundDefaults) {
     EXPECT_EQ(opts.max_response_header_bytes, 64u * 1024u);
     EXPECT_EQ(opts.max_response_body_bytes, 16u * 1024u * 1024u);
     EXPECT_EQ(opts.max_response_chunk_bytes, 1024u * 1024u);
+}
+
+TEST(RequestOptions, NegativeDeadlineAndRedirectLimitAreRejected) {
+    auto free_call_error = [](neograph::async::RequestOptions opts) {
+        asio::io_context io;
+        std::string error;
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            try {
+                auto request = neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", "1", "/invalid",
+                    "{}", {}, false, opts);
+                (void)co_await std::move(request);
+            } catch (const std::exception& ex) {
+                error = ex.what();
+            }
+        }, asio::detached);
+        io.run();
+        return error;
+    };
+
+    neograph::async::RequestOptions negative_timeout;
+    negative_timeout.timeout = std::chrono::milliseconds(-1);
+    EXPECT_NE(free_call_error(negative_timeout).find("negative"),
+              std::string::npos);
+
+    neograph::async::RequestOptions negative_redirects;
+    negative_redirects.max_redirects = -1;
+    EXPECT_NE(free_call_error(negative_redirects).find("negative"),
+              std::string::npos);
+
+    asio::io_context pool_io;
+    neograph::async::ConnPool pool(pool_io.get_executor());
+    std::string pool_error;
+    asio::co_spawn(pool_io, [&]() -> asio::awaitable<void> {
+        neograph::async::RequestOptions opts;
+        opts.timeout = std::chrono::milliseconds(-1);
+        try {
+            auto request = pool.async_post(
+                "127.0.0.1", "1", "/invalid", "{}", {}, false, opts);
+            (void)co_await std::move(request);
+        } catch (const std::exception& ex) {
+            pool_error = ex.what();
+        }
+    }, asio::detached);
+    pool_io.run();
+    EXPECT_NE(pool_error.find("negative"), std::string::npos);
+}
+
+TEST(RequestOptions, CloseDelimitedBodyIsReadUntilEof) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 200 OK\r\n"
+            "Connection: close\r\n\r\n"
+            "close-delimited-body");
+    });
+    srv.split_response = true;
+
+    asio::io_context io;
+    neograph::async::HttpResponse response;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        auto request = neograph::async::async_post(
+            io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+            "/close-delimited", "{}", {}, false);
+        response = co_await std::move(request);
+    }, asio::detached);
+    io.run();
+
+    EXPECT_EQ(response.status, 200);
+    EXPECT_EQ(response.body, "close-delimited-body");
+}
+
+TEST(RequestOptions, PoolCloseDelimitedBodyIsReadAndNotCached) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 200 OK\r\n"
+            "Connection: close\r\n\r\n"
+            "pooled-close-body");
+    });
+    srv.split_response = true;
+
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+    neograph::async::HttpResponse response;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        auto request = pool.async_post(
+            "127.0.0.1", std::to_string(srv.port),
+            "/close-delimited", "{}", {}, false);
+        response = co_await std::move(request);
+    }, asio::detached);
+    io.run();
+
+    EXPECT_EQ(response.status, 200);
+    EXPECT_EQ(response.body, "pooled-close-body");
+    EXPECT_EQ(pool.idle_count(), 0u);
+}
+
+TEST(RequestOptions, Http10ResponseIsNotReturnedToKeepAlivePool) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.0 200 OK\r\n"
+            "Content-Length: 2\r\n\r\n"
+            "ok");
+    });
+
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+    for (int i = 0; i < 2; ++i) {
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            auto request = pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/http10", "{}", {}, false);
+            auto response = co_await std::move(request);
+            EXPECT_EQ(response.status, 200);
+            EXPECT_EQ(response.body, "ok");
+        }, asio::detached);
+        io.run();
+        io.restart();
+    }
+
+    EXPECT_EQ(srv.requests.load(), 2);
+    EXPECT_EQ(pool.idle_count(), 0u);
+}
+
+TEST(RequestOptions, StatusLineAndHeaderSyntaxAreValidated) {
+    RoutedMock bad_status([](const std::string&) {
+        return std::string(
+            "HTTP/2 200 OK\r\n"
+            "Content-Length: 2\r\n\r\nok");
+    });
+    RoutedMock bad_header([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 200 OK\r\n"
+            "Broken-Header\r\n"
+            "Content-Length: 2\r\n\r\nok");
+    });
+
+    auto expect_failure = [](unsigned short port) {
+        asio::io_context io;
+        std::string error;
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            try {
+                auto request = neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", std::to_string(port),
+                    "/invalid", "{}", {}, false);
+                (void)co_await std::move(request);
+            } catch (const std::exception& ex) {
+                error = ex.what();
+            }
+        }, asio::detached);
+        io.run();
+        return error;
+    };
+
+    EXPECT_NE(expect_failure(bad_status.port).find("status"), std::string::npos);
+    EXPECT_NE(expect_failure(bad_header.port).find("header"), std::string::npos);
+}
+
+TEST(RequestOptions, Bodyless205DoesNotReadRepresentationBytes) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.1 205 Reset Content\r\n"
+            "Content-Length: 999\r\n"
+            "Connection: close\r\n\r\n");
+    });
+
+    asio::io_context io;
+    neograph::async::HttpResponse response;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        auto request = neograph::async::async_post(
+            io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+            "/reset", "{}", {}, false);
+        response = co_await std::move(request);
+    }, asio::detached);
+    io.run();
+
+    EXPECT_EQ(response.status, 205);
+    EXPECT_TRUE(response.body.empty());
 }
 
 TEST(RequestOptions, RedirectFollowedWithinLimit) {
@@ -689,6 +895,127 @@ TEST(RequestOptions, PoolPropagatesBodyLimitAndDiscardsConnection) {
     EXPECT_TRUE(message_size);
     EXPECT_EQ(pool.idle_count(), 0u);
     EXPECT_EQ(srv.requests.load(), 1);
+}
+
+TEST(RequestOptions, ImmediateTransportFailureIsNotMaskedAsTimeout) {
+    RoutedMock srv([](const std::string&) { return std::string{}; });
+
+    asio::io_context io;
+    asio::error_code observed;
+    bool saw_exception = false;
+    std::chrono::steady_clock::duration elapsed{};
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        neograph::async::RequestOptions opts;
+        opts.timeout = std::chrono::milliseconds(500);
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            auto request = neograph::async::async_post(
+                io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                "/closed", "{}", {}, false, opts);
+            (void)co_await std::move(request);
+        } catch (const asio::system_error& error) {
+            saw_exception = true;
+            observed = error.code();
+        } catch (...) {
+            saw_exception = true;
+        }
+        elapsed = std::chrono::steady_clock::now() - start;
+    }, asio::detached);
+    io.run();
+
+    EXPECT_TRUE(saw_exception);
+    EXPECT_NE(observed, asio::error::timed_out);
+    EXPECT_LT(elapsed, std::chrono::milliseconds(450));
+}
+
+TEST(RequestOptions, PoolImmediateTransportFailureIsNotMaskedAsTimeout) {
+    RoutedMock srv([](const std::string&) { return std::string{}; });
+
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+    asio::error_code observed;
+    bool saw_exception = false;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        neograph::async::RequestOptions opts;
+        opts.timeout = std::chrono::milliseconds(500);
+        try {
+            auto request = pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/closed", "{}", {}, false, opts);
+            (void)co_await std::move(request);
+        } catch (const asio::system_error& error) {
+            saw_exception = true;
+            observed = error.code();
+        } catch (...) {
+            saw_exception = true;
+        }
+    }, asio::detached);
+    io.run();
+
+    EXPECT_TRUE(saw_exception);
+    EXPECT_NE(observed, asio::error::timed_out);
+}
+
+TEST(RequestOptions, InvalidOutboundFramingAndFieldSyntaxIsRejected) {
+    auto call = [](std::string path,
+                   std::vector<std::pair<std::string, std::string>> headers) {
+        asio::io_context io;
+        std::string error;
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            try {
+                auto request = neograph::async::async_post(
+                    io.get_executor(), "127.0.0.1", "1", path, "{}",
+                    std::move(headers), false);
+                (void)co_await std::move(request);
+            } catch (const std::exception& ex) {
+                error = ex.what();
+            }
+        }, asio::detached);
+        io.run();
+        return error;
+    };
+
+    EXPECT_NE(call("/x", {{"Transfer-Encoding", "chunked"}})
+                  .find("framing"), std::string::npos);
+    EXPECT_NE(call("/x", {{"X-Test", "ok\r\nInjected: yes"}})
+                  .find("header value"), std::string::npos);
+    EXPECT_NE(call("/bad path", {})
+                  .find("request target"), std::string::npos);
+    EXPECT_NE(call("/x#fragment", {})
+                  .find("request target"), std::string::npos);
+    EXPECT_NE(call("/x", {{"Bad Name", "value"}})
+                  .find("header name"), std::string::npos);
+}
+
+TEST(RequestOptions, Http10ConnectionCloseWinsAcrossRepeatedHeaders) {
+    RoutedMock srv([](const std::string&) {
+        return std::string(
+            "HTTP/1.0 200 OK\r\n"
+            "Content-Length: 2\r\n"
+            "Connection: close\r\n"
+            "Connection: keep-alive\r\n"
+            "\r\nOK");
+    });
+
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+    std::exception_ptr failure;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try {
+            auto request = pool.async_post(
+                "127.0.0.1", std::to_string(srv.port), "/http10", "{}", {},
+                false);
+            const auto response = co_await std::move(request);
+            EXPECT_EQ(response.status, 200);
+            EXPECT_EQ(response.body, "OK");
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    }, asio::detached);
+    io.run();
+
+    EXPECT_EQ(failure, nullptr);
+    EXPECT_EQ(pool.idle_count(), 0u);
 }
 
 // ---------------------------------------------------------------------------

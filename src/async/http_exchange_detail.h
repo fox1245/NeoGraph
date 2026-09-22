@@ -17,6 +17,7 @@
 #include <asio/buffer.hpp>
 #include <asio/buffers_iterator.hpp>
 #include <asio/multiple_exceptions.hpp>
+#include <asio/redirect_error.hpp>
 #include <asio/read.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/system_error.hpp>
@@ -24,6 +25,7 @@
 #include <asio/write.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstddef>
@@ -104,18 +106,135 @@ asio::awaitable<std::size_t> read_until_limited(
     throw std::runtime_error("Asio multiple_exceptions has no cause");
 }
 
+template <typename T, typename Executor>
+struct CapturedAwaitableResult {
+    std::optional<T> value;
+    std::exception_ptr error;
+};
+
+// An awaitable that always completes successfully, carrying either the
+// operation result or its exception. This is intentionally used before
+// racing an exchange against a timer: awaitable operator|| waits for one
+// successful operand, so a raw failing exchange can otherwise be masked by
+// the timer's later success and reported as a false timeout.
+template <typename T, typename Executor>
+asio::awaitable<CapturedAwaitableResult<T, Executor>, Executor>
+capture_awaitable(asio::awaitable<T, Executor> operation) {
+    CapturedAwaitableResult<T, Executor> result;
+    try {
+        result.value.emplace(co_await std::move(operation));
+    } catch (...) {
+        result.error = std::current_exception();
+    }
+    co_return result;
+}
+
+inline bool is_http_token_char(unsigned char c) noexcept {
+    return std::isalnum(c) || c == '!' || c == '#' || c == '$' ||
+           c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' ||
+           c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
+           c == '|' || c == '~';
+}
+
+inline void validate_request_header_name(std::string_view name) {
+    if (name.empty() ||
+        !std::all_of(name.begin(), name.end(), [](unsigned char c) {
+            return is_http_token_char(c);
+        })) {
+        throw std::runtime_error("async HTTP: invalid request header name");
+    }
+}
+
+inline void validate_request_header_value(std::string_view value) {
+    for (unsigned char c : value) {
+        if (c == 0x7f || (c < 0x20 && c != '\t')) {
+            throw std::runtime_error("async HTTP: invalid request header value");
+        }
+    }
+}
+
+inline void validate_request_target(std::string_view path) {
+    if (path.empty()) return;
+    if (path.front() != '/' && path != "*") {
+        throw std::runtime_error("async HTTP: request target must use origin-form");
+    }
+    for (unsigned char c : path) {
+        if (c == 0x7f || c <= 0x20 || c == '#') {
+            throw std::runtime_error("async HTTP: invalid request target");
+        }
+    }
+}
+
+inline void validate_request_host(std::string_view host) {
+    if (host.empty()) {
+        throw std::runtime_error("async HTTP: empty request host");
+    }
+    for (unsigned char c : host) {
+        if (c <= 0x20 || c == 0x7f || c == '@' || c == '/' ||
+            c == '\\' || c == '?' || c == '#') {
+            throw std::runtime_error("async HTTP: invalid request host");
+        }
+    }
+}
+
+inline std::string ascii_lower(std::string_view value);
+inline std::optional<std::string> effective_port(std::string_view port,
+                                                  bool tls,
+                                                  bool uri_port = false);
+
+inline void validate_request_options(const RequestOptions& opts) {
+    if (opts.timeout.count() < 0) {
+        throw std::invalid_argument("async HTTP: timeout cannot be negative");
+    }
+    if (opts.max_redirects < 0) {
+        throw std::invalid_argument(
+            "async HTTP: max_redirects cannot be negative");
+    }
+}
+
+inline std::string host_header_value(std::string_view host,
+                                     std::string_view port,
+                                     bool tls) {
+    validate_request_host(host);
+    const auto normalized_port = effective_port(port, tls);
+    if (!normalized_port) {
+        throw std::runtime_error("async HTTP: invalid request port");
+    }
+
+    const bool bracketed = host.size() >= 2 && host.front() == '[' &&
+                           host.back() == ']';
+    const bool ipv6 = host.find(':') != std::string_view::npos;
+    std::string result;
+    if (ipv6 && !bracketed) result.push_back('[');
+    result.append(host);
+    if (ipv6 && !bracketed) result.push_back(']');
+
+    const std::string default_port = tls ? "443" : "80";
+    if (*normalized_port != default_port) {
+        result.push_back(':');
+        result.append(*normalized_port);
+    }
+    return result;
+}
+
 inline std::string build_request(
     std::string_view host,
+    std::string_view port,
     std::string_view path,
     std::string_view body,
     const std::vector<std::pair<std::string, std::string>>& headers,
+    bool tls,
     ConnDirective directive,
     std::string_view method = "POST") {
+    validate_request_host(host);
+    validate_request_target(path);
+    validate_request_header_name(method);
     const bool is_get = method == "GET";
     std::string out;
     out.reserve(256 + body.size());
-    out.append(method).append(" ").append(path).append(" HTTP/1.1\r\n");
-    out.append("Host: ").append(host).append("\r\n");
+    out.append(method).append(" ").append(path.empty() ? "/" : path)
+        .append(" HTTP/1.1\r\n");
+    out.append("Host: ").append(host_header_value(host, port, tls)).append("\r\n");
     if (!is_get) {
         out.append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
     }
@@ -124,13 +243,18 @@ inline std::string build_request(
                    : "Connection: close\r\n");
     bool has_ctype = false;
     for (const auto& [k, v] : headers) {
+        validate_request_header_name(k);
+        validate_request_header_value(v);
         std::string lower;
         lower.reserve(k.size());
         std::transform(k.begin(), k.end(), std::back_inserter(lower),
                        [](unsigned char c) { return std::tolower(c); });
         if (lower == "content-type") has_ctype = true;
         if (lower == "content-length" || lower == "host" ||
-            lower == "connection") continue;  // we set these
+            lower == "connection" || lower == "transfer-encoding") {
+            throw std::runtime_error(
+                "async HTTP: caller must not override request framing headers");
+        }
         out.append(k).append(": ").append(v).append("\r\n");
     }
     if (!is_get && !has_ctype) out.append("Content-Type: application/json\r\n");
@@ -178,7 +302,7 @@ inline std::optional<std::string> normalized_host(std::string_view host) {
 
 inline std::optional<std::string> effective_port(std::string_view port,
                                                   bool tls,
-                                                  bool uri_port = false) {
+                                                  bool uri_port) {
     if (port.empty()) return std::string(tls ? "443" : "80");
     const std::string lower = ascii_lower(port);
     if (!uri_port && lower == "https") return std::string("443");
@@ -332,21 +456,38 @@ inline std::string format_http_url(const HttpTarget& target) {
 }
 
 // Parse "HTTP/1.1 200 OK\r\n" → 200. Returns 0 on malformed.
-inline int parse_status_line(std::string_view line) {
-    auto sp1 = line.find(' ');
-    if (sp1 == std::string_view::npos) return 0;
-    auto start = sp1 + 1;
-    auto sp2 = line.find(' ', start);
-    auto token = (sp2 == std::string_view::npos)
-                     ? line.substr(start)
-                     : line.substr(start, sp2 - start);
-    int status = 0;
-    auto [p, ec] = std::from_chars(token.data(), token.data() + token.size(), status);
-    if (ec != std::errc{} || p != token.data() + token.size() ||
-        token.size() != 3 || status < 100 || status > 999) {
-        return 0;
+enum class HttpVersion { http_1_0, http_1_1 };
+
+struct ParsedStatusLine {
+    int         status = 0;
+    HttpVersion version = HttpVersion::http_1_1;
+};
+
+inline std::optional<ParsedStatusLine> parse_status_line(std::string_view line) {
+    HttpVersion version;
+    if (line.starts_with("HTTP/1.1 ")) {
+        version = HttpVersion::http_1_1;
+        line.remove_prefix(9);
+    } else if (line.starts_with("HTTP/1.0 ")) {
+        version = HttpVersion::http_1_0;
+        line.remove_prefix(9);
+    } else {
+        return std::nullopt;
     }
-    return status;
+
+    if (line.size() < 3 ||
+        (line.size() > 3 && line[3] != ' ')) {
+        return std::nullopt;
+    }
+    const auto token = line.substr(0, 3);
+    int status = 0;
+    const auto [p, ec] = std::from_chars(
+        token.data(), token.data() + token.size(), status);
+    if (ec != std::errc{} || p != token.data() + token.size() ||
+        status < 100 || status > 599) {
+        return std::nullopt;
+    }
+    return ParsedStatusLine{status, version};
 }
 
 // Extra per-response bits extracted while scanning headers.
@@ -407,80 +548,164 @@ inline std::size_t parse_decimal_size(std::string_view value,
 // on seeing Transfer-Encoding, any headers that followed would stay
 // buffered and the chunk-size parser would then misread them as a
 // chunk size. Drain first, decide after.
+inline std::string trim_ows(std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
+        value.remove_suffix(1);
+    }
+    return std::string(value);
+}
+
+inline bool has_header_token(std::string_view value, std::string_view wanted) {
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const auto comma = value.find(',', start);
+        std::string_view token(
+            value.data() + start,
+            (comma == std::string_view::npos ? value.size() : comma) - start);
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) {
+            token.remove_prefix(1);
+        }
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) {
+            token.remove_suffix(1);
+        }
+        if (ascii_lower(token) == wanted) return true;
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+    }
+    return false;
+}
+
+inline void validate_response_field_name(std::string_view name) {
+    if (name.empty() ||
+        !std::all_of(name.begin(), name.end(), [](unsigned char c) {
+            return is_http_token_char(c);
+        })) {
+        throw std::runtime_error("async HTTP: malformed response header name");
+    }
+}
+
+inline void validate_response_field_value(std::string_view value) {
+    for (unsigned char c : value) {
+        if (c == 0x7f || (c < 0x20 && c != '\t')) {
+            throw std::runtime_error("async HTTP: malformed response header value");
+        }
+    }
+}
+
 inline ParsedResponseHeaders extract_headers(
     std::istream& in,
     ConnDirective& directive,
+    HttpVersion version,
     ResponseHeaderBits* extra = nullptr) {
     std::string line;
+    std::string current_name;
+    std::string current_value;
     ParsedResponseHeaders parsed;
     std::vector<std::string> transfer_codings;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) break;  // end of headers
-        auto colon = line.find(':');
-        if (colon == std::string::npos) continue;
-        // Preserve original-cased name; lowercase copy for comparisons.
-        std::string raw_name  = line.substr(0, colon);
-        std::string value     = line.substr(colon + 1);
-        auto first = value.find_first_not_of(" \t");
-        if (first == std::string::npos) value.clear();
-        else value = value.substr(first);
+    bool connection_close = false;
+    bool connection_keep_alive = false;
 
-        std::string name = raw_name;
-        std::transform(name.begin(), name.end(), name.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+    auto consume_field = [&]() {
+        if (current_name.empty()) return;
+        const std::string value = trim_ows(current_value);
+        validate_response_field_value(value);
+        const std::string name = ascii_lower(current_name);
+        if (extra) extra->all.emplace_back(current_name, value);
 
-        if (extra) {
-            extra->all.emplace_back(raw_name, value);
-        }
         if (name == "content-length") {
-            const std::size_t content_length = parse_decimal_size(
-                value,
-                "async HTTP: malformed Content-Length",
-                "async HTTP: Content-Length overflow");
-            if (parsed.content_length && *parsed.content_length != content_length) {
-                throw std::runtime_error(
-                    "async HTTP: conflicting Content-Length headers");
-            }
-            parsed.content_length = content_length;
-        } else if (name == "transfer-encoding") {
-            std::string lv;
-            std::transform(value.begin(), value.end(), std::back_inserter(lv),
-                           [](unsigned char c) { return std::tolower(c); });
             std::size_t start = 0;
-            while (start <= lv.size()) {
-                const auto comma = lv.find(',', start);
-                std::string_view token(lv.data() + start,
-                    (comma == std::string::npos ? lv.size() : comma) - start);
-                while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
-                    token.remove_prefix(1);
-                while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
-                    token.remove_suffix(1);
+            while (start <= value.size()) {
+                const auto comma = value.find(',', start);
+                const std::string_view part(
+                    value.data() + start,
+                    (comma == std::string::npos ? value.size() : comma) - start);
+                const std::size_t content_length = parse_decimal_size(
+                    part,
+                    "async HTTP: malformed Content-Length",
+                    "async HTTP: Content-Length overflow");
+                if (parsed.content_length && *parsed.content_length != content_length) {
+                    throw std::runtime_error(
+                        "async HTTP: conflicting Content-Length headers");
+                }
+                parsed.content_length = content_length;
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        } else if (name == "transfer-encoding") {
+            std::size_t start = 0;
+            while (start <= value.size()) {
+                const auto comma = value.find(',', start);
+                std::string token = trim_ows(std::string_view(
+                    value.data() + start,
+                    (comma == std::string::npos ? value.size() : comma) - start));
+                const auto semicolon = token.find(';');
+                if (semicolon != std::string::npos) token.resize(semicolon);
+                token = ascii_lower(trim_ows(token));
                 if (token.empty()) {
                     throw std::runtime_error(
                         "async HTTP: malformed Transfer-Encoding");
                 }
-                transfer_codings.emplace_back(token);
+                transfer_codings.push_back(std::move(token));
                 if (comma == std::string::npos) break;
                 start = comma + 1;
             }
         } else if (name == "connection") {
-            std::string lv;
-            std::transform(value.begin(), value.end(), std::back_inserter(lv),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (lv.find("close") != std::string::npos)
-                directive = ConnDirective::close;
+            connection_close = connection_close || has_header_token(value, "close");
+            connection_keep_alive = connection_keep_alive ||
+                                    has_header_token(value, "keep-alive");
         } else if (extra && name == "retry-after") {
             extra->retry_after = value;
         } else if (extra && name == "location") {
             extra->location = value;
         }
+        current_name.clear();
+        current_value.clear();
+    };
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) {
+            consume_field();
+            break;
+        }
+        if (line.front() == ' ' || line.front() == '\t') {
+            if (current_name.empty()) {
+                throw std::runtime_error("async HTTP: orphaned folded header");
+            }
+            const auto continuation = trim_ows(line);
+            if (!continuation.empty()) {
+                current_value.push_back(' ');
+                current_value.append(continuation);
+            }
+            continue;
+        }
+
+        consume_field();
+        const auto colon = line.find(':');
+        if (colon == std::string::npos || colon == 0) {
+            throw std::runtime_error("async HTTP: malformed response header");
+        }
+        current_name = line.substr(0, colon);
+        validate_response_field_name(current_name);
+        current_value = line.substr(colon + 1);
     }
+    consume_field();
+
+    // `close` is authoritative across all repeated Connection fields. In
+    // HTTP/1.0, keep-alive opts into persistence only when no close token was
+    // sent anywhere in the field list.
+    if (connection_close) {
+        directive = ConnDirective::close;
+    } else if (version == HttpVersion::http_1_0 && connection_keep_alive) {
+        directive = ConnDirective::keep_alive;
+    }
+
     if (!transfer_codings.empty()) {
         parsed.transfer_encoding_present = true;
-        if (parsed.content_length) {
-            parsed.ambiguous_framing = true;
-        }
+        if (parsed.content_length) parsed.ambiguous_framing = true;
         if (transfer_codings.size() != 1 ||
             transfer_codings.back() != "chunked") {
             parsed.unsupported_transfer_coding = true;
@@ -506,6 +731,13 @@ struct StreamExchangeResult {
     ConnDirective server_directive = ConnDirective::keep_alive;
     std::string   location;
 };
+
+template <typename Stream>
+asio::awaitable<void> read_close_delimited_stream(
+    Stream& stream,
+    asio::streambuf& buf,
+    const std::function<void(std::string_view)>& on_chunk,
+    const RequestOptions& opts);
 
 inline std::size_t parse_hex_chunk_size(std::string_view value,
                                         const char* malformed_context) {
@@ -567,12 +799,21 @@ asio::awaitable<void> read_chunk_trailers(
         const std::size_t line_bytes = co_await read_until_limited(
             stream, buf, "\r\n", remaining,
             "async HTTP: trailer limit");
+        const auto begin = asio::buffers_begin(buf.data());
+        const std::string line(
+            begin, begin + static_cast<std::ptrdiff_t>(line_bytes - 2));
         if (line_bytes > std::numeric_limits<std::size_t>::max() - trailer_bytes) {
             throw_message_size("async HTTP: trailer limit");
         }
         trailer_bytes += line_bytes;
         buf.consume(line_bytes);
         if (line_bytes == 2) co_return;
+        const auto colon = line.find(':');
+        if (colon == std::string::npos || colon == 0) {
+            throw std::runtime_error("async HTTP: malformed trailer field");
+        }
+        validate_response_field_name(line.substr(0, colon));
+        validate_response_field_value(line.substr(colon + 1));
     }
 }
 
@@ -649,13 +890,17 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
         std::string status_line;
         std::getline(is, status_line);
         if (!status_line.empty() && status_line.back() == '\r') status_line.pop_back();
-        r.status = parse_status_line(status_line);
-        if (r.status == 0) {
+        const auto status = parse_status_line(status_line);
+        if (!status) {
             throw std::runtime_error("async_post_stream: malformed HTTP status line");
         }
+        r.status = status->status;
+        r.server_directive = status->version == HttpVersion::http_1_1
+            ? ConnDirective::keep_alive
+            : ConnDirective::close;
 
         ResponseHeaderBits extra;
-        parsed = extract_headers(is, r.server_directive, &extra);
+        parsed = extract_headers(is, r.server_directive, status->version, &extra);
         if (r.status >= 100 && r.status < 200 && r.status != 101) {
             if (++interim_responses > 16) {
                 throw std::runtime_error(
@@ -668,7 +913,7 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
     }
     const bool response_can_have_body =
         !(r.status >= 100 && r.status < 200) &&
-        r.status != 204 && r.status != 304;
+        r.status != 204 && r.status != 205 && r.status != 304;
     if (!response_can_have_body) {
         if (buf.size() != 0) {
             throw std::runtime_error(
@@ -689,6 +934,12 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
                               r.status == 303 || r.status == 307 ||
                               r.status == 308;
         if (redirect) {
+            if (!parsed.content_length) {
+                r.server_directive = ConnDirective::close;
+                co_await read_close_delimited_stream(
+                    stream, buf, [](std::string_view) {}, opts);
+                co_return r;
+            }
             const std::size_t body_size = parsed.content_length.value_or(0);
             if (exceeds_limit(body_size, opts.max_response_body_bytes)) {
                 throw_message_size("async_post_stream: response body limit");
@@ -699,6 +950,11 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
             }
             co_await buffer_exactly(stream, buf, body_size);
             buf.consume(body_size);
+            co_return r;
+        }
+        if (!parsed.content_length) {
+            r.server_directive = ConnDirective::close;
+            co_await read_close_delimited_stream(stream, buf, on_chunk, opts);
             co_return r;
         }
         throw std::runtime_error(
@@ -763,6 +1019,112 @@ asio::awaitable<void> read_chunked_body(Stream& stream,
     }
 }
 
+inline void append_buffered_body(asio::streambuf& buf,
+                                 std::string& out,
+                                 const RequestOptions& opts,
+                                 const char* context) {
+    const std::size_t buffered = buf.size();
+    if (out.size() > out.max_size() ||
+        buffered > out.max_size() - out.size()) {
+        throw_message_size(context);
+    }
+    if (opts.max_response_body_bytes != 0 &&
+        (out.size() > opts.max_response_body_bytes ||
+         buffered > opts.max_response_body_bytes - out.size())) {
+        throw_message_size(context);
+    }
+    const auto begin = asio::buffers_begin(buf.data());
+    out.append(begin, begin + static_cast<std::ptrdiff_t>(buffered));
+    buf.consume(buffered);
+}
+
+template <typename Stream>
+asio::awaitable<void> read_close_delimited_body(
+    Stream& stream,
+    asio::streambuf& buf,
+    std::string& out,
+    const RequestOptions& opts) {
+    append_buffered_body(buf, out, opts,
+                         "async_post: response body limit");
+    std::array<char, 8192> chunk{};
+    const std::size_t read_size = opts.max_response_chunk_bytes == 0
+        ? chunk.size()
+        : std::min(chunk.size(), opts.max_response_chunk_bytes);
+    for (;;) {
+        asio::error_code ec;
+        const std::size_t received = co_await stream.async_read_some(
+            asio::buffer(chunk.data(), read_size),
+            asio::redirect_error(asio::use_awaitable, ec));
+        if (ec == asio::error::eof) co_return;
+        if (ec) throw asio::system_error(ec, "async_post: close-delimited body");
+        if (received == 0) continue;
+        if (out.size() > out.max_size() ||
+            received > out.max_size() - out.size() ||
+            (opts.max_response_body_bytes != 0 &&
+             (out.size() > opts.max_response_body_bytes ||
+              received > opts.max_response_body_bytes - out.size()))) {
+            throw_message_size("async_post: response body limit");
+        }
+        out.append(chunk.data(), received);
+    }
+}
+
+template <typename Stream>
+asio::awaitable<void> read_close_delimited_stream(
+    Stream& stream,
+    asio::streambuf& buf,
+    const std::function<void(std::string_view)>& on_chunk,
+    const RequestOptions& opts) {
+    std::size_t body_bytes = 0;
+    if (buf.size() != 0) {
+        const std::size_t buffered = buf.size();
+        if (exceeds_limit(buffered, opts.max_response_body_bytes) ||
+            buffered > std::numeric_limits<std::size_t>::max() - body_bytes) {
+            throw_message_size("async_post_stream: response body limit");
+        }
+        const auto begin = asio::buffers_begin(buf.data());
+        const std::size_t emit_limit = opts.max_response_chunk_bytes == 0
+            ? buffered
+            : opts.max_response_chunk_bytes;
+        for (std::size_t offset = 0; offset < buffered;) {
+            const std::size_t take = std::min(emit_limit, buffered - offset);
+            std::string payload(
+                begin + static_cast<std::ptrdiff_t>(offset),
+                begin + static_cast<std::ptrdiff_t>(offset + take));
+            on_chunk(payload);
+            offset += take;
+        }
+        buf.consume(buffered);
+        body_bytes = buffered;
+    }
+
+    std::array<char, 8192> chunk{};
+    const std::size_t read_size = opts.max_response_chunk_bytes == 0
+        ? chunk.size()
+        : std::min(chunk.size(), opts.max_response_chunk_bytes);
+    for (;;) {
+        asio::error_code ec;
+        const std::size_t received = co_await stream.async_read_some(
+            asio::buffer(chunk.data(), read_size),
+            asio::redirect_error(asio::use_awaitable, ec));
+        if (ec == asio::error::eof) co_return;
+        if (ec) {
+            throw asio::system_error(ec,
+                                     "async_post_stream: close-delimited body");
+        }
+        if (received == 0) continue;
+        if (exceeds_limit(received, opts.max_response_chunk_bytes) ||
+            body_bytes > std::numeric_limits<std::size_t>::max() - received ||
+            (opts.max_response_body_bytes != 0 &&
+             (body_bytes > opts.max_response_body_bytes ||
+              received > opts.max_response_body_bytes - body_bytes))) {
+            throw_message_size("async_post_stream: response body limit");
+        }
+        body_bytes += received;
+        on_chunk(std::string_view(chunk.data(), received));
+    }
+}
+
 template <typename Stream>
 asio::awaitable<ExchangeResult> run_exchange(Stream& stream,
                                              const std::string& req,
@@ -771,7 +1133,6 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream,
 
     asio::streambuf buf;
     ExchangeResult r;
-    r.server_directive = ConnDirective::keep_alive;  // HTTP/1.1 default
     ParsedResponseHeaders parsed;
     std::size_t header_bytes = 0;
     int interim_responses = 0;
@@ -792,13 +1153,17 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream,
         std::string status_line;
         std::getline(is, status_line);
         if (!status_line.empty() && status_line.back() == '\r') status_line.pop_back();
-        r.response.status = parse_status_line(status_line);
-        if (r.response.status == 0) {
+        const auto status = parse_status_line(status_line);
+        if (!status) {
             throw std::runtime_error("async_post: malformed HTTP status line");
         }
+        r.response.status = status->status;
+        r.server_directive = status->version == HttpVersion::http_1_1
+            ? ConnDirective::keep_alive
+            : ConnDirective::close;
 
         ResponseHeaderBits extra;
-        parsed = extract_headers(is, r.server_directive, &extra);
+        parsed = extract_headers(is, r.server_directive, status->version, &extra);
         if (r.response.status >= 100 && r.response.status < 200 &&
             r.response.status != 101) {
             if (++interim_responses > 16) {
@@ -815,7 +1180,8 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream,
 
     const bool response_can_have_body =
         !(r.response.status >= 100 && r.response.status < 200) &&
-        r.response.status != 204 && r.response.status != 304;
+        r.response.status != 204 && r.response.status != 205 &&
+        r.response.status != 304;
     if (!response_can_have_body) {
         if (buf.size() != 0) {
             throw std::runtime_error(
@@ -856,9 +1222,13 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream,
     }
 
     if (!parsed.content_length) {
-        // Without self-delimiting framing, unread bytes cannot safely remain
-        // on a pooled connection. One-shot callers close it anyway.
+        // Without self-delimiting framing, the response body is delimited by
+        // the server's EOF. Drain it before returning so callers receive the
+        // complete representation; the connection is never reusable.
         r.server_directive = ConnDirective::close;
+        co_await read_close_delimited_body(
+            stream, buf, r.response.body, opts);
+        co_return r;
     }
 
     const std::size_t content_length = parsed.content_length.value_or(0);

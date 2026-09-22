@@ -8,8 +8,9 @@
 //     always happens outside the lock.
 //   - Retry-once semantics: a coroutine that checks out an idle
 //     connection, fails mid-exchange, transparently retries on a
-//     fresh connection. A fresh-conn failure is a real network
-//     error and propagates to the caller.
+//     fresh connection only when the request is safe to replay or the
+//     caller explicitly opts into `RequestOptions::allow_replay`. A
+//     fresh-conn failure is a real network error and propagates.
 //   - Stale conns are dropped by letting their unique_ptr go out of
 //     scope — the socket destructor closes the fd. We *do not* call
 //     async_shutdown on a stale conn: its state after the failed
@@ -19,17 +20,19 @@
 //   - No background idle reaper (lazy eviction on checkout is fine
 //     since the pool can't grow past max_idle_per_host anyway).
 //   - No TLS session cache tuning on the ssl::context.
-//   - No per-host in-flight cap / wait queue. Requests beyond the
-//     idle cap just open a temporary conn that doesn't return to
-//     the pool.
+//   - A per-host in-flight gate bounds concurrent sockets and queues
+//     excess requests asynchronously. The idle cap is independent:
+//     completed connections beyond it are simply dropped.
 //   - No HTTP/2. Keep-alive on HTTP/1.1 only.
 
 #include <neograph/async/conn_pool.h>
 #include "http_exchange_detail.h"
 
 #include <asio/connect.hpp>
+#include <asio/experimental/concurrent_channel.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/redirect_error.hpp>
 #include <asio/ssl.hpp>
 #include <asio/ssl/host_name_verification.hpp>
 #include <asio/steady_timer.hpp>
@@ -87,6 +90,49 @@ struct Connection {
     std::chrono::steady_clock::time_point                   idle_since{};
 };
 
+struct HostGate {
+    using SlotChannel = asio::experimental::concurrent_channel<
+        void(asio::error_code, int)>;
+
+    HostGate(asio::any_io_executor ex, std::size_t capacity)
+        : slots(std::move(ex), capacity) {
+        for (std::size_t i = 0; i < capacity; ++i) {
+            slots.try_send(asio::error_code{}, 1);
+        }
+    }
+
+    SlotChannel slots;
+};
+
+struct HostPermit {
+    std::shared_ptr<HostGate> gate;
+
+    HostPermit() = default;
+    explicit HostPermit(std::shared_ptr<HostGate> g) : gate(std::move(g)) {}
+    HostPermit(const HostPermit&) = delete;
+    HostPermit& operator=(const HostPermit&) = delete;
+    HostPermit(HostPermit&& other) noexcept : gate(std::move(other.gate)) {}
+    HostPermit& operator=(HostPermit&& other) noexcept {
+        if (this != &other) {
+            release();
+            gate = std::move(other.gate);
+        }
+        return *this;
+    }
+
+    ~HostPermit() {
+        release();
+    }
+
+private:
+    void release() noexcept {
+        if (gate) {
+            (void)gate->slots.try_send(asio::error_code{}, 1);
+            gate.reset();
+        }
+    }
+};
+
 }  // namespace
 
 struct ConnPool::Impl {
@@ -100,13 +146,16 @@ struct ConnPool::Impl {
 
     mutable std::mutex                                                        mu;
     std::unordered_map<Key, std::deque<std::unique_ptr<Connection>>, KeyHash> idle;
+    std::unordered_map<Key, std::weak_ptr<HostGate>, KeyHash>                  gates;
     std::size_t                                                               total_idle = 0;
 
     Impl(asio::any_io_executor e, ConnPoolOptions o)
         : ex(std::move(e)),
           opts(o),
           ssl_ctx(asio::ssl::context::tls_client) {
-        ssl_ctx.set_default_verify_paths();
+        asio::error_code ec;
+        ssl_ctx.set_default_verify_paths(ec);
+        if (ec) throw asio::system_error(ec, "TLS default trust paths");
         ssl_ctx.set_verify_mode(asio::ssl::verify_peer);
     }
 
@@ -132,6 +181,30 @@ struct ConnPool::Impl {
         if (bucket.size() >= opts.max_idle_per_host) return;  // drop
         bucket.push_back(std::move(c));
         ++total_idle;
+    }
+
+    std::shared_ptr<HostGate> gate_for(const Key& k) {
+        if (opts.max_in_flight_per_host == 0) return {};
+        std::lock_guard lk(mu);
+        auto it = gates.find(k);
+        if (it != gates.end()) {
+            if (auto gate = it->second.lock()) return gate;
+            gates.erase(it);
+        }
+        auto gate = std::make_shared<HostGate>(
+            ex, opts.max_in_flight_per_host);
+        gates.emplace(k, gate);
+        return gate;
+    }
+
+    asio::awaitable<HostPermit> acquire(const Key& k) {
+        auto gate = gate_for(k);
+        if (!gate) co_return HostPermit{};
+        asio::error_code ec;
+        (void)co_await gate->slots.async_receive(
+            asio::redirect_error(asio::use_awaitable, ec));
+        if (ec) throw asio::system_error(ec, "ConnPool host gate");
+        co_return HostPermit(std::move(gate));
     }
 
     // Core dispatch: try to reuse an idle conn, fall back to fresh.
@@ -220,14 +293,18 @@ asio::awaitable<std::optional<detail::ExchangeResult>> try_exchange(
         auto r = co_await detail::run_exchange(*conn.tls, req, opts);
         co_return r;
     } catch (const asio::system_error& error) {
+        // Cancellation belongs to the caller's deadline/shutdown path, not
+        // to stale-connection recovery. In particular, allow_replay must
+        // never turn a timed-out POST into a late duplicate request.
+        if (error.code() == asio::error::operation_aborted) throw;
         // A framing limit is deterministic, not evidence of a stale idle
         // socket. Replaying even a safe request would only repeat the same
         // oversized response. Propagation also drops `conn` at dispatch scope.
         if (error.code() == asio::error::message_size) throw;
-        if (is_safe_method(req)) co_return std::nullopt;
+        if (is_safe_method(req) || opts.allow_replay) co_return std::nullopt;
         throw;
     } catch (const std::exception&) {
-        if (is_safe_method(req)) co_return std::nullopt;
+        if (is_safe_method(req) || opts.allow_replay) co_return std::nullopt;
         throw;
     }
 }
@@ -248,6 +325,7 @@ asio::awaitable<detail::ExchangeResult> exchange_fresh(
 
 asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
     Key key, const std::string& req, RequestOptions request_opts) {
+    auto permit = co_await acquire(key);
     auto reused = checkout(key);
     if (reused) {
         auto maybe = co_await try_exchange(*reused, req, request_opts);
@@ -269,7 +347,7 @@ asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
 }
 
 ConnPool::ConnPool(asio::any_io_executor ex, ConnPoolOptions opts)
-    : impl_(std::make_unique<Impl>(std::move(ex), opts)) {}
+    : impl_(std::make_shared<Impl>(std::move(ex), opts)) {}
 
 ConnPool::~ConnPool() = default;
 
@@ -287,11 +365,13 @@ asio::awaitable<HttpResponse> ConnPool::async_post(
     bool tls,
     RequestOptions opts) {
     return async_post_owned(
+        impl_,
         std::string(host), std::string(port), std::string(path),
         std::string(body), std::move(headers), tls, opts);
 }
 
 asio::awaitable<HttpResponse> ConnPool::async_post_owned(
+    std::shared_ptr<Impl> impl,
     std::string host,
     std::string port,
     std::string path,
@@ -300,12 +380,14 @@ asio::awaitable<HttpResponse> ConnPool::async_post_owned(
     bool tls,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
     std::string req = detail::build_request(
-        host, path, body, headers, detail::ConnDirective::keep_alive);
+        host, port, path, body, headers, tls,
+        detail::ConnDirective::keep_alive);
     Key key{ std::move(host), std::move(port), tls };
 
     if (opts.timeout.count() <= 0) {
-        co_return co_await impl_->dispatch(std::move(key), req, opts);
+        co_return co_await impl->dispatch(std::move(key), req, opts);
     }
 
     // Bound the entire call (reuse attempt + fresh fallback) by a
@@ -313,17 +395,23 @@ asio::awaitable<HttpResponse> ConnPool::async_post_owned(
     // async_post uses — a plain steady_timer racing one awaitable,
     // which GCC 13 codegen handles cleanly.
     using asio::experimental::awaitable_operators::operator||;
-    asio::steady_timer timer(impl_->ex);
+    asio::steady_timer timer(impl->ex);
     timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
-            impl_->dispatch(std::move(key), req, opts)
+            detail::capture_awaitable(
+                impl->dispatch(std::move(key), req, opts))
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
                                      "ConnPool::async_post: timeout");
         }
-        co_return std::get<0>(std::move(res));
+        auto captured = std::get<0>(std::move(res));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (!captured.value) {
+            throw std::runtime_error("ConnPool::async_post: missing result");
+        }
+        co_return std::move(*captured.value);
     } catch (const asio::multiple_exceptions& error) {
         detail::rethrow_first_exception(error);
     }

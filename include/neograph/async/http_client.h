@@ -2,10 +2,10 @@
  * @file http_client.h
  * @brief Minimal async HTTP/1.1 POST client on asio coroutines.
  *
- * Stage 3 / Semester 1.1 — adds TLS via asio::ssl::stream. Still
- * HTTP/1.1 only with no chunked transfer, keep-alive, redirects, or
- * auth helpers; the TLS path is what makes real LLM endpoints
- * reachable. Keep-alive, SSE, redirects land in 1.2–1.5.
+ * The one-shot path opens a fresh connection for every exchange and
+ * supports TLS, bounded Content-Length/chunked/close-delimited response
+ * framing, streaming callbacks, and same-origin redirects. It deliberately
+ * leaves authentication policy to callers.
  *
  * Every call opens a fresh connect → (handshake) → write → read →
  * close cycle. The TLS branch verifies the peer certificate against
@@ -70,6 +70,13 @@ struct RequestOptions {
     /// Applied independently to each hop when following redirects
     /// rather than as a total budget.
     std::chrono::milliseconds timeout{0};
+
+    /// For ConnPool, permit one replay after a stale keep-alive connection
+    /// fails. The one-shot clients never replay a request.
+    /// Disabled by default because a transport error cannot prove that a
+    /// non-idempotent request did not already reach the server. Safe methods
+    /// may still be retried by the pool without this opt-in.
+    bool allow_replay = false;
 
     /// Max 3xx hops to follow automatically. Zero (default) = never
     /// follow; the 3xx response comes straight back to the caller

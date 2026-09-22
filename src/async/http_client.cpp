@@ -91,15 +91,16 @@ asio::awaitable<HttpResponse> async_post_once(
     bool tls,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
+    std::string req = detail::build_request(
+        host, port, path, body, headers, tls,
+        detail::ConnDirective::close);
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
         host, port, asio::use_awaitable);
 
     asio::ip::tcp::socket sock{ex};
     co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
-
-    std::string req = detail::build_request(
-        host, path, body, headers, detail::ConnDirective::close);
 
     if (!tls) {
         auto r = co_await detail::run_exchange(sock, req, opts);
@@ -110,7 +111,9 @@ asio::awaitable<HttpResponse> async_post_once(
     }
 
     asio::ssl::context ctx{asio::ssl::context::tls_client};
-    ctx.set_default_verify_paths();
+    asio::error_code ca_ec;
+    ctx.set_default_verify_paths(ca_ec);
+    if (ca_ec) throw asio::system_error(ca_ec, "TLS default trust paths");
     ctx.set_verify_mode(asio::ssl::verify_peer);
 
     asio::ssl::stream<asio::ip::tcp::socket&> tls_stream{sock, ctx};
@@ -145,15 +148,16 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     std::function<void(std::string_view chunk)> on_chunk,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
+    std::string req = detail::build_request(
+        host, port, path, body, headers, tls,
+        detail::ConnDirective::close);
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
         host, port, asio::use_awaitable);
 
     asio::ip::tcp::socket sock{ex};
     co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
-
-    std::string req = detail::build_request(
-        host, path, body, headers, detail::ConnDirective::close);
 
     if (!tls) {
         auto r = co_await detail::run_exchange_stream(sock, req, on_chunk, opts);
@@ -164,7 +168,9 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     }
 
     asio::ssl::context ctx{asio::ssl::context::tls_client};
-    ctx.set_default_verify_paths();
+    asio::error_code ca_ec;
+    ctx.set_default_verify_paths(ca_ec);
+    if (ca_ec) throw asio::system_error(ca_ec, "TLS default trust paths");
     ctx.set_verify_mode(asio::ssl::verify_peer);
 
     asio::ssl::stream<asio::ip::tcp::socket&> tls_stream{sock, ctx};
@@ -216,14 +222,20 @@ asio::awaitable<HttpResponse> async_post_once_timed(
     timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
-            async_post_once(ex, std::move(host), std::move(port), std::move(path),
-                            std::move(body), std::move(headers), tls, opts)
+            detail::capture_awaitable(async_post_once(
+                ex, std::move(host), std::move(port), std::move(path),
+                std::move(body), std::move(headers), tls, opts))
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
                                      "async_post: per-hop timeout");
         }
-        co_return std::get<0>(std::move(res));
+        auto captured = std::get<0>(std::move(res));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (!captured.value) {
+            throw std::runtime_error("async_post: missing result");
+        }
+        co_return std::move(*captured.value);
     } catch (const asio::multiple_exceptions& error) {
         detail::rethrow_first_exception(error);
     }
@@ -247,15 +259,21 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once_timed(
     timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
-            async_post_stream_once(ex, std::move(host), std::move(port),
-                                   std::move(path), std::move(body),
-                                   std::move(headers), tls, std::move(on_chunk), opts)
+            detail::capture_awaitable(async_post_stream_once(
+                ex, std::move(host), std::move(port), std::move(path),
+                std::move(body), std::move(headers), tls,
+                std::move(on_chunk), opts))
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
                                      "async_post_stream: per-hop timeout");
         }
-        co_return std::get<0>(std::move(res));
+        auto captured = std::get<0>(std::move(res));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (!captured.value) {
+            throw std::runtime_error("async_post_stream: missing result");
+        }
+        co_return std::move(*captured.value);
     } catch (const asio::multiple_exceptions& error) {
         detail::rethrow_first_exception(error);
     }
@@ -275,6 +293,7 @@ static asio::awaitable<HttpResponse> async_post_owned(
     bool tls,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
     Target cur{
         std::move(host), std::move(port), std::move(path), tls
     };
@@ -327,15 +346,16 @@ asio::awaitable<HttpResponse> async_get_once(
     bool tls,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
+    std::string req = detail::build_request(
+        host, port, path, /*body=*/"", headers, tls,
+        detail::ConnDirective::close, "GET");
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
         host, port, asio::use_awaitable);
 
     asio::ip::tcp::socket sock{ex};
     co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
-
-    std::string req = detail::build_request(
-        host, path, /*body=*/"", headers, detail::ConnDirective::close, "GET");
 
     if (!tls) {
         auto r = co_await detail::run_exchange(sock, req, opts);
@@ -346,7 +366,9 @@ asio::awaitable<HttpResponse> async_get_once(
     }
 
     asio::ssl::context ctx{asio::ssl::context::tls_client};
-    ctx.set_default_verify_paths();
+    asio::error_code ca_ec;
+    ctx.set_default_verify_paths(ca_ec);
+    if (ca_ec) throw asio::system_error(ca_ec, "TLS default trust paths");
     ctx.set_verify_mode(asio::ssl::verify_peer);
 
     asio::ssl::stream<asio::ip::tcp::socket&> tls_stream{sock, ctx};
@@ -386,14 +408,20 @@ asio::awaitable<HttpResponse> async_get_once_timed(
     timer.expires_after(opts.timeout);
     try {
         auto res = co_await (
-            async_get_once(ex, std::move(host), std::move(port), std::move(path),
-                           std::move(headers), tls, opts)
+            detail::capture_awaitable(async_get_once(
+                ex, std::move(host), std::move(port), std::move(path),
+                std::move(headers), tls, opts))
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
                                      "async_get: per-hop timeout");
         }
-        co_return std::get<0>(std::move(res));
+        auto captured = std::get<0>(std::move(res));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (!captured.value) {
+            throw std::runtime_error("async_get: missing result");
+        }
+        co_return std::move(*captured.value);
     } catch (const asio::multiple_exceptions& error) {
         detail::rethrow_first_exception(error);
     }
@@ -408,6 +436,7 @@ static asio::awaitable<HttpResponse> async_get_owned(
     bool tls,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
     Target cur{std::move(host), std::move(port), std::move(path), tls};
     int hops = 0;
     for (;;) {
@@ -447,6 +476,7 @@ static asio::awaitable<HttpStreamResponse> async_post_stream_owned(
     std::function<void(std::string_view chunk)> on_chunk,
     RequestOptions opts) {
 
+    detail::validate_request_options(opts);
     // Streaming redirects are an uncommon combination (servers that
     // stream don't tend to return 3xx on the same path). Follow them
     // only if asked, by retrying the whole exchange — callers that

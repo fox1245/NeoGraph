@@ -14,8 +14,10 @@
  *     (host, port, tls). A request with a matching key picks up an
  *     idle connection; otherwise it opens a fresh one.
  *   - If reusing an idle connection fails mid-exchange (server-side
- *     idle timeout race), the pool transparently retries once with a
- *     fresh connection so the caller never sees a spurious error.
+ *     idle timeout race), safe methods transparently retry once with a
+ *     fresh connection. Non-safe methods require
+ *     `RequestOptions::allow_replay` because the transport error cannot
+ *     prove that the server did not already apply the request.
  *   - After a successful exchange, the connection returns to the
  *     pool unless the server sent `Connection: close`, in which case
  *     it's dropped.
@@ -50,6 +52,11 @@ struct ConnPoolOptions {
     /// Idle connections older than this are dropped on checkout
     /// without being reused. Lazy — no background reaper.
     std::chrono::seconds idle_ttl{30};
+
+    /// Maximum number of in-flight exchanges per (host, port, tls)
+    /// bucket. Waiters are queued asynchronously. Zero disables the
+    /// cap for callers that intentionally manage concurrency elsewhere.
+    std::size_t max_in_flight_per_host = 16;
 };
 
 class NEOGRAPH_API ConnPool {
@@ -61,10 +68,6 @@ public:
     ConnPool(const ConnPool&) = delete;
     ConnPool& operator=(const ConnPool&) = delete;
 
-    /// Pooled HTTP(S) POST. See free async_post for parameter
-    /// semantics. Throws asio::system_error on fresh-connection
-    /// failure (DNS, connect, TLS handshake, write/read of the
-    /// second attempt). A stale-idle-conn failure is absorbed.
     /// Pooled HTTP(S) POST. See free async_post for parameter
     /// semantics. `opts.timeout` bounds the entire call, covering
     /// both the reuse attempt (if any) and the fresh-connection
@@ -88,9 +91,10 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 
-    asio::awaitable<HttpResponse> async_post_owned(
+    static asio::awaitable<HttpResponse> async_post_owned(
+        std::shared_ptr<Impl> impl,
         std::string host,
         std::string port,
         std::string path,

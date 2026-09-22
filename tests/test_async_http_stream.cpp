@@ -131,6 +131,63 @@ struct ChunkedMockServer {
     }
 };
 
+// HTTP/1.1 responses without Content-Length or Transfer-Encoding are
+// delimited by the peer's close. Keep this fixture separate from the
+// chunked server so the test cannot accidentally pass through the
+// chunk parser.
+struct CloseDelimitedMockServer {
+    asio::io_context        io;
+    asio::ip::tcp::acceptor acceptor{io};
+    std::thread             worker;
+    std::string              body;
+    unsigned short           port = 0;
+
+    explicit CloseDelimitedMockServer(std::string response_body)
+        : body(std::move(response_body)) {
+        acceptor.open(asio::ip::tcp::v4());
+        acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+        acceptor.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+        acceptor.listen();
+        port = acceptor.local_endpoint().port();
+        asio::co_spawn(io, accept_loop(), asio::detached);
+        worker = std::thread([this] { io.run(); });
+    }
+
+    ~CloseDelimitedMockServer() {
+        asio::error_code ec;
+        acceptor.close(ec);
+        io.stop();
+        if (worker.joinable()) worker.join();
+    }
+
+    asio::awaitable<void> handle(asio::ip::tcp::socket sock) {
+        try {
+            asio::streambuf request;
+            co_await asio::async_read_until(
+                sock, request, "\r\n\r\n", asio::use_awaitable);
+            const std::string head =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/plain\r\n"
+                "Connection: close\r\n\r\n";
+            co_await asio::async_write(sock, asio::buffer(head), asio::use_awaitable);
+            co_await asio::async_write(sock, asio::buffer(body), asio::use_awaitable);
+        } catch (...) {}
+        asio::error_code ec;
+        sock.close(ec);
+    }
+
+    asio::awaitable<void> accept_loop() {
+        for (;;) {
+            asio::ip::tcp::socket sock{io};
+            asio::error_code ec;
+            co_await acceptor.async_accept(
+                sock, asio::redirect_error(asio::use_awaitable, ec));
+            if (ec) co_return;
+            asio::co_spawn(io, handle(std::move(sock)), asio::detached);
+        }
+    }
+};
+
 TEST(AsyncPostStream, ChunksDeliveredInOrder) {
     ChunkedMockServer srv({"alpha", "beta", "gamma"});
     asio::io_context  client_io;
@@ -154,6 +211,39 @@ TEST(AsyncPostStream, ChunksDeliveredInOrder) {
     EXPECT_EQ(received[0], "alpha");
     EXPECT_EQ(received[1], "beta");
     EXPECT_EQ(received[2], "gamma");
+}
+
+TEST(AsyncPostStream, CloseDelimitedResponseIsDeliveredUntilEof) {
+    CloseDelimitedMockServer srv("close-delimited-stream-body");
+    asio::io_context io;
+    std::vector<std::string> received;
+    neograph::async::RequestOptions opts;
+    opts.max_response_chunk_bytes = 5;
+    int status = 0;
+    std::string error;
+
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try {
+            auto response = co_await neograph::async::async_post_stream(
+                io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+                "/close-delimited", "{}", {}, false,
+                [&](std::string_view chunk) { received.emplace_back(chunk); },
+                opts);
+            status = response.status;
+        } catch (const std::exception& ex) {
+            error = ex.what();
+        }
+    }, asio::detached);
+    io.run();
+
+    std::string joined;
+    for (const auto& chunk : received) {
+        EXPECT_LE(chunk.size(), opts.max_response_chunk_bytes);
+        joined += chunk;
+    }
+    EXPECT_TRUE(error.empty()) << error;
+    EXPECT_EQ(status, 200);
+    EXPECT_EQ(joined, "close-delimited-stream-body");
 }
 
 // Non-streaming async_post must also handle Transfer-Encoding: chunked

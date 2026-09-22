@@ -18,6 +18,7 @@
 #include <neograph/async/conn_pool.h>
 
 #include <asio/awaitable.hpp>
+#include <asio/buffers_iterator.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -26,6 +27,7 @@
 #include <asio/read_until.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/streambuf.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 #include <asio/write.hpp>
@@ -35,9 +37,12 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <condition_variable>
 #include <cstddef>
 #include <exception>
 #include <istream>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -54,7 +59,18 @@ struct MockServer {
     std::thread                    worker;
     std::atomic<int>               accepted{0};
     std::atomic<int>               requests{0};
+    std::atomic<int>               active{0};
+    std::atomic<int>               max_active{0};
     std::atomic<bool>              force_close{false};
+    std::atomic<bool>              stale_close{false};
+    std::atomic<bool>              release_stale{false};
+    std::atomic<bool>              stale_waiting{false};
+    std::atomic<bool>              stale_closed{false};
+    std::atomic<int>               response_delay_ms{0};
+    std::mutex                     request_mu;
+    std::mutex                     state_mu;
+    std::condition_variable        state_cv;
+    std::string                    last_request;
     unsigned short                 port = 0;
 
     MockServer() {
@@ -75,11 +91,27 @@ struct MockServer {
     }
 
     asio::awaitable<void> handle(asio::ip::tcp::socket sock) {
+        struct ActiveGuard {
+            std::atomic<int>& value;
+            ~ActiveGuard() { --value; }
+        } active_guard{active};
+        const int now_active = ++active;
+        int previous = max_active.load();
+        while (now_active > previous &&
+               !max_active.compare_exchange_weak(previous, now_active)) {}
+        int connection_requests = 0;
         try {
             for (;;) {
                 asio::streambuf buf;
                 co_await asio::async_read_until(
                     sock, buf, "\r\n\r\n", asio::use_awaitable);
+
+                {
+                    const auto data = buf.data();
+                    std::lock_guard lock(request_mu);
+                    last_request.assign(asio::buffers_begin(data),
+                                        asio::buffers_end(data));
+                }
 
                 std::istream is(&buf);
                 std::string line;
@@ -128,6 +160,7 @@ struct MockServer {
                 }
 
                 ++requests;
+                ++connection_requests;
 
                 const std::string body = request_path == "/x"
                     ? R"({"ok":true})"
@@ -143,9 +176,27 @@ struct MockServer {
                 resp.append(send_close ? "Connection: close\r\n\r\n"
                                        : "Connection: keep-alive\r\n\r\n");
                 resp.append(body);
+                if (const int delay = response_delay_ms.load(); delay > 0) {
+                    asio::steady_timer timer(io);
+                    timer.expires_after(std::chrono::milliseconds(delay));
+                    co_await timer.async_wait(asio::use_awaitable);
+                }
                 co_await asio::async_write(sock, asio::buffer(resp),
                                            asio::use_awaitable);
                 if (send_close) break;
+                if (stale_close.load() && connection_requests == 1) {
+                    stale_waiting = true;
+                    state_cv.notify_all();
+                    while (!release_stale.load()) {
+                        asio::steady_timer timer(io);
+                        timer.expires_after(std::chrono::milliseconds(1));
+                        co_await timer.async_wait(asio::use_awaitable);
+                    }
+                    stale_waiting = false;
+                    stale_closed = true;
+                    state_cv.notify_all();
+                    break;
+                }
             }
         } catch (...) {
             // client disconnected / malformed — drop
@@ -308,6 +359,342 @@ TEST(AsyncHttpOwnership, ConnPoolSnapshotsRequestBeforeFirstResume) {
 
     EXPECT_EQ(resp.status, 200);
     EXPECT_EQ(resp.body, R"({"ok":true})");
+}
+
+TEST(ConnPool, NonDefaultPortAppearsInHostHeader) {
+    MockServer srv;
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false);
+            EXPECT_EQ(response.status, 200);
+        };
+    }());
+
+    std::string request;
+    {
+        std::lock_guard lock(srv.request_mu);
+        request = srv.last_request;
+    }
+    EXPECT_NE(request.find("Host: 127.0.0.1:" + std::to_string(srv.port) +
+                           "\r\n"), std::string::npos);
+}
+
+TEST(ConnPool, UnsafeStaleReuseDoesNotReplayByDefault) {
+    MockServer srv;
+    srv.stale_close = true;
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false);
+            EXPECT_EQ(response.status, 200);
+        };
+    }());
+    ASSERT_EQ(pool.idle_count(), 1u);
+
+    {
+        std::unique_lock lock(srv.state_mu);
+        ASSERT_TRUE(srv.state_cv.wait_for(
+            lock, std::chrono::seconds(2),
+            [&] { return srv.stale_waiting.load(); }));
+    }
+    srv.release_stale = true;
+    srv.state_cv.notify_all();
+    {
+        std::unique_lock lock(srv.state_mu);
+        ASSERT_TRUE(srv.state_cv.wait_for(
+            lock, std::chrono::seconds(2),
+            [&] { return srv.stale_closed.load(); }));
+    }
+
+    bool failed = false;
+    io.restart();
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            try {
+                neograph::async::RequestOptions opts;
+                opts.timeout = std::chrono::milliseconds(500);
+                auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/x", "{}", {}, false, opts);
+                (void)response;
+            } catch (const std::exception&) {
+                failed = true;
+            }
+        };
+    }());
+
+    EXPECT_TRUE(failed);
+    EXPECT_EQ(srv.requests.load(), 1);
+}
+
+TEST(ConnPool, UnsafeStaleReuseCanBeExplicitlyReplayed) {
+    MockServer srv;
+    srv.stale_close = true;
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false);
+            EXPECT_EQ(response.status, 200);
+        };
+    }());
+    ASSERT_EQ(pool.idle_count(), 1u);
+
+    {
+        std::unique_lock lock(srv.state_mu);
+        ASSERT_TRUE(srv.state_cv.wait_for(
+            lock, std::chrono::seconds(2),
+            [&] { return srv.stale_waiting.load(); }));
+    }
+    srv.release_stale = true;
+    srv.state_cv.notify_all();
+    {
+        std::unique_lock lock(srv.state_mu);
+        ASSERT_TRUE(srv.state_cv.wait_for(
+            lock, std::chrono::seconds(2),
+            [&] { return srv.stale_closed.load(); }));
+    }
+
+    bool succeeded = false;
+    io.restart();
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.timeout = std::chrono::milliseconds(500);
+            opts.allow_replay = true;
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false, opts);
+            succeeded = response.status == 200;
+        };
+    }());
+
+    EXPECT_TRUE(succeeded);
+    EXPECT_EQ(srv.requests.load(), 2);
+    EXPECT_EQ(srv.accepted.load(), 2);
+}
+
+TEST(ConnPool, TimeoutCancellationNeverReplaysOptedInPost) {
+    MockServer srv;
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false);
+            EXPECT_EQ(response.status, 200);
+        };
+    }());
+    ASSERT_EQ(pool.idle_count(), 1u);
+
+    // Force the next response on the reused socket to outlive the caller's
+    // deadline. The request has still reached the server, so a buggy replay
+    // would be visible as a third request and a second accepted socket.
+    srv.response_delay_ms = 200;
+    bool timed_out = false;
+    io.restart();
+    run_on(io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            neograph::async::RequestOptions opts;
+            opts.timeout = std::chrono::milliseconds(30);
+            opts.allow_replay = true;
+            try {
+                auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/x", "{}", {}, false, opts);
+                (void)response;
+            } catch (const asio::system_error& error) {
+                timed_out = error.code() == asio::error::timed_out;
+            } catch (...) {
+            }
+        };
+    }());
+
+    EXPECT_TRUE(timed_out);
+    EXPECT_EQ(srv.requests.load(), 2);
+    EXPECT_EQ(srv.accepted.load(), 1);
+    EXPECT_EQ(pool.idle_count(), 0u);
+}
+
+TEST(ConnPool, MaxInFlightPerHostBoundsConcurrentSockets) {
+    MockServer srv;
+    srv.response_delay_ms = 40;
+    asio::io_context io;
+    neograph::async::ConnPool pool(
+        io.get_executor(),
+        {
+            /*.max_idle_per_host =*/ 8,
+            /*.idle_ttl =*/ std::chrono::seconds(30),
+            /*.max_in_flight_per_host =*/ 2,
+        });
+
+    constexpr int requests = 8;
+    std::atomic<int> finished{0};
+    for (int i = 0; i < requests; ++i) {
+        asio::co_spawn(io,
+            [&]() -> asio::awaitable<void> {
+                auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/x", "{}", {}, false);
+                EXPECT_EQ(response.status, 200);
+            },
+            [&finished](std::exception_ptr error) {
+                if (error) {
+                    try { std::rethrow_exception(error); }
+                    catch (const std::exception& ex) {
+                        ADD_FAILURE() << "coro: " << ex.what();
+                    }
+                }
+                ++finished;
+            });
+    }
+    std::thread t2([&]{ io.run(); });
+    io.run();
+    t2.join();
+
+    EXPECT_EQ(finished.load(), requests);
+    EXPECT_EQ(srv.requests.load(), requests);
+    EXPECT_LE(srv.max_active.load(), 2);
+}
+
+TEST(ConnPool, ZeroInFlightCapAllowsParallelExchanges) {
+    MockServer srv;
+    srv.response_delay_ms = 60;
+    asio::io_context io;
+    neograph::async::ConnPool pool(
+        io.get_executor(),
+        {
+            /*.max_idle_per_host =*/ 8,
+            /*.idle_ttl =*/ std::chrono::seconds(30),
+            /*.max_in_flight_per_host =*/ 0,
+        });
+
+    constexpr int requests = 8;
+    std::atomic<int> finished{0};
+    for (int i = 0; i < requests; ++i) {
+        asio::co_spawn(io,
+            [&]() -> asio::awaitable<void> {
+                auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/x", "{}", {}, false);
+                EXPECT_EQ(response.status, 200);
+            },
+            [&finished](std::exception_ptr error) {
+                if (error) {
+                    try { std::rethrow_exception(error); }
+                    catch (const std::exception& ex) {
+                        ADD_FAILURE() << "coro: " << ex.what();
+                    }
+                }
+                ++finished;
+            });
+    }
+    std::thread t2([&]{ io.run(); });
+    io.run();
+    t2.join();
+
+    EXPECT_EQ(finished.load(), requests);
+    EXPECT_EQ(srv.requests.load(), requests);
+    EXPECT_GE(srv.max_active.load(), 2);
+}
+
+TEST(ConnPool, InFlightWaiterTimeoutCancelsGateWait) {
+    MockServer srv;
+    srv.response_delay_ms = 200;
+    asio::io_context io;
+    neograph::async::ConnPool pool(
+        io.get_executor(),
+        {
+            /*.max_idle_per_host =*/ 2,
+            /*.idle_ttl =*/ std::chrono::seconds(30),
+            /*.max_in_flight_per_host =*/ 1,
+        });
+
+    bool first_succeeded = false;
+    bool second_timed_out = false;
+    bool second_reached_gate = false;
+
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try {
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false);
+            first_succeeded = response.status == 200;
+        } catch (...) {
+        }
+    }, asio::detached);
+
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        // Wait until the first request has been accepted. At that point it
+        // owns the sole host permit, while its delayed response keeps that
+        // permit occupied long enough for this request's deadline to fire.
+        for (int i = 0; i < 500 && srv.active.load() == 0; ++i) {
+            asio::steady_timer timer(io);
+            timer.expires_after(std::chrono::milliseconds(1));
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        second_reached_gate = srv.active.load() > 0;
+
+        neograph::async::RequestOptions opts;
+        opts.timeout = std::chrono::milliseconds(30);
+        try {
+            auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port),
+                "/x", "{}", {}, false, opts);
+            (void)response;
+        } catch (const asio::system_error& error) {
+            second_timed_out = error.code() == asio::error::timed_out;
+        } catch (...) {
+        }
+    }, asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(first_succeeded);
+    EXPECT_TRUE(second_reached_gate);
+    EXPECT_TRUE(second_timed_out);
+    EXPECT_EQ(srv.requests.load(), 1);
+    EXPECT_EQ(srv.accepted.load(), 1);
+}
+
+TEST(ConnPool, InFlightOperationOwnsStateAfterPoolDestruction) {
+    MockServer srv;
+    srv.response_delay_ms = 500;
+    asio::io_context io;
+    std::optional<neograph::async::ConnPool> pool;
+    pool.emplace(io.get_executor());
+    bool timed_out = false;
+
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        neograph::async::RequestOptions opts;
+        opts.timeout = std::chrono::milliseconds(50);
+        auto operation = pool->async_post(
+            "127.0.0.1", std::to_string(srv.port),
+            "/x", "{}", {}, false, opts);
+        pool.reset();
+        try {
+            (void)co_await std::move(operation);
+        } catch (const asio::system_error& error) {
+            timed_out = error.code() == asio::error::timed_out;
+        }
+    }, asio::detached);
+    io.run();
+
+    EXPECT_TRUE(timed_out);
 }
 
 }  // namespace
