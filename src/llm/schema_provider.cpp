@@ -1189,7 +1189,7 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
 
     switch (resp_.strategy) {
         case ResponseStrategy::CHOICES_MESSAGE: {
-            // OpenAI: choices[0].message.{content, tool_calls}
+            // OpenAI-compatible: choices[0].message.{content, reasoning_content, tool_calls}
             auto message = json_path::at_path(resp_json, resp_.message_path);
             if (!message) {
                 throw std::runtime_error("SchemaProvider: cannot find message at path: " + resp_.message_path);
@@ -1199,6 +1199,16 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
 
             if (message->contains(resp_.content_field) && !(*message)[resp_.content_field].is_null()) {
                 msg.content = (*message)[resp_.content_field].get<std::string>();
+            }
+
+            // Keep provider reasoning separate from user-visible content. GLM
+            // sends reasoning_content alongside tool calls, and the host may
+            // require that rationale before allowing the Tool action.
+            if (message->contains("reasoning") && (*message)["reasoning"].is_string()) {
+                msg.reasoning = (*message)["reasoning"].get<std::string>();
+            } else if (message->contains("reasoning_content") &&
+                       (*message)["reasoning_content"].is_string()) {
+                msg.reasoning = (*message)["reasoning_content"].get<std::string>();
             }
 
             if (message->contains(resp_.tool_calls_field) &&
@@ -1883,6 +1893,14 @@ ChatCompletion SchemaProvider::complete_stream_http(
                                 std::string token = (*delta)[stream_.content_field].get<std::string>();
                                 full_content += token;
                                 if (on_chunk) on_chunk(token);
+                            }
+
+                            // Reasoning deltas are part of the returned
+                            // message, never public content/on_chunk output.
+                            if (delta->contains("reasoning_content") &&
+                                (*delta)["reasoning_content"].is_string()) {
+                                completion.message.reasoning +=
+                                    (*delta)["reasoning_content"].get<std::string>();
                             }
 
                             // Tool calls (streamed incrementally)

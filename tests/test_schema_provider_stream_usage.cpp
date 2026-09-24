@@ -95,9 +95,9 @@ struct OpenAIStreamMock {
             [](const httplib::Request&, httplib::Response& res) {
                 res.set_header("Content-Type", "text/event-stream");
                 res.set_content(
-                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n"
+                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\",\"reasoning_content\":\"Need \"},\"finish_reason\":null}]}\n"
                     "\n"
-                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":null}]}\n"
+                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\",\"reasoning_content\":\"approved lookup.\"},\"finish_reason\":null}]}\n"
                     "\n"
                      "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n"
                     "\n"
@@ -183,6 +183,7 @@ TEST(SchemaProviderStreamUsage, OpenAIStreamingPopulatesUsage) {
 
     EXPECT_EQ("hi there", streamed);
     EXPECT_EQ("hi there", result.message.content);
+    EXPECT_EQ("Need approved lookup.", result.message.reasoning);
     EXPECT_EQ(12, result.usage.prompt_tokens);
     EXPECT_EQ(3,  result.usage.completion_tokens);
     EXPECT_EQ(15, result.usage.total_tokens);

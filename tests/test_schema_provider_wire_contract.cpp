@@ -194,6 +194,34 @@ TEST(SchemaProviderWireContract, ToolResponsesNormalizeAcrossProviders) {
     }
 }
 
+TEST(SchemaProviderWireContract, ChoicesMessagePreservesGlmReasoningWithToolCall) {
+    auto provider = provider_for("openai");
+    const json response = {
+        {"choices", json::array({{
+            {"message", {
+                {"role", "assistant"},
+                {"content", nullptr},
+                {"reasoning_content", "Need the approved lookup."},
+                {"tool_calls", json::array({{
+                    {"id", "call_glm_1"},
+                    {"type", "function"},
+                    {"function", {{"name", "lookup_weather"},
+                                  {"arguments", R"({"city":"Seoul"})"}}}
+                }})}
+            }},
+            {"finish_reason", "tool_calls"}
+        }})}
+    };
+    const auto message = SchemaProviderTestAccess::parse_response(*provider, response);
+    EXPECT_EQ(message.role, "assistant");
+    EXPECT_TRUE(message.content.empty());
+    EXPECT_EQ(message.reasoning, "Need the approved lookup.");
+    ASSERT_EQ(message.tool_calls.size(), 1U);
+    EXPECT_EQ(message.tool_calls[0].id, "call_glm_1");
+    EXPECT_EQ(message.tool_calls[0].name, "lookup_weather");
+    EXPECT_EQ(json::parse(message.tool_calls[0].arguments).at("city"), "Seoul");
+}
+
 TEST(SchemaProviderWireContract, DataUrlVisionUsesEachProviderWireShape) {
     const std::array<std::string, 3> schemas = {"openai", "claude", "gemini"};
     const std::string image_url = "data:image/png;base64,AA==";
