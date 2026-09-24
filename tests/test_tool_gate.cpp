@@ -42,6 +42,7 @@
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 using namespace neograph;
@@ -364,6 +365,40 @@ TEST(ToolGate, InterruptPausesBeforeAnySiblingRuns) {
     EXPECT_EQ(runs_a.load(), 0) << "a sibling ran before the gate stopped the batch";
     EXPECT_EQ(runs_b.load(), 0) << "the tool that needed approval ran anyway";
     EXPECT_EQ(runs_c.load(), 0) << "a sibling ran before the gate stopped the batch";
+}
+
+TEST(ToolGate, BatchSnapshotRejectsDuplicateSelectorsBeforeAnyToolRuns) {
+    std::atomic<int> runs{0};
+    SpyTool tool("write", &runs);
+    std::size_t gate_visits = 0;
+    ToolGate gate = [&gate_visits](ToolCall, ToolGateContext gctx)
+            -> asio::awaitable<ToolDecision> {
+        ++gate_visits;
+        if (!gctx.batch_calls || gctx.batch_calls->size() != 2) {
+            co_return ToolDecision::interrupt("missing batch snapshot");
+        }
+        std::unordered_set<std::string> selected;
+        for (const auto& sibling : *gctx.batch_calls) {
+            const auto segment = json::parse(sibling.arguments).at("segment_id").get<std::string>();
+            if (!selected.insert(segment).second) {
+                co_return ToolDecision::interrupt("duplicate segment selector");
+            }
+        }
+        co_return ToolDecision::allow();
+    };
+
+    EXPECT_THROW(dispatch({make_call("1", "write", R"({"segment_id":"s1"})"),
+                           make_call("2", "write", R"({"segment_id":"s1"})")},
+                          {&tool}, gate), NodeInterrupt);
+    EXPECT_EQ(runs.load(), 0);
+    EXPECT_EQ(gate_visits, 2u);
+
+    const auto distinct = dispatch({make_call("3", "write", R"({"segment_id":"s1"})"),
+                                    make_call("4", "write", R"({"segment_id":"s2"})")},
+                                   {&tool}, gate);
+    EXPECT_EQ(distinct.size(), 2u);
+    EXPECT_EQ(runs.load(), 2);
+    EXPECT_EQ(gate_visits, 4u);
 }
 
 // The interrupt carries what the caller needs to render the prompt — riding the

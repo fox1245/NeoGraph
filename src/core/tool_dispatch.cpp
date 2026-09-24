@@ -51,6 +51,10 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
     // than one wants to.
     std::vector<ToolDecision> decisions;
     if (gate) {
+        // Only gated dispatch pays for the immutable batch snapshot. The gate
+        // receives context by value and may suspend, so a borrowed view of
+        // `calls` would not be a safe public API.
+        gctx.batch_calls = std::make_shared<const std::vector<ToolCall>>(calls);
         decisions.reserve(calls.size());
         for (const auto& tc : calls) {
             throw_if_cancelled("before tool gate");

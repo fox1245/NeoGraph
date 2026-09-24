@@ -33,6 +33,7 @@
 #include <asio/awaitable.hpp>
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -62,6 +63,13 @@ struct ToolGateContext {
 
     /// Super-step index. Zero on the Agent path.
     int step = 0;
+
+    /// Immutable assistant-message batch being decided. Set by the dispatcher
+    /// only when a gate is present. Shared ownership keeps the snapshot alive
+    /// while an asynchronous gate is suspended. A gate can reject relationships
+    /// between sibling calls before any Tool starts (for example, duplicate
+    /// writes to the same resource).
+    std::shared_ptr<const std::vector<ToolCall>> batch_calls;
 };
 
 /**
