@@ -1,8 +1,13 @@
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/runtime_interposition_controller.h>
+#include <neograph/context_store.h>
+#include <neograph/controlled_provider.h>
 #include <thread>
 #include <future>
 #include <atomic>
+#include <mutex>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -419,4 +424,205 @@ TEST_F(GraphEngineTest, ConcurrentRunSameThreadIdNoCrash) {
     }
     for (auto& f : futures) EXPECT_TRUE(f.get());
     EXPECT_EQ(g_counter.load(), N_THREADS * RUNS);
+}
+
+namespace {
+
+class BrokerProbeProvider final : public Provider {
+public:
+    std::atomic<unsigned> calls{0};
+
+    ChatCompletion complete(const CompletionParams&) override {
+        ++calls;
+        ChatCompletion completion;
+        completion.message = ChatMessage{"assistant", "provider"};
+        return completion;
+    }
+    ChatCompletion complete_stream(const CompletionParams& params,
+                                   const StreamCallback&) override {
+        return complete(params);
+    }
+    std::string get_name() const override { return "broker-probe"; }
+};
+
+class RecordingProviderCallBroker final : public ProviderCallBroker {
+public:
+    bool replay = false;
+    bool fail_first = false;
+
+    asio::awaitable<ChatCompletion> invoke(ProviderCallIdentity identity,
+                                            std::shared_ptr<Provider> provider,
+                                            CompletionParams params,
+                                            StreamCallback on_chunk) override {
+        {
+            std::lock_guard lock(mutex_);
+            identities_.push_back(std::move(identity));
+            if (fail_first && identities_.size() == 1) {
+                throw std::runtime_error("pre-dispatch broker failure");
+            }
+        }
+        if (replay) {
+            ChatCompletion completion;
+            completion.message = ChatMessage{"assistant", "replayed"};
+            co_return completion;
+        }
+        co_return co_await provider->invoke(params, std::move(on_chunk));
+    }
+
+    std::vector<ProviderCallIdentity> identities() const {
+        std::lock_guard lock(mutex_);
+        return identities_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<ProviderCallIdentity> identities_;
+};
+
+json broker_probe_graph() {
+    return {{"name", "broker-probe"},
+            {"channels", {{"messages", {{"reducer", "append"}}}}},
+            {"nodes", {{"reason", {{"type", "llm_call"}}}}},
+            {"edges", json::array({{{"from", "__start__"}, {"to", "reason"}},
+                                     {{"from", "reason"}, {"to", "__end__"}}})}};
+}
+
+json broker_classifier_graph() {
+    return {{"name", "broker-classifier"},
+            {"channels", {{"messages", {{"reducer", "append"}}},
+                          {"__route__", {{"reducer", "overwrite"}}}}},
+            {"nodes", {{"router", {{"type", "intent_classifier"},
+                                    {"prompt", "Choose shopping or support"},
+                                    {"routes", json::array({"shopping", "support"})}}}}},
+            {"edges", json::array({{{"from", "__start__"}, {"to", "router"}},
+                                     {{"from", "router"}, {"to", "__end__"}}})}};
+}
+
+RunResult run_broker_probe(GraphEngine& engine, std::string thread_id,
+                           std::string run_id,
+                           std::shared_ptr<ProviderCallBroker> broker,
+                           bool streaming = true) {
+    RunConfig config;
+    config.thread_id = std::move(thread_id);
+    config.input = {{"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+    RunMetadata metadata;
+    metadata.owner_scope = "tenant:probe";
+    metadata.run_id = std::move(run_id);
+    RunResources resources;
+    resources.provider_call_broker = std::move(broker);
+    if (!streaming) {
+        return neograph::async::run_sync(engine.run_async(
+            std::move(config), std::move(metadata), std::move(resources)));
+    }
+    return neograph::async::run_sync(engine.run_stream_async(
+        std::move(config), {}, std::move(metadata), std::move(resources)));
+}
+
+}  // namespace
+
+TEST(GraphProviderBrokerTest, ReplaysWithoutTransportAndKeepsConcurrentRunsScoped) {
+    auto provider = std::make_shared<BrokerProbeProvider>();
+    NodeContext context;
+    context.provider = provider;
+    context.model = "probe-model";
+    auto engine = GraphEngine::compile(broker_probe_graph(), context);
+    auto replay_broker = std::make_shared<RecordingProviderCallBroker>();
+    replay_broker->replay = true;
+    auto dispatch_broker = std::make_shared<RecordingProviderCallBroker>();
+
+    auto first = std::async(std::launch::async, [&] {
+        return run_broker_probe(*engine, "thread-one", "run-one", replay_broker);
+    });
+    auto second = std::async(std::launch::async, [&] {
+        return run_broker_probe(*engine, "thread-two", "run-two", dispatch_broker);
+    });
+    EXPECT_FALSE(first.get().interrupted);
+    EXPECT_FALSE(second.get().interrupted);
+    EXPECT_EQ(provider->calls.load(), 1U);
+
+    const auto replayed = replay_broker->identities();
+    const auto dispatched = dispatch_broker->identities();
+    ASSERT_EQ(replayed.size(), 1U);
+    ASSERT_EQ(dispatched.size(), 1U);
+    EXPECT_EQ(replayed[0].owner_scope, "tenant:probe");
+    EXPECT_EQ(replayed[0].run_id, "run-one");
+    EXPECT_EQ(replayed[0].thread_id, "thread-one");
+    EXPECT_EQ(dispatched[0].run_id, "run-two");
+    EXPECT_EQ(dispatched[0].thread_id, "thread-two");
+    EXPECT_EQ(replayed[0].task_id, dispatched[0].task_id);
+    EXPECT_FALSE(replayed[0].task_id.empty());
+    EXPECT_EQ(replayed[0].node_name, "reason");
+}
+
+TEST(GraphProviderBrokerTest, NodeRetryKeepsOneLogicalTaskIdentity) {
+    auto provider = std::make_shared<BrokerProbeProvider>();
+    NodeContext context;
+    context.provider = provider;
+    context.model = "probe-model";
+    auto engine = GraphEngine::compile(broker_probe_graph(), context);
+    RetryPolicy retry;
+    retry.max_retries = 1;
+    retry.initial_delay_ms = 0;
+    engine->set_node_retry_policy("reason", retry);
+    auto broker = std::make_shared<RecordingProviderCallBroker>();
+    broker->fail_first = true;
+
+    EXPECT_FALSE(run_broker_probe(*engine, "retry-thread", "retry-run", broker).interrupted);
+    const auto seen = broker->identities();
+    ASSERT_EQ(seen.size(), 2U);
+    EXPECT_EQ(seen[0].task_id, seen[1].task_id);
+    EXPECT_EQ(seen[0].thread_id, seen[1].thread_id);
+    EXPECT_EQ(provider->calls.load(), 1U);
+}
+
+TEST(GraphProviderBrokerTest, NonStreamingRunCanUseInvocationBroker) {
+    auto provider = std::make_shared<BrokerProbeProvider>();
+    NodeContext context;
+    context.provider = provider;
+    context.model = "probe-model";
+    auto engine = GraphEngine::compile(broker_probe_graph(), context);
+    auto broker = std::make_shared<RecordingProviderCallBroker>();
+    broker->replay = true;
+
+    EXPECT_FALSE(run_broker_probe(*engine, "nonstream-thread", "nonstream-run",
+                                  broker, false).interrupted);
+    EXPECT_EQ(provider->calls.load(), 0U);
+    ASSERT_EQ(broker->identities().size(), 1U);
+}
+
+TEST(GraphProviderBrokerTest, ConflictingStrictInterpositionFailsClosed) {
+    auto provider = std::make_shared<BrokerProbeProvider>();
+    NodeContext context;
+    context.provider = provider;
+    context.model = "probe-model";
+    auto engine = GraphEngine::compile(broker_probe_graph(), context);
+    auto strict = std::make_shared<RuntimeInterpositionController>(
+        provider, std::make_shared<InMemoryContextStore>(),
+        std::make_shared<InMemoryProviderDispatchReceiptStore>(),
+        "sha256:" + std::string(64, 'a'));
+    engine->set_runtime_interposition(strict);
+    auto broker = std::make_shared<RecordingProviderCallBroker>();
+
+    EXPECT_THROW(run_broker_probe(*engine, "strict-thread", "strict-run", broker),
+                 std::exception);
+    EXPECT_EQ(provider->calls.load(), 0U);
+    EXPECT_TRUE(broker->identities().empty());
+}
+
+TEST(GraphProviderBrokerTest, ClassifierUsesTheSameInvocationBoundary) {
+    auto provider = std::make_shared<BrokerProbeProvider>();
+    NodeContext context;
+    context.provider = provider;
+    context.model = "probe-model";
+    auto engine = GraphEngine::compile(broker_classifier_graph(), context);
+    auto broker = std::make_shared<RecordingProviderCallBroker>();
+    broker->replay = true;
+
+    EXPECT_FALSE(run_broker_probe(*engine, "classifier-thread", "classifier-run", broker)
+                     .interrupted);
+    EXPECT_EQ(provider->calls.load(), 0U);
+    const auto seen = broker->identities();
+    ASSERT_EQ(seen.size(), 1U);
+    EXPECT_EQ(seen[0].node_name, "router");
+    EXPECT_FALSE(seen[0].task_id.empty());
 }

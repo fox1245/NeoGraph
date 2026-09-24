@@ -2,6 +2,7 @@
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/run_context.h>
+#include <neograph/graph/provider_call_broker.h>
 
 #include <memory>
 #include <string>
@@ -19,6 +20,7 @@ struct RunContextRuntime {
     std::shared_ptr<CheckpointStore> checkpoint_store;
     std::shared_ptr<SubgraphWriteJournal> subgraph_write_journal;
     std::string invocation_id;
+    std::shared_ptr<ProviderCallBroker> provider_call_broker;
     bool is_resume = false;
 };
 

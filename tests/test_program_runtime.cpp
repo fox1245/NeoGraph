@@ -846,6 +846,7 @@ struct AdmittedRuntime {
     std::size_t                                     scheduler_thread_count;
     std::shared_ptr<HookRuntime>                    hook_runtime;
     ProgramCoreToolGrantResolver                    core_tool_grant_resolver;
+    ProgramCoreProviderCallResolver                 core_provider_call_resolver;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -932,6 +933,7 @@ struct AdmittedRuntime {
         config.child_quota = child_quota;
         config.hook_runtime = hook_runtime;
         config.core_tool_grant_resolver = core_tool_grant_resolver;
+        config.core_provider_call_resolver = core_provider_call_resolver;
         config.runtime_recovery_handler = std::move(recovery_handler);
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
@@ -2216,6 +2218,60 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
     EXPECT_EQ(invoke("stale-operation").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(invoke("stale-attempt").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
+}
+
+namespace {
+class ProgramBrokerProbe final : public neograph::graph::ProviderCallBroker {
+public:
+    asio::awaitable<neograph::ChatCompletion> invoke(
+        neograph::graph::ProviderCallIdentity,
+        std::shared_ptr<neograph::Provider>,
+        neograph::CompletionParams,
+        neograph::StreamCallback) override {
+        neograph::ChatCompletion completion;
+        completion.message = neograph::ChatMessage{"assistant", "brokered"};
+        co_return completion;
+    }
+};
+}  // namespace
+
+TEST(ProgramRuntimeTest, CoreProviderResolverChecksExactOperationBinding) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    const auto broker = std::make_shared<ProgramBrokerProbe>();
+    std::vector<std::string> seen_runs;
+    fixture.core_provider_call_resolver =
+        [&, version_id = version.id()](const ProgramCoreProviderCallContext& context)
+            -> std::optional<ProgramCoreProviderCallBinding> {
+        EXPECT_EQ(context.owner_scope, "tenant:runtime");
+        EXPECT_EQ(context.program_version_id, version_id);
+        EXPECT_EQ(context.operation_id, "root");
+        EXPECT_EQ(context.attempt, 1U);
+        seen_runs.emplace_back(context.run_id);
+        ProgramCoreProviderCallBinding binding;
+        binding.owner_scope = std::string(context.owner_scope);
+        binding.program_version_id = std::string(context.program_version_id);
+        binding.run_id = context.run_id == "stale" ? "other-run" : std::string(context.run_id);
+        binding.operation_id = std::string(context.operation_id);
+        binding.attempt = context.attempt;
+        binding.broker = broker;
+        return binding;
+    };
+    fixture.runtime = fixture.make_runtime();
+
+    const auto invoke = [&](std::string run_id) {
+        ProgramInvocation invocation{json::object(), grant(), "trace-provider-broker", {}};
+        invocation.requested_run_id = std::move(run_id);
+        return fixture.runtime->start("tenant:runtime", version, std::move(invocation)).wait();
+    };
+    EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(invoke("stale").status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    ASSERT_EQ(seen_runs.size(), 2U);
+    EXPECT_EQ(seen_runs[0], "allowed");
+    EXPECT_EQ(seen_runs[1], "stale");
 }
 
 TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {

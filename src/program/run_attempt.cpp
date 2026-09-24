@@ -1416,6 +1416,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             *resume_checkpoint_content_id);
                 }
                 graph::RunResources resources{operation_checkpoints, control->state_store};
+                resources.provider_call_broker =
+                    control->resolve_core_provider_call_broker(operation_id);
                 const auto grant = control->resolve_core_tool_grant(operation_id);
                 if (grant && grant->owner_scope == control->owner_scope &&
                     grant->program_version_id == control->program_version_id &&
