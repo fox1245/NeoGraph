@@ -1416,6 +1416,24 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             *resume_checkpoint_content_id);
                 }
                 graph::RunResources resources{operation_checkpoints, control->state_store};
+                const auto grant = control->resolve_core_tool_grant(operation_id);
+                if (grant && grant->owner_scope == control->owner_scope &&
+                    grant->program_version_id == control->program_version_id &&
+                    grant->run_id == control->run_id &&
+                    grant->operation_id == operation_id &&
+                    grant->attempt == control->attempt && !grant->grant_id.empty() &&
+                    grant->gate && grant->controller) {
+                    resources.tool_gate = grant->gate;
+                    resources.tool_execution_controller = grant->controller;
+                } else {
+                    // A capability receipt binds code, not authority for an effect.
+                    // Native nodes calling Tool::execute directly remain a separate
+                    // trusted-code boundary; this gate covers mediated dispatch.
+                    resources.tool_gate = [](ToolCall, ToolGateContext)
+                        -> asio::awaitable<ToolDecision> {
+                        co_return ToolDecision::deny("Program Core tool grant is absent or stale");
+                    };
+                }
                 graph::GraphStreamCallback callback =
                     [control, core_progress, operation_id](const graph::GraphEvent& event) {
                         core_progress->observe(event);

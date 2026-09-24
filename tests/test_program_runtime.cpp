@@ -6,6 +6,7 @@
 #include <neograph/hook_runtime.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#include <neograph/tool_dispatch.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
 #include <neograph/program/postgres_store.h>
 #include <neograph/program/postgres_transition_store.h>
@@ -83,6 +84,8 @@ using namespace neograph::graph;
 using namespace neograph::program;
 
 std::atomic<unsigned>               completed_calls{0};
+std::atomic<unsigned>               mediated_tool_calls{0};
+std::atomic<neograph::ToolExecutionController*> mediated_tool_controller{nullptr};
 std::string                         synthesis_execution_marker;
 std::atomic<unsigned>               interrupt_calls{0};
 std::atomic<unsigned>               blocking_calls{0};
@@ -127,6 +130,46 @@ public:
         }
         NodeOutput output;
         output.writes.push_back(ChannelWrite{"value", "completed"});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class MediatedProbeTool final : public Tool {
+public:
+    ChatTool get_definition() const override {
+        return {"mediated-probe", "Program gate probe", json{{"type", "object"}}};
+    }
+    std::string get_name() const override { return "mediated-probe"; }
+    std::string execute(const json&) override {
+        ++mediated_tool_calls;
+        return "ok";
+    }
+};
+
+class MediatedDispatchNode final : public GraphNode {
+public:
+    explicit MediatedDispatchNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        MediatedProbeTool tool;
+        mediated_tool_controller.store(in.ctx.tool_execution_controller.get());
+        neograph::ToolGateContext gate_context;
+        gate_context.thread_id = in.ctx.thread_id;
+        gate_context.step = in.ctx.step;
+        neograph::ToolExecutionContext execution;
+        execution.controller = in.ctx.tool_execution_controller;
+        execution.identity = in.ctx.tool_execution_identity;
+        execution.identity.thread_id = in.ctx.thread_id;
+        (void)co_await dispatch_tool_calls(
+            {neograph::ToolCall{"call-1", "mediated-probe", "{}"}}, {&tool},
+            in.ctx.tool_gate, std::move(gate_context), std::move(execution));
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", mediated_tool_calls.load()});
         co_return output;
     }
 
@@ -418,6 +461,13 @@ RegistrySnapshot runtime_registry(
         std::move(completed),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<CompletedNode>(name);
+        },
+        json{{"type", "object"}},
+        json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-mediated-dispatch", 'a'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<MediatedDispatchNode>(name);
         },
         json{{"type", "object"}},
         json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
@@ -795,6 +845,7 @@ struct AdmittedRuntime {
     ProgramChildQuotaConfig                         child_quota;
     std::size_t                                     scheduler_thread_count;
     std::shared_ptr<HookRuntime>                    hook_runtime;
+    ProgramCoreToolGrantResolver                    core_tool_grant_resolver;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -880,6 +931,7 @@ struct AdmittedRuntime {
         };
         config.child_quota = child_quota;
         config.hook_runtime = hook_runtime;
+        config.core_tool_grant_resolver = core_tool_grant_resolver;
         config.runtime_recovery_handler = std::move(recovery_handler);
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
@@ -2098,6 +2150,137 @@ json typed_event_value(const TypedGraphEvent& event) {
     return value;
 }
 }  // namespace
+
+TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-mediated-dispatch");
+
+    auto invoke = [&](std::string run_id) {
+        ProgramInvocation invocation{json::object(), grant(), "trace-tool-grant", {}};
+        invocation.requested_run_id = std::move(run_id);
+        return fixture.runtime->start("tenant:runtime", version, std::move(invocation)).wait();
+    };
+
+    EXPECT_EQ(invoke("no-grant").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    const auto allowed_controller = std::make_shared<neograph::ToolExecutionController>();
+    fixture.core_tool_grant_resolver = [version_id = version.id(), allowed_controller](
+        const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
+        if (context.owner_scope != "tenant:runtime" ||
+            context.program_version_id != version_id || context.run_id != "allowed" ||
+            context.operation_id != "root" || context.attempt != 1)
+            return std::nullopt;
+        ProgramCoreToolGrant grant;
+        grant.owner_scope = std::string(context.owner_scope);
+        grant.program_version_id = std::string(context.program_version_id);
+        grant.run_id = std::string(context.run_id);
+        grant.operation_id = std::string(context.operation_id);
+        grant.attempt = context.attempt;
+        grant.grant_id = "grant-allowed";
+        grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        grant.controller = allowed_controller;
+        return grant;
+    };
+    fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+    EXPECT_EQ(mediated_tool_controller.load(), allowed_controller.get());
+
+    fixture.core_tool_grant_resolver = [version_id = version.id()](
+        const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
+        ProgramCoreToolGrant stale;
+        stale.owner_scope = std::string(context.owner_scope);
+        stale.program_version_id = version_id;
+        stale.run_id = context.run_id == "stale-run"
+            ? "a-different-run" : std::string(context.run_id);
+        stale.operation_id = std::string(context.operation_id);
+        stale.attempt = context.attempt;
+        if (context.run_id == "stale-operation")
+            stale.operation_id = "a-different-operation";
+        if (context.run_id == "stale-attempt") ++stale.attempt;
+        stale.grant_id = "grant-stale";
+        stale.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        stale.controller = std::make_shared<neograph::ToolExecutionController>();
+        return stale;
+    };
+    fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("stale-run").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(invoke("stale-operation").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(invoke("stale-attempt").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = program_document("runtime-mediated-dispatch");
+    document["root"]["definition"]["interrupt_before"] = json::array({"work"});
+    const auto version = fixture.admit_document(std::move(document));
+
+    fixture.core_tool_grant_resolver = [](const ProgramCoreToolGrantContext& context)
+        -> std::optional<ProgramCoreToolGrant> {
+        ProgramCoreToolGrant grant;
+        grant.owner_scope = std::string(context.owner_scope);
+        grant.program_version_id = std::string(context.program_version_id);
+        grant.run_id = std::string(context.run_id);
+        grant.operation_id = std::string(context.operation_id);
+        grant.attempt = context.attempt;
+        grant.grant_id = "grant-before-restart";
+        grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        grant.controller = std::make_shared<neograph::ToolExecutionController>();
+        return grant;
+    };
+    fixture.runtime = fixture.make_runtime();
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-tool-grant-before-restart", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    const auto durable_resolver = fixture.core_tool_grant_resolver;
+    fixture.core_tool_grant_resolver = {};
+    fixture.runtime = fixture.make_runtime();
+    const auto reconnected =
+        fixture.runtime->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(reconnected.status(), ProgramTerminalStatus::Interrupted);
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json::object(),
+                                                 "trace-tool-grant-after-restart"))
+                             .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    fixture.core_tool_grant_resolver = durable_resolver;
+    fixture.runtime = fixture.make_runtime();
+    const auto second_interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-tool-grant-rebound", {}});
+    ASSERT_EQ(second_interrupted.status(), ProgramTerminalStatus::Interrupted);
+    fixture.runtime = fixture.make_runtime();
+    const auto rebound = fixture.runtime
+                             ->reconnect("tenant:runtime", second_interrupted.run_id())
+                             .wait();
+    ASSERT_EQ(rebound.status(), ProgramTerminalStatus::Interrupted);
+    const auto allowed = fixture.runtime
+                             ->resume("tenant:runtime", second_interrupted.run_id(),
+                                      resume_for(second_interrupted, json::object(),
+                                                 "trace-tool-grant-rebound-resume"))
+                             .wait();
+    EXPECT_EQ(allowed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+}
 
 TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEvents) {
     completed_calls.store(0);

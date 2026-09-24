@@ -125,6 +125,9 @@ struct RunResources {
     std::shared_ptr<Store> store;
     /// Optional invocation-scoped gate composed before the engine gate.
     std::optional<ToolGate> tool_gate;
+    /// Optional invocation-scoped execution policy, including resume calls.
+    /// Applies to mediated dispatch_tool_calls, not direct Tool::execute by native nodes.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
 };
 
 /**
@@ -969,6 +972,7 @@ private:
         std::optional<std::shared_ptr<CheckpointStore>> checkpoint_store;
         std::optional<std::shared_ptr<Store>> store;
         std::optional<ToolGate> parent_tool_gate;
+        std::shared_ptr<ToolExecutionController> tool_execution_controller;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };
