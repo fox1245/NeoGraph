@@ -575,6 +575,47 @@ TEST(GraphProviderBrokerTest, NodeRetryKeepsOneLogicalTaskIdentity) {
     EXPECT_EQ(provider->calls.load(), 1U);
 }
 
+TEST(GraphProviderBrokerTest, ExactCheckpointReplayKeepsCallSlotAcrossEngineRebuild) {
+    auto provider = std::make_shared<BrokerProbeProvider>();
+    NodeContext context;
+    context.provider = provider;
+    context.model = "probe-model";
+    auto checkpoints = std::make_shared<InMemoryCheckpointStore>();
+    auto interrupted_graph = broker_probe_graph();
+    interrupted_graph["interrupt_before"] = json::array({"reason"});
+    auto seed = GraphEngine::compile(interrupted_graph, context, checkpoints);
+    RunConfig config;
+    config.thread_id = "checkpoint-broker-thread";
+    config.input = {{"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+    RunMetadata metadata;
+    metadata.owner_scope = "tenant:probe";
+    metadata.run_id = "checkpoint-broker-run";
+    const auto interrupted = neograph::async::run_sync(seed->run_async(config, metadata));
+    ASSERT_TRUE(interrupted.interrupted);
+    ASSERT_FALSE(interrupted.checkpoint_id.empty());
+
+    const auto replay = [&]() {
+        auto engine = GraphEngine::compile(broker_probe_graph(), context, checkpoints);
+        auto broker = std::make_shared<RecordingProviderCallBroker>();
+        broker->replay = true;
+        RunResources resources;
+        resources.provider_call_broker = broker;
+        const auto result = neograph::async::run_sync(engine->resume_from_async(
+            config, interrupted.checkpoint_id, {}, {}, metadata, resources));
+        EXPECT_FALSE(result.interrupted);
+        const auto identities = broker->identities();
+        EXPECT_EQ(identities.size(), 1U);
+        return identities.empty() ? ProviderCallIdentity{} : identities.front();
+    };
+    const auto first = replay();
+    const auto rebuilt = replay();
+    EXPECT_FALSE(first.task_id.empty());
+    EXPECT_EQ(first.task_id, rebuilt.task_id);
+    EXPECT_EQ(first.thread_id, rebuilt.thread_id);
+    EXPECT_EQ(first.run_id, rebuilt.run_id);
+    EXPECT_EQ(provider->calls.load(), 0U);
+}
+
 TEST(GraphProviderBrokerTest, NonStreamingRunCanUseInvocationBroker) {
     auto provider = std::make_shared<BrokerProbeProvider>();
     NodeContext context;

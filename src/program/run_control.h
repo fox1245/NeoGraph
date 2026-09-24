@@ -138,7 +138,8 @@ public:
     void set_core_tool_grant_resolver(ProgramCoreToolGrantResolver resolver);
     std::optional<ProgramCoreToolGrant> resolve_core_tool_grant(
         std::string_view operation_id) const;
-    void set_core_provider_call_resolver(ProgramCoreProviderCallResolver resolver);
+    void set_core_provider_call_resolver(ProgramCoreProviderCallResolver resolver,
+                                         bool required = false);
     std::shared_ptr<graph::ProviderCallBroker> resolve_core_provider_call_broker(
         std::string_view operation_id) const;
     void emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
@@ -282,6 +283,7 @@ private:
     std::shared_ptr<HookRuntime>               hook_runtime_;
     ProgramCoreToolGrantResolver                core_tool_grant_resolver_;
     ProgramCoreProviderCallResolver             core_provider_call_resolver_;
+    bool                                        require_core_provider_call_broker_ = false;
     std::atomic<bool>                          hook_runtime_enabled_{false};
     std::shared_ptr<TaskGraphFragmentStore>  task_graph_fragments_;
     TaskGraphExpansionPolicyResolver         task_graph_policy_resolver_;

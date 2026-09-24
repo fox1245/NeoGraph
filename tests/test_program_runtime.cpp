@@ -847,6 +847,7 @@ struct AdmittedRuntime {
     std::shared_ptr<HookRuntime>                    hook_runtime;
     ProgramCoreToolGrantResolver                    core_tool_grant_resolver;
     ProgramCoreProviderCallResolver                 core_provider_call_resolver;
+    bool                                            require_core_provider_call_broker = false;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -934,6 +935,7 @@ struct AdmittedRuntime {
         config.hook_runtime = hook_runtime;
         config.core_tool_grant_resolver = core_tool_grant_resolver;
         config.core_provider_call_resolver = core_provider_call_resolver;
+        config.require_core_provider_call_broker = require_core_provider_call_broker;
         config.runtime_recovery_handler = std::move(recovery_handler);
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
@@ -2258,6 +2260,7 @@ TEST(ProgramRuntimeTest, CoreProviderResolverChecksExactOperationBinding) {
         binding.broker = broker;
         return binding;
     };
+    fixture.require_core_provider_call_broker = true;
     fixture.runtime = fixture.make_runtime();
 
     const auto invoke = [&](std::string run_id) {
@@ -2272,6 +2275,47 @@ TEST(ProgramRuntimeTest, CoreProviderResolverChecksExactOperationBinding) {
     ASSERT_EQ(seen_runs.size(), 2U);
     EXPECT_EQ(seen_runs[0], "allowed");
     EXPECT_EQ(seen_runs[1], "stale");
+
+    fixture.core_provider_call_resolver = {};
+    fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("missing-resolver").status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, RequiredCoreProviderBrokerMustBeReboundOnReconnect) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = program_document("runtime-completed");
+    document["root"]["definition"]["interrupt_before"] = json::array({"work"});
+    const auto version = fixture.admit_document(std::move(document));
+    const auto broker = std::make_shared<ProgramBrokerProbe>();
+    fixture.require_core_provider_call_broker = true;
+    fixture.core_provider_call_resolver = [broker](
+        const ProgramCoreProviderCallContext& context)
+        -> std::optional<ProgramCoreProviderCallBinding> {
+        return ProgramCoreProviderCallBinding{
+            std::string(context.owner_scope), std::string(context.program_version_id),
+            std::string(context.run_id), std::string(context.operation_id),
+            context.attempt, broker};
+    };
+    fixture.runtime = fixture.make_runtime();
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-provider-reconnect", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(completed_calls.load(), 0U);
+
+    fixture.core_provider_call_resolver = {};
+    fixture.runtime = fixture.make_runtime();
+    const auto reconnected = fixture.runtime->reconnect(
+        "tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(reconnected.status(), ProgramTerminalStatus::Interrupted);
+    const auto resumed = fixture.runtime
+        ->resume("tenant:runtime", interrupted.run_id(),
+                 resume_for(interrupted, json::object(), "trace-provider-resume"))
+        .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(completed_calls.load(), 0U);
 }
 
 TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {

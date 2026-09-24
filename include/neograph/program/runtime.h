@@ -163,6 +163,9 @@ struct ProgramChildQuotaConfig {
       /// Optional host broker for each built-in Core provider call. When set,
       /// a missing or stale binding denies that operation before Core runs.
       ProgramCoreProviderCallResolver core_provider_call_resolver;
+      /// Hosts with durable provider effects can forbid raw Core provider calls.
+      /// A missing resolver or binding then fails the Core operation closed.
+      bool require_core_provider_call_broker = false;
   };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
