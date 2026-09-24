@@ -1,3 +1,5 @@
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
 #include <neograph/program/program.h>
 #include <neograph/provider.h>
@@ -16,6 +18,7 @@
 #include <cstdlib>
 #include "catalog_access.h"
 #include "canonical_json.h"
+#include "registry_access.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -70,11 +73,14 @@ private:
 
 class CatalogProvider final : public neograph::Provider {
 public:
-    std::string              get_name() const override { return "catalog-provider"; }
+    explicit CatalogProvider(std::string name = "catalog-provider") : name_(std::move(name)) {}
+    std::string get_name() const override { return name_; }
     neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
         ++provider_calls;
         return {};
     }
+private:
+    std::string name_;
 };
 
 class CatalogTool final : public neograph::Tool {
@@ -94,25 +100,21 @@ private:
     std::string name_;
 };
 
-class BoundCatalogNode final : public GraphNode {
+class CatalogToolCallingProvider final : public neograph::Provider {
 public:
-    BoundCatalogNode(std::string                         name,
-                     std::shared_ptr<neograph::Provider> provider,
-                     neograph::Tool*                     tool)
-        : name_(std::move(name)), provider_(std::move(provider)), tool_(tool) {}
-
-    asio::awaitable<NodeOutput> run(NodeInput) override {
-        (void)provider_->complete({});
-        (void)tool_->execute(json::object());
-        co_return NodeOutput{};
+    std::string get_name() const override { return "catalog-provider"; }
+    void request_tool(std::string name) { requested_tool_ = std::move(name); }
+    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
+        ++provider_calls;
+        EXPECT_EQ(params.tools.size(), 1U);
+        neograph::ChatCompletion completion;
+        completion.message.role = "assistant";
+        completion.message.tool_calls.push_back(
+            neograph::ToolCall{"call-1", requested_tool_, "{}"});
+        return completion;
     }
-
-    std::string get_name() const override { return name_; }
-
 private:
-    std::string                         name_;
-    std::shared_ptr<neograph::Provider> provider_;
-    neograph::Tool*                     tool_;
+    std::string requested_tool_ = "catalog-tool";
 };
 
 RegistrySnapshot registry(bool                     failing_factory = false,
@@ -147,11 +149,13 @@ RegistrySnapshot bound_registry() {
         manifest(ExecutableKind::Node, "bound-catalog-node", '5'),
         [](const std::string& name, const json&, const NodeContext& context) {
             ++factory_calls;
-            if (!context.provider || context.tools.size() != 1) {
-                throw std::runtime_error("factory did not receive owned exact bindings");
+            if (context.provider || context.provider_name != "catalog-provider" ||
+                !context.tools.empty() ||
+                context.tool_definitions.size() != 1 ||
+                context.tool_definitions.front().name != "catalog-tool") {
+                throw std::runtime_error("brokered factory received incorrect capabilities");
             }
-            return std::make_unique<BoundCatalogNode>(name, context.provider,
-                                                      context.tools.front());
+            return std::make_unique<CatalogNode>(name);
         },
         json{{"type", "object"},
              {"properties",
@@ -325,7 +329,9 @@ ProgramBundleData copy_data(const ProgramBundle& bundle) {
 
 bool has_code(const ProgramAdmissionError& error, const std::string& code) {
     return std::any_of(error.diagnostics().begin(), error.diagnostics().end(),
-                       [&](const Diagnostic& diagnostic) { return diagnostic.code == code; });
+                       [&](const neograph::program::Diagnostic& diagnostic) {
+                           return diagnostic.code == code;
+                       });
 }
 
 struct CatalogFixture {
@@ -669,7 +675,7 @@ TEST(ProgramCatalogTest, JavaScriptControlLowersGuaranteeBelowStrictCoreClosure)
 }
 #endif
 
-TEST(ProgramCatalogTest, ConfigDerivedClosureBindsExactlyAndOwnedResourcesRun) {
+TEST(ProgramCatalogTest, ConfigDerivedClosureAttenuatesBrokeredExecutables) {
     factory_calls.store(0);
     provider_calls.store(0);
     tool_calls.store(0);
@@ -701,8 +707,156 @@ TEST(ProgramCatalogTest, ConfigDerivedClosureBindsExactlyAndOwnedResourcesRun) {
     run.thread_id = "catalog-owned-binding";
     run.input     = json::object();
     (void)pinned->root->engine->run(run);
-    EXPECT_EQ(provider_calls.load(), 1U);
+    EXPECT_EQ(provider_calls.load(), 0U);
+    EXPECT_EQ(tool_calls.load(), 0U);
+}
+
+TEST(ProgramCatalogTest, NodeFactoriesReceiveOnlyTheirExactCapabilities) {
+    const auto provider = manifest(ExecutableKind::Provider, "catalog-provider", '3');
+    const auto tool = manifest(ExecutableKind::Tool, "catalog-tool", '4');
+    RegistrySnapshotBuilder builder;
+    builder.add_provider(provider, ProviderMetadata{json::object(), json::object()});
+    builder.add_tool(tool, ToolMetadata{json::object(), json::object()});
+    unsigned unprivileged_factories = 0;
+    unsigned declared_factories = 0;
+    unsigned trusted_factories = 0;
+    builder.add_node(
+        manifest(ExecutableKind::Node, "without-capabilities", 'a'),
+        [&](const std::string& name, const json&, const NodeContext& context) {
+            ++unprivileged_factories;
+            EXPECT_FALSE(context.provider);
+            EXPECT_TRUE(context.provider_name.empty());
+            EXPECT_TRUE(context.tools.empty());
+            EXPECT_TRUE(context.tool_definitions.empty());
+            return std::make_unique<CatalogNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "with-capabilities", 'b'),
+        [&](const std::string& name, const json&, const NodeContext& context) {
+            ++declared_factories;
+            EXPECT_FALSE(context.provider);
+            EXPECT_EQ(context.provider_name, "catalog-provider");
+            EXPECT_TRUE(context.tools.empty());
+            EXPECT_EQ(context.tool_definitions.size(), 1U);
+            if (!context.tool_definitions.empty())
+                EXPECT_EQ(context.tool_definitions.front().name, "catalog-tool");
+            return std::make_unique<CatalogNode>(name);
+        },
+        json{{"type", "object"}}, json::object(),
+        [provider_id = provider.identity, tool_id = tool.identity](const json&) {
+            return std::vector<ExecutableIdentity>{provider_id, tool_id};
+        });
+    auto trusted = manifest(ExecutableKind::Node, "trusted-capabilities", 'c');
+    trusted.effect_mode = EffectMode::TrustedNative;
+    builder.add_node(
+        std::move(trusted),
+        [&](const std::string& name, const json&, const NodeContext& context) {
+            ++trusted_factories;
+            EXPECT_TRUE(context.provider);
+            EXPECT_EQ(context.tools.size(), 1U);
+            if (!context.tools.empty()) EXPECT_EQ(context.tools.front()->get_name(), "catalog-tool");
+            return std::make_unique<CatalogNode>(name);
+        },
+        json{{"type", "object"}}, json::object(),
+        [provider_id = provider.identity, tool_id = tool.identity](const json&) {
+            return std::vector<ExecutableIdentity>{provider_id, tool_id};
+        });
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "catalog-overwrite", '2'),
+                        [](const json&, const json& incoming) { return json(incoming); });
+    auto snapshot = std::move(builder).build();
+    auto definition = document()["root"]["definition"];
+    definition["nodes"] = json{{"a", json{{"type", "without-capabilities"}}},
+                                {"b", json{{"type", "with-capabilities"}}},
+                                {"c", json{{"type", "trusted-capabilities"}}}};
+    definition["edges"] = json::array({
+        json{{"from", "__start__"}, {"to", "a"}},
+        json{{"from", "a"}, {"to", "b"}},
+        json{{"from", "b"}, {"to", "c"}},
+        json{{"from", "c"}, {"to", "__end__"}}});
+    CatalogTool bound_tool;
+    NodeContext context;
+    context.provider = std::make_shared<CatalogProvider>();
+    context.tools.push_back(&bound_tool);
+    auto topology = neograph::program::detail::RegistrySnapshotAccess::parse_local(
+        snapshot, definition);
+    (void)neograph::program::detail::RegistrySnapshotAccess::link_local(
+        snapshot, std::move(topology), context);
+    EXPECT_EQ(unprivileged_factories, 1U);
+    EXPECT_EQ(declared_factories, 1U);
+    EXPECT_EQ(trusted_factories, 1U);
+}
+
+TEST(ProgramCatalogTest, FixedBrokeredCoreNodesDispatchOnlyThroughRunGate) {
+    provider_calls.store(0);
+    tool_calls.store(0);
+    const auto provider = manifest(ExecutableKind::Provider, "catalog-provider", '3');
+    const auto tool = manifest(ExecutableKind::Tool, "catalog-tool", '4');
+    RegistrySnapshotBuilder builder;
+    builder.add_provider(provider, ProviderMetadata{json::object(), json::object()});
+    builder.add_tool(tool, ToolMetadata{json::object(), json::object()});
+    builder.add_core_llm_call(
+        manifest(ExecutableKind::Node, "llm_call", 'c'),
+        [provider_id = provider.identity, tool_id = tool.identity](const json&) {
+            return std::vector<ExecutableIdentity>{provider_id, tool_id};
+        });
+    builder.add_core_tool_dispatch(
+        manifest(ExecutableKind::Node, "tool_dispatch", 'd'),
+        [tool_id = tool.identity](const json&) {
+            return std::vector<ExecutableIdentity>{tool_id};
+        });
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "catalog-overwrite", '2'),
+                        [](const json&, const json& incoming) { return json(incoming); });
+    auto snapshot = std::move(builder).build();
+    auto definition = document()["root"]["definition"];
+    definition["channels"] = json{{"messages", json{{"reducer", "catalog-overwrite"},
+                                                      {"initial", json::array()}}}};
+    definition["nodes"] = json{{"llm", json{{"type", "llm_call"}}},
+                                {"tools", json{{"type", "tool_dispatch"}}}};
+    definition["edges"] = json::array({
+        json{{"from", "__start__"}, {"to", "llm"}},
+        json{{"from", "llm"}, {"to", "tools"}},
+        json{{"from", "tools"}, {"to", "__end__"}}});
+    CatalogTool bound_tool;
+    CatalogTool out_of_scope_tool("out-of-scope");
+    NodeContext context;
+    auto model = std::make_shared<CatalogToolCallingProvider>();
+    context.provider = model;
+    context.tools.push_back(&bound_tool);
+    context.tools.push_back(&out_of_scope_tool);
+    auto topology = neograph::program::detail::RegistrySnapshotAccess::parse_local(
+        snapshot, definition);
+    auto compiled = neograph::program::detail::RegistrySnapshotAccess::link_local(
+        snapshot, std::move(topology), context);
+    EngineResources engine_resources;
+    engine_resources.registry =
+        neograph::program::detail::RegistrySnapshotAccess::runtime_registry(snapshot);
+    auto engine = GraphEngine::link(std::move(compiled), EngineConfig{},
+                                    std::move(engine_resources));
+
+    auto run = [&](std::string thread_id, bool allow) {
+        RunConfig config;
+        config.thread_id = std::move(thread_id);
+        config.input = json::object();
+        RunResources resources;
+        resources.tool_gate = [allow](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return allow ? neograph::ToolDecision::allow()
+                            : neograph::ToolDecision::deny("grant required");
+        };
+        resources.tool_execution_controller =
+            std::make_shared<neograph::ToolExecutionController>();
+        return neograph::async::run_sync(engine->run_stream_async(
+            std::move(config), {}, {}, std::move(resources)));
+    };
+    EXPECT_EQ(run("brokered-denied", false).status(), RunStatus::Completed);
+    EXPECT_EQ(tool_calls.load(), 0U);
+    EXPECT_EQ(run("brokered-allowed", true).status(), RunStatus::Completed);
     EXPECT_EQ(tool_calls.load(), 1U);
+    model->request_tool("out-of-scope");
+    EXPECT_EQ(run("brokered-out-of-scope", true).status(), RunStatus::Completed);
+    EXPECT_EQ(tool_calls.load(), 1U);
+    EXPECT_EQ(provider_calls.load(), 3U);
 }
 
 TEST(ProgramCatalogTest, PolicyDenialSkipsCapabilityBinder) {
@@ -770,6 +924,9 @@ TEST(ProgramCatalogTest, ExtraDuplicateAndNonShaReceiptsRejectBeforeFactory) {
             std::vector<std::unique_ptr<neograph::Tool>> tools;
             tools.push_back(std::make_unique<CatalogTool>("wrong-tool"));
             binding.tools = neograph::ToolSet(std::move(tools));
+        },
+        [](CatalogCapabilityBinding& binding) {
+            binding.node_context.provider = std::make_shared<CatalogProvider>("wrong-provider");
         }};
 
     for (const auto& mutate : mutations) {

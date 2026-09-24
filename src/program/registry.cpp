@@ -89,6 +89,48 @@ void validate_manifest(ExecutableManifest& manifest) {
     }
 }
 
+graph::NodeContext node_capability_context(
+    const graph::NodeContext& context,
+    const std::vector<ExecutableIdentity>& static_requirements,
+    const ExecutableRequirementResolver& dynamic_requirements,
+    const json& config, bool allow_executable_bindings) {
+    auto required = static_requirements;
+    if (dynamic_requirements) {
+        auto dynamic = dynamic_requirements(config);
+        required.insert(required.end(), dynamic.begin(), dynamic.end());
+    }
+    bool wants_provider = false;
+    std::string provider_name;
+    std::unordered_set<std::string> tool_names;
+    for (const auto& identity : required) {
+        if (identity.kind == ExecutableKind::Provider) {
+            if (wants_provider && provider_name != identity.name)
+                throw std::invalid_argument("Node requires multiple distinct Providers");
+            wants_provider = true;
+            provider_name = identity.name;
+        }
+        if (identity.kind == ExecutableKind::Tool) tool_names.insert(identity.name);
+    }
+
+    graph::NodeContext narrowed = context;
+    if (wants_provider && !context.provider)
+        throw std::invalid_argument("Node requires an unbound Provider");
+    if (wants_provider && context.provider->get_name() != provider_name)
+        throw std::invalid_argument("Node requires a different Provider");
+    narrowed.provider_name = std::move(provider_name);
+    if (!wants_provider || !allow_executable_bindings) narrowed.provider.reset();
+    narrowed.tools.clear();
+    narrowed.tool_definitions.clear();
+    for (auto* tool : context.tools) {
+        if (!tool_names.erase(tool->get_name())) continue;
+        narrowed.tool_definitions.push_back(tool->get_definition());
+        if (allow_executable_bindings) narrowed.tools.push_back(tool);
+    }
+    if (!tool_names.empty())
+        throw std::invalid_argument("Node requires an unbound Tool");
+    return narrowed;
+}
+
 void require_kind(const ExecutableManifest& manifest, ExecutableKind expected) {
     if (manifest.identity.kind != expected) {
         throw std::invalid_argument("Executable manifest kind does not match builder operation");
@@ -306,6 +348,51 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(
     json                          config_schema,
     json                          effects,
     ExecutableRequirementResolver requirement_resolver) {
+    const bool allow_executable_bindings = manifest.effect_mode == EffectMode::TrustedNative;
+    return add_node_impl(std::move(manifest), std::move(factory), std::move(config_schema),
+                         std::move(effects), std::move(requirement_resolver),
+                         allow_executable_bindings);
+}
+
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_core_llm_call(
+    ExecutableManifest manifest, ExecutableRequirementResolver requirement_resolver) {
+    if (manifest.effect_mode != EffectMode::Brokered ||
+        manifest.identity.name != "llm_call")
+        throw std::invalid_argument("Core llm_call must be a brokered llm_call Node");
+    return add_node_impl(
+        std::move(manifest),
+        [](const std::string& name, const json&, const graph::NodeContext& context) {
+            return std::make_unique<graph::LLMCallNode>(name, context);
+        },
+        json{{"type", "object"}},
+        json{{"reads", json::array({"messages"})},
+             {"writes", json::array({"messages"})}},
+        std::move(requirement_resolver), true);
+}
+
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_core_tool_dispatch(
+    ExecutableManifest manifest, ExecutableRequirementResolver requirement_resolver) {
+    if (manifest.effect_mode != EffectMode::Brokered ||
+        manifest.identity.name != "tool_dispatch")
+        throw std::invalid_argument("Core tool_dispatch must be a brokered tool_dispatch Node");
+    return add_node_impl(
+        std::move(manifest),
+        [](const std::string& name, const json&, const graph::NodeContext& context) {
+            return std::make_unique<graph::ToolDispatchNode>(name, context);
+        },
+        json{{"type", "object"}},
+        json{{"reads", json::array({"messages"})},
+             {"writes", json::array({"messages"})}},
+        std::move(requirement_resolver), true);
+}
+
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node_impl(
+    ExecutableManifest            manifest,
+    graph::NodeFactoryFn          factory,
+    json                          config_schema,
+    json                          effects,
+    ExecutableRequirementResolver requirement_resolver,
+    bool                          allow_executable_bindings) {
     require_kind(manifest, ExecutableKind::Node);
     validate_manifest(manifest);
     if (!factory) throw std::invalid_argument("Node factory must not be empty");
@@ -314,8 +401,17 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(
     }
     config_schema = detail::owned_json_copy(config_schema);
     effects       = detail::owned_json_copy(effects);
-    impl_->registry.register_type(manifest.identity.name, std::move(factory), config_schema,
-                                  effects);
+    auto requirements = manifest.required_executables;
+    impl_->registry.register_type(
+        manifest.identity.name,
+        [factory = std::move(factory), requirements = std::move(requirements),
+         requirement_resolver, allow_executable_bindings](const std::string& name, const json& config,
+                                                const graph::NodeContext& context) {
+            auto narrowed = node_capability_context(context, requirements, requirement_resolver,
+                                                    config, allow_executable_bindings);
+            return factory(name, config, narrowed);
+        },
+        config_schema, effects);
     impl_->entries.push_back(
         SnapshotEntry{std::move(manifest),
                       detail::owned_json_copy(

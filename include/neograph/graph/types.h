@@ -396,6 +396,12 @@ struct NodeContext {
     std::string               model;       ///< Model name override (empty = use provider default).
     std::string               instructions; ///< System prompt / instructions for the LLM.
     json                      extra_config; ///< Additional configuration (node-type specific).
+    /// Non-executable metadata for an admitted node's exact Tool requirements.
+    /// Program brokered factories receive this without raw Tool pointers.
+    std::vector<ChatTool>    tool_definitions;
+    /// Identity metadata for an admitted Provider requirement. Brokered
+    /// Program factories receive this without the executable Provider pointer.
+    std::string              provider_name;
 };
 
 /**
