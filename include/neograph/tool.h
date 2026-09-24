@@ -25,6 +25,7 @@ class CancelToken;
 
 namespace neograph {
 class HookRuntime;
+class ToolEffectBroker;
 
 /**
  * @brief Per-invocation context for a cooperative asynchronous tool.
@@ -39,6 +40,10 @@ struct ToolExecutionContext {
     std::shared_ptr<graph::CancelToken> cancel_token;
     std::shared_ptr<ToolExecutionController> controller;
     ToolExecutionIdentity identity;
+    /// Optional host broker; only mediated dispatch_tool_calls invokes it.
+    std::shared_ptr<ToolEffectBroker> effect_broker;
+    /// Stable Core node invocation slot, populated by GraphEngine.
+    std::string effect_task_id;
     std::optional<std::chrono::steady_clock::time_point> deadline;
     /// Optional host-owned lifecycle boundary shared by all tool consumers.
     std::shared_ptr<HookRuntime> hook_runtime;

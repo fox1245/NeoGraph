@@ -217,12 +217,7 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     gctx.resume_value = in.ctx.resume_value;
     gctx.thread_id    = in.ctx.thread_id;
     gctx.step         = in.ctx.step;
-    ToolExecutionContext execution;
-    execution.cancel_token = in.ctx.cancel_token;
-    execution.controller = in.ctx.tool_execution_controller;
-    execution.identity = in.ctx.tool_execution_identity;
-    execution.identity.thread_id = in.ctx.thread_id;
-    execution.deadline = in.ctx.deadline;
+    auto execution = make_tool_execution_context(in.ctx);
     auto tool_msgs = co_await dispatch_tool_calls(
         assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx),
         std::move(execution));

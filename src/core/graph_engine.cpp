@@ -671,6 +671,7 @@ asio::awaitable<RunResult> GraphEngine::run_async(
         std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker =
         std::move(resources.provider_call_broker);
+    runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
     co_return co_await run_async_with_runtime(
         std::move(config), nullptr, std::move(metadata),
         std::move(runtime_resources));
@@ -774,6 +775,7 @@ GraphEngine::run_stream_async(RunConfig config,
     }
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
+    runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata),
         std::move(runtime_resources));
@@ -801,6 +803,7 @@ asio::awaitable<RunResult> GraphEngine::run_until_safe_point_async(
     }
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
+    runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
     runtime_resources.safe_point_request = std::move(request);
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata),
@@ -874,6 +877,7 @@ asio::awaitable<RunResult> GraphEngine::resume_async(
     }
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
+    runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),
         std::move(metadata), std::move(runtime_resources));
@@ -916,6 +920,7 @@ asio::awaitable<RunResult> GraphEngine::resume_from_async(
     }
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
+    runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),
         std::move(metadata), std::move(runtime_resources),
@@ -951,6 +956,7 @@ asio::awaitable<RunResult> GraphEngine::resume_from_until_safe_point_async(
     }
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
+    runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
     runtime_resources.safe_point_request = std::move(request);
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),
@@ -1104,6 +1110,7 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     resources.tool_execution_controller = parent.tool_execution_controller;
     if (parent_runtime) {
         resources.provider_call_broker = parent_runtime->provider_call_broker;
+        resources.tool_effect_broker = parent_runtime->tool_effect_broker;
     }
     auto journal = std::make_shared<detail::SubgraphWriteJournal>();
     resources.subgraph_write_journal = journal;
@@ -1257,6 +1264,7 @@ GraphEngine::execute_graph_async(
     runtime->checkpoint_store = checkpoint_store;
     if (resources) {
         runtime->provider_call_broker = resources->provider_call_broker;
+        runtime->tool_effect_broker = resources->tool_effect_broker;
     }
     if (resources) {
         runtime->subgraph_write_journal = resources->subgraph_write_journal;

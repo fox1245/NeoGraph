@@ -79,6 +79,14 @@ struct RunContext {
 
 };
 
+/**
+ * Populate the mediated Tool execution context for a node invocation.
+ * Host-registered nodes that call dispatch_tool_calls must use this helper to
+ * inherit the invocation's gate-adjacent effect broker and stable task slot.
+ * Direct Tool::execute remains outside this boundary.
+ */
+NEOGRAPH_API ToolExecutionContext make_tool_execution_context(const RunContext& ctx);
+
 /// @brief Fold a completion's token usage into the run's running total.
 inline void record_usage(const RunContext& ctx, const ChatCompletion& completion) {
     if (ctx.usage) ctx.usage->add(completion.usage);

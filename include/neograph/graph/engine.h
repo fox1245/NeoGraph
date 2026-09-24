@@ -19,6 +19,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/node_cache.h>
 #include <neograph/graph/provider_call_broker.h>
+#include <neograph/tool_effect_broker.h>
 #include <neograph/graph/registry.h>
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/safe_point.h>
@@ -133,6 +134,8 @@ struct RunResources {
     /// Brokered calls require a nonempty thread_id to scope replay identity.
     /// Never mutates provider nodes on the shared engine.
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
+    /// Host broker for mediated Tool effects in this invocation and subgraphs.
+    std::shared_ptr<ToolEffectBroker> tool_effect_broker;
 };
 
 /**
@@ -983,6 +986,7 @@ private:
         std::optional<ToolGate> parent_tool_gate;
         std::shared_ptr<ToolExecutionController> tool_execution_controller;
         std::shared_ptr<ProviderCallBroker> provider_call_broker;
+        std::shared_ptr<ToolEffectBroker> tool_effect_broker;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };

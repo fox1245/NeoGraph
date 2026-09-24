@@ -103,3 +103,21 @@ ScopedRunContextRuntime::~ScopedRunContextRuntime() {
 }
 
 }  // namespace neograph::graph::detail
+
+namespace neograph::graph {
+
+ToolExecutionContext make_tool_execution_context(const RunContext& ctx) {
+    ToolExecutionContext execution;
+    execution.cancel_token = ctx.cancel_token;
+    execution.controller = ctx.tool_execution_controller;
+    execution.identity = ctx.tool_execution_identity;
+    execution.identity.thread_id = ctx.thread_id;
+    execution.deadline = ctx.deadline;
+    if (const auto runtime = detail::runtime_for(ctx)) {
+        execution.effect_broker = runtime->tool_effect_broker;
+        execution.effect_task_id = runtime->invocation_id;
+    }
+    return execution;
+}
+
+}  // namespace neograph::graph

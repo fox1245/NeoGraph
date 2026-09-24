@@ -10,6 +10,7 @@
 #include <string_view>
 
 namespace neograph { class ToolExecutionController; }
+namespace neograph { class ToolEffectBroker; }
 
 namespace neograph::program {
 
@@ -38,6 +39,8 @@ struct ProgramCoreToolGrant {
     std::string grant_id;
     ToolGate gate;
     std::shared_ptr<ToolExecutionController> controller;
+    /// Optional host-owned per-call effect journal for this exact grant.
+    std::shared_ptr<ToolEffectBroker> effect_broker;
 };
 
 using ProgramCoreToolGrantResolver =

@@ -161,10 +161,7 @@ public:
         neograph::ToolGateContext gate_context;
         gate_context.thread_id = in.ctx.thread_id;
         gate_context.step = in.ctx.step;
-        neograph::ToolExecutionContext execution;
-        execution.controller = in.ctx.tool_execution_controller;
-        execution.identity = in.ctx.tool_execution_identity;
-        execution.identity.thread_id = in.ctx.thread_id;
+        auto execution = neograph::graph::make_tool_execution_context(in.ctx);
         (void)co_await dispatch_tool_calls(
             {neograph::ToolCall{"call-1", "mediated-probe", "{}"}}, {&tool},
             in.ctx.tool_gate, std::move(gate_context), std::move(execution));
@@ -2155,6 +2152,21 @@ json typed_event_value(const TypedGraphEvent& event) {
 }
 }  // namespace
 
+namespace {
+class ProgramToolEffectProbe final : public neograph::ToolEffectBroker {
+public:
+    asio::awaitable<neograph::ToolExecutionResult> execute(
+        neograph::ToolEffectIdentity identity, neograph::Tool& tool,
+        neograph::json arguments, neograph::ToolExecutionContext context) override {
+        seen.push_back(std::move(identity));
+        co_return co_await context.controller->execute_result_async(
+            tool, std::move(arguments), context);
+    }
+
+    std::vector<neograph::ToolEffectIdentity> seen;
+};
+}  // namespace
+
 TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
     mediated_tool_calls.store(0);
     AdmittedRuntime fixture;
@@ -2170,7 +2182,9 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
     EXPECT_EQ(mediated_tool_calls.load(), 0U);
 
     const auto allowed_controller = std::make_shared<neograph::ToolExecutionController>();
-    fixture.core_tool_grant_resolver = [version_id = version.id(), allowed_controller](
+    const auto effect_broker = std::make_shared<ProgramToolEffectProbe>();
+    fixture.core_tool_grant_resolver = [version_id = version.id(), allowed_controller,
+                                        effect_broker](
         const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
         if (context.owner_scope != "tenant:runtime" ||
             context.program_version_id != version_id || context.run_id != "allowed" ||
@@ -2188,12 +2202,19 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
             co_return neograph::ToolDecision::allow();
         };
         grant.controller = allowed_controller;
+        grant.effect_broker = effect_broker;
         return grant;
     };
     fixture.runtime = fixture.make_runtime();
     EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
     EXPECT_EQ(mediated_tool_controller.load(), allowed_controller.get());
+    ASSERT_EQ(effect_broker->seen.size(), 1U);
+    EXPECT_EQ(effect_broker->seen[0].owner_scope, "tenant:runtime");
+    EXPECT_EQ(effect_broker->seen[0].run_id, "allowed");
+    EXPECT_FALSE(effect_broker->seen[0].thread_id.empty());
+    EXPECT_FALSE(effect_broker->seen[0].task_id.empty());
+    EXPECT_EQ(effect_broker->seen[0].call_ordinal, 0U);
 
     fixture.core_tool_grant_resolver = [version_id = version.id()](
         const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {

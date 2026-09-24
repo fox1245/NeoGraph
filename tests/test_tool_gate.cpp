@@ -31,14 +31,17 @@
 #include <neograph/graph/types.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/tool_dispatch.h>
+#include <neograph/tool_effect_broker.h>
 #include <neograph/async/run_sync.h>
 
 #include <asio/awaitable.hpp>
 
 #include <atomic>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace neograph;
@@ -82,6 +85,90 @@ ToolCall make_call(std::string id, std::string name, std::string args = "{}") {
     return tc;
 }
 
+class RecordingToolEffectBroker final : public ToolEffectBroker {
+public:
+    asio::awaitable<ToolExecutionResult> execute(
+        ToolEffectIdentity identity, Tool& tool, json arguments,
+        ToolExecutionContext context) override {
+        const auto key = std::make_tuple(identity.run_id, identity.thread_id,
+                                         identity.task_id, identity.call_ordinal);
+        {
+            std::lock_guard lock(mutex_);
+            if (const auto found = receipts_.find(key); found != receipts_.end()) {
+                if (found->second.tool_name != tool.get_name() ||
+                    found->second.arguments != arguments ||
+                    found->second.tool_call_id != identity.tool_call_id) {
+                    ToolExecutionResult conflict;
+                    conflict.status = ToolTerminalStatus::Rejected;
+                    conflict.error = "Tool effect replay binding changed";
+                    co_return conflict;
+                }
+                co_return found->second.result;
+            }
+        }
+        auto controller = context.controller ? context.controller
+                                             : default_tool_execution_controller();
+        auto result = co_await controller->execute_result_async(
+            tool, arguments, context);
+        {
+            std::lock_guard lock(mutex_);
+            identities_.push_back(identity);
+            receipts_.emplace(key, Receipt{tool.get_name(), std::move(arguments),
+                                           identity.tool_call_id, result});
+        }
+        co_return result;
+    }
+
+    std::vector<ToolEffectIdentity> identities() const {
+        std::lock_guard lock(mutex_);
+        return identities_;
+    }
+
+private:
+    struct Receipt {
+        std::string tool_name;
+        json arguments;
+        std::string tool_call_id;
+        ToolExecutionResult result;
+    };
+    mutable std::mutex mutex_;
+    std::map<std::tuple<std::string, std::string, std::string, std::uint64_t>,
+             Receipt> receipts_;
+    std::vector<ToolEffectIdentity> identities_;
+};
+
+class RefusingToolEffectBroker final : public ToolEffectBroker {
+public:
+    asio::awaitable<ToolExecutionResult> execute(
+        ToolEffectIdentity, Tool&, json, ToolExecutionContext) override {
+        ToolExecutionResult refused;
+        refused.status = ToolTerminalStatus::Failed;
+        refused.error = "dispatch marker was not persisted";
+        co_return refused;
+    }
+};
+
+class UncertainToolEffectBroker final : public ToolEffectBroker {
+public:
+    asio::awaitable<ToolExecutionResult> execute(
+        ToolEffectIdentity, Tool&, json, ToolExecutionContext) override {
+        ToolExecutionResult unknown;
+        unknown.status = ToolTerminalStatus::ReconciliationRequired;
+        unknown.error = "effect outcome is unknown";
+        unknown.effect_uncertain = true;
+        co_return unknown;
+    }
+};
+
+class ThrowingToolEffectBroker final : public ToolEffectBroker {
+public:
+    asio::awaitable<ToolExecutionResult> execute(
+        ToolEffectIdentity, Tool&, json, ToolExecutionContext) override {
+        throw std::runtime_error("receipt persistence failed");
+        co_return ToolExecutionResult{};
+    }
+};
+
 // Drives dispatch_tool_calls directly — the single place both the graph node and
 // the Agent route through, so a gate proven here is proven for both. (That the
 // two paths really do share it is asserted separately, further down.)
@@ -95,6 +182,96 @@ std::vector<ChatMessage> dispatch(std::vector<ToolCall> calls,
 }
 
 } // namespace
+
+TEST(ToolGate, EffectBrokerUsesBatchOrdinalAndReplaysWithoutToolExecution) {
+    std::atomic<int> first_runs{0}, second_runs{0};
+    SpyTool first("first", &first_runs);
+    SpyTool second("second", &second_runs);
+    auto broker = std::make_shared<RecordingToolEffectBroker>();
+    ToolExecutionContext execution;
+    execution.identity.owner_scope = "tenant-a";
+    execution.identity.root_run_id = "run-1";
+    execution.identity.thread_id = "thread-1";
+    execution.effect_task_id = "s2:tool_dispatch";
+    execution.effect_broker = broker;
+    const auto calls = std::vector<ToolCall>{
+        make_call("same-model-id", "first", R"({"segment":1})"),
+        make_call("same-model-id", "second", R"({"segment":2})")};
+    auto invoke = [&](std::vector<ToolCall> requested) {
+        return neograph::async::run_sync(dispatch_tool_calls(
+            std::move(requested), {&first, &second}, {}, {}, execution));
+    };
+
+    const auto initial = invoke(calls);
+    ASSERT_EQ(initial.size(), 2u);
+    EXPECT_EQ(first_runs.load(), 1);
+    EXPECT_EQ(second_runs.load(), 1);
+    const auto identities = broker->identities();
+    ASSERT_EQ(identities.size(), 2u);
+    EXPECT_EQ(identities[0].task_id, "s2:tool_dispatch");
+    EXPECT_EQ(identities[0].call_ordinal, 0u);
+    EXPECT_EQ(identities[1].call_ordinal, 1u);
+
+    const auto replay = invoke(calls);
+    ASSERT_EQ(replay.size(), 2u);
+    EXPECT_EQ(first_runs.load(), 1);
+    EXPECT_EQ(second_runs.load(), 1);
+    EXPECT_EQ(replay[0].content, initial[0].content);
+    EXPECT_EQ(replay[1].content, initial[1].content);
+
+    auto changed = calls;
+    changed[0].arguments = R"({"segment":99})";
+    const auto conflict = invoke(std::move(changed));
+    ASSERT_EQ(conflict.size(), 2u);
+    EXPECT_EQ(conflict[0].tool_status, "rejected");
+    EXPECT_EQ(first_runs.load(), 1);
+}
+
+TEST(ToolGate, EffectBrokerRefusalAndMissingIdentityExecuteNoTool) {
+    std::atomic<int> runs{0};
+    SpyTool tool("effect", &runs);
+    ToolExecutionContext execution;
+    execution.identity.thread_id = "thread-1";
+    execution.effect_task_id = "s1:tool_dispatch";
+    execution.effect_broker = std::make_shared<RefusingToolEffectBroker>();
+    const auto refused = neograph::async::run_sync(dispatch_tool_calls(
+        {make_call("call-1", "effect")}, {&tool}, {}, {}, execution));
+    ASSERT_EQ(refused.size(), 1u);
+    EXPECT_EQ(refused[0].tool_status, "failed");
+    EXPECT_EQ(runs.load(), 0);
+
+    execution.effect_task_id.clear();
+    EXPECT_THROW(neograph::async::run_sync(dispatch_tool_calls(
+                     {make_call("call-1", "effect")}, {&tool}, {}, {}, execution)),
+                 std::invalid_argument);
+    EXPECT_EQ(runs.load(), 0);
+}
+
+TEST(ToolGate, UncertainBrokerOutcomeInterruptsBeforeAnotherModelTurn) {
+    std::atomic<int> runs{0};
+    SpyTool tool("effect", &runs);
+    ToolExecutionContext execution;
+    execution.identity.thread_id = "thread-1";
+    execution.effect_task_id = "s1:tool_dispatch";
+    execution.effect_broker = std::make_shared<UncertainToolEffectBroker>();
+    EXPECT_THROW(neograph::async::run_sync(dispatch_tool_calls(
+                     {make_call("call-1", "effect")}, {&tool}, {}, {}, execution)),
+                 NodeInterrupt);
+    EXPECT_EQ(runs.load(), 0);
+}
+
+TEST(ToolGate, BrokerExceptionAlsoInterruptsBeforeAnotherModelTurn) {
+    std::atomic<int> runs{0};
+    SpyTool tool("effect", &runs);
+    ToolExecutionContext execution;
+    execution.identity.thread_id = "thread-1";
+    execution.effect_task_id = "s1:tool_dispatch";
+    execution.effect_broker = std::make_shared<ThrowingToolEffectBroker>();
+    EXPECT_THROW(neograph::async::run_sync(dispatch_tool_calls(
+                     {make_call("call-1", "effect")}, {&tool}, {}, {}, execution)),
+                 NodeInterrupt);
+    EXPECT_EQ(runs.load(), 0);
+}
 
 // ── 1. No gate: nothing changes ───────────────────────────────────────────
 //
