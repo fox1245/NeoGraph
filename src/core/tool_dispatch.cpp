@@ -177,7 +177,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     {"error", result.error},
                     {"status", tool_msg.tool_status},
                     {"retryable", result.retryable},
-                    {"effect_uncertain", result.effect_uncertain},
+                    {"effect_uncertain", tool_msg.tool_effect_uncertain},
                     {"output", result.output}}
                     .dump();
             }
