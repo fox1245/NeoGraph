@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <future>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #ifdef _WIN32
@@ -168,6 +169,46 @@ TEST(SqliteCheckpointWriteGuardTest, RejectsStaleWritesInsideWriterTransaction) 
     allowed = true;
     guarded.clear_writes("t", first.id);
     EXPECT_TRUE(guarded.get_writes("t", first.id).empty());
+}
+
+TEST(SqliteCheckpointTransactionTest, RolledBackByTriggerPreservesOriginalError) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-transaction-" + Checkpoint::generate_id() + ".sqlite");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            for (const auto& suffix : {"", "-wal", "-shm"})
+                std::filesystem::remove(path.string() + suffix, ignored);
+        }
+    } cleanup{path};
+
+    SqliteCheckpointStore store(path.string());
+    sqlite3* raw = nullptr;
+    const int opened = sqlite3_open(path.string().c_str(), &raw);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> observer(raw, &sqlite3_close);
+    ASSERT_EQ(opened, SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(observer.get(),
+        "CREATE TRIGGER reject_checkpoint BEFORE INSERT ON neograph_checkpoints "
+        "BEGIN SELECT RAISE(ROLLBACK, 'checkpoint blocked'); END;",
+        nullptr, nullptr, nullptr), SQLITE_OK);
+
+    const auto cp = make_state_cp("t", 0, {{"x", {42, 1}}});
+    try {
+        store.save(cp);
+        FAIL() << "trigger should reject the checkpoint";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("checkpoint insert failed"),
+                  std::string::npos);
+    }
+    EXPECT_EQ(store.blob_count(), 0U);
+    EXPECT_FALSE(store.load_latest("t").has_value());
+
+    ASSERT_EQ(sqlite3_exec(observer.get(), "DROP TRIGGER reject_checkpoint",
+                           nullptr, nullptr, nullptr), SQLITE_OK);
+    store.save(cp);
+    ASSERT_TRUE(store.load_latest("t"));
+    EXPECT_EQ(store.load_latest("t")->id, cp.id);
 }
 
 TEST_F(SqliteCheckpointTest, LoadByIdReturnsCheckpoint) {

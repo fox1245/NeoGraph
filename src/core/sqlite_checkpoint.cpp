@@ -38,6 +38,31 @@ namespace {
     throw std::runtime_error(std::move(msg));
 }
 
+// Owns a writer transaction so every exceptional exit rolls it back.
+// Cleanup is noexcept: a rollback error must not replace the original failure.
+class WriteTransaction {
+public:
+    explicit WriteTransaction(sqlite3* db) : db_(db) {
+        if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw_sqlite_error(db_, "begin immediate failed");
+    }
+    ~WriteTransaction() noexcept {
+        if (active_) (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
+    WriteTransaction(const WriteTransaction&) = delete;
+    WriteTransaction& operator=(const WriteTransaction&) = delete;
+
+    void commit() {
+        if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw_sqlite_error(db_, "commit failed");
+        active_ = false;
+    }
+
+private:
+    sqlite3* db_;
+    bool active_ = true;
+};
+
 // RAII wrapper for sqlite3_stmt. Ensures finalize on every exit path —
 // including exceptions thrown mid-binding.
 class Stmt {
@@ -326,86 +351,81 @@ void SqliteCheckpointStore::drop_schema() {
 void SqliteCheckpointStore::save(const Checkpoint& cp) {
     std::lock_guard lock(db_mutex_);
 
-    exec_ddl("BEGIN IMMEDIATE;");
-    try {
-        if (write_guard_) write_guard_(db_, cp.thread_id);
-        // 1. Blob upserts.
-        if (cp.channel_values.is_object() &&
-            cp.channel_values.contains("channels")) {
-            json chs = cp.channel_values["channels"];
-            if (chs.is_object()) {
-                Stmt blob_ins(db_,
-                    "INSERT INTO neograph_checkpoint_blobs "
-                    "(thread_id, channel, version, blob_data) "
-                    "VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT (thread_id, channel, version) DO NOTHING");
-                for (auto [name, ch] : chs.items()) {
-                    if (!ch.is_object() || !ch.contains("version")) continue;
-                    if (!ch.contains("value")) continue;
-                    int64_t ver = ch["version"].get<int64_t>();
-                    std::string val_text = to_text(ch["value"]);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, cp.thread_id);
+    // 1. Blob upserts.
+    if (cp.channel_values.is_object() &&
+        cp.channel_values.contains("channels")) {
+        json chs = cp.channel_values["channels"];
+        if (chs.is_object()) {
+            Stmt blob_ins(db_,
+                "INSERT INTO neograph_checkpoint_blobs "
+                "(thread_id, channel, version, blob_data) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (thread_id, channel, version) DO NOTHING");
+            for (auto [name, ch] : chs.items()) {
+                if (!ch.is_object() || !ch.contains("version")) continue;
+                if (!ch.contains("value")) continue;
+                int64_t ver = ch["version"].get<int64_t>();
+                std::string val_text = to_text(ch["value"]);
 
-                    sqlite3_reset(blob_ins.get());
-                    sqlite3_clear_bindings(blob_ins.get());
-                    blob_ins.bind_text(1, cp.thread_id);
-                    blob_ins.bind_text(2, name);
-                    blob_ins.bind_int64(3, ver);
-                    blob_ins.bind_text(4, val_text);
-                    if (blob_ins.step() != SQLITE_DONE) {
-                        throw_sqlite_error(db_, "blob insert failed");
-                    }
+                sqlite3_reset(blob_ins.get());
+                sqlite3_clear_bindings(blob_ins.get());
+                blob_ins.bind_text(1, cp.thread_id);
+                blob_ins.bind_text(2, name);
+                blob_ins.bind_int64(3, ver);
+                blob_ins.bind_text(4, val_text);
+                if (blob_ins.step() != SQLITE_DONE) {
+                    throw_sqlite_error(db_, "blob insert failed");
                 }
             }
         }
-
-        // 2. Checkpoint row (upsert on PK).
-        json channel_versions = extract_channel_versions(cp.channel_values);
-        int64_t global_version = 0;
-        if (cp.channel_values.is_object() &&
-            cp.channel_values.contains("global_version")) {
-            global_version = cp.channel_values["global_version"].get<int64_t>();
-        }
-
-        Stmt cp_ins(db_,
-            "INSERT INTO neograph_checkpoints "
-            "(thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
-            " interrupt_phase, barrier_state, channel_versions, global_version, "
-            " metadata, step, timestamp_ms, schema_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET "
-            "  parent_id        = excluded.parent_id, "
-            "  current_node     = excluded.current_node, "
-            "  next_nodes       = excluded.next_nodes, "
-            "  interrupt_phase  = excluded.interrupt_phase, "
-            "  barrier_state    = excluded.barrier_state, "
-            "  channel_versions = excluded.channel_versions, "
-            "  global_version   = excluded.global_version, "
-            "  metadata         = excluded.metadata, "
-            "  step             = excluded.step, "
-            "  timestamp_ms     = excluded.timestamp_ms, "
-            "  schema_version   = excluded.schema_version");
-        cp_ins.bind_text (1,  cp.thread_id);
-        cp_ins.bind_text (2,  cp.id);
-        cp_ins.bind_text (3,  cp.parent_id);
-        cp_ins.bind_text (4,  cp.current_node);
-        cp_ins.bind_text (5,  to_text(next_nodes_to_json(cp.next_nodes)));
-        cp_ins.bind_text (6,  std::string(to_string(cp.interrupt_phase)));
-        cp_ins.bind_text (7,  to_text(barrier_state_to_json(cp.barrier_state)));
-        cp_ins.bind_text (8,  to_text(channel_versions));
-        cp_ins.bind_int64(9,  global_version);
-        cp_ins.bind_text (10, to_text(cp.metadata));
-        cp_ins.bind_int64(11, cp.step);
-        cp_ins.bind_int64(12, cp.timestamp);
-        cp_ins.bind_int  (13, cp.schema_version);
-        if (cp_ins.step() != SQLITE_DONE) {
-            throw_sqlite_error(db_, "checkpoint insert failed");
-        }
-
-        exec_ddl("COMMIT;");
-    } catch (...) {
-        exec_ddl("ROLLBACK;");
-        throw;
     }
+
+    // 2. Checkpoint row (upsert on PK).
+    json channel_versions = extract_channel_versions(cp.channel_values);
+    int64_t global_version = 0;
+    if (cp.channel_values.is_object() &&
+        cp.channel_values.contains("global_version")) {
+        global_version = cp.channel_values["global_version"].get<int64_t>();
+    }
+
+    Stmt cp_ins(db_,
+        "INSERT INTO neograph_checkpoints "
+        "(thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
+        " interrupt_phase, barrier_state, channel_versions, global_version, "
+        " metadata, step, timestamp_ms, schema_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET "
+        "  parent_id        = excluded.parent_id, "
+        "  current_node     = excluded.current_node, "
+        "  next_nodes       = excluded.next_nodes, "
+        "  interrupt_phase  = excluded.interrupt_phase, "
+        "  barrier_state    = excluded.barrier_state, "
+        "  channel_versions = excluded.channel_versions, "
+        "  global_version   = excluded.global_version, "
+        "  metadata         = excluded.metadata, "
+        "  step             = excluded.step, "
+        "  timestamp_ms     = excluded.timestamp_ms, "
+        "  schema_version   = excluded.schema_version");
+    cp_ins.bind_text (1,  cp.thread_id);
+    cp_ins.bind_text (2,  cp.id);
+    cp_ins.bind_text (3,  cp.parent_id);
+    cp_ins.bind_text (4,  cp.current_node);
+    cp_ins.bind_text (5,  to_text(next_nodes_to_json(cp.next_nodes)));
+    cp_ins.bind_text (6,  std::string(to_string(cp.interrupt_phase)));
+    cp_ins.bind_text (7,  to_text(barrier_state_to_json(cp.barrier_state)));
+    cp_ins.bind_text (8,  to_text(channel_versions));
+    cp_ins.bind_int64(9,  global_version);
+    cp_ins.bind_text (10, to_text(cp.metadata));
+    cp_ins.bind_int64(11, cp.step);
+    cp_ins.bind_int64(12, cp.timestamp);
+    cp_ins.bind_int  (13, cp.schema_version);
+    if (cp_ins.step() != SQLITE_DONE) {
+        throw_sqlite_error(db_, "checkpoint insert failed");
+    }
+
+    transaction.commit();
 }
 
 // ── load helpers ──────────────────────────────────────────────────────
@@ -508,25 +528,20 @@ std::vector<Checkpoint> SqliteCheckpointStore::list(
 
 void SqliteCheckpointStore::delete_thread(const std::string& thread_id) {
     std::lock_guard lock(db_mutex_);
-    exec_ddl("BEGIN IMMEDIATE;");
-    try {
-        if (write_guard_) write_guard_(db_, thread_id);
-        for (const char* sql : {
-            "DELETE FROM neograph_checkpoint_writes WHERE thread_id = ?",
-            "DELETE FROM neograph_checkpoint_blobs  WHERE thread_id = ?",
-            "DELETE FROM neograph_checkpoints       WHERE thread_id = ?"
-        }) {
-            Stmt q(db_, sql);
-            q.bind_text(1, thread_id);
-            if (q.step() != SQLITE_DONE) {
-                throw_sqlite_error(db_, "delete_thread step failed");
-            }
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, thread_id);
+    for (const char* sql : {
+        "DELETE FROM neograph_checkpoint_writes WHERE thread_id = ?",
+        "DELETE FROM neograph_checkpoint_blobs  WHERE thread_id = ?",
+        "DELETE FROM neograph_checkpoints       WHERE thread_id = ?"
+    }) {
+        Stmt q(db_, sql);
+        q.bind_text(1, thread_id);
+        if (q.step() != SQLITE_DONE) {
+            throw_sqlite_error(db_, "delete_thread step failed");
         }
-        exec_ddl("COMMIT;");
-    } catch (...) {
-        exec_ddl("ROLLBACK;");
-        throw;
     }
+    transaction.commit();
 }
 
 // ── Pending writes ────────────────────────────────────────────────────
@@ -539,51 +554,46 @@ void SqliteCheckpointStore::put_writes(
     // Acquire the writer before reading seq. A deferred read transaction cannot
     // upgrade its WAL snapshot after a different connection commits, even with
     // busy_timeout; shared Program/chat databases exercise this path frequently.
-    exec_ddl("BEGIN IMMEDIATE;");
-    try {
-        if (write_guard_) write_guard_(db_, thread_id);
-        // Allocate next seq inside the transaction so concurrent puts
-        // (well, serialised by db_mutex_, but matching PG semantics
-        // anyway) get distinct seqs.
-        int next_seq = 0;
-        {
-            Stmt q(db_,
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM neograph_checkpoint_writes "
-                "WHERE thread_id = ? AND parent_checkpoint_id = ?");
-            q.bind_text(1, thread_id);
-            q.bind_text(2, parent_checkpoint_id);
-            if (q.step() != SQLITE_ROW) {
-                throw_sqlite_error(db_, "next_seq query failed");
-            }
-            next_seq = q.column_int(0);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, thread_id);
+    // Allocate next seq inside the transaction so concurrent puts
+    // (well, serialised by db_mutex_, but matching PG semantics
+    // anyway) get distinct seqs.
+    int next_seq = 0;
+    {
+        Stmt q(db_,
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM neograph_checkpoint_writes "
+            "WHERE thread_id = ? AND parent_checkpoint_id = ?");
+        q.bind_text(1, thread_id);
+        q.bind_text(2, parent_checkpoint_id);
+        if (q.step() != SQLITE_ROW) {
+            throw_sqlite_error(db_, "next_seq query failed");
         }
-
-        Stmt ins(db_,
-            "INSERT INTO neograph_checkpoint_writes "
-            "(thread_id, parent_checkpoint_id, seq, task_id, task_path, "
-            " node_name, writes_json, command_json, sends_json, step, "
-            " timestamp_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        ins.bind_text (1,  thread_id);
-        ins.bind_text (2,  parent_checkpoint_id);
-        ins.bind_int  (3,  next_seq);
-        ins.bind_text (4,  write.task_id);
-        ins.bind_text (5,  write.task_path);
-        ins.bind_text (6,  write.node_name);
-        ins.bind_text (7,  to_text(write.writes));
-        ins.bind_text (8,  to_text(write.command));
-        ins.bind_text (9,  to_text(write.sends));
-        ins.bind_int64(10, write.step);
-        ins.bind_int64(11, write.timestamp);
-        if (ins.step() != SQLITE_DONE) {
-            throw_sqlite_error(db_, "put_writes insert failed");
-        }
-
-        exec_ddl("COMMIT;");
-    } catch (...) {
-        exec_ddl("ROLLBACK;");
-        throw;
+        next_seq = q.column_int(0);
     }
+
+    Stmt ins(db_,
+        "INSERT INTO neograph_checkpoint_writes "
+        "(thread_id, parent_checkpoint_id, seq, task_id, task_path, "
+        " node_name, writes_json, command_json, sends_json, step, "
+        " timestamp_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    ins.bind_text (1,  thread_id);
+    ins.bind_text (2,  parent_checkpoint_id);
+    ins.bind_int  (3,  next_seq);
+    ins.bind_text (4,  write.task_id);
+    ins.bind_text (5,  write.task_path);
+    ins.bind_text (6,  write.node_name);
+    ins.bind_text (7,  to_text(write.writes));
+    ins.bind_text (8,  to_text(write.command));
+    ins.bind_text (9,  to_text(write.sends));
+    ins.bind_int64(10, write.step);
+    ins.bind_int64(11, write.timestamp);
+    if (ins.step() != SQLITE_DONE) {
+        throw_sqlite_error(db_, "put_writes insert failed");
+    }
+
+    transaction.commit();
 }
 
 std::vector<PendingWrite> SqliteCheckpointStore::get_writes(
@@ -619,22 +629,17 @@ void SqliteCheckpointStore::clear_writes(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id) {
     std::lock_guard lock(db_mutex_);
-    exec_ddl("BEGIN IMMEDIATE;");
-    try {
-        if (write_guard_) write_guard_(db_, thread_id);
-        Stmt q(db_,
-            "DELETE FROM neograph_checkpoint_writes "
-            "WHERE thread_id = ? AND parent_checkpoint_id = ?");
-        q.bind_text(1, thread_id);
-        q.bind_text(2, parent_checkpoint_id);
-        if (q.step() != SQLITE_DONE) {
-            throw_sqlite_error(db_, "clear_writes delete failed");
-        }
-        exec_ddl("COMMIT;");
-    } catch (...) {
-        exec_ddl("ROLLBACK;");
-        throw;
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, thread_id);
+    Stmt q(db_,
+        "DELETE FROM neograph_checkpoint_writes "
+        "WHERE thread_id = ? AND parent_checkpoint_id = ?");
+    q.bind_text(1, thread_id);
+    q.bind_text(2, parent_checkpoint_id);
+    if (q.step() != SQLITE_DONE) {
+        throw_sqlite_error(db_, "clear_writes delete failed");
     }
+    transaction.commit();
 }
 
 size_t SqliteCheckpointStore::blob_count() {
