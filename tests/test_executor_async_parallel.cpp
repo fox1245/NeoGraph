@@ -223,9 +223,8 @@ TEST(ExecutorAsyncParallel, BranchesRunConcurrentlyOnSharedIoContext) {
 }
 
 TEST(ExecutorAsyncParallel, NodeInterruptSavesDedicatedCheckpoint) {
-    // One interrupter among quick async siblings. First exception
-    // (NodeInterrupt) must surface AND a cp with next_nodes={offender}
-    // must land in the store before the throw.
+    // One interrupter among quick async siblings. The checkpoint must retain
+    // the full ready set so successful sibling writes can replay on resume.
     std::vector<std::unique_ptr<GraphNode>> nodes;
     nodes.push_back(std::make_unique<AsyncWorkerNode>("alpha", 5));
     nodes.push_back(std::make_unique<InterruptingNode>("halt"));
@@ -262,8 +261,8 @@ TEST(ExecutorAsyncParallel, NodeInterruptSavesDedicatedCheckpoint) {
     bool found_interrupt = false;
     for (const auto& cp : cps) {
         if (cp.interrupt_phase == CheckpointPhase::NodeInterrupt) {
-            ASSERT_EQ(cp.next_nodes.size(), 1u);
-            EXPECT_EQ(cp.next_nodes[0], "halt");
+            EXPECT_EQ(cp.current_node, "halt");
+            EXPECT_EQ(cp.next_nodes, ready);
             found_interrupt = true;
         }
     }

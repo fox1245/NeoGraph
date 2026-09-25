@@ -408,12 +408,8 @@ TEST(NodeExecutionParallel, SuccessfulSiblingRecordsPendingWriteWhenOtherFails) 
     EXPECT_EQ(b_attempts.load(), 1);
 }
 
-// Parallel NodeInterrupt must produce the same narrow resume shape as
-// single-node NodeInterrupt: a phase=NodeInterrupt cp whose next_nodes
-// is exactly the interrupting node. Pre-fix, run_parallel rethrew
-// NodeInterrupt without saving any cp, so the latest cp stayed at the
-// previous super-step's Completed boundary and resume fan'd out the
-// whole ready set again (replay masking that via pending_writes).
+// Parallel NodeInterrupt must save the whole ready set so resume can replay
+// successful siblings from pending writes and retry the interrupted node.
 TEST(NodeExecutionParallel, NodeInterruptInParallelSavesDedicatedCheckpoint) {
     std::atomic<int> a_attempts{0};
     std::atomic<int> a_fail{0};
@@ -435,14 +431,13 @@ TEST(NodeExecutionParallel, NodeInterruptInParallelSavesDedicatedCheckpoint) {
     auto result = engine->run(cfg);
     EXPECT_TRUE(result.interrupted);
 
-    // Post-fix: latest cp must be phase=NodeInterrupt pinned to the
-    // specific node that threw, NOT the setup Completed cp.
+    // The interrupt checkpoint identifies the offender while retaining the
+    // full ready set needed to replay sibling results on exact resume.
     auto latest = store->load_latest("parallel-ni");
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->interrupt_phase, CheckpointPhase::NodeInterrupt);
     EXPECT_EQ(latest->current_node, "b");
-    ASSERT_EQ(latest->next_nodes.size(), 1u);
-    EXPECT_EQ(latest->next_nodes[0], "b");
+    EXPECT_EQ(latest->next_nodes, (std::vector<std::string>{"a", "b"}));
 
     EXPECT_EQ(a_attempts.load(), 1);
     EXPECT_EQ(interrupter_attempts.load(), 1);

@@ -163,8 +163,12 @@ public:
         gate_context.thread_id = in.ctx.thread_id;
         gate_context.step = in.ctx.step;
         auto execution = neograph::graph::make_tool_execution_context(in.ctx);
+        // GCC 13 cannot lower nested temporary vectors across this co_await.
+        std::vector<neograph::ToolCall> calls;
+        calls.push_back(neograph::ToolCall{"call-1", "mediated-probe", "{}"});
+        std::vector<Tool*> tools{&tool};
         (void)co_await dispatch_tool_calls(
-            {neograph::ToolCall{"call-1", "mediated-probe", "{}"}}, {&tool},
+            std::move(calls), std::move(tools),
             in.ctx.tool_gate, std::move(gate_context), std::move(execution));
         NodeOutput output;
         output.writes.push_back(ChannelWrite{"value", mediated_tool_calls.load()});
