@@ -9,6 +9,7 @@
 #include <neograph/graph/sqlite_checkpoint.h>
 
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 #include <barrier>
 #include <chrono>
@@ -129,6 +130,44 @@ TEST_F(SqliteCheckpointTest, SaveAndLoadLatestRoundTrip) {
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 42);
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["version"].get<uint64_t>(), 1u);
     EXPECT_EQ(loaded->channel_values["channels"]["msg"]["value"].get<std::string>(), "hi");
+}
+
+TEST(SqliteCheckpointWriteGuardTest, RejectsStaleWritesInsideWriterTransaction) {
+    bool allowed = true;
+    int guarded_writes = 0;
+    SqliteCheckpointStore guarded(":memory:", std::chrono::seconds(5),
+        [&](sqlite3* db, const std::string& thread_id) {
+            EXPECT_EQ(thread_id, "t");
+            EXPECT_EQ(sqlite3_txn_state(db, "main"), SQLITE_TXN_WRITE);
+            ++guarded_writes;
+            if (!allowed) throw std::runtime_error("stale checkpoint owner");
+        });
+    const auto first = make_state_cp("t", 0, {{"x", {1, 1}}});
+    guarded.save(first);
+    PendingWrite write;
+    write.task_id = "task-1";
+    write.node_name = "reason";
+    write.writes = json::array();
+    guarded.put_writes("t", first.id, write);
+    const auto blobs_before = guarded.blob_count();
+    ASSERT_EQ(guarded.get_writes("t", first.id).size(), 1U);
+
+    allowed = false;
+    EXPECT_THROW(guarded.save(make_state_cp("t", 1, {{"x", {2, 2}}})),
+                 std::runtime_error);
+    EXPECT_THROW(guarded.put_writes("t", first.id, write), std::runtime_error);
+    EXPECT_THROW(guarded.clear_writes("t", first.id), std::runtime_error);
+    EXPECT_THROW(guarded.delete_thread("t"), std::runtime_error);
+    EXPECT_THROW(guarded.drop_schema(), std::logic_error);
+    ASSERT_TRUE(guarded.load_latest("t"));
+    EXPECT_EQ(guarded.load_latest("t")->id, first.id);
+    EXPECT_EQ(guarded.get_writes("t", first.id).size(), 1U);
+    EXPECT_EQ(guarded.blob_count(), blobs_before);
+    EXPECT_EQ(guarded_writes, 6);
+
+    allowed = true;
+    guarded.clear_writes("t", first.id);
+    EXPECT_TRUE(guarded.get_writes("t", first.id).empty());
 }
 
 TEST_F(SqliteCheckpointTest, LoadByIdReturnsCheckpoint) {

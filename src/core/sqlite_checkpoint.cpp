@@ -250,7 +250,12 @@ SqliteCheckpointStore::SqliteCheckpointStore(const std::string& db_path)
     : SqliteCheckpointStore(db_path, std::chrono::seconds(5)) {}
 
 SqliteCheckpointStore::SqliteCheckpointStore(
-    const std::string& db_path, std::chrono::milliseconds busy_timeout) {
+    const std::string& db_path, std::chrono::milliseconds busy_timeout)
+    : SqliteCheckpointStore(db_path, busy_timeout, {}) {}
+
+SqliteCheckpointStore::SqliteCheckpointStore(
+    const std::string& db_path, std::chrono::milliseconds busy_timeout,
+    WriteGuard write_guard) : write_guard_(std::move(write_guard)) {
     if (busy_timeout.count() < 0 ||
         busy_timeout.count() > std::numeric_limits<int>::max()) {
         throw std::invalid_argument("SqliteCheckpointStore: busy timeout is out of range");
@@ -310,6 +315,8 @@ void SqliteCheckpointStore::ensure_schema() {
 
 void SqliteCheckpointStore::drop_schema() {
     std::lock_guard lock(db_mutex_);
+    if (write_guard_)
+        throw std::logic_error("SqliteCheckpointStore: guarded schema cannot be dropped");
     exec_ddl(kDropDDL);
     exec_ddl(kSchemaDDL);
 }
@@ -319,8 +326,9 @@ void SqliteCheckpointStore::drop_schema() {
 void SqliteCheckpointStore::save(const Checkpoint& cp) {
     std::lock_guard lock(db_mutex_);
 
-    exec_ddl("BEGIN TRANSACTION;");
+    exec_ddl("BEGIN IMMEDIATE;");
     try {
+        if (write_guard_) write_guard_(db_, cp.thread_id);
         // 1. Blob upserts.
         if (cp.channel_values.is_object() &&
             cp.channel_values.contains("channels")) {
@@ -500,8 +508,9 @@ std::vector<Checkpoint> SqliteCheckpointStore::list(
 
 void SqliteCheckpointStore::delete_thread(const std::string& thread_id) {
     std::lock_guard lock(db_mutex_);
-    exec_ddl("BEGIN TRANSACTION;");
+    exec_ddl("BEGIN IMMEDIATE;");
     try {
+        if (write_guard_) write_guard_(db_, thread_id);
         for (const char* sql : {
             "DELETE FROM neograph_checkpoint_writes WHERE thread_id = ?",
             "DELETE FROM neograph_checkpoint_blobs  WHERE thread_id = ?",
@@ -532,6 +541,7 @@ void SqliteCheckpointStore::put_writes(
     // busy_timeout; shared Program/chat databases exercise this path frequently.
     exec_ddl("BEGIN IMMEDIATE;");
     try {
+        if (write_guard_) write_guard_(db_, thread_id);
         // Allocate next seq inside the transaction so concurrent puts
         // (well, serialised by db_mutex_, but matching PG semantics
         // anyway) get distinct seqs.
@@ -609,13 +619,21 @@ void SqliteCheckpointStore::clear_writes(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id) {
     std::lock_guard lock(db_mutex_);
-    Stmt q(db_,
-        "DELETE FROM neograph_checkpoint_writes "
-        "WHERE thread_id = ? AND parent_checkpoint_id = ?");
-    q.bind_text(1, thread_id);
-    q.bind_text(2, parent_checkpoint_id);
-    if (q.step() != SQLITE_DONE) {
-        throw_sqlite_error(db_, "clear_writes delete failed");
+    exec_ddl("BEGIN IMMEDIATE;");
+    try {
+        if (write_guard_) write_guard_(db_, thread_id);
+        Stmt q(db_,
+            "DELETE FROM neograph_checkpoint_writes "
+            "WHERE thread_id = ? AND parent_checkpoint_id = ?");
+        q.bind_text(1, thread_id);
+        q.bind_text(2, parent_checkpoint_id);
+        if (q.step() != SQLITE_DONE) {
+            throw_sqlite_error(db_, "clear_writes delete failed");
+        }
+        exec_ddl("COMMIT;");
+    } catch (...) {
+        exec_ddl("ROLLBACK;");
+        throw;
     }
 }
 
