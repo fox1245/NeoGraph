@@ -39,6 +39,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <chrono>
+#include <charconv>
 #include <cstddef>
 #include <deque>
 #include <exception>
@@ -46,6 +47,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -88,7 +90,56 @@ struct Connection {
     std::optional<asio::ip::tcp::socket>                    plain;
     std::optional<asio::ssl::stream<asio::ip::tcp::socket>> tls;
     std::chrono::steady_clock::time_point                   idle_since{};
+    std::chrono::seconds                                    idle_ttl{};
 };
+
+std::string_view trim_http_space(std::string_view value) noexcept {
+    const auto first = value.find_first_not_of(" \t");
+    if (first == std::string_view::npos) return {};
+    const auto last = value.find_last_not_of(" \t");
+    return value.substr(first, last - first + 1);
+}
+
+bool ascii_equal_folded(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) return false;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        const auto folded = [](char c) noexcept {
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c;
+        };
+        if (folded(left[i]) != folded(right[i])) return false;
+    }
+    return true;
+}
+
+std::optional<std::chrono::seconds> server_keep_alive_timeout(
+    const HttpResponse& response) noexcept {
+    std::optional<std::chrono::seconds> shortest;
+    for (const auto& [name, raw_value] : response.headers) {
+        if (!ascii_equal_folded(name, "Keep-Alive")) continue;
+        std::string_view value(raw_value);
+        while (!value.empty()) {
+            const auto separator = value.find_first_of(",;");
+            const auto parameter = trim_http_space(value.substr(0, separator));
+            const auto equals = parameter.find('=');
+            if (equals != std::string_view::npos &&
+                ascii_equal_folded(trim_http_space(parameter.substr(0, equals)),
+                                   "timeout")) {
+                const auto digits = trim_http_space(parameter.substr(equals + 1));
+                int seconds = -1;
+                const auto parsed = std::from_chars(
+                    digits.data(), digits.data() + digits.size(), seconds);
+                if (parsed.ec == std::errc{} &&
+                    parsed.ptr == digits.data() + digits.size() && seconds >= 0) {
+                    const auto timeout = std::chrono::seconds(seconds);
+                    if (!shortest || timeout < *shortest) shortest = timeout;
+                }
+            }
+            if (separator == std::string_view::npos) break;
+            value.remove_prefix(separator + 1);
+        }
+    }
+    return shortest;
+}
 
 struct HostGate {
     using SlotChannel = asio::experimental::concurrent_channel<
@@ -168,13 +219,24 @@ struct ConnPool::Impl {
             auto c = std::move(it->second.back());
             it->second.pop_back();
             --total_idle;
-            if (now - c->idle_since <= opts.idle_ttl) return c;
+            if (now - c->idle_since < c->idle_ttl) return c;
             // expired — drop c by letting it destruct here
         }
         return nullptr;
     }
 
-    void checkin(const Key& k, std::unique_ptr<Connection> c) {
+    void checkin(const Key& k, std::unique_ptr<Connection> c,
+                 const HttpResponse& response) {
+        c->idle_ttl = opts.idle_ttl;
+        if (const auto advertised = server_keep_alive_timeout(response)) {
+            // Retire before the server's deadline to avoid reusing a socket
+            // that it has just closed. A one-second limit is not cacheable.
+            const auto safe = *advertised > std::chrono::seconds(1)
+                ? *advertised - std::chrono::seconds(1)
+                : std::chrono::seconds(0);
+            if (safe < c->idle_ttl) c->idle_ttl = safe;
+        }
+        if (c->idle_ttl <= std::chrono::seconds(0)) return;
         c->idle_since = std::chrono::steady_clock::now();
         std::lock_guard lk(mu);
         auto& bucket = idle[k];
@@ -331,7 +393,7 @@ asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
         auto maybe = co_await try_exchange(*reused, req, request_opts);
         if (maybe) {
             if (maybe->server_directive == detail::ConnDirective::keep_alive) {
-                checkin(key, std::move(reused));
+                checkin(key, std::move(reused), maybe->response);
             }
             co_return maybe->response;
         }
@@ -341,7 +403,7 @@ asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
     auto fresh = co_await open(ex, ssl_ctx, key);
     auto r = co_await exchange_fresh(*fresh, req, request_opts);
     if (r.server_directive == detail::ConnDirective::keep_alive) {
-        checkin(key, std::move(fresh));
+        checkin(key, std::move(fresh), r.response);
     }
     co_return r.response;
 }
