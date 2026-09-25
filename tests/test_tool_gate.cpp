@@ -36,6 +36,7 @@
 
 #include <asio/awaitable.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <map>
@@ -207,10 +208,15 @@ TEST(ToolGate, EffectBrokerUsesBatchOrdinalAndReplaysWithoutToolExecution) {
     ASSERT_EQ(initial.size(), 2u);
     EXPECT_EQ(first_runs.load(), 1);
     EXPECT_EQ(second_runs.load(), 1);
-    const auto identities = broker->identities();
+    auto identities = broker->identities();
     ASSERT_EQ(identities.size(), 2u);
+    std::sort(identities.begin(), identities.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.call_ordinal < rhs.call_ordinal;
+              });
     EXPECT_EQ(identities[0].task_id, "s2:tool_dispatch");
     EXPECT_EQ(identities[0].call_ordinal, 0u);
+    EXPECT_EQ(identities[1].task_id, "s2:tool_dispatch");
     EXPECT_EQ(identities[1].call_ordinal, 1u);
 
     const auto replay = invoke(calls);
