@@ -58,6 +58,7 @@ extern char** environ;
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -262,10 +263,58 @@ private:
 
 class FailingNode final : public GraphNode {
 public:
-    explicit FailingNode(std::string name) : name_(std::move(name)) {}
+    explicit FailingNode(std::string name, std::string message = "classified core failure")
+        : name_(std::move(name)), message_(std::move(message)) {}
 
     asio::awaitable<NodeOutput> run(NodeInput) override {
-        throw std::runtime_error("classified core failure");
+        throw std::runtime_error(message_);
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    std::string message_;
+};
+
+class NonUtf8ErrorCategory final : public std::error_category {
+public:
+    const char* name() const noexcept override { return "test-platform"; }
+    std::string message(int) const override { return std::string("\xc7\xf6\xc0\xe7", 4); }
+};
+
+class FailingSystemErrorNode final : public GraphNode {
+public:
+    explicit FailingSystemErrorNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        static const NonUtf8ErrorCategory category;
+        throw std::system_error(std::error_code(10053, category));
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class MalformedEventThenFailNode final : public GraphNode {
+public:
+    explicit MalformedEventThenFailNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        if (!input.stream_cb) throw std::runtime_error("stream callback missing");
+        bool rejected = false;
+        try {
+            (*input.stream_cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_,
+                                          json(std::string("\xc7\xf6\xc0\xe7", 4))});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        if (!rejected) throw std::runtime_error("invalid event was accepted");
+        throw std::runtime_error("node failed after rejected event");
         co_return NodeOutput{};
     }
 
@@ -502,6 +551,24 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-failing", '4'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<FailingNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-failing-non-utf8", '5'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FailingNode>(name, std::string("\xc7\xf6\xc0\xe7", 4));
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-failing-system-error", '6'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FailingSystemErrorNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-malformed-event-then-fail", '7'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<MalformedEventThenFailNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -6080,6 +6147,79 @@ TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
     EXPECT_EQ(result.usage().core_steps, 1U);
     EXPECT_EQ(result.remaining_budget().max_core_steps, 19U);
     EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+}
+
+TEST(ProgramRuntimeTest, NonUtf8NodeErrorPreservesJournaledCoreFailure) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-failing-non-utf8");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-non-utf8-error", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_NE(result.failure()->message.find("\\xC7"), std::string::npos);
+    const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
+    ASSERT_FALSE(events.empty());
+    bool saw_error = false;
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        EXPECT_EQ(events[i].sequence, i + 1);
+        EXPECT_NO_THROW((void)events[i].serialize_canonical());
+        const auto* core = std::get_if<neograph::graph::TypedGraphEvent>(&events[i].payload);
+        if (core) {
+            const auto* error = std::get_if<neograph::graph::ErrorEvent>(core);
+            if (error) {
+                saw_error = true;
+                EXPECT_NE(error->message.find("non-UTF-8"), std::string::npos);
+            }
+        }
+    }
+    EXPECT_TRUE(saw_error);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+}
+
+TEST(ProgramRuntimeTest, NonUtf8SystemErrorPreservesPlatformCode) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-failing-system-error");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-non-utf8-system-error", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
+    bool saw_system_error = false;
+    for (const auto& event : events) {
+        const auto* core = std::get_if<neograph::graph::TypedGraphEvent>(&event.payload);
+        if (!core) continue;
+        const auto* error = std::get_if<neograph::graph::ErrorEvent>(core);
+        if (!error) continue;
+        saw_system_error = true;
+        EXPECT_NE(error->message.find("system error code 10053"), std::string::npos);
+        EXPECT_NO_THROW((void)event.serialize_canonical());
+    }
+    EXPECT_TRUE(saw_system_error);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+}
+
+TEST(ProgramRuntimeTest, RejectedCoreEventDoesNotConsumeSequence) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-malformed-event-then-fail");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-rejected-core-event", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_NE(result.failure()->message.find("node failed after rejected event"),
+              std::string::npos);
+    const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
+    ASSERT_FALSE(events.empty());
+    for (std::size_t i = 0; i < events.size(); ++i) EXPECT_EQ(events[i].sequence, i + 1);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
 }
 
 TEST(ProgramRuntimeTest, CoreStepLimitMapsToBudgetExhausted) {

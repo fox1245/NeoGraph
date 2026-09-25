@@ -5,6 +5,7 @@
 #include <neograph/graph/registry.h>
 #include <neograph/graph/state.h>
 
+#include "canonical_json.h"
 #include "run_context_runtime.h"
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
@@ -26,10 +27,27 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 
 namespace neograph::graph {
 
 namespace {
+
+std::string safe_exception_message(const std::exception& error) {
+    const std::string_view bytes(error.what());
+    try {
+        neograph::detail::validate_utf8(bytes);
+        return std::string(bytes);
+    } catch (const std::invalid_argument&) {
+        // std::system_error::what() can use the Windows active code page.
+        // Graph events are also Program journal input, which requires UTF-8.
+        if (const auto* system = dynamic_cast<const std::system_error*>(&error))
+            return "system error code " + std::to_string(system->code().value()) +
+                   " (non-UTF-8 platform message)";
+        return "exception message contained non-UTF-8 bytes (length " +
+               std::to_string(bytes.size()) + ")";
+    }
+}
 
 // ── FNV-1a 64-bit for Send task_id hashing ─────────────────────────────
 // Deterministic, 0 deps, sufficient for resume's replay map key.
@@ -246,7 +264,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             try {
                 std::rethrow_exception(cause);
             } catch (const std::exception& e) {
-                what = e.what();
+                what = safe_exception_message(e);
             } catch (...) {}
             cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
                           json{{"error", what}, {"attempts", attempts}}});
@@ -357,7 +375,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             try {
                 std::rethrow_exception(retryable_err);
             } catch (const std::exception& e) {
-                what = e.what();
+                what = safe_exception_message(e);
             } catch (...) {
                 what = "unknown";
             }

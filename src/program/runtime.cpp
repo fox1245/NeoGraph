@@ -517,7 +517,12 @@ void complete_attempt_launch_failure(const std::shared_ptr<detail::RunControl>& 
             std::rethrow_exception(error);
         } catch (const std::exception& exception) {
             message += ": ";
-            message += exception.what();
+            try {
+                detail::validate_utf8(exception.what());
+                message += exception.what();
+            } catch (const std::invalid_argument&) {
+                message += "exception message contained non-UTF-8 bytes";
+            }
         } catch (...) {
             message += " with a non-standard exception";
         }
@@ -2390,7 +2395,7 @@ ProgramEvent RunControl::make_event(ProgramEventKind kind, ProgramEventPayload p
 ProgramEvent RunControl::make_event(std::string_view    event_operation_id,
                                     ProgramEventKind    kind,
                                     ProgramEventPayload payload) {
-    return preview_event(next_sequence_++, event_operation_id, kind, std::move(payload));
+    return preview_event(next_sequence_, event_operation_id, kind, std::move(payload));
 }
 
 ProgramEvent RunControl::preview_event(std::uint64_t       sequence,
@@ -2446,6 +2451,7 @@ ProgramEvent RunControl::stage_event(std::string_view    event_operation_id,
     std::lock_guard lock(mutex_);
     auto            event = make_event(event_operation_id, kind, std::move(payload));
     events_.push_back(event);
+    ++next_sequence_;
     return event;
 }
 
