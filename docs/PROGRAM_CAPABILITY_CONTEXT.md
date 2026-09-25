@@ -10,6 +10,7 @@ node is not an implicit capability of this node.
 | Registered node | Provider pointer | Tool pointers | Safe metadata |
 | --- | --- | --- | --- |
 | Arbitrary `Brokered` C++ factory | None | None | Exact `provider_name` and `tool_definitions` |
+| Host-reviewed `add_host_brokered_node` | Exact declared Provider | Exact declared Tools | Exact metadata |
 | Fixed `add_core_llm_call` | Exact declared Provider | Exact declared Tools for model definitions | Exact metadata |
 | Fixed `add_core_tool_dispatch` | None | Exact declared Tools | Exact metadata |
 | `TrustedNative` C++ factory | Exact declared Provider | Exact declared Tools | Exact metadata |
@@ -41,7 +42,11 @@ reconciliation. Program does not yet persist or reconcile `grant_id` itself.
 Existing brokered custom factories that used `NodeContext.provider` or
 `NodeContext.tools` must move execution to a fixed Core node, use a separately
 reviewed host broker, or be admitted as `TrustedNative` under the host's trusted
-embedding policy. Direct Core graphs outside Program retain their existing
+embedding policy. `add_host_brokered_node` is the explicit native host-broker
+registration path used by Harness workers. It does not make a caller-supplied
+factory safe: the host must review and pin its effects and keep each operation
+inside the admitted provider/tool closure. Ordinary `add_node` retains the
+metadata-only boundary. Direct Core graphs outside Program retain their existing
 `NodeContext` behavior. See [#291](https://github.com/fox1245/NeoGraph/issues/291),
 [#292](https://github.com/fox1245/NeoGraph/issues/292), and
 [#293](https://github.com/fox1245/NeoGraph/issues/293) for the remaining

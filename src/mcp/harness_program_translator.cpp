@@ -1036,7 +1036,7 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
     };
 
     program::RegistrySnapshotBuilder builder;
-    builder.add_node(std::move(config.registry.worker.manifest),
+    builder.add_host_brokered_node(std::move(config.registry.worker.manifest),
                      std::move(config.registry.worker.factory),
                      std::move(config.registry.worker.config_schema),
                      std::move(config.registry.worker.effects), std::move(host_resolver));

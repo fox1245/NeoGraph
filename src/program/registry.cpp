@@ -354,6 +354,18 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(
                          allow_executable_bindings);
 }
 
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_host_brokered_node(
+    ExecutableManifest            manifest,
+    graph::NodeFactoryFn          factory,
+    json                          config_schema,
+    json                          effects,
+    ExecutableRequirementResolver requirement_resolver) {
+    if (manifest.effect_mode != EffectMode::Brokered)
+        throw std::invalid_argument("Host broker node must declare Brokered effects");
+    return add_node_impl(std::move(manifest), std::move(factory), std::move(config_schema),
+                         std::move(effects), std::move(requirement_resolver), true);
+}
+
 RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_core_llm_call(
     ExecutableManifest manifest, ExecutableRequirementResolver requirement_resolver) {
     if (manifest.effect_mode != EffectMode::Brokered ||

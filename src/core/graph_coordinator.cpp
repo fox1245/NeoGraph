@@ -141,12 +141,12 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
             if (node_interrupt_resume && pw.step != checkpoint.step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw));
         }
+        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+            current.parent_id.empty()) break;
         if (current.parent_id == current.id) {
             throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
         }
-        if (is_external_resume_boundary(current, thread_id) ||
-            current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
-            current.parent_id.empty()) break;
+        if (is_external_resume_boundary(current, thread_id)) break;
         auto parent = store.load_by_id(current.parent_id);
         if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
             parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
@@ -185,12 +185,12 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
             if (node_interrupt_resume && pw.step != selected_step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw));
         }
+        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+            current.parent_id.empty()) break;
         if (current.parent_id == current.id) {
             throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
         }
-        if (is_external_resume_boundary(current, thread_id) ||
-            current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
-            current.parent_id.empty()) break;
+        if (is_external_resume_boundary(current, thread_id)) break;
         auto parent = co_await store->load_by_id_async(current.parent_id);
         if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
             parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
