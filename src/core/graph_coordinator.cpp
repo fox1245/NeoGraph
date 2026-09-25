@@ -101,6 +101,23 @@ int resume_start_step(const Checkpoint& checkpoint) {
     return static_cast<int>(start);
 }
 
+bool is_external_resume_boundary(const Checkpoint& checkpoint,
+                                 const std::string& thread_id) {
+    if (!checkpoint.metadata.is_object() || checkpoint.parent_id.empty()) return false;
+    if (checkpoint.metadata.contains("forked_from")) {
+        const auto& forked = checkpoint.metadata.at("forked_from");
+        if (!forked.is_object()) return false;
+        const auto source_thread = forked.value("thread_id", std::string{});
+        return forked.value("checkpoint_id", std::string{}) == checkpoint.parent_id &&
+               !source_thread.empty() && source_thread != thread_id;
+    }
+    // A migrated checkpoint retains its source ID for provenance, but starts
+    // a new thread whose pending writes must be replayed independently.
+    return checkpoint.metadata.contains("migrated_from") &&
+           checkpoint.metadata.at("migrated_from").is_string() &&
+           !checkpoint.metadata.at("migrated_from").get<std::string>().empty();
+}
+
 std::unordered_map<std::string, NodeResult> load_resume_writes(
     CheckpointStore& store, const std::string& thread_id, const Checkpoint& checkpoint) {
     std::unordered_map<std::string, NodeResult> results;
@@ -124,7 +141,11 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
             if (node_interrupt_resume && pw.step != checkpoint.step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw));
         }
-        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+        if (current.parent_id == current.id) {
+            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+        }
+        if (is_external_resume_boundary(current, thread_id) ||
+            current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
         auto parent = store.load_by_id(current.parent_id);
         if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
@@ -164,7 +185,11 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
             if (node_interrupt_resume && pw.step != selected_step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw));
         }
-        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+        if (current.parent_id == current.id) {
+            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+        }
+        if (is_external_resume_boundary(current, thread_id) ||
+            current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
         auto parent = co_await store->load_by_id_async(current.parent_id);
         if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||

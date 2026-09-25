@@ -6711,7 +6711,8 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
                        json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
             .wait();
 
-    EXPECT_EQ(forked.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(forked.status(), ProgramTerminalStatus::Completed)
+        << (forked.failure() ? forked.failure()->message : "");
     EXPECT_EQ(forked.run_id(), "fork-target-run");
     EXPECT_NE(forked.run_id(), source.run_id());
     EXPECT_EQ(forked.output()["channels"]["value"]["value"], "forked");
