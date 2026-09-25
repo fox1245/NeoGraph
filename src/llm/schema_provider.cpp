@@ -408,6 +408,9 @@ void SchemaProvider::parse_schema()
     }
     resp_.message_path = resp.value("message_path", "");
     resp_.content_field = resp.value("content_field", "content");
+    // Keep the legacy aliases when an external schema omits this field.
+    resp_.reasoning_fields = resp.value("reasoning_fields",
+        std::vector<std::string>{"reasoning", "reasoning_content"});
     resp_.role_field = resp.value("role_field", "role");
     resp_.tool_calls_field = resp.value("tool_calls_field", "tool_calls");
     resp_.tool_call_id_field = resp.value("tool_call_id_field", "id");
@@ -463,6 +466,8 @@ void SchemaProvider::parse_schema()
     stream_.done_signal = st.value("done_signal", "[DONE]");
     stream_.delta_path = st.value("delta_path", "");
     stream_.content_field = st.value("content_field", "content");
+    stream_.reasoning_fields = st.value("reasoning_fields",
+        std::vector<std::string>{"reasoning_content"});
     stream_.tool_calls_field = st.value("tool_calls_field", "tool_calls");
     stream_.tool_call_index_field = st.value("tool_call_index_field", "index");
     stream_.tool_call_id_field = st.value("tool_call_id_field", "id");
@@ -1204,11 +1209,11 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
             // Keep provider reasoning separate from user-visible content. GLM
             // sends reasoning_content alongside tool calls, and the host may
             // require that rationale before allowing the Tool action.
-            if (message->contains("reasoning") && (*message)["reasoning"].is_string()) {
-                msg.reasoning = (*message)["reasoning"].get<std::string>();
-            } else if (message->contains("reasoning_content") &&
-                       (*message)["reasoning_content"].is_string()) {
-                msg.reasoning = (*message)["reasoning_content"].get<std::string>();
+            for (const auto& field : resp_.reasoning_fields) {
+                if (message->contains(field) && (*message)[field].is_string()) {
+                    msg.reasoning = (*message)[field].get<std::string>();
+                    break;
+                }
             }
 
             if (message->contains(resp_.tool_calls_field) &&
@@ -1897,10 +1902,12 @@ ChatCompletion SchemaProvider::complete_stream_http(
 
                             // Reasoning deltas are part of the returned
                             // message, never public content/on_chunk output.
-                            if (delta->contains("reasoning_content") &&
-                                (*delta)["reasoning_content"].is_string()) {
-                                completion.message.reasoning +=
-                                    (*delta)["reasoning_content"].get<std::string>();
+                            for (const auto& field : stream_.reasoning_fields) {
+                                if (delta->contains(field) && (*delta)[field].is_string()) {
+                                    completion.message.reasoning +=
+                                        (*delta)[field].get<std::string>();
+                                    break;
+                                }
                             }
 
                             // Tool calls (streamed incrementally)

@@ -1,0 +1,24 @@
+{
+  "name": "reasoning-alias-test",
+  "connection": {
+    "base_url": "https://example.test",
+    "endpoint": "/v1/chat/completions"
+  },
+  "request": {},
+  "system_prompt": {},
+  "messages": {},
+  "tool_definition": {},
+  "tool_call_in_message": {},
+  "tool_result": {},
+  "image": {},
+  "response": {
+    "strategy": "choices_message",
+    "message_path": "choices.0.message",
+    "reasoning_fields": ["private_thought"]
+  },
+  "streaming": {
+    "format": "sse_data",
+    "delta_path": "choices.0.delta",
+    "reasoning_fields": ["private_delta"]
+  }
+}

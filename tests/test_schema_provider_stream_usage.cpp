@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <thread>
 
@@ -120,6 +121,34 @@ struct OpenAIStreamMock {
     }
 };
 
+struct ReasoningAliasStreamMock {
+    httplib::Server svr;
+    std::thread worker;
+    int port = 0;
+
+    ReasoningAliasStreamMock() {
+        svr.Post("/v1/chat/completions",
+            [](const httplib::Request&, httplib::Response& res) {
+                res.set_content(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\",\"private_delta\":\"thought\"},\"finish_reason\":null}]}\n"
+                    "\n"
+                    "data: [DONE]\n"
+                    "\n",
+                    "text/event-stream");
+            });
+        port = svr.bind_to_any_port("127.0.0.1");
+        worker = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    ~ReasoningAliasStreamMock() {
+        svr.stop();
+        if (worker.joinable()) worker.join();
+    }
+};
+
 } // namespace
 
 TEST(SchemaProviderStreamUsage, ClaudeStreamingPopulatesUsage) {
@@ -188,4 +217,32 @@ TEST(SchemaProviderStreamUsage, OpenAIStreamingPopulatesUsage) {
     EXPECT_EQ(3,  result.usage.completion_tokens);
     EXPECT_EQ(15, result.usage.total_tokens);
     EXPECT_EQ("max_tokens", result.stop_reason);
+}
+
+TEST(SchemaProviderStreamUsage, ReasoningDeltasFollowExternalSchema) {
+    ReasoningAliasStreamMock mock;
+    ASSERT_GT(mock.port, 0);
+
+    llm::SchemaProvider::Config cfg;
+    cfg.schema_path = (std::filesystem::path(__FILE__).parent_path() /
+                       "fixtures" / "schema_reasoning_alias.json").string();
+    cfg.default_model = "test-model";
+    cfg.timeout_seconds = 10;
+    cfg.base_url_override = "http://127.0.0.1:" + std::to_string(mock.port);
+    cfg.allow_insecure_loopback = true;
+    auto provider = llm::SchemaProvider::create(cfg);
+
+    CompletionParams params;
+    params.model = "test-model";
+    ChatMessage user;
+    user.role = "user";
+    user.content = "hi";
+    params.messages.push_back(user);
+
+    std::string streamed;
+    const auto result = provider->complete_stream(params,
+        [&streamed](const std::string& token) { streamed += token; });
+    EXPECT_EQ(streamed, "ok");
+    EXPECT_EQ(result.message.content, "ok");
+    EXPECT_EQ(result.message.reasoning, "thought");
 }
