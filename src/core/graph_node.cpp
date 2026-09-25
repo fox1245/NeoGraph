@@ -23,6 +23,28 @@ std::string length_frame(std::string_view value) {
     return std::to_string(value.size()) + ":" + std::string(value);
 }
 
+struct ProviderBrokerScope {
+    std::shared_ptr<ProviderCallBroker> broker;
+    ProviderCallIdentity identity;
+};
+
+ProviderBrokerScope provider_broker_scope(const RunContext& context,
+                                          const std::string& node_name) {
+    const auto runtime = detail::runtime_for(context);
+    if (!runtime || !runtime->provider_call_broker) return {};
+    if (runtime->invocation_id.empty() || context.thread_id.empty()) {
+        throw std::invalid_argument(
+            "Provider broker requires a thread-scoped Core task identity");
+    }
+    ProviderCallIdentity identity;
+    identity.owner_scope = context.tool_execution_identity.owner_scope;
+    identity.run_id = context.run_id;
+    identity.thread_id = context.thread_id;
+    identity.task_id = runtime->invocation_id;
+    identity.node_name = node_name;
+    return {runtime->provider_call_broker, std::move(identity)};
+}
+
 // Child checkpoint identities must be stable for one logical invocation yet
 // distinct for sibling Send workers. Length-framing avoids delimiter collisions
 // when callers use arbitrary thread IDs or node names.
@@ -145,8 +167,11 @@ asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
     }
     std::vector<ChatMessage> host_instructions;
     if (!instructions_.empty()) host_instructions.push_back({"system", instructions_});
+    auto broker_scope = provider_broker_scope(in.ctx, name_);
     auto completion = co_await invoke_provider(provider_, std::move(params), std::move(on_token),
-                                               std::move(host_instructions));
+                                               std::move(host_instructions), {},
+                                               std::move(broker_scope.broker),
+                                               std::move(broker_scope.identity));
     record_usage(in.ctx, completion);   // #88
 
     json msg_json;
@@ -192,12 +217,7 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     gctx.resume_value = in.ctx.resume_value;
     gctx.thread_id    = in.ctx.thread_id;
     gctx.step         = in.ctx.step;
-    ToolExecutionContext execution;
-    execution.cancel_token = in.ctx.cancel_token;
-    execution.controller = in.ctx.tool_execution_controller;
-    execution.identity = in.ctx.tool_execution_identity;
-    execution.identity.thread_id = in.ctx.thread_id;
-    execution.deadline = in.ctx.deadline;
+    auto execution = make_tool_execution_context(in.ctx);
     auto tool_msgs = co_await dispatch_tool_calls(
         assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx),
         std::move(execution));
@@ -296,8 +316,11 @@ asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
     std::vector<ChatMessage> host_instructions;
     host_instructions.push_back({"system", params.messages.front().content});
     std::vector<ChatMessage> supplemental{params.messages.back()};
+    auto broker_scope = provider_broker_scope(in.ctx, name_);
     auto completion = co_await invoke_provider(provider_, std::move(params), std::move(on_token),
-                                                std::move(host_instructions), std::move(supplemental));
+                                                std::move(host_instructions), std::move(supplemental),
+                                                std::move(broker_scope.broker),
+                                                std::move(broker_scope.identity));
     record_usage(in.ctx, completion);   // #88 — routing costs tokens too
     ChatMessage reply = std::move(completion.message);
 

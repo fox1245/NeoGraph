@@ -7,6 +7,7 @@
 #include <chrono>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace neograph::graph {
 
@@ -100,6 +101,110 @@ int resume_start_step(const Checkpoint& checkpoint) {
     return static_cast<int>(start);
 }
 
+bool is_external_resume_boundary(const Checkpoint& checkpoint,
+                                 const std::string& thread_id) {
+    if (!checkpoint.metadata.is_object() || checkpoint.parent_id.empty()) return false;
+    if (checkpoint.metadata.contains("forked_from")) {
+        const auto& forked = checkpoint.metadata.at("forked_from");
+        if (!forked.is_object()) return false;
+        const auto source_thread = forked.value("thread_id", std::string{});
+        return forked.value("checkpoint_id", std::string{}) == checkpoint.parent_id &&
+               !source_thread.empty() && source_thread != thread_id;
+    }
+    // A migrated checkpoint retains its source ID for provenance, but starts
+    // a new thread whose pending writes must be replayed independently.
+    return checkpoint.metadata.contains("migrated_from") &&
+           checkpoint.metadata.at("migrated_from").is_string() &&
+           !checkpoint.metadata.at("migrated_from").get<std::string>().empty();
+}
+
+std::unordered_map<std::string, NodeResult> load_resume_writes(
+    CheckpointStore& store, const std::string& thread_id, const Checkpoint& checkpoint) {
+    std::unordered_map<std::string, NodeResult> results;
+    Checkpoint current = checkpoint;
+    const bool node_interrupt_resume =
+        checkpoint.interrupt_phase == CheckpointPhase::NodeInterrupt;
+    // Pending rows under a NodeInterrupt checkpoint's ancestors can only
+    // belong to the paused super-step. Ordinary Completed checkpoints keep
+    // their historical behavior: replay every row under the selected ID.
+    std::unordered_set<std::string> visited;
+    while (true) {
+        if (!visited.insert(current.id).second) {
+            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+        }
+        if (current.id.empty() || current.thread_id != thread_id ||
+            (node_interrupt_resume &&
+             current.schema_version != CHECKPOINT_SCHEMA_VERSION)) {
+            throw std::runtime_error("Incompatible checkpoint in NodeInterrupt ancestry");
+        }
+        for (const auto& pw : store.get_writes(thread_id, current.id)) {
+            if (node_interrupt_resume && pw.step != checkpoint.step) continue;
+            results.emplace(pw.task_id, pending_to_node_result(pw));
+        }
+        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+            current.parent_id.empty()) break;
+        if (current.parent_id == current.id) {
+            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+        }
+        if (is_external_resume_boundary(current, thread_id)) break;
+        auto parent = store.load_by_id(current.parent_id);
+        if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
+            parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
+            throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
+        }
+        if (parent->interrupt_phase == CheckpointPhase::NodeInterrupt &&
+            parent->step != checkpoint.step) {
+            throw std::runtime_error("NodeInterrupt ancestry crosses super-step boundaries");
+        }
+        current = std::move(*parent);
+    }
+    return results;
+}
+
+asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_async(
+    std::shared_ptr<CheckpointStore> store, std::string thread_id, Checkpoint checkpoint) {
+    std::unordered_map<std::string, NodeResult> results;
+    std::unordered_set<std::string> visited;
+    const bool node_interrupt_resume =
+        checkpoint.interrupt_phase == CheckpointPhase::NodeInterrupt;
+    const auto selected_step = checkpoint.step;
+    // Preserve Completed-checkpoint replay semantics; only inherited rows
+    // for a NodeInterrupt resume are scoped to the selected super-step.
+    Checkpoint current = std::move(checkpoint);
+    while (true) {
+        if (!visited.insert(current.id).second) {
+            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+        }
+        if (current.id.empty() || current.thread_id != thread_id ||
+            (node_interrupt_resume &&
+             current.schema_version != CHECKPOINT_SCHEMA_VERSION)) {
+            throw std::runtime_error("Incompatible checkpoint in NodeInterrupt ancestry");
+        }
+        auto writes = co_await store->get_writes_async(thread_id, current.id);
+        for (const auto& pw : writes) {
+            if (node_interrupt_resume && pw.step != selected_step) continue;
+            results.emplace(pw.task_id, pending_to_node_result(pw));
+        }
+        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+            current.parent_id.empty()) break;
+        if (current.parent_id == current.id) {
+            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+        }
+        if (is_external_resume_boundary(current, thread_id)) break;
+        auto parent = co_await store->load_by_id_async(current.parent_id);
+        if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
+            parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
+            throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
+        }
+        if (parent->interrupt_phase == CheckpointPhase::NodeInterrupt &&
+            parent->step != selected_step) {
+            throw std::runtime_error("NodeInterrupt ancestry crosses super-step boundaries");
+        }
+        current = std::move(*parent);
+    }
+    co_return results;
+}
+
 }  // namespace
 
 // =========================================================================
@@ -189,10 +294,7 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
 
     // Rehydrate in-flight super-step writes so the engine can replay
     // completed tasks instead of re-executing them.
-    auto pending = store_->get_writes(thread_id_, ctx.checkpoint_id);
-    for (const auto& pw : pending) {
-        ctx.replay_results.emplace(pw.task_id, pending_to_node_result(pw));
-    }
+    ctx.replay_results = load_resume_writes(*store_, thread_id_, *cp_opt);
 
     return ctx;
 }
@@ -338,10 +440,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     // Same phase-aware step offset as load_for_resume.
     ctx.start_step = resume_start_step(*cp_opt);
 
-    auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
-    for (const auto& pw : pending) {
-        ctx.replay_results.emplace(pw.task_id, pending_to_node_result(pw));
-    }
+    ctx.replay_results = co_await load_resume_writes_async(store_, thread_id_, *cp_opt);
 
     co_return ctx;
 }
@@ -372,10 +471,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
 
     ctx.start_step = resume_start_step(*cp_opt);
 
-    auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
-    for (const auto& pw : pending) {
-        ctx.replay_results.emplace(pw.task_id, pending_to_node_result(pw));
-    }
+    ctx.replay_results = co_await load_resume_writes_async(store_, thread_id_, *cp_opt);
 
     co_return ctx;
 }

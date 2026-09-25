@@ -122,6 +122,23 @@ public:
         json                          config_schema,
         json                          effects,
         ExecutableRequirementResolver requirement_resolver = {});
+    /// Host-reviewed broker nodes may retain only their exact declared bindings.
+    /// The embedding host owns this native factory and its effect mediation;
+    /// do not use this for model-authored or otherwise untrusted C++ factories.
+    RegistrySnapshotBuilder& add_host_brokered_node(
+        ExecutableManifest            manifest,
+        graph::NodeFactoryFn          factory,
+        json                          config_schema,
+        json                          effects,
+        ExecutableRequirementResolver requirement_resolver = {});
+    /// Fixed NeoGraph implementations that may hold exact bound executables.
+    /// Unlike arbitrary brokered C++ factories, these use the reviewed Core paths.
+    RegistrySnapshotBuilder& add_core_llm_call(
+        ExecutableManifest manifest,
+        ExecutableRequirementResolver requirement_resolver);
+    RegistrySnapshotBuilder& add_core_tool_dispatch(
+        ExecutableManifest manifest,
+        ExecutableRequirementResolver requirement_resolver);
     RegistrySnapshotBuilder& add_reducer(ExecutableManifest manifest, graph::ReducerFn reducer);
     RegistrySnapshotBuilder& add_condition(ExecutableManifest                  manifest,
                                            graph::ConditionFn                  condition,
@@ -149,6 +166,13 @@ public:
     RegistrySnapshot build() &&;
 
 private:
+    RegistrySnapshotBuilder& add_node_impl(
+        ExecutableManifest            manifest,
+        graph::NodeFactoryFn          factory,
+        json                          config_schema,
+        json                          effects,
+        ExecutableRequirementResolver requirement_resolver,
+        bool                          allow_executable_bindings);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

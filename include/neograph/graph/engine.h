@@ -18,6 +18,8 @@
 #include <neograph/graph/executor.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/node_cache.h>
+#include <neograph/graph/provider_call_broker.h>
+#include <neograph/tool_effect_broker.h>
 #include <neograph/graph/registry.h>
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/safe_point.h>
@@ -125,6 +127,15 @@ struct RunResources {
     std::shared_ptr<Store> store;
     /// Optional invocation-scoped gate composed before the engine gate.
     std::optional<ToolGate> tool_gate;
+    /// Optional invocation-scoped execution policy, including resume calls.
+    /// Applies to mediated dispatch_tool_calls, not direct Tool::execute by native nodes.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+    /// Host broker for built-in provider calls in this invocation and subgraphs.
+    /// Brokered calls require a nonempty thread_id to scope replay identity.
+    /// Never mutates provider nodes on the shared engine.
+    std::shared_ptr<ProviderCallBroker> provider_call_broker;
+    /// Host broker for mediated Tool effects in this invocation and subgraphs.
+    std::shared_ptr<ToolEffectBroker> tool_effect_broker;
 };
 
 /**
@@ -580,6 +591,10 @@ public:
     /// Async peer that preserves the supplied C++ run metadata.
     asio::awaitable<RunResult> run_async(RunConfig config, RunMetadata metadata);
 
+    /// Async non-streaming run with invocation-scoped persistence and provider policy.
+    asio::awaitable<RunResult> run_async(
+        RunConfig config, RunMetadata metadata, RunResources resources);
+
     /**
      * @brief Execute the graph with streaming event callbacks.
      * @param config Run configuration.
@@ -969,6 +984,9 @@ private:
         std::optional<std::shared_ptr<CheckpointStore>> checkpoint_store;
         std::optional<std::shared_ptr<Store>> store;
         std::optional<ToolGate> parent_tool_gate;
+        std::shared_ptr<ToolExecutionController> tool_execution_controller;
+        std::shared_ptr<ProviderCallBroker> provider_call_broker;
+        std::shared_ptr<ToolEffectBroker> tool_effect_broker;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };

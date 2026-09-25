@@ -51,13 +51,15 @@ std::string configured_binding_identity(std::string_view route_identity,
 
 class HarnessBoundProvider final : public Provider {
 public:
-    HarnessBoundProvider(HarnessWorkerExecutor executor, std::map<std::string, json> tools)
-        : executor_(std::move(executor)), tools_(std::move(tools)) {}
-    std::string                  get_name() const override { return "harness-owned-provider"; }
+    HarnessBoundProvider(std::string name, HarnessWorkerExecutor executor,
+                         std::map<std::string, json> tools)
+        : name_(std::move(name)), executor_(std::move(executor)), tools_(std::move(tools)) {}
+    std::string                  get_name() const override { return name_; }
     const HarnessWorkerExecutor& executor() const noexcept { return executor_; }
     const std::map<std::string, json>& tools() const noexcept { return tools_; }
 
 private:
+    std::string                 name_;
     HarnessWorkerExecutor       executor_;
     std::map<std::string, json> tools_;
 };
@@ -485,6 +487,7 @@ program::RecordedBindingSet make_recorded_binding(
                 throw std::invalid_argument(
                     "recorded Harness Provider identity differs from the target request");
             owned.node_context.provider = std::make_shared<HarnessBoundProvider>(
+                receipt.executable.name,
                 [recorded_calls](const HarnessWorkerCall& call,
                                  const std::shared_ptr<graph::CancelToken>&) {
                     return recorded_calls->next(call);
@@ -583,7 +586,8 @@ HarnessServiceResources make_harness_program_service_resources(HarnessProgramHos
                         throw std::invalid_argument(
                             "missing exact stable Harness Provider binding");
                     result.node_context.provider =
-                        std::make_shared<HarnessBoundProvider>(worker_executor, tool_configs);
+                        std::make_shared<HarnessBoundProvider>(
+                            executable.name, worker_executor, tool_configs);
                     result.receipts.push_back(
                         {executable,
                          configured_binding_identity(provider_binding_identity,

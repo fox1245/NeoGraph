@@ -10,6 +10,8 @@
 #include <neograph/host_admission.h>
 #include <neograph/hook_runtime.h>
 #include <neograph/program/catalog.h>
+#include <neograph/program/core_tool_grant.h>
+#include <neograph/program/core_provider_call.h>
 #include <neograph/program/fork.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/handle.h>
@@ -155,6 +157,15 @@ struct ProgramChildQuotaConfig {
       /// recorded spawn/await command is unfinished after process loss. This
       /// never authorizes a new child or replay of an unknown external effect.
       bool recover_existing_child_commands = false;
+      /// Rebound for each Program attempt and Core operation. Missing, stale or
+      /// incomplete grants deny mediated tool calls before dispatch.
+      ProgramCoreToolGrantResolver core_tool_grant_resolver;
+      /// Optional host broker for each built-in Core provider call. When set,
+      /// a missing or stale binding denies that operation before Core runs.
+      ProgramCoreProviderCallResolver core_provider_call_resolver;
+      /// Hosts with durable provider effects can forbid raw Core provider calls.
+      /// A missing resolver or binding then fails the Core operation closed.
+      bool require_core_provider_call_broker = false;
   };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:

@@ -47,6 +47,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -66,12 +67,19 @@ namespace neograph::graph {
  */
 class NEOGRAPH_API SqliteCheckpointStore : public CheckpointStore {
 public:
+    // Called after BEGIN IMMEDIATE has acquired the SQLite writer and before
+    // any checkpoint mutation. Throw to roll the transaction back. The guard
+    // may inspect this connection but must not start another transaction.
+    using WriteGuard = std::function<void(sqlite3*, const std::string& thread_id)>;
     /// @param db_path Filesystem path or ":memory:". Anything sqlite3_open accepts.
     /// @throws std::runtime_error on open or DDL failure.
     explicit SqliteCheckpointStore(const std::string& db_path);
     /// Configure how long writes wait for a competing SQLite writer.
     SqliteCheckpointStore(const std::string& db_path,
                           std::chrono::milliseconds busy_timeout);
+    SqliteCheckpointStore(const std::string& db_path,
+                          std::chrono::milliseconds busy_timeout,
+                          WriteGuard write_guard);
 
     ~SqliteCheckpointStore() override;
 
@@ -113,6 +121,7 @@ private:
     /// raw pointer so forward-declaration in the header works.
     sqlite3* db_ = nullptr;
     std::mutex db_mutex_;
+    WriteGuard write_guard_;
 };
 
 } // namespace neograph::graph

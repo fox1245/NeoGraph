@@ -71,9 +71,11 @@ struct MockServer {
     std::mutex                     state_mu;
     std::condition_variable        state_cv;
     std::string                    last_request;
+    const std::string              keep_alive_headers;
     unsigned short                 port = 0;
 
-    MockServer() {
+    explicit MockServer(std::string headers = {})
+        : keep_alive_headers(std::move(headers)) {
         acceptor.open(asio::ip::tcp::v4());
         acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
         acceptor.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
@@ -173,8 +175,10 @@ struct MockServer {
                 resp.append("Content-Length: ")
                     .append(std::to_string(body.size()))
                     .append("\r\n");
-                resp.append(send_close ? "Connection: close\r\n\r\n"
-                                       : "Connection: keep-alive\r\n\r\n");
+                resp.append(send_close ? "Connection: close\r\n"
+                                       : "Connection: keep-alive\r\n");
+                if (!send_close) resp.append(keep_alive_headers);
+                resp.append("\r\n");
                 resp.append(body);
                 if (const int delay = response_delay_ms.load(); delay > 0) {
                     asio::steady_timer timer(io);
@@ -270,6 +274,76 @@ TEST(ConnPool, SerialReuse) {
 
     EXPECT_EQ(srv.requests.load(), N);
     EXPECT_EQ(srv.accepted.load(), 1);    // one socket served all N
+    EXPECT_EQ(pool.idle_count(), 1u);
+}
+
+TEST(ConnPool, ServerKeepAliveZeroPreventsCaching) {
+    MockServer srv("Keep-Alive: max=10, TIMEOUT = 0\r\n"
+                   "keep-alive: timeout=5\r\n");
+    asio::io_context client_io;
+    neograph::async::ConnPool pool(client_io.get_executor());
+
+    run_on(client_io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            for (int i = 0; i < 2; ++i) {
+                const auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port), "/x", "{}", {}, false);
+                EXPECT_EQ(response.status, 200);
+                EXPECT_EQ(pool.idle_count(), 0u);
+            }
+        };
+    }());
+
+    EXPECT_EQ(srv.requests.load(), 2);
+    EXPECT_EQ(srv.accepted.load(), 2);
+}
+
+TEST(ConnPool, ServerKeepAliveCapsClientIdleTtl) {
+    MockServer srv("Keep-Alive: max=10, timeout=2\r\n");
+    asio::io_context client_io;
+    neograph::async::ConnPool pool(client_io.get_executor());
+
+    run_on(client_io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            const auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port), "/x", "{}", {}, false);
+            EXPECT_EQ(response.status, 200);
+        };
+    }());
+    ASSERT_EQ(pool.idle_count(), 1u);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    client_io.restart();
+    run_on(client_io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            const auto response = co_await pool.async_post(
+                "127.0.0.1", std::to_string(srv.port), "/x", "{}", {}, false);
+            EXPECT_EQ(response.status, 200);
+        };
+    }());
+
+    EXPECT_EQ(srv.requests.load(), 2);
+    EXPECT_EQ(srv.accepted.load(), 2);
+    EXPECT_EQ(pool.idle_count(), 1u);
+}
+
+TEST(ConnPool, MalformedServerKeepAliveFallsBackToClientTtl) {
+    MockServer srv("Keep-Alive: timeout=999999999999999999999, max=10\r\n"
+                   "Keep-Alive: timeout=invalid\r\n");
+    asio::io_context client_io;
+    neograph::async::ConnPool pool(client_io.get_executor());
+
+    run_on(client_io, [&] {
+        return [&]() -> asio::awaitable<void> {
+            for (int i = 0; i < 2; ++i) {
+                const auto response = co_await pool.async_post(
+                    "127.0.0.1", std::to_string(srv.port), "/x", "{}", {}, false);
+                EXPECT_EQ(response.status, 200);
+            }
+        };
+    }());
+
+    EXPECT_EQ(srv.requests.load(), 2);
+    EXPECT_EQ(srv.accepted.load(), 1);
     EXPECT_EQ(pool.idle_count(), 1u);
 }
 

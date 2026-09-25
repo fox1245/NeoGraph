@@ -35,6 +35,7 @@
 
 #include <atomic>
 #include <memory>
+#include <set>
 #include <string>
 
 using namespace neograph;
@@ -80,9 +81,11 @@ private:
 // Plain worker, used as the sibling that makes a super-step parallel.
 class QuietNode : public GraphNode {
 public:
-    explicit QuietNode(std::string name) : name_(std::move(name)) {}
+    explicit QuietNode(std::string name, std::atomic<int>* visits = nullptr)
+        : name_(std::move(name)), visits_(visits) {}
 
     asio::awaitable<NodeResult> run(NodeInput) override {
+        if (visits_) visits_->fetch_add(1);
         NodeResult out;
         out.writes.push_back(ChannelWrite{"sibling", json("done")});
         co_return out;
@@ -92,6 +95,35 @@ public:
 
 private:
     std::string name_;
+    std::atomic<int>* visits_;
+};
+
+class AnchorNode : public GraphNode {
+public:
+    asio::awaitable<NodeResult> run(NodeInput) override {
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"anchor", json(true)});
+        co_return out;
+    }
+    std::string get_name() const override { return "anchor"; }
+};
+
+class RepeatApprovalNode : public GraphNode {
+public:
+    explicit RepeatApprovalNode(std::atomic<int>* visits) : visits_(visits) {}
+
+    asio::awaitable<NodeResult> run(NodeInput) override {
+        const int visit = visits_->fetch_add(1) + 1;
+        if (visit < 3) throw NodeInterrupt("approval still pending");
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"result", json("approved")});
+        co_return out;
+    }
+
+    std::string get_name() const override { return "risky"; }
+
+private:
+    std::atomic<int>* visits_;
 };
 
 json single_node_graph() {
@@ -130,14 +162,34 @@ json parallel_graph() {
     };
 }
 
-void register_types(std::atomic<int>* visits = nullptr) {
+json parallel_graph_with_anchor() {
+    auto graph = parallel_graph();
+    graph["name"] = "di_parallel_anchored";
+    graph["channels"]["anchor"] = {{"reducer", "overwrite"}};
+    graph["nodes"]["anchor"] = {{"type", "di_anchor"}};
+    graph["edges"] = json::array({
+        json{{"from", "__start__"}, {"to", "anchor"}},
+        json{{"from", "anchor"}, {"to", "risky"}},
+        json{{"from", "anchor"}, {"to", "calm"}},
+        json{{"from", "risky"}, {"to", "__end__"}},
+        json{{"from", "calm"}, {"to", "__end__"}}
+    });
+    return graph;
+}
+
+void register_types(std::atomic<int>* visits = nullptr,
+                    std::atomic<int>* calm_visits = nullptr) {
     NodeFactory::instance().register_type("di_approval",
         [visits](const std::string&, const json&, const NodeContext&) {
             return std::make_unique<ApprovalNode>("risky", visits);
         });
     NodeFactory::instance().register_type("di_quiet",
+        [calm_visits](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<QuietNode>("calm", calm_visits);
+        });
+    NodeFactory::instance().register_type("di_anchor",
         [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<QuietNode>("calm");
+            return std::make_unique<AnchorNode>();
         });
 }
 
@@ -179,6 +231,106 @@ TEST(DynamicInterrupt, NodeNameSurvivesTheParallelPath) {
     EXPECT_EQ(result.interrupt_node, "risky")
         << "interrupt_node must name the node that paused, on every path";
     EXPECT_EQ(result.interrupt_value.value("reason", ""), kReason);
+}
+
+TEST(DynamicInterrupt, ParallelResumeReplaysSuccessfulSiblingWrites) {
+    std::atomic<int> risky_visits{0};
+    std::atomic<int> calm_visits{0};
+    register_types(&risky_visits, &calm_visits);
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(parallel_graph_with_anchor(), NodeContext{}, store);
+
+    RunConfig cfg;
+    cfg.thread_id = "di-parallel-pending-replay";
+    auto paused = engine->run(cfg);
+    ASSERT_TRUE(paused.interrupted);
+    EXPECT_EQ(risky_visits.load(), 1);
+    EXPECT_EQ(calm_visits.load(), 1);
+    auto interrupt_cp = store->load_latest(cfg.thread_id);
+    ASSERT_TRUE(interrupt_cp.has_value());
+    EXPECT_EQ(interrupt_cp->interrupt_phase, CheckpointPhase::NodeInterrupt);
+    EXPECT_EQ(std::set<std::string>(interrupt_cp->next_nodes.begin(),
+                                    interrupt_cp->next_nodes.end()),
+              (std::set<std::string>{"risky", "calm"}));
+
+    // Recompile against the same store and resume by the exact checkpoint ID.
+    auto cold_engine = GraphEngine::compile(parallel_graph_with_anchor(), NodeContext{}, store);
+    auto done = cold_engine->resume_from(cfg, interrupt_cp->id,
+                                         json{{"approved", true}});
+    EXPECT_FALSE(done.interrupted);
+    EXPECT_EQ(risky_visits.load(), 2);
+    EXPECT_EQ(calm_visits.load(), 1)
+        << "the successful sibling must replay from its pending write";
+    EXPECT_EQ(done.output["channels"]["sibling"]["value"], "done");
+    EXPECT_EQ(done.output["channels"]["result"]["value"], "paid");
+}
+
+TEST(DynamicInterrupt, ExactResumeCarriesSiblingWritesAcrossRepeatedInterrupts) {
+    std::atomic<int> risky_visits{0};
+    std::atomic<int> calm_visits{0};
+    register_types(nullptr, &calm_visits);
+    NodeFactory::instance().register_type("di_repeat_approval",
+        [&risky_visits](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<RepeatApprovalNode>(&risky_visits);
+        });
+    auto graph = parallel_graph_with_anchor();
+    graph["nodes"]["risky"]["type"] = "di_repeat_approval";
+
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto first_engine = GraphEngine::compile(graph, NodeContext{}, store);
+    RunConfig cfg;
+    cfg.thread_id = "di-parallel-repeated-interrupt";
+    const auto first_pause = first_engine->run(cfg);
+    ASSERT_TRUE(first_pause.interrupted);
+    EXPECT_EQ(risky_visits.load(), 1);
+    EXPECT_EQ(calm_visits.load(), 1);
+    const auto first_cp = store->load_latest(cfg.thread_id);
+    ASSERT_TRUE(first_cp.has_value());
+
+    auto cold_engine = GraphEngine::compile(graph, NodeContext{}, store);
+    const auto second_pause = cold_engine->resume_from(
+        cfg, first_cp->id, json{{"approved", true}});
+    ASSERT_TRUE(second_pause.interrupted);
+    EXPECT_EQ(risky_visits.load(), 2);
+    EXPECT_EQ(calm_visits.load(), 1)
+        << "the sibling result must remain replayable after another interrupt";
+    const auto second_cp = store->load_latest(cfg.thread_id);
+    ASSERT_TRUE(second_cp.has_value());
+    ASSERT_NE(second_cp->id, first_cp->id);
+    EXPECT_EQ(second_cp->parent_id, first_cp->id);
+    EXPECT_EQ(second_cp->step, first_cp->step);
+
+    const auto done = cold_engine->resume_from(
+        cfg, second_cp->id, json{{"approved", true}});
+    EXPECT_FALSE(done.interrupted);
+    EXPECT_EQ(risky_visits.load(), 3);
+    EXPECT_EQ(calm_visits.load(), 1);
+    EXPECT_EQ(done.output["channels"]["sibling"]["value"], "done");
+    EXPECT_EQ(done.output["channels"]["result"]["value"], "approved");
+}
+
+TEST(DynamicInterrupt, ExactResumeRejectsCyclicInterruptAncestry) {
+    std::atomic<int> risky_visits{0};
+    std::atomic<int> calm_visits{0};
+    register_types(&risky_visits, &calm_visits);
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(parallel_graph_with_anchor(), NodeContext{}, store);
+    RunConfig cfg;
+    cfg.thread_id = "di-parallel-cyclic-ancestry";
+    ASSERT_TRUE(engine->run(cfg).interrupted);
+    auto interrupt_cp = store->load_latest(cfg.thread_id);
+    ASSERT_TRUE(interrupt_cp.has_value());
+
+    // Simulate corrupted ancestry through the store API. Exact resume must
+    // stop before running any node instead of traversing or replaying it.
+    interrupt_cp->parent_id = interrupt_cp->id;
+    store->save(*interrupt_cp);
+    auto cold_engine = GraphEngine::compile(parallel_graph_with_anchor(), NodeContext{}, store);
+    EXPECT_THROW((void)cold_engine->resume_from(cfg, interrupt_cp->id,
+                                                json{{"approved", true}}),
+                 std::runtime_error);
+    EXPECT_EQ(risky_visits.load(), 1);
+    EXPECT_EQ(calm_visits.load(), 1);
 }
 
 // The single-node path must agree with the parallel one. Two paths that lose

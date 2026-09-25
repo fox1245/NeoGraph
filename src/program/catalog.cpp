@@ -189,6 +189,26 @@ void validate_capability_binding(const std::vector<ExecutableIdentity>& requeste
                         "Owned Provider presence does not match the exact closure",
                         json{{"provider_count", provider_count},
                              {"provider_bound", static_cast<bool>(binding.node_context.provider)}});
+    } else if (provider_count == 1 && binding.node_context.provider) {
+        try {
+            const auto required_provider = std::find_if(
+                requested.begin(), requested.end(), [](const auto& identity) {
+                    return identity.kind == ExecutableKind::Provider;
+                });
+            if (binding.node_context.provider->get_name() != required_provider->name) {
+                diagnostics.add("P_BINDING_PROVIDER", "/capability_bindings",
+                                "Owned Provider name does not match the exact closure",
+                                json{{"expected", required_provider->name},
+                                     {"actual", binding.node_context.provider->get_name()}});
+            }
+        } catch (const std::exception& error) {
+            diagnostics.add("P_BINDING_PROVIDER", "/capability_bindings",
+                            "Owned Provider identity inspection failed",
+                            json{{"error", error.what()}});
+        } catch (...) {
+            diagnostics.add("P_BINDING_PROVIDER", "/capability_bindings",
+                            "Owned Provider identity inspection failed with a non-standard exception");
+        }
     }
     if (binding.tools.size() != tool_count) {
         diagnostics.add("P_BINDING_TOOL", "/capability_bindings",

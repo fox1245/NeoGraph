@@ -299,6 +299,7 @@ public:
         ResponseStrategy strategy;
         std::string message_path;
         std::string content_field;
+        std::vector<std::string> reasoning_fields;
         std::string role_field;
         std::string tool_calls_field;
         std::string tool_call_id_field;
@@ -336,6 +337,7 @@ public:
         std::string done_signal;
         std::string delta_path;
         std::string content_field;
+        std::vector<std::string> reasoning_fields;
         std::string tool_calls_field;
         std::string tool_call_index_field;
         std::string tool_call_id_field;

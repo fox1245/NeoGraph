@@ -20,7 +20,8 @@
  *     prove that the server did not already apply the request.
  *   - After a successful exchange, the connection returns to the
  *     pool unless the server sent `Connection: close`, in which case
- *     it's dropped.
+ *     it's dropped. A valid server `Keep-Alive: timeout=N` caps the
+ *     configured client idle TTL with a one-second safety margin.
  *
  * Thread-safety: the pool may be shared across worker threads of one
  * or more io_contexts. Check-out/check-in are serialized by an
@@ -50,7 +51,8 @@ struct ConnPoolOptions {
     std::size_t max_idle_per_host = 16;
 
     /// Idle connections older than this are dropped on checkout
-    /// without being reused. Lazy — no background reaper.
+    /// without being reused. A server-advertised timeout may shorten
+    /// this limit. Lazy — no background reaper.
     std::chrono::seconds idle_ttl{30};
 
     /// Maximum number of in-flight exchanges per (host, port, tls)

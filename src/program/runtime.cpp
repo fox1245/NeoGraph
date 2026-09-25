@@ -517,7 +517,12 @@ void complete_attempt_launch_failure(const std::shared_ptr<detail::RunControl>& 
             std::rethrow_exception(error);
         } catch (const std::exception& exception) {
             message += ": ";
-            message += exception.what();
+            try {
+                detail::validate_utf8(exception.what());
+                message += exception.what();
+            } catch (const std::invalid_argument&) {
+                message += "exception message contained non-UTF-8 bytes";
+            }
         } catch (...) {
             message += " with a non-standard exception";
         }
@@ -1985,6 +1990,55 @@ void RunControl::set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept
     hook_runtime_enabled_.store(static_cast<bool>(hook_runtime_), std::memory_order_release);
 }
 
+void RunControl::set_core_tool_grant_resolver(ProgramCoreToolGrantResolver resolver) {
+    std::lock_guard lock(mutex_);
+    core_tool_grant_resolver_ = std::move(resolver);
+}
+
+std::optional<ProgramCoreToolGrant> RunControl::resolve_core_tool_grant(
+    std::string_view operation_id) const {
+    ProgramCoreToolGrantResolver resolver;
+    {
+        std::lock_guard lock(mutex_);
+        resolver = core_tool_grant_resolver_;
+    }
+    if (!resolver) return std::nullopt;
+    return resolver(ProgramCoreToolGrantContext{
+        owner_scope, program_version_id, run_id, operation_id, attempt});
+}
+
+void RunControl::set_core_provider_call_resolver(ProgramCoreProviderCallResolver resolver,
+                                                 bool required) {
+    std::lock_guard lock(mutex_);
+    core_provider_call_resolver_ = std::move(resolver);
+    require_core_provider_call_broker_ = required;
+}
+
+std::shared_ptr<graph::ProviderCallBroker> RunControl::resolve_core_provider_call_broker(
+    std::string_view operation_id) const {
+    ProgramCoreProviderCallResolver resolver;
+    bool required;
+    {
+        std::lock_guard lock(mutex_);
+        resolver = core_provider_call_resolver_;
+        required = require_core_provider_call_broker_;
+    }
+    if (!resolver) {
+        if (required)
+            throw std::runtime_error("Program Core provider broker resolver is required");
+        return {};
+    }
+    const auto binding = resolver(ProgramCoreProviderCallContext{
+        owner_scope, program_version_id, run_id, operation_id, attempt});
+    if (!binding || binding->owner_scope != owner_scope ||
+        binding->program_version_id != program_version_id ||
+        binding->run_id != run_id || binding->operation_id != operation_id ||
+        binding->attempt != attempt || !binding->broker) {
+        throw std::runtime_error("Program Core provider broker binding is absent or stale");
+    }
+    return binding->broker;
+}
+
 void RunControl::emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
                                      std::optional<ProgramTerminalStatus> status,
                                      bool observe_cancellation) const {
@@ -2341,7 +2395,7 @@ ProgramEvent RunControl::make_event(ProgramEventKind kind, ProgramEventPayload p
 ProgramEvent RunControl::make_event(std::string_view    event_operation_id,
                                     ProgramEventKind    kind,
                                     ProgramEventPayload payload) {
-    return preview_event(next_sequence_++, event_operation_id, kind, std::move(payload));
+    return preview_event(next_sequence_, event_operation_id, kind, std::move(payload));
 }
 
 ProgramEvent RunControl::preview_event(std::uint64_t       sequence,
@@ -2397,6 +2451,7 @@ ProgramEvent RunControl::stage_event(std::string_view    event_operation_id,
     std::lock_guard lock(mutex_);
     auto            event = make_event(event_operation_id, kind, std::move(payload));
     events_.push_back(event);
+    ++next_sequence_;
     return event;
 }
 
@@ -4374,6 +4429,9 @@ struct ProgramRuntime::Impl {
     ControlRegistration register_control(const std::shared_ptr<detail::RunControl>& control,
                                           bool process_unique = false) {
         control->set_hook_runtime(config.hook_runtime);
+        control->set_core_tool_grant_resolver(config.core_tool_grant_resolver);
+        control->set_core_provider_call_resolver(
+            config.core_provider_call_resolver, config.require_core_provider_call_broker);
         if (control->logical_run_id != control->run_id) {
             const auto run = control->snapshot();
             if (!run.children().empty()) {
@@ -4966,6 +5024,10 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
          impl_->config.transitions, execution_lease);
     control->set_hook_runtime(impl_->config.hook_runtime);
+    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+    control->set_core_provider_call_resolver(
+        impl_->config.core_provider_call_resolver,
+        impl_->config.require_core_provider_call_broker);
 
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
@@ -5219,6 +5281,10 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
              impl_->config.state_store, impl_->config.transitions);
         control->set_hook_runtime(impl_->config.hook_runtime);
+        control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+        control->set_core_provider_call_resolver(
+            impl_->config.core_provider_call_resolver,
+            impl_->config.require_core_provider_call_broker);
         impl_->commit_active_child(control, global_quota);
         impl_->bind_budgeted_child_completion(control, owner_scope, parent_run_id, run_id);
         ProgramEvent started;
@@ -5362,6 +5428,10 @@ ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
          impl_->config.transitions);
     control->set_hook_runtime(impl_->config.hook_runtime);
+    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+    control->set_core_provider_call_resolver(
+        impl_->config.core_provider_call_resolver,
+        impl_->config.require_core_provider_call_broker);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
     const auto published = compare_publish_with_lineage(
@@ -5649,6 +5719,10 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         target_thread_id, 0, std::move(invocation.events), impl_->deadline_pool.get_executor(),
          impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
     control->set_hook_runtime(impl_->config.hook_runtime);
+    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+    control->set_core_provider_call_resolver(
+        impl_->config.core_provider_call_resolver,
+        impl_->config.require_core_provider_call_broker);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
     auto publication =
@@ -6038,6 +6112,10 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         impl_->config.transitions, std::nullopt, source_record->logical_run_id());
     replacement_control = control;
     control->set_hook_runtime(impl_->config.hook_runtime);
+    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+    control->set_core_provider_call_resolver(
+        impl_->config.core_provider_call_resolver,
+        impl_->config.require_core_provider_call_broker);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{remaining});
     auto publication = initial_publication(
@@ -6476,6 +6554,10 @@ ProgramHandle ProgramRuntime::migrate_graph(
         impl_->config.state_store, impl_->config.transitions, std::nullopt,
         source_record->logical_run_id());
     control->set_hook_runtime(impl_->config.hook_runtime);
+    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+    control->set_core_provider_call_resolver(
+        impl_->config.core_provider_call_resolver,
+        impl_->config.require_core_provider_call_broker);
     auto started = control->preview_event(
         1, ProgramEventKind::Started, ProgramStartedEvent{remaining});
     started.id.clear();
@@ -7336,6 +7418,10 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
                 impl_->config.state_store, impl_->config.transitions, execution_lease);
             expired_control->set_hook_runtime(impl_->config.hook_runtime);
+            expired_control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+            expired_control->set_core_provider_call_resolver(
+                impl_->config.core_provider_call_resolver,
+                impl_->config.require_core_provider_call_broker);
             detail::RunOutcome timed_out;
             timed_out.status = ProgramTerminalStatus::TimedOut;
             timed_out.remaining_budget = program_replacement_remaining_budget(
@@ -7474,6 +7560,10 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     }
     auto control = std::make_shared<detail::RunControl>(*record, impl_->config.transitions);
     control->set_hook_runtime(impl_->config.hook_runtime);
+    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+    control->set_core_provider_call_resolver(
+        impl_->config.core_provider_call_resolver,
+        impl_->config.require_core_provider_call_broker);
     if (!record->invocation().parent_run_id.empty())
         impl_->bind_budgeted_child_completion(
             control, owner_scope, record->invocation().parent_run_id, record->logical_run_id());

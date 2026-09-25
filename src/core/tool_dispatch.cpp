@@ -1,4 +1,5 @@
 #include <neograph/tool_dispatch.h>
+#include <neograph/tool_effect_broker.h>
 #include <neograph/hook_runtime.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>   // NodeInterrupt — the gate's Interrupt verdict
@@ -25,6 +26,10 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     ToolExecutionContext execution) {
     std::vector<ChatMessage> results;
     if (calls.empty()) co_return results;
+    if (execution.effect_broker &&
+        (execution.identity.thread_id.empty() || execution.effect_task_id.empty())) {
+        throw std::invalid_argument("Tool effect broker requires a thread-scoped Core task identity");
+    }
 
     auto throw_if_cancelled = [&execution](const char* detail) {
         if (execution.cancel_token) {
@@ -46,6 +51,10 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
     // than one wants to.
     std::vector<ToolDecision> decisions;
     if (gate) {
+        // Only gated dispatch pays for the immutable batch snapshot. The gate
+        // receives context by value and may suspend, so a borrowed view of
+        // `calls` would not be a safe public API.
+        gctx.batch_calls = std::make_shared<const std::vector<ToolCall>>(calls);
         decisions.reserve(calls.size());
         for (const auto& tc : calls) {
             throw_if_cancelled("before tool gate");
@@ -69,7 +78,8 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
     // parallel group.
     throw_if_cancelled("before tool dispatch");
 
-    auto worker = [tools, execution](ToolCall tc, std::optional<ToolDecision> decision)
+    auto worker = [tools, execution](std::size_t call_index, ToolCall tc,
+                                     std::optional<ToolDecision> decision)
             -> asio::awaitable<ChatMessage> {
         const auto hook_deadline = [&execution]()
             -> std::optional<std::chrono::system_clock::time_point> {
@@ -112,6 +122,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             set_failure(ToolTerminalStatus::Rejected, "Tool not found: " + tc.name);
             co_return tool_msg;
         }
+        bool broker_invoked = false;
         try {
             // The gate may rewrite the arguments — that is how ambient values
             // (tenant, thread, credentials) get injected without every tool
@@ -138,11 +149,27 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             auto controller = call_execution.controller
                             ? call_execution.controller
                             : default_tool_execution_controller();
-            const auto result = co_await controller->execute_result_async(
-                **it, std::move(args), call_execution);
+            ToolExecutionResult result;
+            if (call_execution.effect_broker) {
+                ToolEffectIdentity identity;
+                identity.owner_scope = call_execution.identity.owner_scope;
+                identity.run_id = call_execution.identity.root_run_id;
+                identity.thread_id = call_execution.identity.thread_id;
+                identity.task_id = call_execution.effect_task_id;
+                identity.call_ordinal = call_index;
+                identity.tool_call_id = tc.id;
+                call_execution.controller = controller;
+                broker_invoked = true;
+                result = co_await call_execution.effect_broker->execute(
+                    std::move(identity), **it, std::move(args), call_execution);
+            } else {
+                result = co_await controller->execute_result_async(
+                    **it, std::move(args), call_execution);
+            }
             tool_msg.tool_status = std::string(to_string(result.status));
             tool_msg.tool_retryable = result.retryable;
-            tool_msg.tool_effect_uncertain = result.effect_uncertain;
+            tool_msg.tool_effect_uncertain = result.effect_uncertain ||
+                result.status == ToolTerminalStatus::ReconciliationRequired;
             if (result.succeeded()) {
                 tool_msg.content = result.output;
             } else {
@@ -150,7 +177,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     {"error", result.error},
                     {"status", tool_msg.tool_status},
                     {"retryable", result.retryable},
-                    {"effect_uncertain", result.effect_uncertain},
+                    {"effect_uncertain", tool_msg.tool_effect_uncertain},
                     {"output", result.output}}
                     .dump();
             }
@@ -178,9 +205,13 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                 && error.code() == asio::error::operation_aborted) {
                 throw graph::CancelledException("tool operation aborted");
             }
-            set_failure(ToolTerminalStatus::Failed, error.what());
+            set_failure(broker_invoked ? ToolTerminalStatus::ReconciliationRequired
+                                       : ToolTerminalStatus::Failed,
+                        error.what(), false, broker_invoked);
         } catch (const std::exception& e) {
-            set_failure(ToolTerminalStatus::Failed, e.what());
+            set_failure(broker_invoked ? ToolTerminalStatus::ReconciliationRequired
+                                       : ToolTerminalStatus::Failed,
+                        e.what(), false, broker_invoked);
         }
         co_return tool_msg;
     };
@@ -189,10 +220,23 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
         if (i < decisions.size()) return decisions[i];
         return std::nullopt;
     };
+    const auto stop_on_uncertain_effect = [&execution](const std::vector<ChatMessage>& messages) {
+        if (!execution.effect_broker) return;
+        if (std::any_of(messages.begin(), messages.end(), [](const ChatMessage& message) {
+                return message.tool_effect_uncertain;
+            })) {
+            throw graph::NodeInterrupt(
+                "Mediated Tool effect requires reconciliation",
+                json{{"kind", "tool_effect_reconciliation"},
+                     {"thread_id", execution.identity.thread_id},
+                     {"task_id", execution.effect_task_id}});
+        }
+    };
 
     // Single call: run inline, skip the parallel-group machinery.
     if (calls.size() == 1) {
-        results.push_back(co_await worker(calls.front(), decision_for(0)));
+        results.push_back(co_await worker(0, calls.front(), decision_for(0)));
+        stop_on_uncertain_effect(results);
         co_return results;
     }
 
@@ -200,13 +244,13 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
     // uses for independent nodes within a super-step.
     auto ex = co_await asio::this_coro::executor;
     using DeferredOp = decltype(asio::co_spawn(
-        ex, worker(std::declval<ToolCall>(),
+        ex, worker(std::declval<std::size_t>(), std::declval<ToolCall>(),
                    std::declval<std::optional<ToolDecision>>()),
         asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(calls.size());
     for (std::size_t i = 0; i < calls.size(); ++i) {
-        ops.push_back(asio::co_spawn(ex, worker(calls[i], decision_for(i)),
+        ops.push_back(asio::co_spawn(ex, worker(i, calls[i], decision_for(i)),
                                      asio::deferred));
     }
 
@@ -239,11 +283,16 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             } catch (...) {
                 m.content = R"({"error": "unknown tool failure"})";
             }
+            if (execution.effect_broker) {
+                m.tool_status = std::string(to_string(ToolTerminalStatus::ReconciliationRequired));
+                m.tool_effect_uncertain = true;
+            }
             results.push_back(std::move(m));
         } else {
             results.push_back(std::move(values[i]));
         }
     }
+    stop_on_uncertain_effect(results);
     co_return results;
 }
 

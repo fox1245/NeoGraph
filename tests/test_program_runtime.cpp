@@ -6,6 +6,7 @@
 #include <neograph/hook_runtime.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#include <neograph/tool_dispatch.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
 #include <neograph/program/postgres_store.h>
 #include <neograph/program/postgres_transition_store.h>
@@ -57,6 +58,7 @@ extern char** environ;
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -83,6 +85,8 @@ using namespace neograph::graph;
 using namespace neograph::program;
 
 std::atomic<unsigned>               completed_calls{0};
+std::atomic<unsigned>               mediated_tool_calls{0};
+std::atomic<neograph::ToolExecutionController*> mediated_tool_controller{nullptr};
 std::string                         synthesis_execution_marker;
 std::atomic<unsigned>               interrupt_calls{0};
 std::atomic<unsigned>               blocking_calls{0};
@@ -127,6 +131,47 @@ public:
         }
         NodeOutput output;
         output.writes.push_back(ChannelWrite{"value", "completed"});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class MediatedProbeTool final : public Tool {
+public:
+    ChatTool get_definition() const override {
+        return {"mediated-probe", "Program gate probe", json{{"type", "object"}}};
+    }
+    std::string get_name() const override { return "mediated-probe"; }
+    std::string execute(const json&) override {
+        ++mediated_tool_calls;
+        return "ok";
+    }
+};
+
+class MediatedDispatchNode final : public GraphNode {
+public:
+    explicit MediatedDispatchNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        MediatedProbeTool tool;
+        mediated_tool_controller.store(in.ctx.tool_execution_controller.get());
+        neograph::ToolGateContext gate_context;
+        gate_context.thread_id = in.ctx.thread_id;
+        gate_context.step = in.ctx.step;
+        auto execution = neograph::graph::make_tool_execution_context(in.ctx);
+        // GCC 13 cannot lower nested temporary vectors across this co_await.
+        std::vector<neograph::ToolCall> calls;
+        calls.push_back(neograph::ToolCall{"call-1", "mediated-probe", "{}"});
+        std::vector<Tool*> tools{&tool};
+        (void)co_await dispatch_tool_calls(
+            std::move(calls), std::move(tools),
+            in.ctx.tool_gate, std::move(gate_context), std::move(execution));
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", mediated_tool_calls.load()});
         co_return output;
     }
 
@@ -222,10 +267,58 @@ private:
 
 class FailingNode final : public GraphNode {
 public:
-    explicit FailingNode(std::string name) : name_(std::move(name)) {}
+    explicit FailingNode(std::string name, std::string message = "classified core failure")
+        : name_(std::move(name)), message_(std::move(message)) {}
 
     asio::awaitable<NodeOutput> run(NodeInput) override {
-        throw std::runtime_error("classified core failure");
+        throw std::runtime_error(message_);
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    std::string message_;
+};
+
+class NonUtf8ErrorCategory final : public std::error_category {
+public:
+    const char* name() const noexcept override { return "test-platform"; }
+    std::string message(int) const override { return std::string("\xc7\xf6\xc0\xe7", 4); }
+};
+
+class FailingSystemErrorNode final : public GraphNode {
+public:
+    explicit FailingSystemErrorNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        static const NonUtf8ErrorCategory category;
+        throw std::system_error(std::error_code(10053, category));
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class MalformedEventThenFailNode final : public GraphNode {
+public:
+    explicit MalformedEventThenFailNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        if (!input.stream_cb) throw std::runtime_error("stream callback missing");
+        bool rejected = false;
+        try {
+            (*input.stream_cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_,
+                                          json(std::string("\xc7\xf6\xc0\xe7", 4))});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        if (!rejected) throw std::runtime_error("invalid event was accepted");
+        throw std::runtime_error("node failed after rejected event");
         co_return NodeOutput{};
     }
 
@@ -422,6 +515,13 @@ RegistrySnapshot runtime_registry(
         json{{"type", "object"}},
         json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
     builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-mediated-dispatch", 'a'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<MediatedDispatchNode>(name);
+        },
+        json{{"type", "object"}},
+        json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
+    builder.add_node(
         manifest(ExecutableKind::Node, "runtime-map-echo", 'e'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<MapEchoNode>(name);
@@ -455,6 +555,24 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-failing", '4'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<FailingNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-failing-non-utf8", '5'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FailingNode>(name, std::string("\xc7\xf6\xc0\xe7", 4));
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-failing-system-error", '6'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FailingSystemErrorNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-malformed-event-then-fail", '7'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<MalformedEventThenFailNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -795,6 +913,9 @@ struct AdmittedRuntime {
     ProgramChildQuotaConfig                         child_quota;
     std::size_t                                     scheduler_thread_count;
     std::shared_ptr<HookRuntime>                    hook_runtime;
+    ProgramCoreToolGrantResolver                    core_tool_grant_resolver;
+    ProgramCoreProviderCallResolver                 core_provider_call_resolver;
+    bool                                            require_core_provider_call_broker = false;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -880,6 +1001,9 @@ struct AdmittedRuntime {
         };
         config.child_quota = child_quota;
         config.hook_runtime = hook_runtime;
+        config.core_tool_grant_resolver = core_tool_grant_resolver;
+        config.core_provider_call_resolver = core_provider_call_resolver;
+        config.require_core_provider_call_broker = require_core_provider_call_broker;
         config.runtime_recovery_handler = std::move(recovery_handler);
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
@@ -2098,6 +2222,257 @@ json typed_event_value(const TypedGraphEvent& event) {
     return value;
 }
 }  // namespace
+
+namespace {
+class ProgramToolEffectProbe final : public neograph::ToolEffectBroker {
+public:
+    asio::awaitable<neograph::ToolExecutionResult> execute(
+        neograph::ToolEffectIdentity identity, neograph::Tool& tool,
+        neograph::json arguments, neograph::ToolExecutionContext context) override {
+        seen.push_back(std::move(identity));
+        co_return co_await context.controller->execute_result_async(
+            tool, std::move(arguments), context);
+    }
+
+    std::vector<neograph::ToolEffectIdentity> seen;
+};
+}  // namespace
+
+TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-mediated-dispatch");
+
+    auto invoke = [&](std::string run_id) {
+        ProgramInvocation invocation{json::object(), grant(), "trace-tool-grant", {}};
+        invocation.requested_run_id = std::move(run_id);
+        return fixture.runtime->start("tenant:runtime", version, std::move(invocation)).wait();
+    };
+
+    EXPECT_EQ(invoke("no-grant").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    const auto allowed_controller = std::make_shared<neograph::ToolExecutionController>();
+    const auto effect_broker = std::make_shared<ProgramToolEffectProbe>();
+    fixture.core_tool_grant_resolver = [version_id = version.id(), allowed_controller,
+                                        effect_broker](
+        const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
+        if (context.owner_scope != "tenant:runtime" ||
+            context.program_version_id != version_id || context.run_id != "allowed" ||
+            context.operation_id != "root" || context.attempt != 1)
+            return std::nullopt;
+        ProgramCoreToolGrant grant;
+        grant.owner_scope = std::string(context.owner_scope);
+        grant.program_version_id = std::string(context.program_version_id);
+        grant.run_id = std::string(context.run_id);
+        grant.operation_id = std::string(context.operation_id);
+        grant.attempt = context.attempt;
+        grant.grant_id = "grant-allowed";
+        grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        grant.controller = allowed_controller;
+        grant.effect_broker = effect_broker;
+        return grant;
+    };
+    fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+    EXPECT_EQ(mediated_tool_controller.load(), allowed_controller.get());
+    ASSERT_EQ(effect_broker->seen.size(), 1U);
+    EXPECT_EQ(effect_broker->seen[0].owner_scope, "tenant:runtime");
+    EXPECT_EQ(effect_broker->seen[0].run_id, "allowed");
+    EXPECT_FALSE(effect_broker->seen[0].thread_id.empty());
+    EXPECT_FALSE(effect_broker->seen[0].task_id.empty());
+    EXPECT_EQ(effect_broker->seen[0].call_ordinal, 0U);
+
+    fixture.core_tool_grant_resolver = [version_id = version.id()](
+        const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
+        ProgramCoreToolGrant stale;
+        stale.owner_scope = std::string(context.owner_scope);
+        stale.program_version_id = version_id;
+        stale.run_id = context.run_id == "stale-run"
+            ? "a-different-run" : std::string(context.run_id);
+        stale.operation_id = std::string(context.operation_id);
+        stale.attempt = context.attempt;
+        if (context.run_id == "stale-operation")
+            stale.operation_id = "a-different-operation";
+        if (context.run_id == "stale-attempt") ++stale.attempt;
+        stale.grant_id = "grant-stale";
+        stale.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        stale.controller = std::make_shared<neograph::ToolExecutionController>();
+        return stale;
+    };
+    fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("stale-run").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(invoke("stale-operation").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(invoke("stale-attempt").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+}
+
+namespace {
+class ProgramBrokerProbe final : public neograph::graph::ProviderCallBroker {
+public:
+    asio::awaitable<neograph::ChatCompletion> invoke(
+        neograph::graph::ProviderCallIdentity,
+        std::shared_ptr<neograph::Provider>,
+        neograph::CompletionParams,
+        neograph::StreamCallback) override {
+        neograph::ChatCompletion completion;
+        completion.message = neograph::ChatMessage{"assistant", "brokered"};
+        co_return completion;
+    }
+};
+}  // namespace
+
+TEST(ProgramRuntimeTest, CoreProviderResolverChecksExactOperationBinding) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    const auto broker = std::make_shared<ProgramBrokerProbe>();
+    std::vector<std::string> seen_runs;
+    fixture.core_provider_call_resolver =
+        [&, version_id = version.id()](const ProgramCoreProviderCallContext& context)
+            -> std::optional<ProgramCoreProviderCallBinding> {
+        EXPECT_EQ(context.owner_scope, "tenant:runtime");
+        EXPECT_EQ(context.program_version_id, version_id);
+        EXPECT_EQ(context.operation_id, "root");
+        EXPECT_EQ(context.attempt, 1U);
+        seen_runs.emplace_back(context.run_id);
+        ProgramCoreProviderCallBinding binding;
+        binding.owner_scope = std::string(context.owner_scope);
+        binding.program_version_id = std::string(context.program_version_id);
+        binding.run_id = context.run_id == "stale" ? "other-run" : std::string(context.run_id);
+        binding.operation_id = std::string(context.operation_id);
+        binding.attempt = context.attempt;
+        binding.broker = broker;
+        return binding;
+    };
+    fixture.require_core_provider_call_broker = true;
+    fixture.runtime = fixture.make_runtime();
+
+    const auto invoke = [&](std::string run_id) {
+        ProgramInvocation invocation{json::object(), grant(), "trace-provider-broker", {}};
+        invocation.requested_run_id = std::move(run_id);
+        return fixture.runtime->start("tenant:runtime", version, std::move(invocation)).wait();
+    };
+    EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(invoke("stale").status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    ASSERT_EQ(seen_runs.size(), 2U);
+    EXPECT_EQ(seen_runs[0], "allowed");
+    EXPECT_EQ(seen_runs[1], "stale");
+
+    fixture.core_provider_call_resolver = {};
+    fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("missing-resolver").status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, RequiredCoreProviderBrokerMustBeReboundOnReconnect) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = program_document("runtime-completed");
+    document["root"]["definition"]["interrupt_before"] = json::array({"work"});
+    const auto version = fixture.admit_document(std::move(document));
+    const auto broker = std::make_shared<ProgramBrokerProbe>();
+    fixture.require_core_provider_call_broker = true;
+    fixture.core_provider_call_resolver = [broker](
+        const ProgramCoreProviderCallContext& context)
+        -> std::optional<ProgramCoreProviderCallBinding> {
+        return ProgramCoreProviderCallBinding{
+            std::string(context.owner_scope), std::string(context.program_version_id),
+            std::string(context.run_id), std::string(context.operation_id),
+            context.attempt, broker};
+    };
+    fixture.runtime = fixture.make_runtime();
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-provider-reconnect", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(completed_calls.load(), 0U);
+
+    fixture.core_provider_call_resolver = {};
+    fixture.runtime = fixture.make_runtime();
+    const auto reconnected = fixture.runtime->reconnect(
+        "tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(reconnected.status(), ProgramTerminalStatus::Interrupted);
+    const auto resumed = fixture.runtime
+        ->resume("tenant:runtime", interrupted.run_id(),
+                 resume_for(interrupted, json::object(), "trace-provider-resume"))
+        .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = program_document("runtime-mediated-dispatch");
+    document["root"]["definition"]["interrupt_before"] = json::array({"work"});
+    const auto version = fixture.admit_document(std::move(document));
+
+    fixture.core_tool_grant_resolver = [](const ProgramCoreToolGrantContext& context)
+        -> std::optional<ProgramCoreToolGrant> {
+        ProgramCoreToolGrant grant;
+        grant.owner_scope = std::string(context.owner_scope);
+        grant.program_version_id = std::string(context.program_version_id);
+        grant.run_id = std::string(context.run_id);
+        grant.operation_id = std::string(context.operation_id);
+        grant.attempt = context.attempt;
+        grant.grant_id = "grant-before-restart";
+        grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        grant.controller = std::make_shared<neograph::ToolExecutionController>();
+        return grant;
+    };
+    fixture.runtime = fixture.make_runtime();
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-tool-grant-before-restart", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    const auto durable_resolver = fixture.core_tool_grant_resolver;
+    fixture.core_tool_grant_resolver = {};
+    fixture.runtime = fixture.make_runtime();
+    const auto reconnected =
+        fixture.runtime->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(reconnected.status(), ProgramTerminalStatus::Interrupted);
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json::object(),
+                                                 "trace-tool-grant-after-restart"))
+                             .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    fixture.core_tool_grant_resolver = durable_resolver;
+    fixture.runtime = fixture.make_runtime();
+    const auto second_interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-tool-grant-rebound", {}});
+    ASSERT_EQ(second_interrupted.status(), ProgramTerminalStatus::Interrupted);
+    fixture.runtime = fixture.make_runtime();
+    const auto rebound = fixture.runtime
+                             ->reconnect("tenant:runtime", second_interrupted.run_id())
+                             .wait();
+    ASSERT_EQ(rebound.status(), ProgramTerminalStatus::Interrupted);
+    const auto allowed = fixture.runtime
+                             ->resume("tenant:runtime", second_interrupted.run_id(),
+                                      resume_for(second_interrupted, json::object(),
+                                                 "trace-tool-grant-rebound-resume"))
+                             .wait();
+    EXPECT_EQ(allowed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+}
 
 TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEvents) {
     completed_calls.store(0);
@@ -5778,6 +6153,79 @@ TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
     EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
 }
 
+TEST(ProgramRuntimeTest, NonUtf8NodeErrorPreservesJournaledCoreFailure) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-failing-non-utf8");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-non-utf8-error", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_NE(result.failure()->message.find("\\xC7"), std::string::npos);
+    const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
+    ASSERT_FALSE(events.empty());
+    bool saw_error = false;
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        EXPECT_EQ(events[i].sequence, i + 1);
+        EXPECT_NO_THROW((void)events[i].serialize_canonical());
+        const auto* core = std::get_if<neograph::graph::TypedGraphEvent>(&events[i].payload);
+        if (core) {
+            const auto* error = std::get_if<neograph::graph::ErrorEvent>(core);
+            if (error) {
+                saw_error = true;
+                EXPECT_NE(error->message.find("non-UTF-8"), std::string::npos);
+            }
+        }
+    }
+    EXPECT_TRUE(saw_error);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+}
+
+TEST(ProgramRuntimeTest, NonUtf8SystemErrorPreservesPlatformCode) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-failing-system-error");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-non-utf8-system-error", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
+    bool saw_system_error = false;
+    for (const auto& event : events) {
+        const auto* core = std::get_if<neograph::graph::TypedGraphEvent>(&event.payload);
+        if (!core) continue;
+        const auto* error = std::get_if<neograph::graph::ErrorEvent>(core);
+        if (!error) continue;
+        saw_system_error = true;
+        EXPECT_NE(error->message.find("system error code 10053"), std::string::npos);
+        EXPECT_NO_THROW((void)event.serialize_canonical());
+    }
+    EXPECT_TRUE(saw_system_error);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+}
+
+TEST(ProgramRuntimeTest, RejectedCoreEventDoesNotConsumeSequence) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-malformed-event-then-fail");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-rejected-core-event", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_NE(result.failure()->message.find("node failed after rejected event"),
+              std::string::npos);
+    const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
+    ASSERT_FALSE(events.empty());
+    for (std::size_t i = 0; i < events.size(); ++i) EXPECT_EQ(events[i].sequence, i + 1);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+}
+
 TEST(ProgramRuntimeTest, CoreStepLimitMapsToBudgetExhausted) {
     completed_calls.store(0);
 
@@ -6263,7 +6711,8 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
                        json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
             .wait();
 
-    EXPECT_EQ(forked.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(forked.status(), ProgramTerminalStatus::Completed)
+        << (forked.failure() ? forked.failure()->message : "");
     EXPECT_EQ(forked.run_id(), "fork-target-run");
     EXPECT_NE(forked.run_id(), source.run_id());
     EXPECT_EQ(forked.output()["channels"]["value"]["value"], "forked");

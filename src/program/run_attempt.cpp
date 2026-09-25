@@ -45,6 +45,29 @@ std::uint64_t elapsed_ms(std::chrono::steady_clock::time_point start) {
     return elapsed.count() < 0 ? 0 : static_cast<std::uint64_t>(elapsed.count());
 }
 
+std::string safe_failure_message(std::string message) {
+    try {
+        validate_utf8(message);
+        return message;
+    } catch (const std::invalid_argument&) {
+        // Exception::what() may contain bytes from the Windows active code page.
+        // Preserve the diagnostic as ASCII escapes so terminal records stay durable.
+        constexpr char hex[] = "0123456789ABCDEF";
+        std::string escaped;
+        escaped.reserve(message.size());
+        for (unsigned char byte : message) {
+            if (byte < 0x80) {
+                escaped.push_back(static_cast<char>(byte));
+            } else {
+                escaped += "\\x";
+                escaped.push_back(hex[byte >> 4]);
+                escaped.push_back(hex[byte & 0x0f]);
+            }
+        }
+        return escaped;
+    }
+}
+
 std::uint64_t subtract_saturated(std::uint64_t available, std::uint64_t spent) noexcept {
     return spent >= available ? 0 : available - spent;
 }
@@ -532,8 +555,8 @@ PlanExecution plan_failure(ProgramTerminalStatus status,
                            std::string           operation_id) {
     PlanExecution result;
     result.status  = status;
-    result.failure = ProgramFailure{
-        std::move(code), std::move(message), std::move(operation_id), "", 0, json::object()};
+    result.failure = ProgramFailure{std::move(code), safe_failure_message(std::move(message)),
+                                    std::move(operation_id), "", 0, json::object()};
     return result;
 }
 
@@ -953,8 +976,8 @@ RunOutcome failed_outcome(const std::shared_ptr<RunControl>& control,
     RunOutcome outcome;
     outcome.status           = ProgramTerminalStatus::Failed;
     outcome.remaining_budget = control->granted_budget;
-    outcome.failure          = ProgramFailure{std::move(code),      std::move(message), "root",
-                                     std::move(core_node), attempts,           json::object()};
+    outcome.failure = ProgramFailure{std::move(code), safe_failure_message(std::move(message)),
+                                     "root", std::move(core_node), attempts, json::object()};
     return outcome;
 }
 std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexcept {
@@ -966,15 +989,15 @@ bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::str
     if (cause == CancellationCause::None) return false;
     if (cause == CancellationCause::EventSink) {
         outcome.status = ProgramTerminalStatus::Failed;
-        outcome.failure =
-            ProgramFailure{"P_EVENT_SINK", std::string(message), "root", "", 0, json::object()};
+        outcome.failure = ProgramFailure{"P_EVENT_SINK", safe_failure_message(std::string(message)),
+                                         "root", "", 0, json::object()};
         return true;
     }
     outcome.status  = cause == CancellationCause::Timeout ? ProgramTerminalStatus::TimedOut
                                                           : ProgramTerminalStatus::Cancelled;
     outcome.failure = ProgramFailure{
         cause == CancellationCause::Timeout ? "P_RUNTIME_TIMEOUT" : "P_RUNTIME_CANCELLED",
-        std::string(message),
+        safe_failure_message(std::string(message)),
         "root",
         "",
         0,
@@ -1416,6 +1439,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             *resume_checkpoint_content_id);
                 }
                 graph::RunResources resources{operation_checkpoints, control->state_store};
+                resources.provider_call_broker =
+                    control->resolve_core_provider_call_broker(operation_id);
+                const auto grant = control->resolve_core_tool_grant(operation_id);
+                if (grant && grant->owner_scope == control->owner_scope &&
+                    grant->program_version_id == control->program_version_id &&
+                    grant->run_id == control->run_id &&
+                    grant->operation_id == operation_id &&
+                    grant->attempt == control->attempt && !grant->grant_id.empty() &&
+                    grant->gate && grant->controller) {
+                    resources.tool_gate = grant->gate;
+                    resources.tool_execution_controller = grant->controller;
+                    resources.tool_effect_broker = grant->effect_broker;
+                } else {
+                    // A capability receipt binds code, not authority for an effect.
+                    // Native nodes calling Tool::execute directly remain a separate
+                    // trusted-code boundary; this gate covers mediated dispatch.
+                    resources.tool_gate = [](ToolCall, ToolGateContext)
+                        -> asio::awaitable<ToolDecision> {
+                        co_return ToolDecision::deny("Program Core tool grant is absent or stale");
+                    };
+                }
                 graph::GraphStreamCallback callback =
                     [control, core_progress, operation_id](const graph::GraphEvent& event) {
                         core_progress->observe(event);

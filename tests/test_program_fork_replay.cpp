@@ -135,7 +135,7 @@ public:
         return completion;
     }
 
-    std::string get_name() const override { return "recorded-test"; }
+    std::string get_name() const override { return "recorded-provider"; }
 
 private:
     std::atomic<unsigned>& calls_;
@@ -178,10 +178,13 @@ RegistrySnapshot replay_registry() {
     RegistrySnapshotBuilder  builder;
     builder.add_provider(replay_manifest(provider),
                          ProviderMetadata{json::object(), json::object()});
+    auto recorded_node = replay_manifest(
+        ExecutableIdentity{ExecutableKind::Node, "recorded-node", "1.0.0", digest('f')},
+        {provider});
+    recorded_node.effect_mode = EffectMode::TrustedNative;
+    recorded_node.attestation_id = "host:recorded-runtime-test";
     builder.add_node(
-        replay_manifest(
-            ExecutableIdentity{ExecutableKind::Node, "recorded-node", "1.0.0", digest('f')},
-            {provider}),
+        std::move(recorded_node),
         [](const std::string& name, const json&, const NodeContext& context) {
             return std::make_unique<ReplayProviderNode>(name, context.provider);
         },
@@ -272,10 +275,11 @@ struct RecordedRuntimeFixture {
         builder.id("recorded-profile")
             .semantic_version("1.0.0")
             .registry(registry)
-            .mode(AdmissionMode::MultiTenant)
+            .mode(AdmissionMode::TrustedEmbedding)
             .max_program_schema_version(1)
             .allow_source_kind(SourceKind::CppBuilder)
-            .allow_effect_mode(EffectMode::Brokered);
+            .allow_effect_mode(EffectMode::Brokered)
+            .allow_effect_mode(EffectMode::TrustedNative);
         for (const auto& identity : registry.identities())
             builder.allow_executable(identity);
         return std::move(builder).build();
@@ -287,6 +291,7 @@ struct RecordedRuntimeFixture {
             .semantic_version("1.0.0")
             .owner_scope("tenant:recorded")
             .admission_profile(profile)
+            .allow_capability(std::string(TRUSTED_NATIVE_CAPABILITY))
             .budget_ceiling(BudgetLimits{10000, 1000, 1000, 1, 1, 20, 1, 1, 1});
         return std::move(builder).build();
     }
@@ -310,7 +315,7 @@ struct RecordedRuntimeFixture {
                               ++live_binder_calls;
                               return make_binding(false, false);
                           },
-                          1});
+                          1, {}, "host:recorded-runtime-test"});
         runtime = std::make_unique<ProgramRuntime>(
             RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
     }

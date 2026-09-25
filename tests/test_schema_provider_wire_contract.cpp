@@ -9,6 +9,7 @@
 #include <neograph/llm/schema_provider.h>
 
 #include <array>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -192,6 +193,52 @@ TEST(SchemaProviderWireContract, ToolResponsesNormalizeAcrossProviders) {
             EXPECT_FALSE(message.tool_calls[0].id.empty());
         }
     }
+}
+
+TEST(SchemaProviderWireContract, ChoicesMessagePreservesGlmReasoningWithToolCall) {
+    auto provider = provider_for("openai");
+    const json response = {
+        {"choices", json::array({{
+            {"message", {
+                {"role", "assistant"},
+                {"content", nullptr},
+                {"reasoning_content", "Need the approved lookup."},
+                {"tool_calls", json::array({{
+                    {"id", "call_glm_1"},
+                    {"type", "function"},
+                    {"function", {{"name", "lookup_weather"},
+                                  {"arguments", R"({"city":"Seoul"})"}}}
+                }})}
+            }},
+            {"finish_reason", "tool_calls"}
+        }})}
+    };
+    const auto message = SchemaProviderTestAccess::parse_response(*provider, response);
+    EXPECT_EQ(message.role, "assistant");
+    EXPECT_TRUE(message.content.empty());
+    EXPECT_EQ(message.reasoning, "Need the approved lookup.");
+    ASSERT_EQ(message.tool_calls.size(), 1U);
+    EXPECT_EQ(message.tool_calls[0].id, "call_glm_1");
+    EXPECT_EQ(message.tool_calls[0].name, "lookup_weather");
+    EXPECT_EQ(json::parse(message.tool_calls[0].arguments).at("city"), "Seoul");
+}
+
+TEST(SchemaProviderWireContract, ReasoningFieldsFollowExternalSchema) {
+    const auto path = std::filesystem::path(__FILE__).parent_path() /
+                      "fixtures" / "schema_reasoning_alias.json";
+    auto provider = provider_for(path.string());
+    const json response = {
+        {"choices", json::array({{
+            {"message", {{"role", "assistant"},
+                         {"content", "done"},
+                         {"reasoning", "legacy value"},
+                         {"reasoning_content", "legacy alias"},
+                         {"private_thought", "schema-selected value"}}}
+        }})}
+    };
+    const auto message = SchemaProviderTestAccess::parse_response(*provider, response);
+    EXPECT_EQ(message.content, "done");
+    EXPECT_EQ(message.reasoning, "schema-selected value");
 }
 
 TEST(SchemaProviderWireContract, DataUrlVisionUsesEachProviderWireShape) {
