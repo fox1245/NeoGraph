@@ -625,8 +625,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     (void)order;  // we apply in ready-order regardless of completion-order
 
     // Find first exception + classify. NodeInterrupt gets a dedicated
-    // cp-save with next_nodes={offender} so resume re-enters on just
-    // that node (siblings' pending writes are already recorded).
+    // cp-save with the full ready set. Successful siblings have pending
+    // writes; resume replays those and retries only the interrupted node.
     //
     // TSan-safe NodeInterrupt path: extract the reason as a plain
     // ``std::string`` while we still hold the exception_ptr, then
@@ -664,7 +664,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             // GCC-13 workaround: build the next_nodes vector outside
             // the co_await arg list (nested brace-init trips the ICE).
             std::vector<std::string> next_nodes;
-            next_nodes.push_back(first_exception_node);
+            next_nodes = ready;
             co_await coord.save_super_step_async(
                 state, first_exception_node, next_nodes, CheckpointPhase::NodeInterrupt, step,
                 parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
