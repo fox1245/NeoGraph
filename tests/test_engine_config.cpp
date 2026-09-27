@@ -3,7 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <thread>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -453,6 +455,114 @@ TEST(EngineResourcesTest, IsolatesNodeReducerAndConditionRegistrationsPerEngine)
     EXPECT_EQ(first->run(run).channel<std::string>("output"), "one");
     EXPECT_EQ(second->run(run).channel<std::string>("output"), "eleven");
     EXPECT_THROW((void)GraphEngine::build(registry_graph(), EngineConfig{}), std::runtime_error);
+}
+
+TEST(EngineResourcesTest, SnapshotFreezesRegistrationAcrossMutationAndOwnerLifetime) {
+    auto registry = make_registry(0, 1, "one");
+    EngineResources first_resources;
+    first_resources.registry = registry;
+    auto first = GraphEngine::build(registry_graph(), EngineConfig{}, std::move(first_resources));
+
+    registry->register_type("engine_local_node",
+                            [](const std::string& name, const json&, const NodeContext&) {
+                                return std::make_unique<RegistryProbeNode>(
+                                    name == "one" ? "eleven" : name);
+                            });
+    registry->register_reducer("engine_local_reducer",
+                               [](const json& current, const json& incoming) {
+                                   return current.get<int>() + incoming.get<int>() + 10;
+                               });
+    registry->register_condition("engine_local_condition",
+                                 [](const GraphState&) { return std::string("one"); });
+    EngineResources second_resources;
+    second_resources.registry = registry;
+    auto second = GraphEngine::build(registry_graph(), EngineConfig{}, std::move(second_resources));
+    registry.reset();
+
+    RunConfig run;
+    EXPECT_EQ(first->run(run).channel<std::string>("output"), "one");
+    EXPECT_EQ(second->run(run).channel<std::string>("output"), "eleven");
+    EXPECT_EQ(first->run(run).channel<std::string>("output"), "one");
+}
+
+TEST(EngineResourcesTest, BuiltinSubgraphResolvesNestedNodesInParentRegistry) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "engine_nested_local_node",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<RegistryProbeNode>("one");
+        });
+    json inner = one_node_graph("engine_nested_local_node");
+    json outer = one_node_graph("subgraph");
+    outer["nodes"]["work"]["definition"] = inner;
+    EngineResources resources;
+    resources.registry = registry;
+    auto engine = GraphEngine::build(outer, EngineConfig{}, std::move(resources));
+    registry.reset();
+    EXPECT_EQ(engine->run(RunConfig{}).channel<std::string>("output"), "one");
+}
+
+TEST(EngineResourcesTest, ConcurrentRegistrationSnapshotsKeepFactoryAndSchemaTogether) {
+    GraphRegistry registry;
+    registry.register_type(
+        "engine_mutating_node",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<RegistryProbeNode>("one");
+        },
+        json{{"type", "object"}, {"description", "one"}});
+
+    std::thread writer([&] {
+        for (int i = 0; i < 100; ++i) {
+            const std::string label = i % 2 == 0 ? "eleven" : "one";
+            registry.register_type(
+                "engine_mutating_node",
+                [label](const std::string&, const json&, const NodeContext&) {
+                    return std::make_unique<RegistryProbeNode>(label);
+                },
+                json{{"type", "object"}, {"description", label}});
+        }
+    });
+    for (int i = 0; i < 100; ++i) {
+        auto snapshot = registry.snapshot();
+        auto node = snapshot->create("engine_mutating_node", "work", json::object(), NodeContext{});
+        EXPECT_EQ(snapshot->config_schema("engine_mutating_node")["description"],
+                  node->get_name());
+    }
+    writer.join();
+}
+
+TEST(EngineResourcesTest, ScopedPaletteExcludesGlobalCustomEntriesUnlessOptedIn) {
+    ReducerRegistry::instance().register_reducer(
+        "engine_global_palette_reducer",
+        [](const json&, const json& incoming) { return incoming; });
+    GraphRegistry scoped;
+    scoped.register_reducer("engine_scoped_palette_reducer",
+                            [](const json&, const json& incoming) { return incoming; });
+    scoped.register_type(
+        "llm_call",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<RegistryProbeNode>(name);
+        },
+        json{{"type", "object"}, {"description", "scoped override"}});
+    scoped.register_condition("has_tool_calls",
+                              [](const GraphState&) { return std::string("custom"); });
+    const auto palette = scoped.export_effective_schema();
+    EXPECT_EQ(palette["node_types"]["llm_call"]["description"], "scoped override");
+    EXPECT_FALSE(palette["node_effects"].contains("llm_call"));
+    EXPECT_FALSE(palette["condition_specs"].contains("has_tool_calls"));
+    const auto names = palette["reducers"].get<std::vector<std::string>>();
+    EXPECT_NE(std::find(names.begin(), names.end(), "overwrite"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "engine_scoped_palette_reducer"),
+              names.end());
+    EXPECT_EQ(std::find(names.begin(), names.end(), "engine_global_palette_reducer"),
+              names.end());
+    EXPECT_THROW((void)scoped.reducer("engine_global_palette_reducer"), std::runtime_error);
+    GraphRegistry legacy(GraphRegistry::Fallback::GlobalFallback);
+    EXPECT_NO_THROW((void)legacy.reducer("engine_global_palette_reducer"));
+    const auto legacy_palette = legacy.export_effective_schema();
+    const auto legacy_names = legacy_palette["reducers"].get<std::vector<std::string>>();
+    EXPECT_NE(std::find(legacy_names.begin(), legacy_names.end(),
+                        "engine_global_palette_reducer"), legacy_names.end());
 }
 
 TEST(EngineResourcesTest, RejectsAmbiguousOwnedAndRawToolBindings) {

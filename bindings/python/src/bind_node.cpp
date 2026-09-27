@@ -410,6 +410,18 @@ std::shared_ptr<PyCallable> make_gil_safe(PyCallable&& fn) {
 
 } // namespace
 
+void register_scoped_python_node(graph::GraphRegistry& registry, const std::string& type,
+                                 py::function factory) {
+    auto held = make_gil_safe(std::move(factory));
+    registry.register_type(type,
+        [held](const std::string& name, const json& config,
+               const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
+            py::gil_scoped_acquire g;
+            return std::make_unique<PyGraphNodeOwner>(
+                (*held)(name, json_to_py(config), ctx));
+        });
+}
+
 // Public helper exposed via json_bridge.h. Wraps each item in the
 // list as a unique_ptr<Tool> backed by a PyToolOwner trampoline.
 // Caller (GraphEngine.compile binding) is responsible for transferring

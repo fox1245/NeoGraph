@@ -1170,11 +1170,26 @@ struct EngineResources {
 };
 ```
 
-`ToolSet` is a move-only owner for a fixed tool collection. `GraphRegistry` is
-a per-engine reducer, condition, and node-factory overlay; names absent from the
-overlay fall back to the existing process-global registries. Configure both
-before passing them to `build()` or `link()`. Runtime mutation is intentionally
-not part of the local-registry contract.
+`ToolSet` owns a fixed tool collection. A new `GraphRegistry` accepts
+engine-specific reducer, condition, and node registrations and resolves built-ins
+without setup. It **does not** inherit process-global custom registrations.
+`GraphEngine::build` / `link` copy a synchronized registry snapshot before
+compiling and running; registering again on the original changes only engines
+built afterwards. The engine owns its snapshot, so the original registry may be
+destroyed. Callables themselves must remain thread-safe when shared by
+concurrent runs.
+
+For migration, existing `GraphEngine::compile`, no-registry `build`, and
+`NodeFactory` / `ReducerRegistry` / `ConditionRegistry` singleton registration
+remain supported. To opt a particular registry into the legacy custom-name
+fallback, construct `GraphRegistry{GraphRegistry::Fallback::GlobalFallback}`.
+Its global entries are captured at engine construction; avoid this policy for
+tenant or test isolation. `GraphCompiler::compile_local` and sealed Program
+registries remain exact local-only resolvers (no built-in fallback).
+
+Legacy Python singleton callbacks still look up their names in module-global
+dictionaries at invocation, so replacing such a name can change existing
+legacy engines. Use scoped Python registries for deterministic callbacks.
 
 ### RunConfig
 
@@ -2259,10 +2274,11 @@ public:
 **Header:** `<neograph/graph/loader.h>`
 **Namespace:** `neograph::graph`
 
-Legacy singleton registries for reducers, conditions, and node types. These
-remain the process-global fallback for JSON-driven graph construction. New
-code can pass a `GraphRegistry` through `EngineResources`; its local entries
-take precedence while missing names continue to resolve here.
+`ReducerRegistry`, `ConditionRegistry`, and `NodeFactory` are synchronized
+legacy process-wide convenience APIs. New engines should register on
+`GraphRegistry` and pass it through `EngineResources`: built-ins resolve by
+default, but custom process-global names require explicit `GlobalFallback`.
+Legacy no-registry calls still recognize the singleton registrations.
 
 ### ReducerRegistry
 
@@ -2380,13 +2396,20 @@ visual block editor (NeoGraph Studio, a private companion repo,
 issue #56) — can generate its palette from the engine and never drift
 out of sync.
 
-**Three access paths, one document:**
+**Export the registry used for compilation:**
 
 | From | How |
 |------|-----|
-| C++ | `neograph::graph::NodeFactory::instance().export_schema()` → `json` |
-| CLI | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
-| Python | `neograph_engine.export_schema()` → `dict` |
+| C++ scoped | `registry.export_effective_schema()` (built-ins plus scoped names); `registry.export_schema()` remains exact local-only for sealed Program palettes |
+| C++ legacy | `NodeFactory::instance().export_schema()` |
+| CLI legacy | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
+| Python scoped | `ng.export_schema(registry)` or `registry.export_schema()` |
+| Python legacy | `ng.export_schema()` |
+
+Python: register on `ng.GraphRegistry()` with `register_type`,
+`register_reducer`, or `register_condition`; pass it as
+`ng.GraphEngine.compile(definition, context, registry=registry)`. Re-registering
+the same symbolic name on a different registry never changes the first engine.
 
 **Document shape:**
 

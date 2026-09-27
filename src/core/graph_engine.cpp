@@ -141,6 +141,9 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
         config.node_context.tools = resources.tools.view();
     }
 
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
+    config.node_context.registry = resources.registry;
     const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
     auto topology = GraphCompiler::parse(definition, registry);
 
@@ -183,6 +186,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig co
 std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph   cg,
                                                EngineConfig    config,
                                                EngineResources resources) {
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
     return link_impl(std::move(cg), std::move(config), std::move(resources), true);
 }
 
@@ -205,6 +210,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link(
         throw std::invalid_argument(
             "GraphEngine generation identity must match the compiled graph");
     }
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
     auto engine = link_impl(
         std::move(cg), std::move(config), std::move(resources), true);
     engine->owned_tools_.push_back(
@@ -229,6 +236,9 @@ std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
         config.node_context.tools = resources.tools.view();
     }
 
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
+    config.node_context.registry = resources.registry;
     const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
     report_validation(topology.report(), topology.topology().schema_version);
     auto cg = GraphCompiler::link(std::move(topology).release(),

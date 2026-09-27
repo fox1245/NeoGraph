@@ -17,6 +17,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sync-only stores use `CheckpointStoreCore` plus the bounded-worker adapter.
   Legacy missing sync operations now fail explicitly without changing the
   `CheckpointStore` vtable or checkpoint wire schema.
+- **Engine-scoped graph registries (#218).** `GraphRegistry` defaults to
+  built-ins without process-global custom entries; `GlobalFallback` opts into
+  legacy registrations. Engines snapshot registrations at construction, so
+  later mutations cannot alter running graphs. Python exposes scoped node,
+  reducer, and condition registration, `GraphEngine.compile(..., registry=...)`,
+  and registry-aware topology schema export. Legacy global APIs remain available.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

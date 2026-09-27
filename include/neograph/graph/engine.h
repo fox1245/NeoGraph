@@ -105,10 +105,10 @@ struct EngineConfig {
 /**
  * @brief Owned construction resources layered beside EngineConfig.
  *
- * Kept as a sibling type so the already-public EngineConfig and NodeContext
- * layouts remain unchanged. Empty resources preserve the legacy raw-tool and
- * process-global registry behavior. Move this value into build() or link();
- * ToolSet ownership transfers to the resulting engine.
+ * Empty resources retain the legacy process-global registry path. Supplying
+ * a GraphRegistry selects its built-in + engine-local palette instead; this
+ * registry is snapshotted before compilation, so later registration cannot
+ * affect the resulting engine. ToolSet ownership transfers to the engine.
  */
 struct EngineResources {
     ToolSet                              tools;

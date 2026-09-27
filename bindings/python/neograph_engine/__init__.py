@@ -173,10 +173,11 @@ from ._neograph import (
     NodeFactory,
     ReducerRegistry,
     ConditionRegistry,
+    GraphRegistry,
 
     # Topology schema export (issue #56) — drift-proof palette source
-    # for external tooling (the visual block editor). Reflects whatever
-    # is registered in NodeFactory at call time.
+    # without an argument this reflects the legacy process-global palette;
+    # pass a GraphRegistry to export the selected built-in + scoped palette.
     export_schema,
 
     # Engine
@@ -709,6 +710,7 @@ __all__ = [
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",
+    "GraphRegistry",
     "export_schema",
     "node",
     "GraphEngine",

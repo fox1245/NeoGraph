@@ -374,6 +374,8 @@ struct ConditionalEdge {
 /// Reserved route key selected when an open/unspecified condition returns no
 /// exact match. Omitting it makes an unknown label a runtime error.
 constexpr const char* DEFAULT_ROUTE = "default";
+class GraphRegistry;
+
 
 /**
  * @brief Dependency injection context passed to nodes during construction.
@@ -402,6 +404,8 @@ struct NodeContext {
     /// Identity metadata for an admitted Provider requirement. Brokered
     /// Program factories receive this without the executable Provider pointer.
     std::string              provider_name;
+    /// Construction-only registry snapshot inherited by built-in subgraphs.
+    std::shared_ptr<const GraphRegistry> registry;
 };
 
 /**

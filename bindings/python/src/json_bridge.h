@@ -17,6 +17,7 @@
 #include <memory>
 #include <vector>
 
+namespace neograph::graph { class GraphRegistry; }
 namespace neograph::pybind {
 
 namespace py = ::pybind11;
@@ -38,5 +39,8 @@ py::object json_to_py(const neograph::json& j);
 /// the `_pytools` attribute attached to the Python NodeContext wrapper.
 std::vector<std::unique_ptr<neograph::Tool>>
 wrap_python_tools(py::handle tools_list);
+/// Register a Python node factory owned by one engine registry.
+void register_scoped_python_node(graph::GraphRegistry& registry, const std::string& type,
+                                 py::function factory);
 
 } // namespace neograph::pybind

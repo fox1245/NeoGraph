@@ -366,7 +366,10 @@ CompiledGraph GraphCompiler::compile(const json& definition, const NodeContext& 
 CompiledGraph GraphCompiler::compile(const json&          definition,
                                      const NodeContext&   default_context,
                                      const GraphRegistry& registry) {
-    return link(parse(definition, registry), default_context, registry);
+    auto selected = registry.snapshot();
+    NodeContext context = default_context;
+    context.registry = selected;
+    return link(parse(definition, *selected), context, *selected);
 }
 
 CompiledGraph GraphCompiler::compile_local(const json&          definition,
@@ -1014,9 +1017,11 @@ CompiledGraph GraphCompiler::link(TopologySpec         topology,
             edge.routes[detail::kLegacyDefaultRoute] = historical_target;
         }
     }
+    NodeContext context = default_context;
+    if (context.registry.get() != &registry) context.registry = registry.snapshot();
     for (const auto& [name, node_def] : topology.node_defs) {
         const auto type = node_def.value("type", "");
-        cg.nodes[name]  = registry.create(type, name, node_def, default_context);
+        cg.nodes[name]  = registry.create(type, name, node_def, context);
 
         json stored = json::object();
         for (const auto& [key, value] : node_def.items()) {

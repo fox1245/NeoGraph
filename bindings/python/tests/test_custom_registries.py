@@ -18,6 +18,71 @@ import pytest
 
 import neograph_engine as ng
 
+class _ScopedNode(ng.GraphNode):
+    def __init__(self, name, label):
+        super().__init__()
+        self.name = name
+        self.label = label
+
+    def get_name(self):
+        return self.name
+
+    def run(self, input):
+        if self.name == "work":
+            return [ng.ChannelWrite("value", 1)]
+        return [ng.ChannelWrite("result", self.label)]
+
+
+def test_engine_scoped_registries_snapshot_and_schema_export():
+    definition = {
+        "schema_version": 1,
+        "channels": {
+            "value": {"reducer": "scoped_sum", "initial": 0},
+            "result": {"reducer": "overwrite"},
+        },
+        "nodes": {name: {"type": "scoped_node"} for name in ("work", "a", "b")},
+        "edges": [
+            {"from": ng.START_NODE, "to": "work"},
+            {"from": "a", "to": ng.END_NODE},
+            {"from": "b", "to": ng.END_NODE},
+        ],
+        "conditional_edges": [{
+            "from": "work", "condition": "scoped_route", "routes": {"a": "a", "b": "b"}
+        }],
+    }
+
+    def configure(bias, label, route):
+        registry = ng.GraphRegistry()
+        registry.register_type("scoped_node", lambda name, config, ctx: _ScopedNode(name, label))
+        registry.register_reducer("scoped_sum", lambda current, incoming: current + incoming + bias)
+        registry.register_condition("scoped_route", lambda state: route)
+        return registry
+
+    left = configure(0, "left", "a")
+    right = configure(10, "right", "b")
+    left_engine = ng.GraphEngine.compile(definition, ng.NodeContext(), registry=left)
+    right_engine = ng.GraphEngine.compile(definition, ng.NodeContext(), registry=right)
+
+    left_schema = ng.export_schema(left)
+    assert left_schema == left.export_schema()
+    assert "scoped_node" in left_schema["node_types"]
+    assert "scoped_sum" in left_schema["reducers"]
+    assert "scoped_route" in left_schema["conditions"]
+    assert "overwrite" in left_schema["reducers"]
+    assert "scoped_node" not in ng.export_schema()["node_types"]
+    assert "scoped_sum" not in ng.export_schema()["reducers"]
+
+    left.register_type("scoped_node", lambda name, config, ctx: _ScopedNode(name, "mutated"))
+    left.register_reducer("scoped_sum", lambda current, incoming: -999)
+    left.register_condition("scoped_route", lambda state: "b")
+    assert left_engine.run(ng.RunConfig()).output["channels"]["result"]["value"] == "left"
+    assert right_engine.run(ng.RunConfig()).output["channels"]["result"]["value"] == "right"
+    changed_engine = ng.GraphEngine.compile(definition, ng.NodeContext(), registry=left)
+    assert changed_engine.run(ng.RunConfig()).output["channels"]["result"]["value"] == "mutated"
+    del left
+    assert left_engine.run(ng.RunConfig()).output["channels"]["result"]["value"] == "left"
+
+
 
 # --------------------------------------------------------------------- #
 # Custom reducer
