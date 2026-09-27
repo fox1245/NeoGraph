@@ -2508,7 +2508,8 @@ TEST(ProgramRuntimeTest, DurableCoreToolGrantRebindsExactAuthorityAcrossRestart)
         }
     } cleanup{path};
     auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
-    const auto make_policy = [](const ProgramCoreToolGrantRecord& record)
+    const auto effect_broker = std::make_shared<ProgramToolEffectProbe>();
+    const auto make_policy = [effect_broker](const ProgramCoreToolGrantRecord& record)
         -> std::optional<ProgramCoreToolGrant> {
         ProgramCoreToolGrant authorized;
         authorized.owner_scope = record.owner_scope;
@@ -2523,6 +2524,7 @@ TEST(ProgramRuntimeTest, DurableCoreToolGrantRebindsExactAuthorityAcrossRestart)
             co_return neograph::ToolDecision::allow();
         };
         authorized.controller = std::make_shared<neograph::ToolExecutionController>();
+        authorized.effect_broker = effect_broker;
         return authorized;
     };
     fixture.core_tool_grant_resolver =

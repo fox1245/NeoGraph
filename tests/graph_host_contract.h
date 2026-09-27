@@ -240,7 +240,7 @@ struct GraphFixture {
         if (looping) graph["edges"][1]["to"] = "worker";
         if (dependency == "tool_wait") {
             wait_tool = std::make_shared<DependencyTool>(probe);
-            context.tools = {wait_tool.get()};
+            context.tools = ToolSet(std::vector<std::shared_ptr<Tool>>{wait_tool});
             graph["nodes"]["tool"] = {{"type", "tool_dispatch"}};
             graph["edges"][1]["to"] = "tool";
             graph["edges"].push_back({{"from", "tool"}, {"to", "__end__"}});
@@ -256,7 +256,7 @@ struct GraphFixture {
             leaf_definition["edges"][1]["to"] = "tool";
             leaf_definition["edges"].push_back({{"from", "tool"}, {"to", "__end__"}});
             NodeContext leaf_context;
-            leaf_context.tools = {tool.get()};
+            leaf_context.tools = ToolSet(std::vector<std::shared_ptr<Tool>>{tool});
             struct OwnedLeaf {
                 std::shared_ptr<PolicyTool> tool;
                 std::shared_ptr<GraphEngine> engine;

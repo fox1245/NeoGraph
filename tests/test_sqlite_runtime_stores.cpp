@@ -613,7 +613,7 @@ TEST(SQLiteToolEffects, StandaloneCoreRunResourcesBrokerReplaysWithoutEngineMuta
     ToolEffectTestFiles files;
     const auto journal_path = files.journal();
     const auto ledger_path = files.ledger();
-    LedgerTool tool("write", ledger_path);
+    auto tool = std::make_shared<LedgerTool>("write", ledger_path);
     graph::NodeFactory::instance().register_type("sqlite_tool_effect_source",
         [](const std::string&, const json&, const graph::NodeContext&) {
             return std::make_unique<ToolEffectAssistantNode>();
@@ -627,7 +627,7 @@ TEST(SQLiteToolEffects, StandaloneCoreRunResourcesBrokerReplaysWithoutEngineMuta
                                 json{{"from", "source"}, {"to", "tools"}},
                                 json{{"from", "tools"}, {"to", "__end__"}}})}};
     graph::NodeContext nodes;
-    nodes.tools = {&tool};
+    nodes.tools = ToolSet(std::vector<std::shared_ptr<Tool>>{tool});
     auto engine = graph::GraphEngine::compile(graph_definition, nodes);
     graph::RunConfig config;
     config.thread_id = "core-thread";
@@ -635,7 +635,7 @@ TEST(SQLiteToolEffects, StandaloneCoreRunResourcesBrokerReplaysWithoutEngineMuta
     metadata.owner_scope = "tenant";
     metadata.run_id = "standalone-core-run";
     auto broker = std::make_shared<SQLiteToolEffectBroker>(
-        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{tool.get(), "sdk-build:v1"}});
     graph::RunResources resources;
     resources.tool_effect_broker = broker;
     resources.tool_effect_grant = {"", "standalone-operation", "host-grant", 1};
@@ -644,7 +644,7 @@ TEST(SQLiteToolEffects, StandaloneCoreRunResourcesBrokerReplaysWithoutEngineMuta
     EXPECT_EQ(LedgerTool::count(ledger_path), 1);
     broker.reset();
     resources.tool_effect_broker = std::make_shared<SQLiteToolEffectBroker>(
-        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{tool.get(), "sdk-build:v1"}});
     resources.tool_effect_grant.attempt = 2;
     const auto replay = async::run_sync(engine->run_async(config, metadata, resources));
     EXPECT_FALSE(replay.interrupted);

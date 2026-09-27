@@ -619,7 +619,7 @@ void GraphEngine::update_state_writes(
     const std::string& thread_id,
     const std::vector<ChannelWrite>& channel_writes,
     const std::string& as_node) {
-    AdministrationGuard guard(*this);
+    AdministrationGuard admin_guard(*this);
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot update_state: no checkpoint store configured");
 
@@ -633,9 +633,9 @@ void GraphEngine::update_state_writes(
     state.restore_checkpoint(cp.channel_values, checkpoint_ephemeral_guard(cp.metadata));
 
     state.apply_writes(channel_writes);
-    const auto guard = state.ephemeral_checkpoint_guard();
-    if (!guard.is_null()) {
-        for (const auto& [name, written] : guard.items()) {
+    const auto ephemeral_guard = state.ephemeral_checkpoint_guard();
+    if (!ephemeral_guard.is_null()) {
+        for (const auto& [name, written] : ephemeral_guard.items()) {
             if (written == true)
                 throw std::runtime_error("Cannot update checkpoint with ephemeral channel write: " +
                                          name);
@@ -646,7 +646,8 @@ void GraphEngine::update_state_writes(
     new_cp.id              = Checkpoint::generate_id();
     new_cp.thread_id       = thread_id;
     new_cp.channel_values  = state.serialize();
-    if (!guard.is_null()) new_cp.metadata["_neograph_ephemeral_guard"] = guard;
+    if (!ephemeral_guard.is_null())
+        new_cp.metadata["_neograph_ephemeral_guard"] = ephemeral_guard;
     new_cp.parent_id       = cp.id;
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
     new_cp.next_nodes      = cp.next_nodes;

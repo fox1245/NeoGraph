@@ -44,8 +44,6 @@ struct ProgramCoreToolGrant {
     std::shared_ptr<ToolExecutionController> controller;
     /// Required host-owned per-call effect journal for a mediated Program Tool grant.
     std::shared_ptr<ToolEffectBroker> effect_broker;
-    /// Exact admitted executable binding; validated by Program's grant resolver.
-    std::string binding_fingerprint;
 };
 
 using ProgramCoreToolGrantResolver =

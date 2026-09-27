@@ -689,20 +689,6 @@ TEST(EngineResourcesTest, ScopedPaletteExcludesGlobalCustomEntriesUnlessOptedIn)
                         "engine_global_palette_reducer"), legacy_names.end());
 }
 
-TEST(EngineResourcesTest, RejectsAmbiguousOwnedAndRawToolBindings) {
-    EngineConfig   config;
-    OwnedProbeTool raw_tool;
-    config.node_context.tools = {&raw_tool};
-
-    std::vector<std::unique_ptr<Tool>> tools;
-    tools.push_back(std::make_unique<OwnedProbeTool>());
-    EngineResources resources;
-    resources.tools = ToolSet(std::move(tools));
-
-    EXPECT_THROW(
-        (void)GraphEngine::build(one_node_graph("unused"), std::move(config), std::move(resources)),
-        std::invalid_argument);
-}
 
 TEST(EngineResourcesTest, RejectsAmbiguousOwnedToolBindings) {
     EngineConfig config;

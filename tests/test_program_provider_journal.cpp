@@ -353,11 +353,11 @@ TEST(ProgramProviderJournal, BuiltInReActSecondTurnGetsNewSlotAfterToolObservati
     Database db("react");
     Journal journal(db.path);
     auto provider = std::make_shared<ReactTransport>();
-    ObservationTool tool;
+    auto       tool     = std::make_shared<ObservationTool>();
     NodeContext nodes;
     nodes.provider = provider;
     nodes.model = "model";
-    nodes.tools = {&tool};
+    nodes.tools = ToolSet(std::vector<std::shared_ptr<Tool>>{tool});
     const json definition{
         {"name", "provider-journal-react"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
