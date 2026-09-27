@@ -8,6 +8,14 @@ MCPError::MCPError(int code, std::string message, json data)
   , data_(std::move(data))
 {
 }
+MCPTransportError::MCPTransportError(MCPFailure failure, std::string message,
+                                     int http_status)
+  : std::runtime_error(std::move(message))
+  , failure_(failure)
+  , http_status_(http_status)
+{
+}
+
 
 InitializeResult InitializeResult::from_json(const json& value) {
     if (!value.is_object()) {

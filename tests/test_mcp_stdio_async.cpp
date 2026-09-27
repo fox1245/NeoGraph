@@ -1,21 +1,13 @@
-// Wire-protocol coverage for the MCPClient stdio transport after
-// Stage 3 / Semester 2.7.
-//
-// detail::StdioSession now exposes rpc_call_async() that drives the
-// subprocess pipes through asio::posix::stream_descriptor instead of
-// blocking ::read/::write. The sync rpc_call() path is unchanged
-// (still mutex+blocking I/O for callers that want the simple shape).
-// MCPClient::rpc_call_async stdio branch routes to the new async
-// path so a single io_context can multiplex many MCP servers without
-// dedicating a thread per session.
-//
-// Test fixture: a minimal stdlib-only Python script
-// (tests/fixtures/mcp_stdio_echo.py) implements just enough JSON-RPC
-// to round-trip initialize + tools/list + tools/call. It avoids
-// fastmcp so the test runs anywhere Python 3 is installed.
+// End-to-end MCP protocol + stdio transport coverage. The protocol
+// session owns JSON-RPC envelopes, initialization and tool adaptation.
+// The stdio transport owns subprocess pipes, response-id demultiplexing,
+// cancellation, and shutdown. Fixtures are real stdlib-only Python
+// servers, with no third-party MCP dependency.
 
 #include <gtest/gtest.h>
 #include <neograph/mcp/client.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -29,7 +21,15 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <string>
+#include <cerrno>
+#include <thread>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 using namespace neograph;
 
@@ -70,11 +70,7 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
     ASSERT_TRUE(std::filesystem::exists(fixture))
         << "fixture missing: " << fixture;
 
-    // io_context before client: the session caches AsyncHandle
-    // wrappers whose destructors need the executor's services still
-    // alive. Declaration order here -> reverse-destruction puts client
-    // (and its session) away FIRST, then io, so the cached wrappers
-    // unregister from a live IOCP/epoll service.
+    // The stdio transport owns its io_context independently of this caller.
     asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
 
@@ -96,26 +92,15 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
 }
 
 TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionCompleteSafely) {
-    // Awaitable-mutex regression (Sem 4 follow-up). Before the lock
-    // migrated off std::mutex, two coroutines on the same single-
-    // threaded io_context calling the same session would deadlock:
-    // the second's lock_guard blocked the worker the first needed
-    // to drive its async read completions. Now the channel-backed
-    // lock lets the second suspend cooperatively.
-    //
-    // Three concurrent rpc_call_async invocations — if the lock
-    // worked, all three complete; if it deadlocked, io.run() never
-    // returns (test harness would hang and time out). We also
-    // assert they all got valid results.
+    // The write semaphore protects frames only; one reader routes concurrent
+    // replies by id without blocking the caller's single-threaded io_context.
     if (!python3_available()) {
         GTEST_SKIP() << "python3 not available";
     }
     auto fixture = fixture_path();
     ASSERT_TRUE(std::filesystem::exists(fixture));
 
-    // Same declaration-order constraint as above: io before client so
-    // the session's cached AsyncHandle wrappers tear down against a
-    // live executor.
+    // Caller context and session context have independent lifetimes.
     asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
     std::atomic<int> done{0};
@@ -158,10 +143,7 @@ TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionCompleteSafely) {
 }
 
 TEST(MCPStdioAsync, SyncFacadeStillWorksAlongsideAsync) {
-    // The sync rpc_call() path was left intact (Sem 2.7 only added the
-    // async peer). Verify a sync initialize+get_tools+call_tool still
-    // works end-to-end against the same fixture so existing examples
-    // that haven't migrated stay green.
+    // Sync calls bridge through the same session-owned async transport.
     if (!python3_available()) {
         GTEST_SKIP() << "python3 not available";
     }
@@ -177,6 +159,27 @@ TEST(MCPStdioAsync, SyncFacadeStillWorksAlongsideAsync) {
     auto out = client.call_tool("echo", json{{"msg", "hello"}});
     EXPECT_TRUE(out.is_object());
     ASSERT_TRUE(out.contains("content"));
+}
+
+TEST(MCPStdioAsync, SyncAndAsyncCallsShareOneCorrelationReader) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    auto fixture = fixture_path().parent_path() / "mcp_stdio_slow.py";
+    ASSERT_TRUE(std::filesystem::exists(fixture));
+    mcp::MCPClient client({python_cmd(), fixture.string()});
+    ASSERT_TRUE(client.initialize());
+    json slow{{"name", "echo"},
+              {"arguments", {{"marker", "async"}, {"delay_ms", 75}}}};
+    auto future = std::async(std::launch::async, [&] {
+        return async::run_sync(client.rpc_call_async("tools/call", slow));
+    });
+    auto sync = client.call_tool("echo", json{{"marker", "sync"}});
+    auto asynchronous = future.get();
+    auto marker = [](const json& result) {
+        return json::parse(result.at("content").at(0).at("text").get<std::string>())
+            .at("args").at("marker").get<std::string>();
+    };
+    EXPECT_EQ(marker(sync), "sync");
+    EXPECT_EQ(marker(asynchronous), "async");
 }
 
 TEST(MCPStdioAsync, ConcurrentStdioCallsOverlapIO) {
@@ -266,3 +269,147 @@ TEST(MCPStdioAsync, ConcurrentStdioCallsOverlapIO) {
         << "calls did not overlap: wall=" << wall_ms
         << "ms, serial floor=" << (kN * kDelayMs) << "ms";
 }
+
+TEST(MCPStdioAsync, TimeoutAndCancellationDoNotCorruptLaterCorrelation) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    auto fixture = fixture_path().parent_path() / "mcp_stdio_slow.py";
+    ASSERT_TRUE(std::filesystem::exists(fixture));
+    mcp::MCPClient client({python_cmd(), fixture.string()});
+    ASSERT_TRUE(client.initialize());
+
+    json slow{{"name", "echo"},
+              {"arguments", {{"marker", "late"}, {"delay_ms", 200}}}};
+    json fast{{"name", "echo"}, {"arguments", {{"marker", "next"}}}};
+    try {
+        async::run_sync(client.rpc_call_async(
+            "tools/call", slow,
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(25)));
+        FAIL() << "expected stdio deadline";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::timeout);
+    }
+
+    auto cancel = std::make_shared<graph::CancelToken>();
+    std::jthread stop([cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        cancel->cancel();
+    });
+    try {
+        async::run_sync(client.rpc_call_async(
+            "tools/call", slow, std::chrono::steady_clock::time_point::max(), cancel));
+        FAIL() << "expected stdio cancellation";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::cancelled);
+    }
+
+    auto result = async::run_sync(client.rpc_call_async("tools/call", fast));
+    auto payload = json::parse(result.at("content").at(0).at("text").get<std::string>());
+    EXPECT_EQ(payload.at("args").at("marker"), "next");
+    std::this_thread::sleep_for(std::chrono::milliseconds(230));
+    auto again = async::run_sync(client.rpc_call_async("tools/call", fast));
+    EXPECT_EQ(json::parse(again.at("content").at(0).at("text").get<std::string>())
+                  .at("args").at("marker"), "next");
+}
+
+TEST(MCPStdioAsync, ToolRetainsProcessUntilLastOwnerReleasesIt) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    auto fixture = fixture_path().parent_path() / "mcp_stdio_slow.py";
+    ASSERT_TRUE(std::filesystem::exists(fixture));
+    std::vector<std::unique_ptr<Tool>> tools;
+    int pid = -1;
+    {
+        mcp::MCPClient client({python_cmd(), fixture.string()});
+        tools = client.get_tools();
+        ASSERT_EQ(tools.size(), 1u);
+        pid = client.call_tool("echo", json::object()).at("serverPid").get<int>();
+    }
+    auto* tool = dynamic_cast<mcp::MCPTool*>(tools[0].get());
+    ASSERT_NE(tool, nullptr);
+    auto result = tool->execute_result(json::object());
+    EXPECT_EQ(result.raw.at("serverPid"), pid);
+#ifndef _WIN32
+    ASSERT_EQ(::kill(pid, 0), 0);
+#endif
+    tools.clear();
+#ifndef _WIN32
+    errno = 0;
+    EXPECT_EQ(::kill(pid, 0), -1);
+    EXPECT_EQ(errno, ESRCH);
+#endif
+}
+
+TEST(MCPStdioAsync, DeadSubprocessIsAConnectionFailure) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    mcp::MCPClient client({python_cmd(), "-c", "import sys; sys.exit(0)"});
+    try {
+        client.initialize();
+        FAIL() << "expected subprocess EOF";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::connection);
+    }
+    EXPECT_FALSE(client.is_initialized());
+}
+
+TEST(MCPStdioAsync, MalformedSubprocessFrameIsAProtocolFailure) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    mcp::MCPClient client({
+        python_cmd(), "-c",
+        "import sys; sys.stdin.readline(); print('not-json', flush=True)",
+    });
+    try {
+        client.initialize();
+        FAIL() << "expected invalid stdio frame";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
+    }
+}
+
+TEST(MCPStdioAsync, InvalidInitializeResultIsAProtocolFailure) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    mcp::MCPClient client({
+        python_cmd(), "-c",
+        "import sys,json; r=json.loads(sys.stdin.readline()); "
+        "print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{}}),flush=True)",
+    });
+    try {
+        client.initialize();
+        FAIL() << "expected missing initialize fields";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
+    }
+    EXPECT_FALSE(client.is_initialized());
+}
+
+#ifndef _WIN32
+TEST(MCPStdioAsync, SpawnClosesInheritedHighFileDescriptor) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    int pipe_fds[2] = {-1, -1};
+    ASSERT_EQ(::pipe(pipe_fds), 0);
+    struct Fd {
+        int value;
+        ~Fd() { if (value >= 0) ::close(value); }
+    } read_end{pipe_fds[0]}, write_end{pipe_fds[1]};
+    Fd inherited{::fcntl(read_end.value, F_DUPFD, 512)};
+    ASSERT_GE(inherited.value, 512);
+
+    const char* script =
+        "import json,os,sys\n"
+        "fd=int(sys.argv[1])\n"
+        "try:\n"
+        "  os.fstat(fd)\n"
+        "  clean=False\n"
+        "except OSError:\n"
+        "  clean=True\n"
+        "r=json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':"
+        "{'protocolVersion':'2025-11-25','capabilities':{},"
+        "'serverInfo':{'name':'fd-closed' if clean else 'fd-leaked',"
+        "'version':'1'}}}),flush=True)\n"
+        "sys.stdin.readline()\n";
+    mcp::MCPClient client({python_cmd(), "-c", script,
+                           std::to_string(inherited.value)});
+    ASSERT_TRUE(client.initialize());
+    EXPECT_EQ(client.get_initialize_result().server_info.value("name", ""),
+              "fd-closed");
+}
+#endif

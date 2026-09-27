@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 #include <neograph/mcp/client.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -24,6 +26,7 @@
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -175,7 +178,7 @@ TEST(MCPClientAsync, ParsesSseFramedResponse) {
     EXPECT_EQ(result.value("sse", false), true);
 }
 
-TEST(MCPClientAsync, JsonRpcErrorSurfacesAsRuntimeError) {
+TEST(MCPClientAsync, JsonRpcErrorPreservesServerCode) {
     MockMcpServer mock;
     mock.body_template =
         R"({"jsonrpc":"2.0","id":%ID%,"error":{"code":-32601,"message":"method not found"}})";
@@ -184,8 +187,9 @@ TEST(MCPClientAsync, JsonRpcErrorSurfacesAsRuntimeError) {
 
     try {
         client.call_tool("missing", json::object());
-        FAIL() << "expected runtime_error";
-    } catch (const std::runtime_error& e) {
+        FAIL() << "expected MCPError";
+    } catch (const mcp::MCPError& e) {
+        EXPECT_EQ(e.code(), -32601);
         EXPECT_NE(std::string(e.what()).find("method not found"),
                   std::string::npos);
     }
@@ -200,7 +204,8 @@ TEST(MCPClientAsync, RejectsMismatchedJsonRpcResponseId) {
     try {
         client.call_tool("mismatched", json::object());
         FAIL() << "expected mismatched response id to fail";
-    } catch (const std::runtime_error& e) {
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
         EXPECT_NE(std::string(e.what()).find("id does not match"),
                   std::string::npos);
     }
@@ -213,7 +218,13 @@ TEST(MCPClientAsync, NonOkHttpStatusSurfacesAsRuntimeError) {
 
     mcp::MCPClient client(mock.url());
 
-    EXPECT_THROW(client.call_tool("x", json::object()), std::runtime_error);
+    try {
+        client.call_tool("x", json::object());
+        FAIL() << "expected HTTP status error";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::http_status);
+        EXPECT_EQ(e.http_status(), 500);
+    }
 }
 
 TEST(MCPClientAsync, NotFoundDoesNotTerminateAndThrowsRuntimeError) {
@@ -591,7 +602,12 @@ TEST(MCPClientAsync, ConfiguredRequestTimeoutIsEnforced) {
     config.request_timeout = std::chrono::milliseconds(20);
     mcp::MCPClient client(
         "http://127.0.0.1:" + std::to_string(server.port), config);
-    EXPECT_THROW(client.initialize(), std::runtime_error);
+    try {
+        client.initialize();
+        FAIL() << "expected HTTP timeout";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::timeout);
+    }
     EXPECT_FALSE(client.is_initialized());
 
 }
@@ -651,4 +667,129 @@ TEST(MCPClientAsync, FailedInitializationClearsNegotiatedHttpStateBeforeRetry) {
     EXPECT_EQ(initialize_count.load(), 2);
     EXPECT_EQ(notification_count.load(), 2);
     EXPECT_EQ(leaked_state.load(), 0);
+}
+
+TEST(MCPClientAsync, HttpCancellationAndConnectionAreClassified) {
+    httplib::Server svr;
+    svr.Post("/mcp", [](const httplib::Request& req, httplib::Response& res) {
+        auto request = json::parse(req.body);
+        if (request.value("method", "") == "slow") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                             {"result", json::object()}}.dump(), "application/json");
+    });
+    int port = 0;
+    {
+        ServerGuard server(svr);
+        port = server.port;
+        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port));
+        auto cancel = std::make_shared<graph::CancelToken>();
+        std::thread stop([cancel] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            cancel->cancel();
+        });
+        try {
+            async::run_sync(client.rpc_call_async(
+                "slow", json::object(), std::chrono::steady_clock::time_point::max(),
+                cancel));
+            FAIL() << "expected cancellation";
+        } catch (const mcp::MCPTransportError& e) {
+            EXPECT_EQ(e.failure(), mcp::MCPFailure::cancelled);
+        }
+        stop.join();
+    }
+    mcp::MCPClient offline("http://127.0.0.1:" + std::to_string(port));
+    try {
+        async::run_sync(offline.rpc_call_async("ping"));
+        FAIL() << "expected closed endpoint failure";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::connection);
+    }
+}
+
+TEST(MCPClientAsync, ConcurrentHttpRequestsReturnTheirOwnCorrelationIds) {
+    httplib::Server svr;
+    svr.Post("/mcp", [](const httplib::Request& req, httplib::Response& res) {
+        auto request = json::parse(req.body);
+        int marker = request.at("params").at("marker").get<int>();
+        std::this_thread::sleep_for(std::chrono::milliseconds((4 - marker) * 12));
+        res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                             {"result", {{"marker", marker}}}}.dump(),
+                        "application/json");
+    });
+    ServerGuard server(svr);
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+    asio::io_context io;
+    std::array<json, 5> results;
+    std::array<json, 5> params;
+    for (int i = 0; i < 5; ++i) params[i] = json{{"marker", i}};
+    for (int i = 0; i < 5; ++i) {
+        asio::co_spawn(io, [&, i]() -> asio::awaitable<void> {
+            results[i] = co_await client.rpc_call_async("echo", params[i]);
+        }, asio::detached);
+    }
+    io.run();
+    for (int i = 0; i < 5; ++i) {
+        ASSERT_TRUE(results[i].is_object());
+        EXPECT_EQ(results[i].at("marker"), i);
+    }
+}
+
+TEST(MCPClientAsync, DiscoveredToolRetainsHttpSessionAfterClientShutdown) {
+    std::atomic<int> tool_requests{0};
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        auto request = json::parse(req.body);
+        auto method = request.value("method", "");
+        if (method == "notifications/initialized") {
+            res.status = 204;
+            return;
+        }
+        if (method == "tools/call") {
+            EXPECT_EQ(req.get_header_value("Mcp-Session-Id"), "retained-session");
+            EXPECT_EQ(req.get_header_value("MCP-Protocol-Version"), "2025-11-25");
+            ++tool_requests;
+        }
+        json result = json::object();
+        if (method == "initialize") {
+            res.set_header("Mcp-Session-Id", "retained-session");
+            result = {{"protocolVersion", "2025-11-25"},
+                      {"capabilities", json::object()},
+                      {"serverInfo", {{"name", "retained"}, {"version", "1"}}}};
+        } else if (method == "tools/list") {
+            result = {{"tools", json::array({{{"name", "echo"},
+                                               {"inputSchema", {{"type", "object"}}}}})}};
+        } else if (method == "tools/call") {
+            result = {{"content", json::array({{{"type", "text"},
+                                                 {"text", "after-client"}}})}};
+        }
+        res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                             {"result", result}}.dump(), "application/json");
+    });
+    ServerGuard server(svr);
+    std::unique_ptr<Tool> tool;
+    {
+        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+        auto discovered = client.get_tools();
+        ASSERT_EQ(discovered.size(), 1u);
+        tool = std::move(discovered.front());
+    }
+    auto* remote = dynamic_cast<mcp::MCPTool*>(tool.get());
+    ASSERT_NE(remote, nullptr);
+    auto result = remote->execute_result(json::object());
+    EXPECT_EQ(result.content.at(0).at("text"), "after-client");
+    EXPECT_EQ(tool_requests.load(), 1);
+}
+
+TEST(MCPClientAsync, InvalidToolPageIsAProtocolFailure) {
+    MockMcpServer mock;
+    mock.body_template = R"({"jsonrpc":"2.0","id":%ID%,"result":{}})";
+    mcp::MCPClient client(mock.url());
+    try {
+        client.list_tools();
+        FAIL() << "expected invalid tools/list page";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
+    }
 }

@@ -42,6 +42,23 @@ class NEOGRAPH_API MCPError : public std::runtime_error {
     int  code_;
     json data_;
 };
+/// Transport and wire failures have one classification on both HTTP and stdio.
+/// A JSON-RPC error response is instead MCPError, preserving its server code.
+enum class MCPFailure {
+    connection, timeout, cancelled, shutdown, http_status, protocol
+};
+
+class NEOGRAPH_API MCPTransportError : public std::runtime_error {
+  public:
+    MCPTransportError(MCPFailure failure, std::string message, int http_status = 0);
+    MCPFailure failure() const noexcept { return failure_; }
+    int http_status() const noexcept { return http_status_; }
+
+  private:
+    MCPFailure failure_;
+    int http_status_;
+};
+
 
 struct NEOGRAPH_API InitializeResult {
     std::string protocol_version;

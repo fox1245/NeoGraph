@@ -2453,25 +2453,18 @@ set_path(data, "metadata.version", 2);
 Model Context Protocol (MCP) クライアント実装です。MCP サーバーに接続し、利用可能なツールを検出して、
 利用できるトランスポートは 2 つです:
 - **HTTP** — `MCPClient("http://host:port")`。検出されたツールは、元の Streamable HTTP セッションを保持します。
-- **stdio** — `MCPClient({"python", "server.py"})`。クライアントはサブプロセスを `fork` + `execvp` し、双方向パイプを接続して、
+- **stdio** — `MCPClient({"python", "server.py"})`。クライアントは `fork` の前に `PATH` を解決し、子プロセスで `execve` して双方向パイプを接続します。
   子プロセスの stdin/stdout 上で通信します。サブプロセスは、
   生成元の `MCPClient` またはいずれかの `MCPTool` が生存する間だけ存在します。
   破棄時には SIGTERM を送り、`waitpid` で回収します (約 500 ms 後に SIGKILL へフォールバック)。
 ### MCPTool
-単一の MCP サーバーツールをローカル `Tool` 実装としてラップします。トランスポートごとに 1 つずつ、2 つのコンストラクターがあります。
-トランスポートごとに 1 つずつコンストラクターがあり、`MCPClient::get_tools()` が適切なものを選びます。
+単一の MCP サーバーツールをローカル `Tool` 実装としてラップします。検出されたツールは
+トランスポートによらず、元のプロトコルセッションを保持します。
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -2525,7 +2518,7 @@ Round 3 の仕様に整合)、stdio トランスポートは同じバージョ�
 | メソッド | 説明 |
 |--------|-------------|
 | `MCPClient(url)` | HTTP モードのクライアントを構築 |
-| `MCPClient(argv)` | サブプロセスを起動して stdio モードのクライアントを構築。`argv[0]` は `PATH` で解決 (execvp)。fork/exec 失敗時は例外。安全対策 (Round 3 強化) のため Windows の `.bat` / `.cmd` は拒否 |
+| `MCPClient(argv)` | サブプロセスを起動して stdio モードのクライアントを構築。`argv[0]` は fork 前に `PATH` で解決し、exec 失敗は最初の RPC で接続エラーになります。安全対策のため Windows の `.bat` / `.cmd` は拒否 |
 | `initialize(client_name)` | MCP 初期化ハンドシェイクを 1 回実行。再呼び出しは冪等で、プロトコル/トランスポート失敗時は例外 |
 | `get_initialize_result()` | ネゴシエートしたプロトコル、機能、サーバー情報、指示、未加工の結果を返す |
 | `list_tools(cursor)` | カーソルを不透明な値として扱い、1 ページを取得 |
@@ -2543,10 +2536,10 @@ auto tools = client.get_tools();
 
 **stdio の使用方法:**
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

@@ -2841,28 +2841,21 @@ Model Context Protocol（MCP）客户端实现。它连接 MCP 服务器、发�
 
 - **HTTP** — `MCPClient("http://host:port")`. 已发现的工具会保留其来源 Streamable HTTP 会话，包括 `Mcp-Session-Id`、协商的
   协议版本、超时设置和自定义头。
-- **stdio** — `MCPClient({"python", "server.py"})`. 客户端对
-  子进程执行 `fork`+`execvp`，连接双向管道，并通过子进程 stdin/stdout 交换换行分隔的
+- **stdio** — `MCPClient({"python", "server.py"})`。客户端在 `fork` 前解析 `PATH`，
+  子进程通过 `execve` 启动，并连接双向管道以通过 stdin/stdout 交换换行分隔的
   JSON-RPC。只要 `MCPClient` 或其生成的任意 `MCPTool` 存在，子进程就会持续运行；
   析构时发送 SIGTERM，并通过 `waitpid` 回收（约 500 ms 后回退到 SIGKILL）。
 
 ### MCPTool
 
-将单个 MCP 服务器工具包装为本地 `Tool` 实现。每种传输方式各有一个
-构造函数；`MCPClient::get_tools()` 会选择正确的构造函数。
+将单个 MCP 服务器工具包装为本地 `Tool` 实现。已发现的工具会保留其来源
+协议会话，与传输方式无关。
 
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -2923,7 +2916,7 @@ public:
 | 方法 | 描述 |
 |--------|-------------|
 | `MCPClient(url)` | 构造 HTTP 模式客户端 |
-| `MCPClient(argv)` | 生成子进程并构造 stdio 模式客户端。 `argv[0]` 通过 `PATH`（execvp）解析。fork/exec 失败时抛出异常。为安全起见拒绝 Windows `.bat`/`.cmd`（Round 3 加固） |
+| `MCPClient(argv)` | 生成子进程并构造 stdio 模式客户端。`argv[0]` 在 fork 前通过 `PATH` 解析；exec 失败将在首次 RPC 中表现为连接错误。为安全起见拒绝 Windows `.bat`/`.cmd` |
 | `initialize(client_name)` | 执行一次 MCP 初始化握手。重复调用幂等；协议或传输失败会抛出异常 |
 | `get_initialize_result()` | 返回协商后的协议、能力、服务器信息、说明和原始结果 |
 | `list_tools(cursor)` | 获取一页结果，并将游标视为不透明值 |
@@ -2944,10 +2937,10 @@ auto tools = client.get_tools();
 **stdio 用法：**
 
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

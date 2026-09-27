@@ -61,6 +61,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   creation-time diagnostics. Python registration remains intentionally
   unsupported, and shared-library loading is documented as a possible linked
   ABI arrangement rather than an implemented dynamic plugin system.
+- **Transport-independent MCP protocol sessions.** HTTP and subprocess stdio
+  now share JSON-RPC correlation, initialization, tool discovery, and tool
+  adaptation while retaining separate transport ownership. Added typed
+  `MCPTransportError` categories for connection, deadline, cancellation,
+  shutdown, HTTP status, and invalid wire responses; JSON-RPC server errors
+  continue to expose `MCPError` codes. stdio sync and async calls now share
+  its session-owned I/O path and support concurrent calls after cancellation.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

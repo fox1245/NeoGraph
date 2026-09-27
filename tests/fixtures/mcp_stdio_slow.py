@@ -9,6 +9,7 @@ client that serialises the round trip sees wall ≈ sum(delay).
 
 Pure stdlib so it runs anywhere Python 3 is installed.
 """
+import os
 import json
 import sys
 import threading
@@ -44,6 +45,7 @@ def handle_call(rid, params):
                     "args": args,
                 }),
             }],
+            "serverPid": os.getpid(),
         },
     })
 
@@ -67,6 +69,15 @@ def handle(req):
         })
         return
 
+    if method == "tools/list":
+        reply({
+            "jsonrpc": "2.0", "id": rid,
+            "result": {"tools": [{
+                "name": "echo", "description": "Echo with a delay",
+                "inputSchema": {"type": "object"},
+            }]},
+        })
+        return
     if method == "tools/call":
         # Off-thread so sibling calls overlap their sleeps.
         threading.Thread(target=handle_call, args=(rid, params),

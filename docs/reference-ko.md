@@ -2946,29 +2946,22 @@ Two transports are available:
 - **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
   originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
   protocol version, timeout, and custom headers.
-- **stdio** — `MCPClient({"python", "server.py"})`. The client `fork`+`execvp`s the
-  subprocess, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
+- **stdio** — `MCPClient({"python", "server.py"})`. The client resolves `PATH`
+  before `fork`, executes with `execve`, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
   over the child's stdin/stdout. The subprocess lives as long as the
   `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
   reaps via `waitpid` (SIGKILL fallback after ~500 ms).
 
 ### MCPTool
 
-Wraps a single MCP server tool as a local `Tool` implementation. Two
-constructors, one per transport; `MCPClient::get_tools()` picks the right one.
+Wraps a single MCP server tool as a local `Tool` implementation. Discovered
+tools retain their originating protocol session, regardless of transport.
 
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -3030,7 +3023,7 @@ versions may reject these requests — pin server-side or upgrade.
 | Method | Description |
 |--------|-------------|
 | `MCPClient(url)` | Construct an HTTP-mode client |
-| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
+| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved through `PATH` before fork; failed exec surfaces as a connection error on first RPC. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
 | `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
 | `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
 | `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
@@ -3051,10 +3044,10 @@ auto tools = client.get_tools();
 **stdio usage:**
 
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

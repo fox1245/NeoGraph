@@ -25,8 +25,8 @@
 #  include <windows.h>
 #else
 #  include <asio/posix/stream_descriptor.hpp>
-#  include <dirent.h>
 #  include <fcntl.h>
+#  include <pthread.h>
 #  include <signal.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
@@ -37,6 +37,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cstdlib>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -50,33 +51,38 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <unordered_map>
 
 namespace neograph::mcp {
 
 namespace {
-json extract_rpc_result(const json& response, int expected_id,
-                        std::string_view transport) {
-    const std::string prefix = "MCP " + std::string(transport) + " RPC";
-    if (!response.is_object() || response.value("jsonrpc", "") != "2.0") {
-        throw std::runtime_error(prefix + " response is not a JSON-RPC 2.0 object");
+json extract_rpc_result(const json& response, int expected_id) {
+    constexpr auto prefix = "MCP JSON-RPC";
+    if (!response.is_object() || !response.contains("jsonrpc")
+        || !response["jsonrpc"].is_string() || response["jsonrpc"] != "2.0") {
+        throw MCPTransportError(MCPFailure::protocol,
+                                "MCP JSON-RPC response is not a JSON-RPC 2.0 object");
     }
     if (!response.contains("id") || response["id"] != expected_id) {
-        throw std::runtime_error(prefix + " response id does not match the request");
+        throw MCPTransportError(MCPFailure::protocol,
+                                "MCP JSON-RPC response id does not match the request");
     }
     const bool has_result = response.contains("result");
     const bool has_error = response.contains("error");
     if (has_result == has_error) {
-        throw std::runtime_error(
-            prefix + " response must contain exactly one of result or error");
+        throw MCPTransportError(MCPFailure::protocol,
+                                "MCP JSON-RPC response must contain exactly one of result or error");
     }
     if (has_error) {
         const auto& error = response["error"];
-        if (!error.is_object()) {
-            throw std::runtime_error(prefix + " error must be an object");
+        if (!error.is_object() || !error.value("code", json()).is_number_integer()
+            || !error.value("message", json()).is_string()) {
+            throw MCPTransportError(MCPFailure::protocol,
+                                    "MCP JSON-RPC error must contain integer code and string message");
         }
-        throw MCPError(error.value("code", -32603),
-                       prefix + " error: " + error.value("message", "unknown"),
+        throw MCPError(error["code"].get<int>(),
+                       std::string(prefix) + " error: " + error["message"].get<std::string>(),
                        error.value("data", json(nullptr)));
     }
     return response["result"];
@@ -99,30 +105,44 @@ asio::awaitable<void> wait_for_rpc_bound(
     std::chrono::steady_clock::time_point deadline,
     const std::shared_ptr<graph::CancelToken>& cancel_token) {
     if (cancel_token && cancel_token->is_cancelled()) {
-        throw std::runtime_error("MCP RPC cancelled");
+        throw MCPTransportError(MCPFailure::cancelled, "MCP RPC cancelled");
     }
     if (deadline <= std::chrono::steady_clock::now()) {
-        throw std::runtime_error("MCP RPC deadline elapsed");
+        throw MCPTransportError(MCPFailure::timeout, "MCP RPC deadline elapsed");
     }
-    throw std::runtime_error("MCP RPC bounds waiter completed unexpectedly");
+    throw MCPTransportError(MCPFailure::shutdown,
+                            "MCP RPC bounds waiter completed unexpectedly");
 }
 } // namespace
 
-// ===========================================================================
-// detail::StdioSession — subprocess-backed JSON-RPC channel
-// ===========================================================================
-//
-// Platform-split implementation:
-//   POSIX: fork+execvp spawn, anonymous pipe fds, asio::posix::stream_descriptor.
-//   Win32: CreateProcess spawn, named pipe with FILE_FLAG_OVERLAPPED,
-//          asio::windows::stream_handle.
-//
-// The public surface (spawn / rpc_call / rpc_call_async / notify) is
-// identical; members diverge where the handle type does. Members are
-// commented by platform below.
+// HTTP and subprocess transports implement the same frame exchange contract.
+// Only the protocol session interprets JSON-RPC messages and MCP tool results.
+// POSIX resolves PATH before fork and uses execve with subprocess pipes;
+// Windows uses CreateProcess and asio::windows::stream_handle.
 namespace detail {
 
-class HttpSession {
+// A transport owns its connection-specific state. The protocol layer owns
+// request envelopes, response validation, initialization, and tool semantics.
+// Correlation is performed by each transport using the envelope's id.
+struct TransportCapabilities {
+    bool concurrent_requests;
+    bool cancellation;
+    bool deadlines;
+};
+
+class Transport {
+public:
+    virtual ~Transport() = default;
+    virtual TransportCapabilities capabilities() const noexcept = 0;
+    virtual asio::awaitable<json> exchange(
+        json request, std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token) = 0;
+    virtual asio::awaitable<void> notify(json notification) = 0;
+    virtual void negotiated_version(const std::string&) {}
+    virtual void reset() {}
+};
+
+class HttpSession final : public Transport {
 public:
     HttpSession(std::string url, MCPClientConfig client_config)
       : server_url(std::move(url))
@@ -144,6 +164,23 @@ public:
         }
     }
 
+    TransportCapabilities capabilities() const noexcept override {
+        return {true, true, true};
+    }
+    asio::awaitable<json> exchange(
+        json request, std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token) override;
+    asio::awaitable<void> notify(json notification) override;
+    void negotiated_version(const std::string& version) override {
+        std::lock_guard lk(mu);
+        protocol_version = version;
+    }
+    void reset() override {
+        std::lock_guard lk(mu);
+        session_id.clear();
+        protocol_version.clear();
+    }
+
     std::string server_url;
     async::AsyncEndpoint endpoint;
     std::string path;
@@ -151,7 +188,6 @@ public:
     std::mutex mu;
     std::string session_id;
     std::string protocol_version;
-    int request_id = 0;
 };
 
 class ClientMetadata {
@@ -164,69 +200,71 @@ public:
     InitializeResult initialize_result;
     std::unordered_map<std::string, json> output_schemas;
 };
-
-#ifdef _WIN32
-using NativeHandle = HANDLE;
-using AsyncHandle  = asio::windows::stream_handle;
-#else
-using NativeHandle = int;
-using AsyncHandle  = asio::posix::stream_descriptor;
-#endif
-
-class StdioSession {
+class ProtocolSession {
 public:
-    static std::shared_ptr<StdioSession> spawn(const std::vector<std::string>& argv);
+    explicit ProtocolSession(std::shared_ptr<Transport> transport)
+      : transport_(std::move(transport)) {}
 
-    ~StdioSession();
-
-    // Send a JSON-RPC request, block until the matching response arrives.
-    json rpc_call(const std::string& method, const json& params);
-
-    /// Async variant — wraps the subprocess pipes in
-    /// asio::posix::stream_descriptor for non-blocking I/O. Concurrent
-    /// rpc_call_async() calls on the same session OVERLAP their in-flight
-    /// I/O via a correlation-id demultiplexer: each caller serialises
-    /// only its frame write (a capacity-1 channel held for microseconds),
-    /// registers a response sink keyed by its JSON-RPC id, then awaits
-    /// that sink. A single reader coroutine owns the read side, routing
-    /// each response line to the matching sink. Wall time for N siblings
-    /// is therefore max(latency), not sum — provided the MCP server
-    /// itself processes concurrently (a serial server is the Amdahl floor
-    /// and gains nothing here).
-    ///
-    /// All callers of one session are assumed to share one io_context
-    /// (in practice the engine's), so the reader and the writers run on
-    /// the same executor.
-    ///
-    /// Sync rpc_call() continues to use the std::mutex mtx_ and must
-    /// NOT be mixed with rpc_call_async on the same session (the two
-    /// paths don't know about each other).
+    json rpc_call(const std::string& method, const json& params = json::object());
     asio::awaitable<json> rpc_call_async(
         const std::string& method, const json& params,
         std::chrono::steady_clock::time_point deadline =
             std::chrono::steady_clock::time_point::max(),
         std::shared_ptr<graph::CancelToken> cancel_token = {});
+    bool initialize(const std::string& client_name = "neograph");
+    asio::awaitable<bool> initialize_async(const std::string& client_name = "neograph");
+    bool is_initialized() const noexcept;
+    InitializeResult get_initialize_result() const;
+    ListToolsPage list_tools(const std::optional<std::string>& cursor);
+    asio::awaitable<ListToolsPage> list_tools_async(
+        const std::optional<std::string>& cursor);
+    std::vector<ToolDefinition> get_tool_definitions();
+    json call_tool(const std::string& name, const json& arguments);
+    asio::awaitable<json> call_tool_async(
+        const std::string& name, const json& arguments);
+    CallToolResult call_tool_result(const std::string& name, const json& arguments);
+    asio::awaitable<CallToolResult> call_tool_result_async(
+        const std::string& name, const json& arguments);
 
-    // Send a JSON-RPC notification (no id, no response expected).
-    void notify(const std::string& method, const json& params);
+    std::shared_ptr<Transport> transport_;
+    std::shared_ptr<ClientMetadata> metadata_ = std::make_shared<ClientMetadata>();
+    std::atomic<int> next_id_{0};
+};
+
+
+#ifdef _WIN32
+using AsyncHandle  = asio::windows::stream_handle;
+#else
+using AsyncHandle  = asio::posix::stream_descriptor;
+#endif
+
+class StdioSession final : public Transport {
+public:
+    static std::shared_ptr<StdioSession> spawn(const std::vector<std::string>& argv);
+
+    ~StdioSession();
+
+    TransportCapabilities capabilities() const noexcept override {
+        return {true, true, true};
+    }
+    asio::awaitable<json> exchange(
+        json request, std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token) override;
+    asio::awaitable<void> notify(json notification) override;
 
 private:
     StdioSession() = default;
 
-    /// The actual exchange, running on THIS session's io_context. Parameters by
-    /// value: they live in the coroutine frame, not in the caller's.
-    asio::awaitable<json> do_exchange(std::string method, json params);
-
-    std::string read_line_locked();       ///< caller holds mtx_
-    void write_frame_locked(const json& j); ///< caller holds mtx_
+    /// The actual exchange runs on the session-owned io_context.
+    asio::awaitable<json> do_exchange(json request);
+    asio::awaitable<void> do_notify(json notification);
 
     asio::awaitable<std::string> async_read_line_locked(AsyncHandle& out);
     asio::awaitable<void> async_write_frame_locked(AsyncHandle& in, const json& j);
 
-    /// Demux reader loop. Owns async_out_, reads every response line and
-    /// routes it to the waiter keyed by its JSON-RPC id. Lazily spawned
-    /// while ≥1 call is in flight; exits once no waiters remain so a
-    /// private run_sync io_context can drain and return.
+    /// One reader routes responses by id. It starts when a call is in
+    /// flight, stops after draining all responses, and may remain suspended
+    /// on the pipe after cancellation until a late response or shutdown.
     asio::awaitable<void> run_reader();
 
 #ifdef _WIN32
@@ -239,29 +277,8 @@ private:
     int   stdout_fd_ = -1;  // child  → parent
 #endif
 
-    // ── The session's OWN io_context ────────────────────────────────
-    //
-    // Every piece of asio state below (the pipe descriptors, the write
-    // lock, the reader coroutine) is bound to an executor on first use
-    // and reused on every later call. It used to be the CALLER's
-    // executor, and the header said so:
-    //
-    //     "All callers of one session are assumed to share one
-    //      io_context (in practice the engine's)"
-    //
-    // That was never true. `GraphEngine::run` goes through `run_sync`,
-    // which stands up an io_context for ONE call and destroys it on the
-    // way out. So the second run — or simply the client's destructor —
-    // touched asio state hanging off a destroyed io_context. Without a
-    // sanitizer, in plain C++, that is a core dump.
-    //
-    // Owning the context makes its lifetime the session's, and deletes
-    // the old precondition ("callers must ensure the io_context outlives
-    // the session") rather than restating it. No engine could have
-    // honoured it.
-    //
-    // Declared FIRST so it is destroyed LAST — after the descriptors and
-    // the lock that point into it.
+    // Declared first so the executor outlives every descriptor and channel.
+    // Graph runs may use short-lived caller executors; these pipes must not.
     asio::io_context io_;
     asio::executor_work_guard<asio::io_context::executor_type> io_guard_{
         asio::make_work_guard(io_)};
@@ -270,61 +287,34 @@ private:
 
     /// Stop the worker and drop everything bound to io_, in that order. Called
     /// from both platforms' destructors before the subprocess is reaped.
-    void shutdown_async_io();
+    void shutdown_async_io() noexcept;
+    void run_io();
 
-    std::mutex   mtx_;        ///< sync path serialisation
-    std::string  buffer_;     ///< sync read buffer
-    std::string  abuffer_;    ///< async read buffer (separate to avoid mixing)
-    std::atomic<int> next_id_{0};
+    std::string abuffer_; ///< Pending bytes on the single async reader.
 
-    // Awaitable lock for the async path (Sem 4 follow-up). Capacity-1
-    // channel behaves as a binary semaphore: holder takes the token
-    // via `async_receive`, releases via `try_send`. Second acquirer
-    // suspends cooperatively rather than blocking the worker thread.
+    // Capacity-one channel serializes only frame writes. A waiting writer
+    // suspends cooperatively; it never blocks the transport's I/O thread.
     using AsyncLock = asio::experimental::channel<void(asio::error_code)>;
     std::unique_ptr<AsyncLock> async_lock_;
     std::mutex async_lock_init_mtx_;
 
-    // Cached AsyncHandle wrappers for the async path. Lazy-created on
-    // first rpc_call_async using the caller's executor, then reused
-    // for every subsequent call.
-    //
-    // Why caching, not per-call construction:
-    //   Windows pins the IOCP association on the kernel FILE_OBJECT,
-    //   not on the HANDLE. Once the first call registers a handle
-    //   with the io_context's IOCP, the pipe's FILE_OBJECT is bound
-    //   forever. DuplicateHandle produces a new HANDLE referring to
-    //   the SAME FILE_OBJECT, so re-registering a duplicate in a
-    //   second call returns ERROR_INVALID_PARAMETER (already bound),
-    //   asio::windows::stream_handle's ctor throws, and the coroutine
-    //   dies before reaching any I/O. Caching side-steps this: bind
-    //   once, reuse forever.
-    //
-    //   POSIX is fine either way (epoll is per-fd, not per-file), but
-    //   we cache there too for symmetry and to avoid the per-call
-    //   wrapper churn.
-    //
-    //   We wrap DUPLICATES of the native handles so the session keeps
-    //   ownership of stdin_h_/stdout_h_; the wrappers close the dups
-    //   on their own destruction. Callers must ensure the io_context
-    //   driving rpc_call_async outlives the session (reverse order of
-    //   declaration in tests and call sites).
+    // Cache wrappers bound to the transport executor. Windows associates
+    // the pipe FILE_OBJECT with an IOCP once, so duplicating a handle into a
+    // different context on each call is invalid. Wrappers own duplicates
+    // of the native handles; the session retains the originals.
     std::unique_ptr<AsyncHandle> async_in_;
     std::unique_ptr<AsyncHandle> async_out_;
     std::mutex async_handles_init_mtx_;
 
-    // ── Demux multiplexer ───────────────────────────────────────────
-    // `async_lock_` above is repurposed as a WRITE-ONLY lock (held only
-    // around the frame write). One reader coroutine owns async_out_ and
-    // fans each response to the waiter registered under its JSON-RPC id,
-    // so N in-flight calls overlap their reads instead of serialising
-    // behind one round-trip lock.
+    // One reader fans responses out to id-keyed waiters; calls overlap
+    // their reads rather than serializing entire round trips.
     using RespChan =
         asio::experimental::channel<void(asio::error_code,
                                          std::shared_ptr<json>)>;
-    std::mutex demux_mu_;                                ///< guards the two fields below
-    std::map<int, std::shared_ptr<RespChan>> waiters_;  ///< id → response sink
-    bool reader_running_ = false;                       ///< a run_reader() coroutine is live
+    std::mutex demux_mu_; ///< guards waiters, reader state, and reader failure
+    std::map<int, std::shared_ptr<RespChan>> waiters_;
+    bool reader_running_ = false;
+    std::exception_ptr reader_failure_;
 };
 
 #ifdef _WIN32
@@ -359,7 +349,33 @@ std::string build_win_cmdline(const std::vector<std::string>& argv) {
 // FILE_FLAG_OVERLAPPED (needed for asio::windows::stream_handle) and
 // the child side is a plain inheritable handle. CreatePipe's anonymous
 // pipes don't support overlapped I/O, hence the named-pipe dance.
-struct PipePair { HANDLE parent; HANDLE child; };
+struct PipePair {
+    HANDLE parent = nullptr;
+    HANDLE child = nullptr;
+    PipePair() = default;
+    PipePair(HANDLE p, HANDLE c) : parent(p), child(c) {}
+    PipePair(const PipePair&) = delete;
+    PipePair& operator=(const PipePair&) = delete;
+    PipePair(PipePair&& other) noexcept
+      : parent(std::exchange(other.parent, nullptr))
+      , child(std::exchange(other.child, nullptr)) {}
+    PipePair& operator=(PipePair&& other) noexcept {
+        if (this != &other) {
+            close();
+            parent = std::exchange(other.parent, nullptr);
+            child = std::exchange(other.child, nullptr);
+        }
+        return *this;
+    }
+    void close_child() noexcept {
+        if (child) CloseHandle(std::exchange(child, nullptr));
+    }
+    void close() noexcept {
+        if (parent) CloseHandle(std::exchange(parent, nullptr));
+        close_child();
+    }
+    ~PipePair() { close(); }
+};
 PipePair make_overlapped_pipe(const char* name_prefix, bool parent_reads) {
     static std::atomic<uint64_t> counter{0};
     char name[128];
@@ -394,7 +410,13 @@ PipePair make_overlapped_pipe(const char* name_prefix, bool parent_reads) {
     }
 
     // Parent side must NOT be inherited by the child.
-    SetHandleInformation(parent, HANDLE_FLAG_INHERIT, 0);
+    if (!SetHandleInformation(parent, HANDLE_FLAG_INHERIT, 0)) {
+        DWORD err = GetLastError();
+        CloseHandle(parent);
+        CloseHandle(child);
+        throw std::system_error(static_cast<int>(err),
+            std::system_category(), "SetHandleInformation(parent)");
+    }
     return PipePair{parent, child};
 }
 } // namespace
@@ -404,17 +426,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
         throw std::invalid_argument("StdioSession::spawn: argv is empty");
     }
 
-    // Two pipes: in = parent writes (child reads on stdin),
-    //            out = child writes (parent reads on stdout).
-    PipePair in_p  = make_overlapped_pipe("in",  /*parent_reads=*/false);
-    PipePair out_p;
-    try {
-        out_p = make_overlapped_pipe("out", /*parent_reads=*/true);
-    } catch (...) {
-        CloseHandle(in_p.parent);
-        CloseHandle(in_p.child);
-        throw;
-    }
+    // Reject executable targets before allocating OS handles: failure must not
+    // leave either pipe open or a process partially started.
 
     // Refuse to spawn `.bat` / `.cmd` targets via CreateProcess with
     // a null lpApplicationName. cmd.exe parses CommandLine for those
@@ -423,7 +436,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
     // passed through, which is a command-injection surface (CVE-2024-
     // 1874-class). Callers who genuinely need to launch a batch file
     // should resolve it to its interpreter first (e.g. cmd.exe /c).
-    if (!argv.empty()) {
+    {
         const auto& exe = argv[0];
         if (exe.size() >= 4) {
             std::string ext = exe.substr(exe.size() - 4);
@@ -437,8 +450,9 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
             }
         }
     }
-
     std::string cmdline = build_win_cmdline(argv);
+    PipePair in_p  = make_overlapped_pipe("in",  /*parent_reads=*/false);
+    PipePair out_p = make_overlapped_pipe("out", /*parent_reads=*/true);
 
     STARTUPINFOA si = {};
     si.cb = sizeof(si);
@@ -456,24 +470,27 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
         /*inherit=*/TRUE, /*flags=*/0,
         /*env=*/nullptr, /*cwd=*/nullptr,
         &si, &pi);
-    // Child side handles belong to the child now (inherited) — we can
-    // close our copies regardless of success.
-    CloseHandle(in_p.child);
-    CloseHandle(out_p.child);
+    const DWORD launch_error = ok ? 0 : GetLastError();
+    // Our child-side copies close whether creation succeeds or fails.
+    in_p.close_child();
+    out_p.close_child();
     if (!ok) {
-        DWORD err = GetLastError();
-        CloseHandle(in_p.parent);
-        CloseHandle(out_p.parent);
-        throw std::system_error(static_cast<int>(err),
+        throw std::system_error(static_cast<int>(launch_error),
             std::system_category(), "CreateProcess");
     }
-    CloseHandle(pi.hThread);  // thread handle unused
-
-    auto sess = std::shared_ptr<StdioSession>(new StdioSession());
-    sess->process_  = pi.hProcess;
-    sess->stdin_h_  = in_p.parent;
-    sess->stdout_h_ = out_p.parent;
-    return sess;
+    CloseHandle(pi.hThread);
+    try {
+        auto sess = std::shared_ptr<StdioSession>(new StdioSession());
+        sess->process_ = pi.hProcess;
+        sess->stdin_h_ = std::exchange(in_p.parent, nullptr);
+        sess->stdout_h_ = std::exchange(out_p.parent, nullptr);
+        return sess;
+    } catch (...) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        throw;
+    }
 }
 
 StdioSession::~StdioSession() {
@@ -502,6 +519,40 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
     if (argv.empty()) {
         throw std::invalid_argument("StdioSession::spawn: argv is empty");
     }
+    // Prepare PATH lookup, argv, and the fallback close bound in the parent.
+    // After fork the child may inherit libc locks held by another thread, so
+    // it only uses async-signal-safe syscalls before execve or _Exit.
+    std::vector<char*> cargv;
+    cargv.reserve(argv.size() + 1);
+    for (const auto& arg : argv) cargv.push_back(const_cast<char*>(arg.c_str()));
+    cargv.push_back(nullptr);
+    std::vector<char*> shell_argv;
+    shell_argv.reserve(argv.size() + 2);
+    shell_argv.push_back(const_cast<char*>("sh"));
+    shell_argv.push_back(nullptr); // Selected script path, set in the child.
+    for (size_t i = 1; i < argv.size(); ++i) {
+        shell_argv.push_back(const_cast<char*>(argv[i].c_str()));
+    }
+    shell_argv.push_back(nullptr);
+
+    std::vector<std::string> candidates;
+    if (argv[0].find('/') != std::string::npos) {
+        candidates.push_back(argv[0]);
+    } else {
+        const char* env_path = std::getenv("PATH");
+        const std::string path = env_path ? env_path : "/bin:/usr/bin";
+        for (size_t start = 0; start <= path.size();) {
+            const auto end = path.find(':', start);
+            const auto directory = path.substr(
+                start, end == std::string::npos ? end : end - start);
+            candidates.push_back(directory.empty() ? argv[0]
+                                                    : directory + "/" + argv[0]);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
+    long max_fd = ::sysconf(_SC_OPEN_MAX);
+    if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
 
     int in_pipe[2]  = {-1, -1};  // parent writes → child stdin
     int out_pipe[2] = {-1, -1};  // child stdout → parent reads
@@ -513,81 +564,79 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
     };
 
     if (::pipe(in_pipe) != 0 || ::pipe(out_pipe) != 0) {
+        const int error = errno;
         close_all();
-        throw std::system_error(errno, std::generic_category(), "pipe()");
+        throw std::system_error(error, std::generic_category(), "pipe()");
     }
 
     pid_t pid = ::fork();
     if (pid < 0) {
+        const int error = errno;
         close_all();
-        throw std::system_error(errno, std::generic_category(), "fork()");
+        throw std::system_error(error, std::generic_category(), "fork()");
     }
 
     if (pid == 0) {
         // --- child ---
-        ::dup2(in_pipe[0],  STDIN_FILENO);
-        ::dup2(out_pipe[1], STDOUT_FILENO);
-        // Leave stderr alone so server logs remain visible.
+        if (::dup2(in_pipe[0], STDIN_FILENO) < 0
+            || ::dup2(out_pipe[1], STDOUT_FILENO) < 0) {
+            std::_Exit(127);
+        }
+        // Keep the new stdin/stdout even if pipes reused fd 0/1. Pipe fd 2
+        // must still close if the parent had no stderr descriptor.
+        const int pipes[] = {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1]};
+        for (int fd : pipes) {
+            if (fd != STDIN_FILENO && fd != STDOUT_FILENO) ::close(fd);
+        }
 
-        ::close(in_pipe[0]);  ::close(in_pipe[1]);
-        ::close(out_pipe[0]); ::close(out_pipe[1]);
-
-        // Close every other inherited file descriptor before exec.
-        // Without this, the child inherits whatever the parent had
-        // open: TLS sockets, sqlite/postgres connection fds, asio's
-        // timerfd / eventfd, OpenSSL's RNG fd, etc. — both a resource
-        // leak and a security issue (the spawned MCP server could
-        // read or write the parent's TLS sessions or DB).
-        //
-        // Linux: prefer close_range(3, ~0u, 0) (kernel ≥ 5.9). Fall
-        // back to walking /proc/self/fd. macOS / BSD: closefrom() is
-        // the standard call. We don't enable closefrom on macOS at
-        // build time without a feature probe, so the /proc fallback
-        // is the portable belt-and-braces path.
+        // Close inherited descriptors without opendir/readdir/atoi or
+        // sysconf in the post-fork child. Linux close_range handles even high
+        // descriptors; elsewhere use the bound calculated before fork.
 #if defined(__linux__) && defined(SYS_close_range)
         if (::syscall(SYS_close_range, 3u, ~0u, 0u) != 0) {
 #endif
-        DIR* d = ::opendir("/proc/self/fd");
-        if (d) {
-            int dfd = ::dirfd(d);
-            struct dirent* ent;
-            while ((ent = ::readdir(d)) != nullptr) {
-                if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
-                int fd = std::atoi(ent->d_name);
-                if (fd > 2 && fd != dfd) ::close(fd);
-            }
-            ::closedir(d);
-        } else {
-            // Last-resort sweep — best effort, bounded so a high
-            // RLIMIT_NOFILE doesn't make exec take seconds.
-            int max_fd = static_cast<int>(::sysconf(_SC_OPEN_MAX));
-            if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
             for (int fd = 3; fd < max_fd; ++fd) ::close(fd);
-        }
 #if defined(__linux__) && defined(SYS_close_range)
         }
 #endif
 
-        std::vector<char*> cargv;
-        cargv.reserve(argv.size() + 1);
-        for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
-        cargv.push_back(nullptr);
-
-        ::execvp(cargv[0], cargv.data());
-        // execvp only returns on error.
-        std::fprintf(stderr, "execvp(%s) failed: %s\n", cargv[0], std::strerror(errno));
+        // execvp is not guaranteed async-signal-safe: try the precomputed
+        // PATH candidates with execve, preserving its script fallback.
+        for (const auto& candidate : candidates) {
+            ::execve(candidate.c_str(), cargv.data(), ::environ);
+            const int error = errno;
+            if (error == ENOEXEC) {
+                shell_argv[1] = const_cast<char*>(candidate.c_str());
+                ::execve("/bin/sh", shell_argv.data(), ::environ);
+                break;
+            }
+            if (error == EACCES || error == ENOENT || error == ENOTDIR) continue;
+            break;
+        }
+        constexpr char message[] = "MCP stdio exec failed\n";
+        (void)::write(STDERR_FILENO, message, sizeof(message) - 1);
         std::_Exit(127);
     }
 
     // --- parent ---
     ::close(in_pipe[0]);
+    in_pipe[0] = -1;
     ::close(out_pipe[1]);
+    out_pipe[1] = -1;
 
-    auto sess = std::shared_ptr<StdioSession>(new StdioSession());
-    sess->pid_       = pid;
-    sess->stdin_fd_  = in_pipe[1];
-    sess->stdout_fd_ = out_pipe[0];
-    return sess;
+    try {
+        auto sess = std::shared_ptr<StdioSession>(new StdioSession());
+        sess->pid_       = pid;
+        sess->stdin_fd_  = in_pipe[1];
+        sess->stdout_fd_ = out_pipe[0];
+        return sess;
+    } catch (...) {
+        close_all();
+        ::kill(pid, SIGKILL);
+        int status;
+        while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+        throw;
+    }
 }
 
 StdioSession::~StdioSession() {
@@ -618,161 +667,55 @@ StdioSession::~StdioSession() {
 
 #endif  // _WIN32
 
+void StdioSession::run_io() {
+#ifndef _WIN32
+    // A subprocess may close stdin between calls. On POSIX a pipe write raises
+    // SIGPIPE before asio can surface EPIPE; block it on this dedicated worker
+    // so callers receive a connection error instead of a process-wide signal.
+    sigset_t mask;
+    ::sigemptyset(&mask);
+    ::sigaddset(&mask, SIGPIPE);
+    ::pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+#endif
+    io_.run();
+}
+
 // Tear down the async machinery on the thread that owns it, before anything it
 // points at can go away. Order matters: close the descriptors (which cancels the
 // reader's pending read, letting it finish), release the work guard so io_.run()
 // can return, then join.
-void StdioSession::shutdown_async_io() {
+void StdioSession::shutdown_async_io() noexcept {
     if (!io_thread_.joinable()) {
         io_guard_.reset();
         return;
     }
-    asio::post(io_, [this] {
-        asio::error_code ec;
-        if (async_in_)  async_in_->close(ec);
-        if (async_out_) async_out_->close(ec);
-        if (async_lock_) async_lock_->close();
-        for (auto& kv : waiters_) {
-            if (kv.second) kv.second->close();
-        }
+    bool posted = false;
+    try {
+        asio::post(io_, [this] {
+            asio::error_code ec;
+            if (async_in_)  async_in_->close(ec);
+            if (async_out_) async_out_->close(ec);
+            if (async_lock_) async_lock_->close();
+            for (auto& kv : waiters_) {
+                if (kv.second) kv.second->close();
+            }
+            async_in_.reset();
+            async_out_.reset();
+            async_lock_.reset();
+        });
+        posted = true;
+    } catch (...) {
+        // A destructor cannot let allocation failure from post() escape.
+        // Stop and join the worker before destroying executor-bound handles.
+        io_.stop();
+    }
+    io_guard_.reset();
+    io_thread_.join();
+    if (!posted) {
         async_in_.reset();
         async_out_.reset();
         async_lock_.reset();
-    });
-    io_guard_.reset();
-    io_thread_.join();
-}
-
-void StdioSession::write_frame_locked(const json& j) {
-    std::string line = j.dump();
-    line.push_back('\n');
-
-    const char* p = line.data();
-    size_t      remaining = line.size();
-    while (remaining > 0) {
-#ifdef _WIN32
-        DWORD written = 0;
-        // With an overlapped named pipe, WriteFile(hEvent=nullptr) still
-        // works synchronously on this thread — it just uses the pipe's
-        // internal event. That's fine for the sync path.
-        if (!WriteFile(stdin_h_, p, static_cast<DWORD>(remaining),
-                       &written, nullptr)) {
-            throw std::system_error(static_cast<int>(GetLastError()),
-                std::system_category(), "StdioSession::WriteFile()");
-        }
-        p         += written;
-        remaining -= static_cast<size_t>(written);
-#else
-        ssize_t n = ::write(stdin_fd_, p, remaining);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            throw std::system_error(errno, std::generic_category(),
-                                    "StdioSession::write()");
-        }
-        p         += n;
-        remaining -= static_cast<size_t>(n);
-#endif
     }
-}
-
-std::string StdioSession::read_line_locked() {
-    // Hard cap on a single line. Without this a malicious or buggy
-    // server that never emits a newline would let `buffer_` grow until
-    // the parent OOMs. 16 MB is the same order of magnitude as the
-    // HTTP body limits in async/http_client.h and well above any
-    // legitimate MCP message.
-    constexpr size_t MAX_LINE_BYTES = 16 * 1024 * 1024;
-    while (true) {
-        auto nl = buffer_.find('\n');
-        if (nl != std::string::npos) {
-            std::string line = buffer_.substr(0, nl);
-            buffer_.erase(0, nl + 1);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            return line;
-        }
-        if (buffer_.size() > MAX_LINE_BYTES) {
-            throw std::runtime_error(
-                "StdioSession: incoming line exceeded "
-                + std::to_string(MAX_LINE_BYTES)
-                + " bytes without newline (peer misbehaving)");
-        }
-
-        char tmp[4096];
-#ifdef _WIN32
-        DWORD got = 0;
-        if (!ReadFile(stdout_h_, tmp, static_cast<DWORD>(sizeof(tmp)),
-                      &got, nullptr)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) {
-                throw std::runtime_error(
-                    "StdioSession: child closed stdout");
-            }
-            throw std::system_error(static_cast<int>(err),
-                std::system_category(), "StdioSession::ReadFile()");
-        }
-        if (got == 0) {
-            throw std::runtime_error(
-                "StdioSession: child closed stdout");
-        }
-        buffer_.append(tmp, static_cast<size_t>(got));
-#else
-        ssize_t n = ::read(stdout_fd_, tmp, sizeof(tmp));
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            throw std::system_error(errno, std::generic_category(),
-                                    "StdioSession::read()");
-        }
-        if (n == 0) {
-            throw std::runtime_error("StdioSession: child closed stdout");
-        }
-        buffer_.append(tmp, static_cast<size_t>(n));
-#endif
-    }
-}
-
-json StdioSession::rpc_call(const std::string& method, const json& params) {
-    const int id = ++next_id_;
-
-    json req = {
-        {"jsonrpc", "2.0"},
-        {"id", id},
-        {"method", method},
-        {"params", params}
-    };
-
-    std::lock_guard<std::mutex> lock(mtx_);
-    write_frame_locked(req);
-
-    // Loop: the server may emit server-initiated notifications / log messages
-    // while we wait for the response with matching id. Filter by id.
-    for (int guard = 0; guard < 1024; ++guard) {
-        std::string line = read_line_locked();
-        if (line.empty()) continue;
-
-        json resp;
-        try {
-            resp = json::parse(line);
-        } catch (const std::exception&) {
-            // Non-JSON line (e.g., stray log). Skip.
-            continue;
-        }
-
-        if (!resp.contains("id")) continue;          // notification from server
-        if (resp["id"] != id)     continue;          // response to a prior call?
-
-        return extract_rpc_result(resp, id, "stdio");
-    }
-    throw std::runtime_error("StdioSession::rpc_call: giving up after 1024 lines");
-}
-
-void StdioSession::notify(const std::string& method, const json& params) {
-    json n = {
-        {"jsonrpc", "2.0"},
-        {"method", method},
-        {"params", params}
-    };
-    std::lock_guard<std::mutex> lock(mtx_);
-    write_frame_locked(n);
 }
 
 asio::awaitable<void>
@@ -787,7 +730,7 @@ asio::awaitable<std::string>
 StdioSession::async_read_line_locked(AsyncHandle& out) {
     auto nl = abuffer_.find('\n');
     if (nl == std::string::npos) {
-        asio::streambuf sbuf;
+        asio::streambuf sbuf(16 * 1024 * 1024);
         // Seed asio's streambuf with whatever we already have so
         // async_read_until doesn't re-read those bytes.
         if (!abuffer_.empty()) {
@@ -795,8 +738,17 @@ StdioSession::async_read_line_locked(AsyncHandle& out) {
             os.write(abuffer_.data(), static_cast<std::streamsize>(abuffer_.size()));
             abuffer_.clear();
         }
-        std::size_t n = co_await asio::async_read_until(
-            out, sbuf, '\n', asio::use_awaitable);
+        std::size_t n = 0;
+        try {
+            n = co_await asio::async_read_until(
+                out, sbuf, '\n', asio::use_awaitable);
+        } catch (const std::system_error& e) {
+            if (e.code() == asio::error::not_found) {
+                throw MCPTransportError(
+                    MCPFailure::protocol, "MCP stdio frame exceeds 16 MiB");
+            }
+            throw;
+        }
         // Re-merge into our string buffer so the rest of the trailing
         // bytes (after the newline) are kept for the next call.
         std::string drained(asio::buffers_begin(sbuf.data()),
@@ -806,8 +758,8 @@ StdioSession::async_read_line_locked(AsyncHandle& out) {
         if (nl == std::string::npos) {
             // async_read_until promised a delim was found within `n`
             // bytes; this branch is defensive.
-            throw std::runtime_error(
-                "StdioSession::async_read_line: delimiter missing after "
+            throw MCPTransportError(MCPFailure::protocol,
+                "MCP stdio delimiter missing after "
                 + std::to_string(n) + " bytes");
         }
     }
@@ -824,11 +776,18 @@ asio::awaitable<void> StdioSession::run_reader() {
             std::string line = co_await async_read_line_locked(*async_out_);
             if (!line.empty()) {
                 json resp;
-                bool parsed = true;
-                try { resp = json::parse(line); }
-                catch (const std::exception&) { parsed = false; }
-                if (parsed && resp.contains("id")
-                        && resp["id"].is_number_integer()) {
+                try {
+                    resp = json::parse(line);
+                } catch (const json::parse_error& e) {
+                    throw MCPTransportError(
+                        MCPFailure::protocol,
+                        std::string("MCP stdio response JSON: ") + e.what());
+                }
+                if (!resp.is_object()) {
+                    throw MCPTransportError(MCPFailure::protocol,
+                                            "MCP stdio frame must be a JSON object");
+                }
+                if (resp.contains("id") && resp["id"].is_number_integer()) {
                     const int rid = resp["id"].get<int>();
                     std::shared_ptr<RespChan> chan;
                     {
@@ -861,8 +820,7 @@ asio::awaitable<void> StdioSession::run_reader() {
             if (stop) break;
         }
     } catch (const std::exception&) {
-        // Pipe EOF / read error (e.g. child died): fail every waiter so
-        // awaiting callers throw instead of hanging on a dead server.
+        // Fail all callers on EOF, malformed frames, or broken pipes.
         fail = std::current_exception();
     }
 
@@ -870,6 +828,7 @@ asio::awaitable<void> StdioSession::run_reader() {
         std::map<int, std::shared_ptr<RespChan>> remaining;
         {
             std::lock_guard<std::mutex> lk(demux_mu_);
+            reader_failure_ = fail;
             remaining.swap(waiters_);
             reader_running_ = false;
         }
@@ -893,46 +852,41 @@ asio::awaitable<void> StdioSession::run_reader() {
 // old precondition — "callers must ensure the io_context outlives the session" —
 // is gone rather than merely documented. It was never a precondition an engine
 // could honour.
-asio::awaitable<json> StdioSession::rpc_call_async(
-    const std::string& method, const json& params,
-    std::chrono::steady_clock::time_point deadline,
+asio::awaitable<json> StdioSession::exchange(
+    json request, std::chrono::steady_clock::time_point deadline,
     std::shared_ptr<graph::CancelToken> cancel_token) {
-    // Lazily start the worker. A session that only ever uses the sync path (or
-    // never gets called at all) pays no thread.
-    {
-        std::lock_guard<std::mutex> g(io_thread_mtx_);
-        if (!io_thread_.joinable()) {
-            io_thread_ = std::thread([this] { io_.run(); });
-        }
-    }
-
-    using asio::experimental::awaitable_operators::operator||;
     if ((cancel_token && cancel_token->is_cancelled())
         || deadline <= std::chrono::steady_clock::now()) {
         throw_rpc_bound(deadline, cancel_token);
     }
-    if (deadline == std::chrono::steady_clock::time_point::max() && !cancel_token) {
-        co_return co_await asio::co_spawn(
-            io_.get_executor(), do_exchange(method, params), asio::use_awaitable);
+    // A transport with no requests pays no worker thread.
+    {
+        std::lock_guard<std::mutex> g(io_thread_mtx_);
+        if (!io_thread_.joinable()) {
+            io_thread_ = std::thread([this] { run_io(); });
+        }
     }
-    auto result = co_await (
-        asio::co_spawn(io_.get_executor(), do_exchange(method, params), asio::use_awaitable)
-        || wait_for_rpc_bound(deadline, cancel_token));
-    if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
-    co_return std::get<0>(std::move(result));
+    using asio::experimental::awaitable_operators::operator||;
+    try {
+        if (deadline == std::chrono::steady_clock::time_point::max() && !cancel_token) {
+            co_return co_await asio::co_spawn(
+                io_.get_executor(), do_exchange(std::move(request)), asio::use_awaitable);
+        }
+        auto result = co_await (
+            asio::co_spawn(io_.get_executor(), do_exchange(std::move(request)),
+                           asio::use_awaitable)
+            || wait_for_rpc_bound(deadline, cancel_token));
+        if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
+        co_return std::get<0>(std::move(result));
+    } catch (const std::system_error& e) {
+        throw MCPTransportError(e.code() == asio::error::operation_aborted
+                                    ? MCPFailure::shutdown : MCPFailure::connection,
+                                std::string("MCP stdio transport: ") + e.what());
+    }
 }
 
-asio::awaitable<json>
-StdioSession::do_exchange(std::string method, json params) {
-    const int id = ++next_id_;
-
-    json req = {
-        {"jsonrpc", "2.0"},
-        {"id", id},
-        {"method", method},
-        {"params", params}
-    };
-
+asio::awaitable<json> StdioSession::do_exchange(json request) {
+    const int id = request.at("id").get<int>();
     auto ex = co_await asio::this_coro::executor;
 
     // Lazy-init the WRITE lock on first call (capacity-1 channel = binary
@@ -1020,6 +974,7 @@ StdioSession::do_exchange(std::string method, json params) {
         std::lock_guard<std::mutex> lk(demux_mu_);
         waiters_[id] = chan;
         if (!reader_running_) {
+            reader_failure_ = nullptr;
             reader_running_ = true;
             start_reader = true;
         }
@@ -1049,19 +1004,53 @@ StdioSession::do_exchange(std::string method, json params) {
                 try { ch->try_send(asio::error_code{}); } catch (...) {}
             }
         } wrel{async_lock_.get()};
-        co_await async_write_frame_locked(*async_in_, req);
+        co_await async_write_frame_locked(*async_in_, request);
     }
 
     // Await our response. use_awaitable turns a closed sink (session torn
     // down / server gone) into a thrown system_error.
-    std::shared_ptr<json> respptr =
-        co_await chan->async_receive(asio::use_awaitable);
+    std::shared_ptr<json> respptr;
+    try {
+        respptr = co_await chan->async_receive(asio::use_awaitable);
+    } catch (const std::system_error&) {
+        std::exception_ptr fail;
+        {
+            std::lock_guard<std::mutex> lk(demux_mu_);
+            fail = reader_failure_;
+        }
+        if (fail) std::rethrow_exception(fail);
+        throw;
+    }
 
-    json& resp = *respptr;
-    // Bind to a named local before co_return — dodges the GCC 13
-    // build_special_member_call ICE on co_return of a brace/temp.
-    json result = extract_rpc_result(resp, id, "stdio");
-    co_return result;
+    json response = std::move(*respptr);
+    co_return response;
+}
+
+asio::awaitable<void> StdioSession::notify(json notification) {
+    {
+        std::lock_guard<std::mutex> g(io_thread_mtx_);
+        if (!io_thread_.joinable()) {
+            io_thread_ = std::thread([this] { run_io(); });
+        }
+    }
+    try {
+        co_await asio::co_spawn(
+            io_.get_executor(), do_notify(std::move(notification)), asio::use_awaitable);
+    } catch (const std::system_error& e) {
+        throw MCPTransportError(MCPFailure::connection,
+                                std::string("MCP stdio notification: ") + e.what());
+    }
+}
+
+asio::awaitable<void> StdioSession::do_notify(json notification) {
+    // initialize's request created the handles and write semaphore. Notifications
+    // use that SAME write lock, so an adjacent tool call cannot interleave frames.
+    co_await async_lock_->async_receive(asio::use_awaitable);
+    struct Release {
+        AsyncLock* lock;
+        ~Release() { lock->try_send(asio::error_code{}); }
+    } release{async_lock_.get()};
+    co_await async_write_frame_locked(*async_in_, notification);
 }
 
 } // namespace detail
@@ -1210,37 +1199,13 @@ MCPTool::MCPTool(const std::string& server_url,
                  const std::string& description,
                  const json& input_schema)
   : server_url_(server_url)
-  , http_session_(nullptr)
-  , metadata_(nullptr)
-  , stdio_session_(nullptr)
   , definition_(legacy_definition(name, description, input_schema))
 {
 }
 
-MCPTool::MCPTool(std::shared_ptr<detail::StdioSession> session,
-                 const std::string& name,
-                 const std::string& description,
-                 const json& input_schema)
-  : server_url_()
-  , http_session_(nullptr)
-  , metadata_(nullptr)
-  , stdio_session_(std::move(session))
-  , definition_(legacy_definition(name, description, input_schema))
-{
-}
-
-MCPTool::MCPTool(std::shared_ptr<detail::HttpSession> session,
-                 std::shared_ptr<detail::ClientMetadata> metadata,
+MCPTool::MCPTool(std::shared_ptr<detail::ProtocolSession> session,
                  ToolDefinition definition)
-  : http_session_(std::move(session))
-  , metadata_(std::move(metadata))
-  , definition_(std::move(definition))
-{
-}
-
-MCPTool::MCPTool(std::shared_ptr<detail::StdioSession> session,
-                 ToolDefinition definition)
-  : stdio_session_(std::move(session))
+  : session_(std::move(session))
   , definition_(std::move(definition))
 {
 }
@@ -1256,39 +1221,20 @@ CallToolResult MCPTool::execute_result(const json& arguments) {
 
 asio::awaitable<CallToolResult>
 MCPTool::execute_result_async(const json& arguments) {
-    if (stdio_session_) {
-        json params{{"name", definition_.name}, {"arguments", arguments}};
-        json result = co_await stdio_session_->rpc_call_async("tools/call", params);
-        auto typed = CallToolResult::from_json(result);
-        validate_tool_result(typed, definition_.output_schema);
-        co_return typed;
-    }
-
-    if (http_session_) {
-        auto client = std::unique_ptr<MCPClient>(
-            new MCPClient(http_session_, metadata_));
-        auto typed = co_await client->call_tool_result_async(
+    if (auto session = session_) {
+        auto result = co_await session->call_tool_result_async(
             definition_.name, arguments);
-        co_return typed;
+        validate_tool_result(result, definition_.output_schema);
+        co_return result;
     }
 
-    // HTTP — one ephemeral client per call, driven fully async. Unlike
-    // the old sync path (which spun a private io_context via run_sync
-    // per call and parked a worker thread), this awaits on the caller's
-    // executor, so several sibling tool calls dispatched from one node
-    // keep their HTTP round-trips in flight at the same time.
-    //
-    // Heap-allocate the client: MCPClient holds a std::mutex (non-move,
-    // non-copy), and keeping such an object directly in the coroutine
-    // frame across a co_await trips a GCC 13 codegen ICE
-    // (build_special_member_call). A unique_ptr in the frame sidesteps
-    // it — the object lives on the heap, the frame only owns a pointer.
+    // The legacy direct-HTTP tool constructor has no originating client.
+    // Create a fresh protocol session for this invocation.
     auto client = std::make_unique<MCPClient>(server_url_);
-    co_await client->initialize_async();
-    auto typed = co_await client->call_tool_result_async(
+    auto result = co_await client->call_tool_result_async(
         definition_.name, arguments);
-    validate_tool_result(typed, definition_.output_schema);
-    co_return typed;
+    validate_tool_result(result, definition_.output_schema);
+    co_return result;
 }
 
 asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
@@ -1300,98 +1246,78 @@ asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
     co_return text;
 }
 
-// ===========================================================================
-// MCPClient — HTTP transport
-// ===========================================================================
-
+// The public client is only a facade over one protocol session. Tools retain
+// that same session, so neither adaptation nor graph dispatch knows the
+// transport type.
 MCPClient::MCPClient(const std::string& server_url)
-  : MCPClient(server_url, MCPClientConfig{})
-{
-}
+  : MCPClient(server_url, MCPClientConfig{}) {}
 
 MCPClient::MCPClient(const std::string& server_url, MCPClientConfig config)
-  : http_session_(std::make_shared<detail::HttpSession>(
-        server_url, std::move(config)))
-  , metadata_(std::make_shared<detail::ClientMetadata>())
-{
-}
-
-// ===========================================================================
-// MCPClient — stdio transport
-// ===========================================================================
+  : session_(std::make_shared<detail::ProtocolSession>(
+        std::make_shared<detail::HttpSession>(server_url, std::move(config)))) {}
 
 MCPClient::MCPClient(std::vector<std::string> argv)
-  : stdio_session_(detail::StdioSession::spawn(argv))
-  , metadata_(std::make_shared<detail::ClientMetadata>())
-{
+  : session_(std::make_shared<detail::ProtocolSession>(
+        detail::StdioSession::spawn(argv))) {}
+
+
+asio::awaitable<json> MCPClient::rpc_call_async(
+    const std::string& method, const json& params,
+    std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
+    auto session = session_;
+    co_return co_await session->rpc_call_async(
+        method, params, deadline, std::move(cancel_token));
 }
 
-MCPClient::MCPClient(std::shared_ptr<detail::HttpSession> session,
-                     std::shared_ptr<detail::ClientMetadata> metadata)
-  : http_session_(std::move(session))
-  , metadata_(std::move(metadata))
-{
-}
-
-// ===========================================================================
-// MCPClient — RPC dispatch
-// ===========================================================================
-
-json MCPClient::rpc_call(const std::string& method, const json& params) {
-    if (stdio_session_) {
-        return stdio_session_->rpc_call(method, params);
-    }
+json detail::ProtocolSession::rpc_call(
+    const std::string& method, const json& params) {
     return async::run_sync(rpc_call_async(method, params));
 }
 
-asio::awaitable<json>
-MCPClient::rpc_call_async(const std::string& method, const json& params,
-                          std::chrono::steady_clock::time_point deadline,
-                          std::shared_ptr<graph::CancelToken> cancel_token) {
-    using asio::experimental::awaitable_operators::operator||;
+asio::awaitable<json> detail::ProtocolSession::rpc_call_async(
+    const std::string& method, const json& params,
+    std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
     if ((cancel_token && cancel_token->is_cancelled())
         || deadline <= std::chrono::steady_clock::now()) {
         throw_rpc_bound(deadline, cancel_token);
     }
-    if (stdio_session_) {
-        co_return co_await stdio_session_->rpc_call_async(method, params, deadline,
-                                                           std::move(cancel_token));
-    }
+    const int id = ++next_id_;
+    json request{{"jsonrpc", "2.0"}, {"id", id},
+                 {"method", method}, {"params", params}};
+    auto transport = transport_;
+    auto response = co_await transport->exchange(
+        std::move(request), deadline, std::move(cancel_token));
+    co_return extract_rpc_result(response, id);
+}
 
-    auto session = http_session_;
-    if (!session) {
-        throw std::logic_error("MCP client has no transport");
-    }
-
-    // Build the request envelope + headers under the session mutex — the
-    // shared fields (request_id_, session_id_, negotiated_protocol_version_)
-    // would otherwise race across concurrent rpc_call_async invocations.
-    // We hold the lock only while reading/writing those fields, NOT
-    // across the network call below.
-    int                                              this_id;
+asio::awaitable<json> detail::HttpSession::exchange(
+    json request, std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
+    using asio::experimental::awaitable_operators::operator||;
+    const int this_id = request.at("id").get<int>();
     std::vector<std::pair<std::string, std::string>> headers;
     HeaderProvider header_provider;
     {
-        std::lock_guard lk(session->mu);
-        this_id = ++session->request_id;
+        std::lock_guard lk(mu);
         headers = {
             {"Content-Type", "application/json"},
             {"Accept",       "application/json, text/event-stream"},
         };
-        headers.insert(headers.end(), session->config.headers.begin(),
-                       session->config.headers.end());
-        header_provider = session->config.header_provider;
-        if (!session->session_id.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session->session_id);
+        headers.insert(headers.end(), config.headers.begin(),
+                       config.headers.end());
+        header_provider = config.header_provider;
+        if (!session_id.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session_id);
         }
         // Spec MUST (transports / Streamable HTTP § "Protocol Version
         // Header"): include MCP-Protocol-Version on every HTTP request
         // after initialize. Strict 2025-11-25 servers respond 400 Bad
         // Request without it. Skip on the initialize call itself —
         // negotiated_protocol_version_ is empty until initialize returns.
-        if (!session->protocol_version.empty()) {
-            headers.emplace_back("MCP-Protocol-Version",
-                                 session->protocol_version);
+        if (!protocol_version.empty()) {
+            headers.emplace_back("MCP-Protocol-Version", protocol_version);
         }
     }
     // User callbacks may refresh credentials or re-enter application code. Run
@@ -1408,15 +1334,10 @@ MCPClient::rpc_call_async(const std::string& method, const json& params,
         }
     }
 
-    json body;
-    body["jsonrpc"] = "2.0";
-    body["id"]      = this_id;
-    body["method"]  = method;
-    body["params"]  = params;
-    auto body_str = body.dump();
+    auto body_str = request.dump();
 
     async::RequestOptions opts;
-    opts.timeout = session->config.request_timeout;
+    opts.timeout = config.request_timeout;
     if (deadline != std::chrono::steady_clock::time_point::max()) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
@@ -1429,19 +1350,22 @@ MCPClient::rpc_call_async(const std::string& method, const json& params,
     try {
         if (deadline == std::chrono::steady_clock::time_point::max() && !cancel_token) {
             res = co_await async::async_post(
-                ex, session->endpoint.host, session->endpoint.port, session->path,
-                body_str, std::move(headers), session->endpoint.tls, opts);
+                ex, endpoint.host, endpoint.port, path,
+                body_str, std::move(headers), endpoint.tls, opts);
         } else {
             auto result = co_await (
-                async::async_post(ex, session->endpoint.host, session->endpoint.port,
-                                  session->path, body_str, std::move(headers),
-                                  session->endpoint.tls, opts)
+                async::async_post(ex, endpoint.host, endpoint.port,
+                                  path, body_str, std::move(headers),
+                                  endpoint.tls, opts)
                 || wait_for_rpc_bound(deadline, cancel_token));
             if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
             res = std::get<0>(std::move(result));
         }
     } catch (const std::system_error& e) {
-        throw std::runtime_error(std::string("MCP request failed: ") + e.what());
+        const auto failure = e.code() == asio::error::timed_out
+            ? MCPFailure::timeout : (e.code() == asio::error::operation_aborted
+                ? MCPFailure::shutdown : MCPFailure::connection);
+        throw MCPTransportError(failure, std::string("MCP HTTP request failed: ") + e.what());
     }
 
     // Absorb response state under the mutex — `Mcp-Session-Id` may
@@ -1449,15 +1373,14 @@ MCPClient::rpc_call_async(const std::string& method, const json& params,
     // sends this header on the initialize response; subsequent rpc
     // calls must echo it back so the server routes to the same session.
     if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
-        std::lock_guard lk(session->mu);
-        session->session_id = std::string(sid);
+        std::lock_guard lk(mu);
+        session_id = std::string(sid);
     }
 
     if (res.status != 200) {
-        std::string scheme = session->endpoint.tls ? "https://" : "http://";
+        std::string scheme = endpoint.tls ? "https://" : "http://";
         std::string full_url =
-            scheme + session->endpoint.host + ":" + session->endpoint.port
-            + session->path;
+            scheme + endpoint.host + ":" + endpoint.port + path;
         std::string hint;
         if (res.status == 404) {
             hint = " — the server has no MCP endpoint at this path. Check the "
@@ -1465,9 +1388,10 @@ MCPClient::rpc_call_async(const std::string& method, const json& params,
                    "so pass the server base like 'http://host:8000' or the "
                    "full 'http://host:8000/mcp').";
         }
-        throw std::runtime_error(
+        throw MCPTransportError(
+            MCPFailure::http_status,
             "MCP error (HTTP " + std::to_string(res.status) + ") for " +
-            full_url + ": " + res.body + hint);
+                full_url + ": " + res.body + hint, res.status);
     }
 
     // Parse response — may be plain JSON or SSE. Streamable HTTP can
@@ -1526,17 +1450,32 @@ MCPClient::rpc_call_async(const std::string& method, const json& params,
         if (!matched.is_null()) {
             resp = std::move(matched);
         } else {
-            throw std::runtime_error(
+            throw MCPTransportError(MCPFailure::protocol,
                 "MCP SSE response had no JSON-RPC response matching the request id");
         }
     } else {
-        resp = json::parse(res.body);
+        try {
+            resp = json::parse(res.body);
+        } catch (const json::parse_error& e) {
+            throw MCPTransportError(MCPFailure::protocol,
+                                    std::string("MCP HTTP response JSON: ") + e.what());
+        }
     }
 
-    co_return extract_rpc_result(resp, this_id, "HTTP");
+    co_return resp;
 }
 
 namespace {
+
+template <typename T>
+T decode_protocol_result(const json& raw) {
+    try {
+        return T::from_json(raw);
+    } catch (const std::exception& e) {
+        throw MCPTransportError(MCPFailure::protocol,
+                                std::string("MCP invalid result: ") + e.what());
+    }
+}
 
 json initialize_params(const std::string& client_name) {
     json params;
@@ -1558,13 +1497,9 @@ void store_initialize_result(
 }
 
 void reset_initialization(
-    const std::shared_ptr<detail::HttpSession>& http_session,
+    const std::shared_ptr<detail::Transport>& transport,
     const std::shared_ptr<detail::ClientMetadata>& metadata) {
-    if (http_session) {
-        std::lock_guard lk(http_session->mu);
-        http_session->session_id.clear();
-        http_session->protocol_version.clear();
-    }
+    transport->reset();
     {
         std::lock_guard lk(metadata->mu);
         metadata->lifecycle = detail::ClientMetadata::Lifecycle::created;
@@ -1574,22 +1509,22 @@ void reset_initialization(
     metadata->changed.notify_all();
 }
 
-HeaderList notification_headers(const std::shared_ptr<detail::HttpSession>& session) {
+HeaderList notification_headers(detail::HttpSession& session) {
     HeaderList headers = {
         {"Content-Type", "application/json"},
         {"Accept", "application/json, text/event-stream"},
     };
     HeaderProvider provider;
     {
-        std::lock_guard lk(session->mu);
-        headers.insert(headers.end(), session->config.headers.begin(),
-                       session->config.headers.end());
-        provider = session->config.header_provider;
-        if (!session->session_id.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session->session_id);
+        std::lock_guard lk(session.mu);
+        headers.insert(headers.end(), session.config.headers.begin(),
+                       session.config.headers.end());
+        provider = session.config.header_provider;
+        if (!session.session_id.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session.session_id);
         }
-        if (!session->protocol_version.empty()) {
-            headers.emplace_back("MCP-Protocol-Version", session->protocol_version);
+        if (!session.protocol_version.empty()) {
+            headers.emplace_back("MCP-Protocol-Version", session.protocol_version);
         }
     }
     if (provider) {
@@ -1605,65 +1540,47 @@ HeaderList notification_headers(const std::shared_ptr<detail::HttpSession>& sess
     return headers;
 }
 
-asio::awaitable<void> send_initialized_notification(
-    const std::shared_ptr<detail::HttpSession>& session) {
-    json notify = {
-        {"jsonrpc", "2.0"},
-        {"method", "notifications/initialized"},
-        {"params", json::object()},
-    };
-    async::RequestOptions opts;
-    opts.timeout = session->config.request_timeout;
-    auto ex = co_await asio::this_coro::executor;
-    auto res = co_await async::async_post(
-        ex, session->endpoint.host, session->endpoint.port, session->path,
-        notify.dump(), notification_headers(session), session->endpoint.tls, opts);
-    if (res.status < 200 || res.status >= 300) {
-        throw std::runtime_error(
-            "MCP initialize notification returned HTTP "
-            + std::to_string(res.status) + ": " + res.body);
-    }
-    co_return;
-}
-
 } // namespace
 
-bool MCPClient::initialize(const std::string& client_name) {
-    {
-        std::unique_lock lk(metadata_->mu);
-        while (metadata_->lifecycle
-               == detail::ClientMetadata::Lifecycle::initializing) {
-            metadata_->changed.wait(lk);
-        }
-        if (metadata_->lifecycle
-            == detail::ClientMetadata::Lifecycle::initialized) {
-            return true;
-        }
-        metadata_->lifecycle = detail::ClientMetadata::Lifecycle::initializing;
-    }
-
+asio::awaitable<void> detail::HttpSession::notify(json notification) {
+    async::RequestOptions opts;
+    opts.timeout = config.request_timeout;
+    auto ex = co_await asio::this_coro::executor;
+    async::HttpResponse res;
     try {
-        auto raw = rpc_call("initialize", initialize_params(client_name));
-        auto result = InitializeResult::from_json(raw);
-        if (http_session_) {
-            {
-                std::lock_guard lk(http_session_->mu);
-                http_session_->protocol_version = result.protocol_version;
-            }
-            async::run_sync(send_initialized_notification(http_session_));
-        } else {
-            stdio_session_->notify("notifications/initialized", json::object());
-        }
-        store_initialize_result(metadata_, std::move(result));
-        return true;
-    } catch (...) {
-        reset_initialization(http_session_, metadata_);
-        throw;
+        res = co_await async::async_post(
+            ex, endpoint.host, endpoint.port, path,
+            notification.dump(), notification_headers(*this), endpoint.tls, opts);
+    } catch (const std::system_error& e) {
+        throw MCPTransportError(e.code() == asio::error::timed_out
+                                    ? MCPFailure::timeout : MCPFailure::connection,
+                                std::string("MCP HTTP notification: ") + e.what());
     }
+    if (res.status < 200 || res.status >= 300) {
+        throw MCPTransportError(MCPFailure::http_status,
+            "MCP initialize notification returned HTTP "
+            + std::to_string(res.status) + ": " + res.body, res.status);
+    }
+}
+
+
+bool MCPClient::initialize(const std::string& client_name) {
+    return session_->initialize(client_name);
 }
 
 asio::awaitable<bool> MCPClient::initialize_async(const std::string& client_name) {
-    bool owner = false;
+    auto session = session_;
+    co_return co_await session->initialize_async(client_name);
+}
+
+bool detail::ProtocolSession::initialize(const std::string& client_name) {
+    return async::run_sync(initialize_async(client_name));
+}
+
+asio::awaitable<bool> detail::ProtocolSession::initialize_async(
+    const std::string& client_name) {
+    // Only one caller performs the handshake; concurrent callers wait for the
+    // same negotiated session. A failure resets both protocol and transport.
     for (;;) {
         {
             std::lock_guard lk(metadata_->mu);
@@ -1675,7 +1592,6 @@ asio::awaitable<bool> MCPClient::initialize_async(const std::string& client_name
                 == detail::ClientMetadata::Lifecycle::created) {
                 metadata_->lifecycle =
                     detail::ClientMetadata::Lifecycle::initializing;
-                owner = true;
                 break;
             }
         }
@@ -1687,31 +1603,28 @@ asio::awaitable<bool> MCPClient::initialize_async(const std::string& client_name
     try {
         auto raw = co_await rpc_call_async(
             "initialize", initialize_params(client_name));
-        auto result = InitializeResult::from_json(raw);
-        if (http_session_) {
-            {
-                std::lock_guard lk(http_session_->mu);
-                http_session_->protocol_version = result.protocol_version;
-            }
-            co_await send_initialized_notification(http_session_);
-        } else {
-            stdio_session_->notify("notifications/initialized", json::object());
-        }
+        auto result = decode_protocol_result<InitializeResult>(raw);
+        transport_->negotiated_version(result.protocol_version);
+        json notification = {
+            {"jsonrpc", "2.0"}, {"method", "notifications/initialized"},
+            {"params", json::object()},
+        };
+        co_await transport_->notify(std::move(notification));
         store_initialize_result(metadata_, std::move(result));
         co_return true;
     } catch (...) {
-        reset_initialization(http_session_, metadata_);
+        reset_initialization(transport_, metadata_);
         throw;
     }
 }
 
-bool MCPClient::is_initialized() const noexcept {
+bool detail::ProtocolSession::is_initialized() const noexcept {
     std::lock_guard lk(metadata_->mu);
     return metadata_->lifecycle
         == detail::ClientMetadata::Lifecycle::initialized;
 }
 
-InitializeResult MCPClient::get_initialize_result() const {
+InitializeResult detail::ProtocolSession::get_initialize_result() const {
     std::lock_guard lk(metadata_->mu);
     if (metadata_->lifecycle
         != detail::ClientMetadata::Lifecycle::initialized) {
@@ -1721,27 +1634,22 @@ InitializeResult MCPClient::get_initialize_result() const {
 }
 
 std::vector<std::unique_ptr<Tool>> MCPClient::get_tools() {
-    auto definitions = get_tool_definitions();
+    auto definitions = session_->get_tool_definitions();
     std::vector<std::unique_ptr<Tool>> tools;
     tools.reserve(definitions.size());
     for (auto& definition : definitions) {
-        if (stdio_session_) {
-            tools.push_back(std::unique_ptr<Tool>(
-                new MCPTool(stdio_session_, std::move(definition))));
-        } else {
-            tools.push_back(std::unique_ptr<Tool>(
-                new MCPTool(http_session_, metadata_, std::move(definition))));
-        }
+        tools.push_back(std::unique_ptr<Tool>(
+            new MCPTool(session_, std::move(definition))));
     }
     return tools;
 }
 
-ListToolsPage MCPClient::list_tools(
+ListToolsPage detail::ProtocolSession::list_tools(
     const std::optional<std::string>& cursor) {
     initialize();
     json params = json::object();
     if (cursor) params["cursor"] = *cursor;
-    auto page = ListToolsPage::from_json(rpc_call("tools/list", params));
+    auto page = decode_protocol_result<ListToolsPage>(rpc_call("tools/list", params));
     {
         std::lock_guard lk(metadata_->mu);
         for (const auto& tool : page.tools) {
@@ -1751,13 +1659,13 @@ ListToolsPage MCPClient::list_tools(
     return page;
 }
 
-asio::awaitable<ListToolsPage> MCPClient::list_tools_async(
+asio::awaitable<ListToolsPage> detail::ProtocolSession::list_tools_async(
     const std::optional<std::string>& cursor) {
     co_await initialize_async();
     json params = json::object();
     if (cursor) params["cursor"] = *cursor;
     auto raw = co_await rpc_call_async("tools/list", params);
-    auto page = ListToolsPage::from_json(raw);
+    auto page = decode_protocol_result<ListToolsPage>(raw);
     {
         std::lock_guard lk(metadata_->mu);
         for (const auto& tool : page.tools) {
@@ -1767,7 +1675,7 @@ asio::awaitable<ListToolsPage> MCPClient::list_tools_async(
     co_return page;
 }
 
-std::vector<ToolDefinition> MCPClient::get_tool_definitions() {
+std::vector<ToolDefinition> detail::ProtocolSession::get_tool_definitions() {
     std::vector<ToolDefinition> definitions;
     std::optional<std::string> cursor;
     do {
@@ -1784,7 +1692,7 @@ std::vector<ToolDefinition> MCPClient::get_tool_definitions() {
     return definitions;
 }
 
-json MCPClient::call_tool(const std::string& name, const json& arguments) {
+json detail::ProtocolSession::call_tool(const std::string& name, const json& arguments) {
     initialize();
     json params;
     params["name"]      = name;
@@ -1792,9 +1700,9 @@ json MCPClient::call_tool(const std::string& name, const json& arguments) {
     return rpc_call("tools/call", params);
 }
 
-CallToolResult MCPClient::call_tool_result(
+CallToolResult detail::ProtocolSession::call_tool_result(
     const std::string& name, const json& arguments) {
-    auto result = CallToolResult::from_json(call_tool(name, arguments));
+    auto result = decode_protocol_result<CallToolResult>(call_tool(name, arguments));
     json output_schema;
     bool has_output_schema = false;
     {
@@ -1810,7 +1718,7 @@ CallToolResult MCPClient::call_tool_result(
 }
 
 asio::awaitable<json>
-MCPClient::call_tool_async(const std::string& name, const json& arguments) {
+detail::ProtocolSession::call_tool_async(const std::string& name, const json& arguments) {
     co_await initialize_async();
     json params;
     params["name"]      = name;
@@ -1818,10 +1726,10 @@ MCPClient::call_tool_async(const std::string& name, const json& arguments) {
     co_return co_await rpc_call_async("tools/call", params);
 }
 
-asio::awaitable<CallToolResult> MCPClient::call_tool_result_async(
+asio::awaitable<CallToolResult> detail::ProtocolSession::call_tool_result_async(
     const std::string& name, const json& arguments) {
     auto raw = co_await call_tool_async(name, arguments);
-    auto result = CallToolResult::from_json(raw);
+    auto result = decode_protocol_result<CallToolResult>(raw);
     json output_schema;
     bool has_output_schema = false;
     {
@@ -1834,6 +1742,49 @@ asio::awaitable<CallToolResult> MCPClient::call_tool_result_async(
     }
     if (has_output_schema) validate_tool_result(result, output_schema);
     co_return result;
+}
+
+bool MCPClient::is_initialized() const noexcept {
+    return session_->is_initialized();
+}
+
+InitializeResult MCPClient::get_initialize_result() const {
+    return session_->get_initialize_result();
+}
+
+ListToolsPage MCPClient::list_tools(const std::optional<std::string>& cursor) {
+    return session_->list_tools(cursor);
+}
+
+asio::awaitable<ListToolsPage> MCPClient::list_tools_async(
+    const std::optional<std::string>& cursor) {
+    auto session = session_;
+    co_return co_await session->list_tools_async(cursor);
+}
+
+std::vector<ToolDefinition> MCPClient::get_tool_definitions() {
+    return session_->get_tool_definitions();
+}
+
+json MCPClient::call_tool(const std::string& name, const json& arguments) {
+    return session_->call_tool(name, arguments);
+}
+
+CallToolResult MCPClient::call_tool_result(
+    const std::string& name, const json& arguments) {
+    return session_->call_tool_result(name, arguments);
+}
+
+asio::awaitable<json> MCPClient::call_tool_async(
+    const std::string& name, const json& arguments) {
+    auto session = session_;
+    co_return co_await session->call_tool_async(name, arguments);
+}
+
+asio::awaitable<CallToolResult> MCPClient::call_tool_result_async(
+    const std::string& name, const json& arguments) {
+    auto session = session_;
+    co_return co_await session->call_tool_result_async(name, arguments);
 }
 
 } // namespace neograph::mcp

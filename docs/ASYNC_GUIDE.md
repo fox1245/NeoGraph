@@ -282,13 +282,13 @@ The obsolete double-execution fallback no longer exists.
 
 ### 4.5 MCP stdio single-session concurrency
 
-`StdioSession::rpc_call_async` serialises concurrent calls via
-`std::mutex`. Two coroutines calling the **same** session on the
-**same single-threaded** `io_context` will deadlock — the second
-coroutine's `lock_guard` blocks the worker the first needs to
-drive its I/O completions. Typical usage (one logical caller per
-session, async fan-out across *different* sessions) is unaffected.
-An awaitable-mutex version is tracked as future work.
+One stdio transport owns its `io_context`, subprocess pipes, write semaphore,
+and response-id reader. Sibling `rpc_call_async` calls on the **same** session
+share only the frame-write lock; reads overlap and the reader routes each
+response to its waiting request by JSON-RPC id. They can originate from
+different caller executors, including successive `run_sync` graph runs.
+Cancelling or timing out one request removes its waiter without closing the
+transport or misrouting a late response to another request.
 
 ---
 
