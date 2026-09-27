@@ -46,6 +46,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -112,6 +113,23 @@ asio::awaitable<void> wait_for_rpc_bound(
     }
     throw MCPTransportError(MCPFailure::shutdown,
                             "MCP RPC bounds waiter completed unexpectedly");
+}
+template <typename Executor>
+struct CapturedJsonResult {
+    std::optional<json> value;
+    std::exception_ptr  error;
+};
+
+template <typename Executor>
+asio::awaitable<CapturedJsonResult<Executor>, Executor> capture_json(
+    asio::awaitable<json, Executor> operation) {
+    CapturedJsonResult<Executor> result;
+    try {
+        result.value.emplace(co_await std::move(operation));
+    } catch (...) {
+        result.error = std::current_exception();
+    }
+    co_return result;
 }
 } // namespace
 
@@ -874,7 +892,14 @@ asio::awaitable<void> StdioSession::run_reader() {
             remaining.swap(waiters_);
             reader_running_ = false;
         }
-        for (auto& kv : remaining) kv.second->close();
+        for (auto& kv : remaining) {
+            // Wake a pending receive explicitly before closing the sink.
+            // Some Asio versions do not cancel a receive solely from close().
+            kv.second->try_send(
+                asio::error_code(asio::error::operation_aborted, asio::system_category()),
+                std::shared_ptr<json>{});
+            kv.second->close();
+        }
     }
     co_return;
 }
@@ -917,14 +942,21 @@ asio::awaitable<json> StdioSession::exchange(
                 io_.get_executor(), do_exchange(std::move(request)), asio::use_awaitable);
         }
         auto result = co_await (
-            asio::co_spawn(io_.get_executor(), do_exchange(std::move(request)),
-                           asio::use_awaitable)
+            capture_json(asio::co_spawn(
+                io_.get_executor(), do_exchange(std::move(request)),
+                asio::use_awaitable))
             || wait_for_rpc_bound(deadline, cancel_token));
         if (result.index() == 1) {
-            terminate_process();
+            // Abandon this request's waiter, but keep the session alive so
+            // late responses remain drainable and later calls can correlate.
             throw_rpc_bound(deadline, cancel_token);
         }
-        co_return std::get<0>(std::move(result));
+        auto captured = std::get<0>(std::move(result));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (!captured.value) {
+            throw std::runtime_error("MCP stdio exchange returned no result");
+        }
+        co_return std::move(*captured.value);
     } catch (const std::system_error& e) {
         throw MCPTransportError(e.code() == asio::error::operation_aborted
                                     ? MCPFailure::shutdown : MCPFailure::connection,

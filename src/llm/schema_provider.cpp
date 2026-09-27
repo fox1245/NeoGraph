@@ -338,16 +338,29 @@ asio::awaitable<async::HttpResponse> SchemaProvider::post_json(
     auto operation = cancel_token ? cancel_token->fork()
         : std::shared_ptr<graph::CancelToken>{};
     async::HttpResponse response;
-    if (operation) {
-        const auto operation_executor = operation->bind_executor(executor);
-        graph::CancelExecutorLease operation_lease(operation);
-        co_await asio::post(operation_executor, asio::use_awaitable);
-        operation->throw_if_cancelled(cancel_context);
-        response = co_await asio::co_spawn(
-            operation_executor, std::move(*request),
-            asio::bind_cancellation_slot(operation->slot(), asio::use_awaitable));
-    } else {
-        response = co_await std::move(*request);
+    try {
+        if (operation) {
+            const auto operation_executor = operation->bind_executor(executor);
+            graph::CancelExecutorLease operation_lease(operation);
+            co_await asio::post(operation_executor, asio::use_awaitable);
+            operation->throw_if_cancelled(cancel_context);
+            response = co_await asio::co_spawn(
+                operation_executor, std::move(*request),
+                asio::bind_cancellation_slot(operation->slot(), asio::use_awaitable));
+        } else {
+            response = co_await std::move(*request);
+        }
+    } catch (...) {
+        // A transport may report a socket reset while cancellation is
+        // concurrently closing the operation. Preserve the graph-level
+        // cancellation contract instead of leaking that transport detail.
+        if ((operation && operation->is_cancelled())
+            || (cancel_token && cancel_token->is_cancelled())) {
+            throw asio::system_error(
+                asio::error::operation_aborted,
+                "SchemaProvider operation cancelled");
+        }
+        throw;
     }
 
     if (response.status != 200) {
@@ -477,6 +490,11 @@ SchemaProvider::complete_async(const CompletionParams& params)
             check_operation();
             throw;
         } catch (const std::exception& error) {
+            if (params.cancel_token && params.cancel_token->is_cancelled()) {
+                throw asio::system_error(
+                    asio::error::operation_aborted,
+                    "SchemaProvider operation cancelled");
+            }
             check_operation();
             if (!operation_.id_path.empty()) {
                 throw OperationError(std::string("SchemaProvider: submission failed: ") + error.what());

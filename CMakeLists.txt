@@ -261,6 +261,11 @@ target_include_directories(yyjson PUBLIC
 set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(NOT MSVC)
     target_compile_options(yyjson PRIVATE -O2)
+    if(EMSCRIPTEN)
+        # Emscripten 3.1.x does not provide __stack_chk_guard for vendored C
+        # objects; keep the WASM link portable without changing native hardening.
+        target_compile_options(yyjson PRIVATE -fno-stack-protector)
+    endif()
 endif()
 
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
@@ -609,8 +614,15 @@ if(NEOGRAPH_BUILD_WASM)
     endif()
     add_executable(neograph_wasm_smoke wasm/smoke.cpp)
     target_link_libraries(neograph_wasm_smoke PRIVATE neograph_core)
-    target_compile_options(neograph_core PRIVATE -O3 -flto -fexceptions -pthread)
-    target_compile_options(neograph_wasm_smoke PRIVATE -O3 -flto -fexceptions -pthread)
+    # Emscripten 3.1.x supports C++20 coroutines but does not expose the
+    # feature-test macro Asio uses to enable awaitable.hpp. Keep the public
+    # header surface consistent with native builds for the WASM smoke target.
+    target_compile_definitions(neograph_core PUBLIC
+        ASIO_HAS_CO_AWAIT=1)
+    target_compile_options(neograph_core PRIVATE
+        -O3 -flto -fexceptions -pthread -fno-stack-protector)
+    target_compile_options(neograph_wasm_smoke PRIVATE
+        -O3 -flto -fexceptions -pthread -fno-stack-protector)
     target_link_options(neograph_wasm_smoke PRIVATE
         -O3 -flto -fexceptions -pthread
         -sALLOW_MEMORY_GROWTH=1

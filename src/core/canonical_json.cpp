@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#if defined(__EMSCRIPTEN__)
+#include <iomanip>
+#include <locale>
+#include <sstream>
+#endif
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -341,6 +346,13 @@ void append_float(std::string& out, double value) {
         return;
     }
 
+#if defined(__EMSCRIPTEN__)
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(std::numeric_limits<double>::max_digits10)
+           << std::defaultfloat << value;
+    std::string encoded = stream.str();
+#else
     std::array<char, 64> buffer{};
     const auto           result =
         std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
@@ -349,6 +361,7 @@ void append_float(std::string& out, double value) {
         throw std::runtime_error("Program canonical JSON failed to encode number");
     }
     std::string encoded(buffer.data(), result.ptr);
+#endif
     const auto  exponent = encoded.find_first_of("eE");
     if (exponent != std::string::npos) {
         encoded[exponent]  = 'e';

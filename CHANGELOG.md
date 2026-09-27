@@ -12,6 +12,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Portable WASM smoke builds.** Distro Emscripten 3.1.x now enables
+  Asio's available coroutine header explicitly and avoids unsupported
+  stack-protector symbols only for WASM targets; native hardening is unchanged.
+- **Bounded async transport failures.** Stdio MCP exchanges preserve reader
+  protocol/connection errors instead of masking them behind the RPC deadline,
+  and a timed-out request no longer kills the shared subprocess session.
+  SchemaProvider cancellation normalizes concurrent socket-reset races to
+  `asio::error::operation_aborted`.
 - **Owned graph tool bindings.** `NodeContext::tools` is now an owned,
   copyable `ToolSet` retained across compilation and engine linkage. Context
   reassignment does not invalidate earlier engines; the unsafe post-compile

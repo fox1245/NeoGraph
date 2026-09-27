@@ -76,6 +76,20 @@ cmake --build build-wasm --target neograph_wasm_smoke -j
 node build-wasm/wasm/smoke.js
 ```
 
+The CMake target enables Asio's coroutine surface explicitly for distro
+Emscripten 3.1.x, whose feature-test macros do not advertise the available
+experimental coroutine header. It also disables stack-protector code only for
+the WASM targets because that toolchain does not provide `__stack_chk_guard`;
+native hardening is unchanged.
+
+With Node.js versions that route local `.wasm` loads through `fetch`, use the
+following equivalent smoke invocation (Emscripten's generated loader otherwise
+receives a filesystem path where Node expects a URL):
+
+```bash
+node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; global.fetch=async p=>({ok:true,arrayBuffer:async()=>fs.promises.readFile(p)}); require("./build-wasm/wasm/smoke.js");'
+```
+
 The target links `neograph_core` directly, so its source list is maintained by
 the main CMake build rather than copied into this document. Expected output
 includes `doubled = 42` and the node trace.
