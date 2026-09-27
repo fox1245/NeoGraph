@@ -10,6 +10,7 @@
 
 #include <neograph/api.h>
 #include <neograph/json.h>
+#include <neograph/program/activation.h>
 #include <neograph/program/result.h>
 
 #include <cstdint>
@@ -127,6 +128,9 @@ struct NEOGRAPH_PROGRAM_API RunInvocation {
     std::string                         idempotency_key;
     std::string                         correlation_id;
     std::optional<InvocationArtifactReference> artifact;
+    /** Present only for an activation-selected top-level start. A new
+     * generation/fork has its own identity and must not inherit this pointer. */
+    std::optional<ProgramActivation>   selected_activation;
 
     /// Validate ownership, identity, sequence and required request fields.
     void validate() const;

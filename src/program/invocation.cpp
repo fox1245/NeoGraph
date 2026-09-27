@@ -98,17 +98,22 @@ InvocationArtifactReference decode_artifact(const json& value) {
 }
 
 json invocation_payload(const RunInvocation& invocation) {
-    return json{{"protocol_revision", invocation.protocol_revision},
-                {"owner_scope", invocation.owner_scope},
-                {"agent_id", invocation.agent_id},
-                {"program_version_id", invocation.program_version_id},
-                {"run_id", invocation.run_id},
-                {"parent_run_id", invocation.parent_run_id},
-                {"budget", encode_budget(invocation.budget)},
-                {"input", invocation.input},
-                {"message_sequence", invocation.message_sequence},
-                {"correlation_id", invocation.correlation_id},
-                {"artifact", invocation.artifact ? encode_artifact(*invocation.artifact) : json(nullptr)}};
+    json payload{{"protocol_revision", invocation.protocol_revision},
+                 {"owner_scope", invocation.owner_scope},
+                 {"agent_id", invocation.agent_id},
+                 {"program_version_id", invocation.program_version_id},
+                 {"run_id", invocation.run_id},
+                 {"parent_run_id", invocation.parent_run_id},
+                 {"budget", encode_budget(invocation.budget)},
+                 {"input", invocation.input},
+                 {"message_sequence", invocation.message_sequence},
+                 {"correlation_id", invocation.correlation_id},
+                 {"artifact", invocation.artifact ? encode_artifact(*invocation.artifact) : json(nullptr)}};
+    if (invocation.selected_activation) {
+        payload["selected_activation"] = detail::parse_json_strict(
+            invocation.selected_activation->serialize_canonical());
+    }
+    return payload;
 }
 
 void validate_diagnostic(const InvocationDiagnostic& diagnostic) {
@@ -216,7 +221,8 @@ RunInvocation invocation_from_json(const json& value) {
                                    "message_sequence",
                                    "idempotency_key",
                                    "correlation_id",
-                                   "artifact"});
+                                   "artifact",
+                                   "selected_activation"});
     if (required_string(value, "format") != INVOCATION_FORMAT ||
         required_u32(value, "storage_schema_version") != RunInvocation::STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Unsupported RunInvocation format or schema version");
@@ -235,6 +241,10 @@ RunInvocation invocation_from_json(const json& value) {
     invocation.correlation_id = required_string(value, "correlation_id");
     const auto& artifact = required_value(value, "artifact");
     if (!artifact.is_null()) invocation.artifact = decode_artifact(artifact);
+    if (value.contains("selected_activation")) {
+        invocation.selected_activation = ProgramActivation::parse(
+            detail::canonical_json_bytes(value.at("selected_activation")));
+    }
     invocation.validate();
     if (invocation.canonical_identity() != required_string(value, "id")) {
         throw std::invalid_argument("RunInvocation id does not match its canonical payload");
@@ -390,6 +400,13 @@ void RunInvocation::validate() const {
         detail::validate_token(artifact->uri, "RunInvocation artifact uri");
         detail::validate_token(artifact->media_type, "RunInvocation artifact media_type");
     }
+    if (selected_activation &&
+        (selected_activation->owner_scope() != owner_scope ||
+         selected_activation->active_version_id() != program_version_id ||
+         !parent_run_id.empty())) {
+        throw std::invalid_argument(
+            "RunInvocation activation must bind its exact top-level owner and version");
+    }
 }
 
 std::string RunInvocation::canonical_payload() const {
@@ -403,7 +420,8 @@ std::string RunInvocation::canonical_identity() const {
 
 std::string RunInvocation::serialize_canonical() const {
     const auto payload = invocation_payload(*this);
-    const auto identity = canonical_identity();
+    const auto identity = detail::sha256_identity(
+        "program-run-invocation/v1", detail::canonical_json_bytes(payload));
     json value{{"format", std::string(INVOCATION_FORMAT)},
                {"storage_schema_version", STORAGE_SCHEMA_VERSION},
                {"id", identity},
@@ -419,6 +437,7 @@ std::string RunInvocation::serialize_canonical() const {
                {"idempotency_key", idempotency_key},
                {"correlation_id", correlation_id},
                {"artifact", artifact ? encode_artifact(*artifact) : json(nullptr)}};
+    if (selected_activation) value["selected_activation"] = payload["selected_activation"];
     return detail::canonical_json_bytes(value);
 }
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 #include <mutex>
 #include <tuple>
 #include <stdexcept>

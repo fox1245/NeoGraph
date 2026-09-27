@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-activation-v1.schema.json",
+  "title": "NeoGraph owner-scoped Program activation",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "owner_scope", "active_version_id", "generation", "policy_snapshot_hash"],
+  "properties": {
+    "format": {"const": "neograph-program-activation"},
+    "storage_schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/identity"},
+    "owner_scope": {"type": "string", "minLength": 1},
+    "active_version_id": {"$ref": "#/$defs/identity"},
+    "generation": {"type": "integer", "minimum": 1},
+    "policy_snapshot_hash": {"$ref": "#/$defs/identity"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "identity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

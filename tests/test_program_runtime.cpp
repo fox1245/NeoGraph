@@ -2966,6 +2966,166 @@ TEST(ProgramRuntimeTest, CanonicalRunInvocationIsRetainedExactlyAndAcceptsRuntim
     EXPECT_GT(sink->calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, ActiveStartPinsAdmittedVersionAcrossRollback) {
+    completed_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto first = fixture.admit("runtime-completed");
+    const auto second = fixture.admit("runtime-followup");
+
+    RunInvocation request;
+    request.owner_scope = "tenant:runtime";
+    request.agent_id = "active-start";
+    request.budget = grant();
+    request.message_sequence = 1;
+    request.idempotency_key = "active-start:1";
+    request.correlation_id = "trace-active-start";
+    request.run_id = "active-start-first";
+    EXPECT_THROW((void)fixture.runtime->start_active(request), ProgramDiagnosticError);
+    EXPECT_FALSE(fixture.journal->load("tenant:runtime", request.run_id));
+    request.program_version_id = first.id();
+    EXPECT_THROW((void)fixture.runtime->start_active(request), std::invalid_argument);
+    request.program_version_id.clear();
+
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", first.id(), 0),
+              ProgramActivationResult::Activated);
+    auto original = fixture.runtime->start_active(request);
+    EXPECT_EQ(original.activation.generation(), 1U);
+    EXPECT_EQ(original.activation.active_version_id(), first.id());
+    EXPECT_EQ(original.handle.snapshot().program_version_id(), first.id());
+    ASSERT_TRUE(original.handle.snapshot().invocation().selected_activation);
+    EXPECT_EQ(original.handle.snapshot().invocation().selected_activation->id(),
+              original.activation.id());
+    EXPECT_EQ(RunInvocation::parse(
+                  original.handle.snapshot().invocation().serialize_canonical())
+                  .selected_activation->id(),
+              original.activation.id());
+    auto forged = request;
+    forged.run_id = "active-start-forged";
+    forged.program_version_id = first.id();
+    forged.selected_activation = original.activation;
+    EXPECT_THROW((void)fixture.runtime->start(forged), ProgramDiagnosticError);
+    EXPECT_FALSE(fixture.journal->load("tenant:runtime", forged.run_id));
+
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", second.id(), 1),
+              ProgramActivationResult::Activated);
+    request.run_id = "active-start-second";
+    request.message_sequence = 2;
+    request.idempotency_key = "active-start:2";
+    auto next = fixture.runtime->start_active(request);
+    EXPECT_EQ(next.activation.generation(), 2U);
+    EXPECT_EQ(next.handle.snapshot().program_version_id(), second.id());
+    ASSERT_TRUE(next.handle.snapshot().invocation().selected_activation);
+    EXPECT_EQ(next.handle.snapshot().invocation().selected_activation->id(),
+              next.activation.id());
+
+    ASSERT_EQ(fixture.catalog->rollback("tenant:runtime", first.id(), 2),
+              ProgramActivationResult::Activated);
+    EXPECT_EQ(original.handle.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(original.handle.snapshot().program_version_id(), first.id());
+    EXPECT_EQ(next.handle.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(next.handle.snapshot().program_version_id(), second.id());
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ConcurrentActiveStartSelectsWholeActivationTuples) {
+    completed_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto first = fixture.admit("runtime-completed");
+    const auto second = fixture.admit("runtime-followup");
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", first.id(), 0),
+              ProgramActivationResult::Activated);
+
+    std::barrier gate(2);
+    std::exception_ptr publisher_error;
+    std::thread publisher([&] {
+        try {
+            gate.arrive_and_wait();
+            for (std::uint64_t generation = 1; generation <= 40; ++generation) {
+                const auto& selected = generation % 2 ? second : first;
+                if (fixture.catalog->activate("tenant:runtime", selected.id(), generation) !=
+                    ProgramActivationResult::Activated) {
+                    throw std::runtime_error("activation CAS failed without competing publishers");
+                }
+            }
+        } catch (...) {
+            publisher_error = std::current_exception();
+        }
+    });
+
+    std::vector<ProgramActiveRun> runs;
+    runs.reserve(40);
+    std::exception_ptr admission_error;
+    try {
+        gate.arrive_and_wait();
+        for (int index = 0; index < 40; ++index) {
+            RunInvocation request;
+            request.owner_scope = "tenant:runtime";
+            request.agent_id = "active-race";
+            request.run_id = "active-race-" + std::to_string(index);
+            request.budget = grant();
+            request.message_sequence = static_cast<std::uint64_t>(index + 1);
+            request.idempotency_key = request.run_id;
+            request.correlation_id = request.run_id;
+            runs.push_back(fixture.runtime->start_active(std::move(request)));
+        }
+    } catch (...) {
+        admission_error = std::current_exception();
+    }
+    publisher.join();
+    if (publisher_error) std::rethrow_exception(publisher_error);
+    if (admission_error) std::rethrow_exception(admission_error);
+    for (auto& run : runs) {
+        const auto expected = run.activation.generation() % 2 ? first.id() : second.id();
+        EXPECT_EQ(run.activation.active_version_id(), expected);
+        EXPECT_EQ(run.handle.snapshot().program_version_id(), expected);
+        ASSERT_TRUE(run.handle.snapshot().invocation().selected_activation);
+        EXPECT_EQ(run.handle.snapshot().invocation().selected_activation->id(),
+                  run.activation.id());
+        EXPECT_EQ(run.handle.wait().status(), ProgramTerminalStatus::Completed);
+    }
+    EXPECT_EQ(completed_calls.load() + followup_calls.load(), runs.size());
+}
+
+TEST(ProgramRuntimeTest, ActiveRunGraphForkDropsSourceActivationButRetainsLineage) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto version = fixture.admit("runtime-short-blocking");
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", version.id(), 0),
+              ProgramActivationResult::Activated);
+
+    RunInvocation request;
+    request.owner_scope = "tenant:runtime";
+    request.agent_id = "active-graph-source";
+    request.run_id = "active-graph-source";
+    request.budget = grant();
+    request.message_sequence = 1;
+    request.idempotency_key = request.run_id;
+    request.correlation_id = request.run_id;
+    auto source = fixture.runtime->start_active(request);
+    auto target = fixture.runtime->migrate_graph(
+        source.handle,
+        ProgramGraphMigrationTarget{version.id(), "active-graph-successor", {}});
+    const auto result = target.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.run_id(), "active-graph-successor");
+    EXPECT_FALSE(target.snapshot().invocation().selected_activation);
+    EXPECT_EQ(source.handle.snapshot().invocation().selected_activation->id(),
+              source.activation.id());
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.handle.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", request.run_id).wait().id(),
+              result.id());
+    (void)source.handle.wait();
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+}
+
 TEST(ProgramRuntimeTest, ReconnectTerminalAfterCatalogRecreationIsByteExactAndNonMutating) {
     completed_calls.store(0);
     AdmittedRuntime fixture;

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=21211053daf9b0e714438ca1369ac260173985bb042ca3effce2f3300588d1a6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=18368b14e7e85d70c14e289cb548abb3a8796f639c31731fe62d1fa6b8d00355 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,13 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **所有者スコープの実験的なアクティブ Program 起動。** C++ の
+  `ProgramRuntime` と Python の `LocalProgramHost` は、新規実行時に
+  承認済みの不変なアクティベーションを一度だけ選択し、選択した記録と
+  そのバージョンに固定されたハンドルを返します。ロールバックは以後の
+  起動にのみ影響します。グラフ移行では、未知のノードローカル状態を
+  移せるとみなさず、不透明なチェックポイントメタデータを拒否します。
+  ストア間の永続 GC と本番向け性能検証は別途必要です。
 - **Program Core Tool grant の永続 ID。** ホストは所有者スコープ内の
   正確な Tool grant を SQLite に承認し、Program 操作と再接続のたびに
   gate/controller を再結合できます。ランタイムは承認された実行バインディング

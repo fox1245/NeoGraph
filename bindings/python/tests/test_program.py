@@ -1,5 +1,7 @@
 """Python parity for NeoGraph's optional Program / QuickJS control plane."""
 
+import pytest
+
 import neograph_engine as ng
 
 
@@ -122,3 +124,24 @@ def test_program_handle_start_wait_uses_the_same_runtime():
 
     assert handle.run_id == result.run_id
     assert result.status == ng.ProgramTerminalStatus.Completed
+
+def test_local_program_host_active_start_pins_admitted_version():
+    host = ng.LocalProgramHost(
+        _registry(), "python-owner-active", _ceiling(), "python-program-host/v1"
+    )
+    version = host.compile_admit(_source(), _budget())
+    with pytest.raises(RuntimeError, match="activation"):
+        host.start_active({}, _budget(), "python-unactivated-run")
+    assert host.activation() is None
+    assert host.activate(version, 0) == ng.ProgramActivationResult.Activated
+    activation, handle = host.start_active({}, _budget(), "python-active-run")
+    assert activation.owner_scope == "python-owner-active"
+    assert activation.active_version_id == version.id
+    assert activation.generation == 1
+    assert ng.ProgramActivation.parse(activation.serialize_canonical()).id == activation.id
+    assert handle.program_version_id == activation.active_version_id
+    result = handle.wait()
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    assert result.output["channels"]["value"]["value"] == 42
+    assert host.rollback(version, 1) == ng.ProgramActivationResult.AlreadyPresent
+    assert host.activation().id == activation.id

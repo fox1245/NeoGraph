@@ -14,6 +14,8 @@
 
 #include <vector>
 
+namespace neograph::program {
+
 /** Result of an atomic owner-scoped activation compare-and-swap. */
 enum class ProgramActivationResult : std::uint8_t {
     Activated,

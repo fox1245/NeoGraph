@@ -867,6 +867,7 @@ MigrationDimension migration_dimension_from_string(std::string_view value) {
     if (value == "reconciliation") return MigrationDimension::Reconciliation;
     if (value == "terminal_output") return MigrationDimension::TerminalOutput;
     if (value == "checkpoint_lineage") return MigrationDimension::CheckpointLineage;
+    throw std::invalid_argument("Unknown migration dimension: " + std::string(value));
 }
 
 }  // namespace neograph::program

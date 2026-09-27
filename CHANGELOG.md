@@ -86,6 +86,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remains explicit; no host credential files or OAuth tokens enter NeoGraph.
   Subprocess trees, output/events, time and usage are bounded and host errors
   remain distinct from schema failures.
+- **Experimental owner-scoped active Program starts.** C++ `ProgramRuntime`
+  and Python `LocalProgramHost` can select an admitted immutable activation
+  once for a new run, returning the observed activation alongside a handle
+  pinned to its version; rollback changes future starts only. Graph migration
+  now rejects opaque checkpoint metadata instead of treating unknown
+  node-local state as transferable. Durable cross-store GC and production
+  performance qualification remain separate gates.
 - **Durable Program Core Tool grant identities.** Hosts may admit an exact,
   owner-scoped Tool grant in SQLite and rebind its gate/controller on each
   Program operation and reconnect. The runtime also checks the admitted

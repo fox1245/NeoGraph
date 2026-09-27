@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=21211053daf9b0e714438ca1369ac260173985bb042ca3effce2f3300588d1a6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=18368b14e7e85d70c14e289cb548abb3a8796f639c31731fe62d1fa6b8d00355 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **소유자 범위의 실험적 활성 Program 시작.** C++ `ProgramRuntime`와 Python
+  `LocalProgramHost`는 새 실행에서 승인된 불변 활성화를 한 번만 선택하고,
+  선택한 활성화와 해당 버전에 고정된 핸들을 함께 반환합니다. 롤백은 이후
+  시작되는 실행에만 영향을 줍니다. 그래프 마이그레이션은 알 수 없는 노드 로컬
+  상태를 이전할 수 있다고 간주하지 않고 불투명한 체크포인트 메타데이터를
+  거부합니다. 저장소 간 영속 GC와 프로덕션 성능 검증은 별도의 관문입니다.
 - **Program Core Tool grant의 영속 식별자.** 호스트는 소유자 범위의 정확한
   Tool grant를 SQLite에 승인하고 Program 작업 및 재연결마다 gate/controller를
   다시 결합할 수 있습니다. 런타임은 승인된 실행 바인딩 fingerprint도 검사하며,

@@ -827,9 +827,9 @@ A migration plan must cover or reject channels, continuations, barriers, pending
 work, retry/cancellation identity, interrupts, budgets, authority, checkpoint
 lineage, effects, caches, and output contracts. Rejection leaves source run,
 activation, published checkpoint lineage, Program journal, and effects
-semantically unchanged. An unreferenced immutable attempt checkpoint may remain
-and is collected by reference-aware GC; byte-identical storage is not promised.
-There is no restart-from-input fallback.
+semantically unchanged. An unreferenced immutable attempt checkpoint may remain;
+automatic collection requires a race-free cross-store reference inventory and is
+not promised here. There is no restart-from-input fallback.
 
 ## Public C++ API shape
 
@@ -1048,6 +1048,137 @@ Required gates:
 - Compilation, activation, migration, retained-version memory, checkpoint
   growth, recovery, and throughput receive separate budgets; one aggregate
   latency number is insufficient.
+
+### Experimental activation and GraphEngine generation qualification (#257)
+
+`ProgramCatalog::admit` publishes immutable, owner-scoped bundles and version
+receipts after compilation, validation, capability binding and materialization.
+`activate(owner, version_id, expected_generation)` and `rollback` perform a
+durable generation CAS. `ProgramRuntime::start_active(request)` accepts a
+top-level `RunInvocation` **without** `program_version_id`, reads one
+backend-coherent activation/version tuple once, verifies its admitted policy
+identity, and returns both the selected `ProgramActivation` and the pinned
+`ProgramHandle`. The canonical run invocation retains that exact activation
+tuple and the version identity; successor forks retain their own generation identity
+rather than inheriting the original activation. A later activation or rollback affects only future
+calls. Explicit-version `start(request)` remains independent of activation.
+Python's `LocalProgramHost.activate`, `rollback`, `activation`, and
+`start_active` expose the same control flow over **in-memory** stores; that
+facade is not a persistence/restart guarantee.
+
+For a separately compiled and admitted C++ `version`, an existing `catalog`
+and `runtime` can select and preserve the exact new-run activation:
+
+```cpp
+auto status = catalog->activate(owner_scope, version.id(), 0);
+if (status != program::ProgramActivationResult::Activated)
+    throw std::runtime_error("activation generation changed");
+program::RunInvocation request;
+request.owner_scope = owner_scope;
+request.agent_id = "example-agent";
+request.budget = budget;
+request.message_sequence = 1;
+request.idempotency_key = "request-123";
+request.correlation_id = "request-123";
+request.run_id = "request-123";
+auto selected = runtime.start_active(std::move(request));
+auto result = selected.handle.wait();  // selected.activation pins this run's tuple
+```
+
+With an already configured in-memory Python `LocalProgramHost` and an
+admitted `version`, the equivalent opt-in call is
+`host.activate(version, 0)` followed by
+`activation, handle = host.start_active(payload, budget, "request-123")`.
+The returned handle stays pinned if another generation is activated later.
+
+The wire contracts are
+[`program-activation-v1.schema.json`](../schemas/program-activation-v1.schema.json),
+[`program-run-invocation-v1.schema.json`](../schemas/program-run-invocation-v1.schema.json),
+and [`program-migration-plan-v2.schema.json`](../schemas/program-migration-plan-v2.schema.json);
+content identities and owner/activation equality are still verified by C++,
+not inferred from JSON Schema alone.
+
+Native in-flight migration is a distinct operation:
+`ProgramRuntime::migrate_graph(source_handle, target)` waits for an exact,
+durable super-step safe point and publishes an independently admitted Core
+successor via generation CAS. The source engine is fenced, not rewritten;
+unmapped state or opaque checkpoint metadata is rejected. A changed Core
+identity requires a separately prepared semantic adapter. Checkpoint metadata
+carrying a subgraph write journal or invocation identity has no admitted
+identity-preserving projection yet and is rejected; ordinary subgraph resume
+remains supported through the original pinned engine. General equivalence
+of changed node behavior is **not** established by a shape-preserving adapter;
+operators must validate the actual implementation and effect semantics before
+supplying one. QuickJS heap or arbitrary native continuation transplantation
+is not supported. `MigrationPlan` and its five classifications distinguish
+admission for future runs from an exact compatible fork.
+
+Performance gate for issue-specific **future** paired measurements, recorded
+before collecting issue-specific measurements (not claimed to predate the
+implementation or earlier Core baselines). Use the same pinned machine,
+compiler, flags, warmup, CPU affinity, process order, and durable backend
+for baseline and candidate. Retain ten process pairs and raw samples;
+discard two warmup pairs; median and nearest-rank p95 use the same pairs.
+Do not combine Core-only and Program-controlled results.
+
+| Observable | Prospective decision budget |
+|---|---|
+| Direct Core run and throughput, Program disabled or unused | Median latency ≤ 1.10× baseline; p95 ≤ 1.15×; throughput ≥ 0.90×. |
+| Active-version start versus explicit-version start | One activation read per admitted run; no per-step read, parse, canonicalization or migration work; median additional ≤ 2 ms in memory, ≤ 10 ms SQLite. |
+| Compile/materialize/activation | Record separate p50/p95 and binder work before enabling a product default; activation CAS median ≤ 2 ms in memory, ≤ 20 ms SQLite. |
+| Compatible fork excluding source-node execution | Median ≤ 100 ms in memory, ≤ 500 ms SQLite, with exact source checkpoint and journal evidence. |
+| Allocation and resident memory | Zero additional direct-Core per-step allocations; ≤ 64 MiB incremental RSS for 256 independently retained small versions on this fixture. |
+| Retention, checkpoint growth and recovery | ≤ 1 MiB per small retained version; target checkpoint bytes ≤ 2× source checkpoint + 16 KiB; recovery median ≤ 2× explicit-version reconnect + 20 ms. |
+
+Measured issue-specific sample (GNU 13.3, Linux WSL2 x86_64, Release, CPU 0,
+`origin/master` at `de8e2e31` versus this branch; ten alternating baseline /
+candidate process pairs after two discarded warm-up pairs). Each Core process
+ran `bench_neograph 10000 500 1 1` with the fan-out warning suppressed.
+Each Program process ran `bench_program_cost --mode cpp --backend memory
+--iterations 30 --warmup 5`, either `--case lifecycle` (both trees) or
+`--case active` (candidate only). Program rows below summarize the median
+*within each process* over its 30 warm iterations; p95 of ten process values
+uses the nearest rank (the largest observed value).
+
+| Process observable (microseconds) | Baseline p50 / p95 | Candidate p50 / p95 |
+|---|---:|---:|
+| Direct Core `seq`, time per iteration | 15.54 / 29.65 | 14.09 / 24.89 |
+| Direct Core `par`, time per iteration | 44.19 / 90.52 | 61.88 / 89.28 |
+| Explicit Program start | 998.24 / 1547.55 | 789.14 / 1695.70 |
+| Active Program start | unavailable | 978.56 / 1940.16 |
+| Active Program activation CAS | unavailable | 31.22 / 109.94 |
+| Explicit Program cold compile | 1039.33 / 3262.81 | 931.40 / 1636.85 |
+| Explicit Program cold admit | 1398.35 / 4906.63 | 1374.75 / 7789.87 |
+
+Raw retained process values (baseline and candidate values correspond by
+position; two decimal places, microseconds):
+
+| Observable | Baseline (10 process samples) | Candidate (10 process samples) |
+|---|---|---|
+| Core `seq` | 9.42, 18.22, 29.65, 17.91, 13.17, 8.42, 9.86, 10.58, 20.44, 21.31 | 15.39, 8.92, 22.01, 22.31, 9.90, 12.78, 8.30, 8.41, 24.89, 21.56 |
+| Core `par` | 66.25, 40.33, 29.69, 31.44, 22.86, 62.21, 90.52, 48.05, 51.09, 31.25 | 89.28, 70.46, 30.37, 20.64, 59.47, 70.94, 69.39, 64.28, 25.62, 23.35 |
+| Explicit start | 709.64, 1222.43, 1520.50, 1289.26, 774.04, 675.03, 651.00, 729.31, 1453.82, 1547.55 | 413.85, 615.99, 1695.70, 1333.87, 865.58, 712.71, 570.97, 651.71, 1230.94, 1358.29 |
+| Active start | unavailable | 495.00, 1940.16, 1803.48, 1243.91, 1154.90, 752.42, 701.31, 802.21, 696.78, 1606.67 |
+| Active activation | unavailable | 24.21, 106.97, 35.25, 109.94, 27.19, 24.68, 23.74, 24.05, 37.76, 35.62 |
+
+The observed candidate active-versus-explicit start p50 difference is
+`0.189 ms`, and in-memory activation CAS p50 is `0.031 ms`; this fixture
+includes different request construction, so neither number isolates the
+activation lookup alone. The Core `par` p50 increased `1.40x`, exceeding
+the preregistered `1.10x` latency budget, even though the Core-only hot path
+is unchanged. WSL2 sample dispersion is large; **the direct-Core gate is not
+passed** on this evidence. Rerun on a controlled pinned host before release.
+SQLite activation latency, compatible fork latency, allocation, 256-version
+RSS, checkpoint growth, and restart recovery budgets are **unmeasured**, not
+passing.
+
+An unmeasured row is **not passed**. Never enable automatic version collection
+without an authoritative durable inventory of activation, run, checkpoint,
+lineage, effect, and audit references. `collect_retention` accepts explicit host
+pins and reports the active-pointer/host-pin reasons it retained; that alone
+does not establish race-free cross-store GC while runs are being published.
+The standalone Python facade uses in-memory stores and must not be described as
+production-durable.
 
 No AVX, JIT, coroutine, pool, or cache optimization is accepted on theory alone.
 Each remains an optional measured lever after the architecture is correct.

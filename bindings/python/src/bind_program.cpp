@@ -220,6 +220,38 @@ public:
     ProgramVersion compile_admit(const ProgramSource& source, const RunBudget& budget) {
         return admit(compile(source, budget));
     }
+    ProgramActivationResult activate(const ProgramVersion& version,
+                                     std::uint64_t expected_generation) {
+        return catalog_->activate(owner_scope_, version.id(), expected_generation);
+    }
+
+    ProgramActivationResult rollback(const ProgramVersion& version,
+                                     std::uint64_t expected_generation) {
+        return catalog_->rollback(owner_scope_, version.id(), expected_generation);
+    }
+
+    std::optional<ProgramActivation> activation() const {
+        return catalog_->activation(owner_scope_);
+    }
+
+    std::pair<ProgramActivation, ProgramHandle> start_active(
+        py::object input, const RunBudget& budget, std::string trace_id) {
+        RunInvocation request;
+        request.owner_scope = owner_scope_;
+        request.agent_id = "python-local";
+        request.run_id = Checkpoint::generate_id();
+        request.budget = budget;
+        request.input = py_to_json(input);
+        request.message_sequence = 1;
+        request.idempotency_key = request.run_id;
+        request.correlation_id = std::move(trace_id);
+        auto selected = [&] {
+            py::gil_scoped_release release;
+            return runtime_->start_active(std::move(request));
+        }();
+        return {std::move(selected.activation), std::move(selected.handle)};
+    }
+
 
     ProgramResult run(const ProgramVersion& version,
                       py::object input,
@@ -446,6 +478,19 @@ void init_program(py::module_& m) {
         .def("wait", &ProgramHandle::wait, py::call_guard<py::gil_scoped_release>())
         .def("try_result", &ProgramHandle::try_result);
 
+    py::enum_<ProgramActivationResult>(m, "ProgramActivationResult")
+        .value("Activated", ProgramActivationResult::Activated)
+        .value("AlreadyPresent", ProgramActivationResult::AlreadyPresent)
+        .value("Conflict", ProgramActivationResult::Conflict);
+    py::class_<ProgramActivation>(m, "ProgramActivation")
+        .def_property_readonly("owner_scope", &ProgramActivation::owner_scope)
+        .def_property_readonly("active_version_id", &ProgramActivation::active_version_id)
+        .def_property_readonly("generation", &ProgramActivation::generation)
+        .def_property_readonly("policy_snapshot_hash", &ProgramActivation::policy_snapshot_hash)
+        .def_property_readonly("id", &ProgramActivation::id)
+        .def_static("parse", &ProgramActivation::parse)
+        .def("serialize_canonical", &ProgramActivation::serialize_canonical);
+
     py::class_<LocalProgramHost>(m, "LocalProgramHost",
         "Owner-scoped in-memory Program compiler, Catalog, and durable runtime. "
         "It uses the same C++ ProgramRuntime as native callers.")
@@ -457,6 +502,14 @@ void init_program(py::module_& m) {
         .def("compile", &LocalProgramHost::compile)
         .def("admit", &LocalProgramHost::admit)
         .def("compile_admit", &LocalProgramHost::compile_admit)
+        .def("activate", &LocalProgramHost::activate,
+             py::arg("version"), py::arg("expected_generation"))
+        .def("rollback", &LocalProgramHost::rollback,
+             py::arg("version"), py::arg("expected_generation"))
+        .def("activation", &LocalProgramHost::activation)
+        .def("start_active", &LocalProgramHost::start_active,
+             py::arg("input"), py::arg("budget"),
+             py::arg("trace_id") = "python-program-active")
         .def("run", &LocalProgramHost::run,
              py::arg("version"), py::arg("input"), py::arg("budget"),
              py::arg("trace_id") = "python-program")

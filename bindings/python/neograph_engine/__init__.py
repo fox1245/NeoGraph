@@ -224,6 +224,8 @@ try:
         ProgramVersion,
         ProgramResult,
         ProgramHandle,
+        ProgramActivation,
+        ProgramActivationResult,
         LocalProgramHost,
         javascript_authoring_capability_manifest,
     )
@@ -765,6 +767,8 @@ if _HAVE_PROGRAM:
         "ProgramVersion",
         "ProgramResult",
         "ProgramHandle",
+        "ProgramActivation",
+        "ProgramActivationResult",
         "LocalProgramHost",
         "javascript_authoring_capability_manifest",
     ])

@@ -8,6 +8,7 @@
 #include <neograph/program/admission.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/module.h>
+#include <neograph/program/store.h>
 #include <neograph/tool_set.h>
 
 #include <functional>

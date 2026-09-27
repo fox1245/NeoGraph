@@ -465,6 +465,13 @@ void validate(const CapsuleData& data) {
         throw std::invalid_argument(
             "Graph migration capsule requires a completed super-step checkpoint");
     }
+    // Root super-step checkpoints carry no node-local/subgraph journal. An
+    // opaque metadata payload cannot be reconciled by the identity projector:
+    // accepting it would silently drop or misinterpret pending local state.
+    if (!checkpoint.metadata.is_null()) {
+        throw std::invalid_argument(
+            "Graph migration capsule cannot transfer opaque checkpoint metadata");
+    }
     if (!checkpoint.channel_values.is_object() ||
         !checkpoint.channel_values.contains("channels") ||
         !checkpoint.channel_values.at("channels").is_object() ||

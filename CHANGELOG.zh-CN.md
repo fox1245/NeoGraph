@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=21211053daf9b0e714438ca1369ac260173985bb042ca3effce2f3300588d1a6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=18368b14e7e85d70c14e289cb548abb3a8796f639c31731fe62d1fa6b8d00355 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **按所有者作用域划分的实验性活动 Program 启动。** C++ `ProgramRuntime`
+  和 Python `LocalProgramHost` 在新运行时只选择一次已批准的不可变激活记录，
+  同时返回所选激活记录和固定于对应版本的句柄。回滚仅影响后续启动。
+  图迁移不再假定未知的节点局部状态可迁移，而是拒绝不透明的检查点元数据。
+  跨存储持久 GC 和生产性能验证仍是独立的准入条件。
 - **Program Core Tool grant 的持久身份。** 宿主可在 SQLite 中批准受所有者
   作用域约束的精确 Tool grant，并在每次 Program 操作及重连时重新绑定
   gate/controller。运行时还校验已批准的可执行绑定 fingerprint；撤销在重启后
