@@ -297,6 +297,28 @@ SQLiteProgramStore::get_activation(std::string_view owner_scope) const {
     if (activation) verify_activation_target(impl_->db, *activation);
     return activation;
 }
+std::optional<ProgramActivationBinding>
+SQLiteProgramStore::get_active_binding(std::string_view owner_scope) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    Transaction transaction(impl_->db);
+    const auto active = load_activation(impl_->db, owner_scope);
+    if (!active) {
+        transaction.commit();
+        return std::nullopt;
+    }
+    const auto bytes = stored_bytes(impl_->db, "program_versions", active->active_version_id());
+    if (!bytes) {
+        throw std::runtime_error("SQLite Program activation references a missing version");
+    }
+    const auto version = ProgramVersion::parse(*bytes);
+    if (version.ownership_scope() != owner_scope ||
+        version.policy_snapshot().fingerprint() != active->policy_snapshot_hash()) {
+        throw std::runtime_error("SQLite Program activation target is not owner/policy bound");
+    }
+    transaction.commit();
+    return ProgramActivationBinding{*active, version};
+}
 
 ProgramActivationResult SQLiteProgramStore::compare_activate(
     std::string_view owner_scope,

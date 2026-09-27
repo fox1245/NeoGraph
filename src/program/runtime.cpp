@@ -4952,6 +4952,29 @@ ProgramRuntime::~ProgramRuntime() {
     if (impl_) impl_->shutdown();
 }
 
+ProgramActiveRun ProgramRuntime::start_active(
+    RunInvocation invocation, std::shared_ptr<ProgramEventSink> events) {
+    if (!invocation.program_version_id.empty() || !invocation.parent_run_id.empty()) {
+        throw std::invalid_argument(
+            "Active-version start accepts only a top-level request without a version id");
+    }
+    const auto binding = impl_->config.catalog->active_binding(invocation.owner_scope);
+    if (!binding) {
+        throw_runtime_diagnostic("P_ACTIVATION_NOT_FOUND",
+                                 "No admitted Program activation exists for this owner");
+    }
+    const auto& activation = binding->activation;
+    const auto& resolved = binding->version;
+    invocation.program_version_id = resolved.id();
+    invocation.selected_activation = activation;
+    invocation.validate();
+    const auto owner_scope = invocation.owner_scope;
+    auto handle = start_resolved(
+        owner_scope, resolved,
+        runtime_projection(std::move(invocation), std::move(events)), true);
+    return ProgramActiveRun{activation, std::move(handle)};
+}
+
 ProgramHandle ProgramRuntime::start(RunInvocation invocation) {
     return start(std::move(invocation), {});
 }
@@ -4991,7 +5014,20 @@ ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
 
 ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
                                              const ProgramVersion& version,
-                                             ProgramInvocation     invocation) {
+                                             ProgramInvocation     invocation,
+                                             bool                  active_selection) {
+    const auto selected = invocation.canonical_request
+        ? invocation.canonical_request->selected_activation
+        : std::nullopt;
+    if (selected.has_value() != active_selection ||
+        (selected &&
+         (selected->owner_scope() != owner_scope ||
+          selected->active_version_id() != version.id() ||
+          selected->policy_snapshot_hash() != version.policy_snapshot().fingerprint()))) {
+        throw_runtime_diagnostic(
+            "P_ACTIVATION_MISMATCH",
+            "Only an exact host-selected activation can bind a new run");
+    }
     auto pinned = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, version);
     validate_invocation(*pinned, invocation);
     const auto run_id =
@@ -6533,6 +6569,7 @@ ProgramHandle ProgramRuntime::migrate_graph(
     }
     auto target_invocation = source_record->invocation();
     target_invocation.program_version_id = target_version->id();
+    target_invocation.selected_activation.reset();
     target_invocation.run_id = target_run_id;
     target_invocation.budget = remaining;
     target_invocation.validate();

@@ -1663,6 +1663,11 @@ std::optional<ProgramActivation> ProgramCatalog::activation(std::string_view own
     detail::validate_token(owner_scope, "Program activation owner_scope");
     return impl_->program_store->get_activation(owner_scope);
 }
+std::optional<ProgramActivationBinding>
+ProgramCatalog::active_binding(std::string_view owner_scope) const {
+    detail::validate_token(owner_scope, "Program activation owner_scope");
+    return impl_->program_store->get_active_binding(owner_scope);
+}
 
 ProgramRetentionReport ProgramCatalog::collect_retention(
     std::string_view owner_scope, const std::vector<std::string>& pinned_version_ids) {

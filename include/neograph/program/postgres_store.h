@@ -37,6 +37,8 @@ public:
                                               std::string_view id) const override;
     std::optional<ProgramActivation>
     get_activation(std::string_view owner_scope) const override;
+    std::optional<ProgramActivationBinding>
+    get_active_binding(std::string_view owner_scope) const override;
     ProgramActivationResult compare_activate(std::string_view owner_scope,
                                              std::uint64_t    expected_generation,
                                              std::string_view version_id,

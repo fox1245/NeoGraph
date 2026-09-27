@@ -150,6 +150,9 @@ public:
                                      std::uint64_t expected_generation);
     std::optional<ProgramActivation>
     activation(std::string_view owner_scope) const;
+    /** Read one coherent activation/version tuple from the durable store. */
+    std::optional<ProgramActivationBinding>
+    active_binding(std::string_view owner_scope) const;
     ProgramRetentionReport collect_retention(
         std::string_view owner_scope,
         const std::vector<std::string>& pinned_version_ids);

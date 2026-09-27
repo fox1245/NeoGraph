@@ -19,6 +19,11 @@
 #include <vector>
 
 namespace neograph::program {
+/** Coherent owner-scoped activation pointer and its admitted immutable target. */
+struct NEOGRAPH_PROGRAM_API ProgramActivationBinding {
+    ProgramActivation activation;
+    ProgramVersion    version;
+};
 
 class NEOGRAPH_PROGRAM_API ProgramStore {
 public:
@@ -62,6 +67,20 @@ public:
     get_activation(std::string_view /*owner_scope*/) const {
         throw std::logic_error("ProgramStore does not expose activation lifecycle");
     }
+    /**
+     * Return one coherent activation/version tuple. Implementations must read
+     * both records under their backend lock or transaction; a missing or
+     * corrupt target fails closed rather than returning a partial tuple.
+     */
+    virtual std::optional<ProgramActivationBinding>
+    get_active_binding(std::string_view owner_scope) const {
+        const auto active = get_activation(owner_scope);
+        if (!active) return std::nullopt;
+        const auto version = get_version(owner_scope, active->active_version_id());
+        if (!version || version->policy_snapshot().fingerprint() != active->policy_snapshot_hash())
+            throw std::runtime_error("Program activation target is missing or has a mismatched policy");
+        return ProgramActivationBinding{*active, *version};
+    }
     virtual ProgramActivationResult compare_activate(
         std::string_view /*owner_scope*/,
         std::uint64_t /*expected_generation*/,
@@ -98,6 +117,8 @@ public:
                                               std::string_view id) const override;
     std::optional<ProgramActivation>
     get_activation(std::string_view owner_scope) const override;
+    std::optional<ProgramActivationBinding>
+    get_active_binding(std::string_view owner_scope) const override;
     ProgramActivationResult compare_activate(std::string_view owner_scope,
                                              std::uint64_t    expected_generation,
                                              std::string_view version_id,

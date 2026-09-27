@@ -343,6 +343,31 @@ PostgreSQLProgramStore::get_activation(std::string_view owner_scope) const {
     if (activation) verify_activation_target(impl_->connection, *activation);
     return activation;
 }
+std::optional<ProgramActivationBinding>
+PostgreSQLProgramStore::get_active_binding(std::string_view owner_scope) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    Transaction transaction(impl_->connection);
+    const auto active = load_activation(impl_->connection, owner_scope);
+    if (!active) {
+        transaction.commit();
+        return std::nullopt;
+    }
+    const auto bytes = select_bytes(
+        impl_->connection,
+        "SELECT canonical_bytes FROM neograph_program_versions WHERE id = $1",
+        {active->active_version_id()});
+    if (!bytes) {
+        throw std::runtime_error("PostgreSQL Program activation references a missing version");
+    }
+    const auto version = ProgramVersion::parse(*bytes);
+    if (version.ownership_scope() != owner_scope ||
+        version.policy_snapshot().fingerprint() != active->policy_snapshot_hash()) {
+        throw std::runtime_error("PostgreSQL Program activation target is not owner/policy bound");
+    }
+    transaction.commit();
+    return ProgramActivationBinding{*active, version};
+}
 
 ProgramActivationResult PostgreSQLProgramStore::compare_activate(
     std::string_view owner_scope,

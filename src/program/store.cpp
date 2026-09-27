@@ -137,6 +137,21 @@ InMemoryProgramStore::get_activation(std::string_view owner_scope) const {
     if (found == impl_->activations.end()) return std::nullopt;
     return found->second.value;
 }
+std::optional<ProgramActivationBinding>
+InMemoryProgramStore::get_active_binding(std::string_view owner_scope) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto active = impl_->activations.find(owner_scope);
+    if (active == impl_->activations.end()) return std::nullopt;
+    const auto version = impl_->versions.find(active->second.value.active_version_id());
+    if (version == impl_->versions.end() ||
+        version->second.value.ownership_scope() != owner_scope ||
+        version->second.value.policy_snapshot().fingerprint() !=
+            active->second.value.policy_snapshot_hash()) {
+        throw std::runtime_error("Program activation target is missing or has a mismatched policy");
+    }
+    return ProgramActivationBinding{active->second.value, version->second.value};
+}
 
 ProgramActivationResult InMemoryProgramStore::compare_activate(
     std::string_view owner_scope,
