@@ -31,7 +31,7 @@
 
 #include <neograph/api.h>
 #include <neograph/acp/types.h>
-#include <neograph/graph/engine.h>
+#include <neograph/graph/execution.h>
 
 #include <chrono>
 #include <iosfwd>
@@ -197,6 +197,10 @@ class NEOGRAPH_API ACPServer {
     ///                 Typically `{"name":"my-agent","version":"0.1.0"}`.
     /// @param adapter  Optional input/output mapping override.
     ACPServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
+              neograph::json info,
+              std::shared_ptr<ACPGraphAdapter> adapter = {});
+    /// Preferred constructor: restrict the host to graph execution.
+    ACPServer(neograph::graph::GraphExecution execution,
               neograph::json info,
               std::shared_ptr<ACPGraphAdapter> adapter = {});
 

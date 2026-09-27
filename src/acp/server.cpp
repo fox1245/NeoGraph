@@ -146,7 +146,9 @@ bool has_array(const neograph::json& object, const char* key) {
 // Impl
 // ---------------------------------------------------------------------------
 struct ACPServer::Impl {
-    std::shared_ptr<neograph::graph::GraphEngine> engine;
+    neograph::graph::GraphExecution               execution;
+    explicit Impl(neograph::graph::GraphExecution value)
+        : execution(std::move(value)) {}
     neograph::json                                info;
     std::shared_ptr<ACPGraphAdapter>              adapter;
     AgentCapabilities                             caps;
@@ -464,14 +466,14 @@ ACPServer::Impl::handle_session_resume(const neograph::json& params,
         reservation.active = true;
     }
 
-    std::vector<neograph::graph::Checkpoint> history;
+    std::optional<neograph::graph::CheckpointPhase> phase;
     try {
-        history = engine->get_state_history(req.session_id, 1);
+        phase = execution.latest_resume_phase(req.session_id);
     } catch (const std::exception& e) {
         return jsonrpc_error(
             -32603, std::string("Failed to restore session: ") + e.what(), id);
     }
-    if (history.empty()) {
+    if (!phase) {
         return jsonrpc_error(-32001, "Unknown session: " + req.session_id, id);
     }
 
@@ -484,7 +486,7 @@ ACPServer::Impl::handle_session_resume(const neograph::json& params,
                 -32602, "session/resume cwd does not match the existing session", id);
         }
         sessions[req.session_id] = req.cwd;
-        if (is_interrupt_phase(history.front().interrupt_phase)) {
+        if (is_interrupt_phase(*phase)) {
             interrupted_sessions.insert(req.session_id);
         } else {
             interrupted_sessions.erase(req.session_id);
@@ -682,7 +684,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                         invocation_request.config = std::move(cfg);
                         invocation_request.metadata.run_id = req.session_id;
                         neograph::graph::RunInvocation invocation(
-                            engine, std::move(invocation_request));
+                            execution, std::move(invocation_request));
 
                         auto outcome = resume_pending
                             ? invocation.resume(neograph::json(
@@ -855,9 +857,13 @@ ACPServer::Impl::handle_session_cancel(const neograph::json& params) {
 ACPServer::ACPServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
                      neograph::json info,
                      std::shared_ptr<ACPGraphAdapter> adapter)
-    : impl_(std::make_unique<Impl>()) {
-    if (!engine) throw std::invalid_argument("ACPServer: engine is null");
-    impl_->engine  = std::move(engine);
+    : ACPServer(neograph::graph::GraphExecution(std::move(engine)),
+                std::move(info), std::move(adapter)) {}
+
+ACPServer::ACPServer(neograph::graph::GraphExecution execution,
+                     neograph::json info,
+                     std::shared_ptr<ACPGraphAdapter> adapter)
+    : impl_(std::make_unique<Impl>(std::move(execution))) {
     impl_->info    = std::move(info);
     impl_->adapter = adapter ? adapter : std::make_shared<ACPGraphAdapter>();
     impl_->caps.session.resume = true;

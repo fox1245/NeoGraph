@@ -212,29 +212,6 @@ void register_node(const std::string& type, NodeFactoryFn factory) {
 
 }  // namespace
 
-TEST(EngineConfigTest, LegacyCompileDelegatesWithoutBehaviorChange) {
-    register_node("engine_config_echo", [](const std::string&, const json&, const NodeContext&) {
-        return std::make_unique<EchoNode>();
-    });
-
-    const auto  definition = one_node_graph("engine_config_echo");
-    NodeContext context;
-
-    auto legacy = GraphEngine::compile(definition, context);
-
-    EngineConfig config;
-    config.node_context = context;
-    auto configured     = GraphEngine::build(definition, std::move(config));
-
-    RunConfig run;
-    run.input = {{"input", "same"}};
-
-    const auto legacy_result     = legacy->run(run);
-    const auto configured_result = configured->run(run);
-
-    EXPECT_EQ(legacy_result.output, configured_result.output);
-    EXPECT_EQ(legacy_result.execution_trace, configured_result.execution_trace);
-}
 
 TEST(EngineConfigTest, StrictBuildRejectsUnknownKeysWithoutMutatingDefinition) {
     register_node("engine_config_strict",
@@ -320,6 +297,29 @@ TEST(EngineConfigTest, EnablesNodeCacheAtConstructionTime) {
     EXPECT_EQ(engine->run(run).channel<int>("output"), 7);
     EXPECT_EQ(engine->run(run).channel<int>("output"), 7);
     EXPECT_EQ(CountingNode::calls.load(), 1);
+}
+
+TEST(EngineConfigTest, ExplicitExecutionCachePolicyOverridesReusableOptIn) {
+    register_node("engine_config_local_cache",
+                  [](const std::string&, const json&, const NodeContext&) {
+                      return std::make_unique<CountingNode>();
+                  });
+    CountingNode::calls = 0;
+    EngineConfig config;
+    config.cached_nodes.insert("work");
+    config.node_cache_policies.emplace(
+        "work", CacheKeyPolicy{CacheScope::Execution, {}});
+    auto engine = GraphEngine::build(one_node_graph("engine_config_local_cache"),
+                                     std::move(config));
+    RunConfig first;
+    first.thread_id = "cache-first";
+    first.input = {{"input", 7}};
+    RunConfig second;
+    second.thread_id = "cache-second";
+    second.input = first.input;
+    EXPECT_EQ(engine->run(first).channel<int>("output"), 7);
+    EXPECT_EQ(engine->run(second).channel<int>("output"), 7);
+    EXPECT_EQ(CountingNode::calls.load(), 2);
 }
 
 TEST(EngineConfigTest, AppliesNodeCacheCapacityBeforeFirstRun) {

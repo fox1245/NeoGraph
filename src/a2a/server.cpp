@@ -252,7 +252,7 @@ neograph::json jsonrpc_result(neograph::json result, const neograph::json& id) {
 // Impl
 // ---------------------------------------------------------------------------
 struct A2AServer::Impl {
-    std::shared_ptr<neograph::graph::GraphEngine> engine;
+    std::optional<neograph::graph::GraphExecution> execution;
     AgentCard                                     card;
     std::shared_ptr<GraphAgentAdapter>            adapter;
 #ifdef NEOGRAPH_A2A_PROGRAM
@@ -515,7 +515,7 @@ Task A2AServer::Impl::run_graph(
         cfg.input = a.build_initial_state(extract_user_text(inbound));
         neograph::graph::RunInvocationRequest request;
         request.config = std::move(cfg);
-        neograph::graph::RunInvocation invocation(engine, std::move(request));
+        neograph::graph::RunInvocation invocation(*execution, std::move(request));
         const auto outcome = invocation.run();
         if (outcome.cancelled()) {
             result = build_failure_task(task_id, context_id, "(canceled)");
@@ -1134,9 +1134,14 @@ void A2AServer::Impl::handle_tasks_cancel(const httplib::Request& req,
 A2AServer::A2AServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
                      AgentCard card,
                      std::shared_ptr<GraphAgentAdapter> adapter)
+    : A2AServer(neograph::graph::GraphExecution(std::move(engine)),
+                std::move(card), std::move(adapter)) {}
+
+A2AServer::A2AServer(neograph::graph::GraphExecution execution,
+                     AgentCard card,
+                     std::shared_ptr<GraphAgentAdapter> adapter)
     : impl_(std::make_unique<Impl>()) {
-    if (!engine) throw std::invalid_argument("A2AServer: engine is null");
-    impl_->engine  = std::move(engine);
+    impl_->execution = std::move(execution);
     impl_->card    = std::move(card);
     impl_->adapter = adapter ? adapter : std::make_shared<GraphAgentAdapter>();
     impl_->register_routes();

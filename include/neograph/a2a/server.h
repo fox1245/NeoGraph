@@ -25,7 +25,7 @@
 
 #include <neograph/api.h>
 #include <neograph/a2a/types.h>
-#include <neograph/graph/engine.h>
+#include <neograph/graph/execution.h>
 
 #ifdef NEOGRAPH_A2A_PROGRAM
 #include <neograph/a2a/collaboration.h>
@@ -126,6 +126,10 @@ class NEOGRAPH_API A2AServer {
     /// @param card     Discovery payload returned at /.well-known/agent-card.json.
     /// @param adapter  Optional input/output mapping override.
     A2AServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
+              AgentCard card,
+              std::shared_ptr<GraphAgentAdapter> adapter = {});
+    /// Preferred constructor: retain only execution-facing capabilities.
+    A2AServer(neograph::graph::GraphExecution execution,
               AgentCard card,
               std::shared_ptr<GraphAgentAdapter> adapter = {});
 

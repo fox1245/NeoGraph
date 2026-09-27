@@ -11,6 +11,8 @@
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/graph/checkpoint.h>
+#include <chrono>
+#include <future>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -125,22 +127,6 @@ TEST(AdminApiBarrierPreservation, ForkCarriesBarrierStateToNewThread) {
     EXPECT_EQ(1u, forked->barrier_state["join"].count("c"));
 }
 
-TEST(AdminApiFacade, DelegatesStateHistoryUpdateAndFork) {
-    auto store = seed_cp_with_barrier("admin-facade-src", {});
-    auto engine = compile_minimal_engine(store);
-    auto admin = engine->admin();
-
-    ASSERT_TRUE(admin.get_state("admin-facade-src").has_value());
-    EXPECT_EQ(admin.get_state_history("admin-facade-src").size(), 1u);
-
-    admin.update_state("admin-facade-src", json{{"a_done", true}}, "join");
-    EXPECT_EQ(admin.get_state_history("admin-facade-src").size(), 2u);
-
-    auto forked_id = admin.fork("admin-facade-src", "admin-facade-dst");
-    EXPECT_FALSE(forked_id.empty());
-    EXPECT_TRUE(admin.get_state("admin-facade-dst").has_value());
-}
-
 TEST(AdminApi, OrderedChannelWritesPreserveModes) {
     auto store = seed_cp_with_barrier("admin-ordered-writes", {});
     auto engine = compile_minimal_engine(store);
@@ -158,4 +144,97 @@ TEST(AdminApi, OrderedChannelWritesPreserveModes) {
     ASSERT_TRUE(state.has_value());
     EXPECT_EQ((*state)["channels"]["messages"]["value"],
               json::array({"replacement", "append-after"}));
+}
+
+TEST(AdminApi, RejectsRacingExecutionWithoutPublishingCheckpoint) {
+    auto store = seed_cp_with_barrier("admin-race", {});
+    auto engine = compile_minimal_engine(store);
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    RunConfig config;
+    config.thread_id = "admin-race";
+    config.input = json::object();
+
+    auto running = std::async(std::launch::async, [&] {
+        return engine->run_stream(config, [&](const GraphEvent& event) {
+            if (event.type == GraphEvent::Type::NODE_START &&
+                event.node_name == "join") {
+                entered.set_value();
+                released.wait();
+            }
+        });
+    });
+    // Release the blocked execution before future destruction even if an
+    // assertion throws or returns early.
+    struct ReleaseOnExit {
+        std::promise<void>& signal;
+        bool signaled = false;
+        void release() {
+            if (!signaled) { signal.set_value(); signaled = true; }
+        }
+        ~ReleaseOnExit() { release(); }
+    } unblock{release};
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+    const auto before = store->list("admin-race").size();
+    auto admin = engine->admin();
+    EXPECT_THROW(admin.get_state("admin-race"), std::logic_error);
+    EXPECT_THROW(engine->get_state_history("admin-race"), std::logic_error);
+    EXPECT_THROW(admin.update_state("admin-race", json{{"a_done", true}}),
+                 std::logic_error);
+    EXPECT_THROW(admin.fork("admin-race", "admin-race-fork"), std::logic_error);
+    EXPECT_THROW(engine->set_worker_count(2), std::logic_error);
+    EXPECT_EQ(store->list("admin-race").size(), before);
+    EXPECT_FALSE(store->load_latest("admin-race-fork").has_value());
+
+    // Administration is engine-wide even on another thread ID; concurrent
+    // executions on distinct thread IDs remain permitted.
+    EXPECT_THROW(admin.get_state("unrelated-thread"), std::logic_error);
+    RunConfig other;
+    other.thread_id = "unrelated-thread";
+    EXPECT_NO_THROW(engine->run(other));
+    unblock.release();
+    EXPECT_NO_THROW(running.get());
+    EXPECT_NO_THROW(engine->set_worker_count(1));
+    EXPECT_NO_THROW(admin.update_state("admin-race", json{{"a_done", true}}));
+}
+
+TEST(AdminApi, ExecutionRejectsWhileAdministrationIsActive) {
+    class BlockingListStore final : public InMemoryCheckpointStore {
+    public:
+        std::promise<void> entered;
+        std::shared_future<void> release;
+        std::vector<Checkpoint> list(const std::string& thread_id,
+                                     int limit = 100) override {
+            entered.set_value();
+            release.wait();
+            return InMemoryCheckpointStore::list(thread_id, limit);
+        }
+    };
+    auto store = std::make_shared<BlockingListStore>();
+    std::promise<void> release;
+    store->release = release.get_future().share();
+    auto entered = store->entered.get_future();
+    auto engine = compile_minimal_engine(store);
+    auto pending_admin = std::async(std::launch::async, [&] {
+        return engine->admin().get_state_history("admin-in-progress");
+    });
+    struct ReleaseOnExit {
+        std::promise<void>& signal;
+        bool signaled = false;
+        void release() {
+            if (!signaled) { signal.set_value(); signaled = true; }
+        }
+        ~ReleaseOnExit() { release(); }
+    } unblock{release};
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    RunConfig config;
+    config.thread_id = "admin-in-progress";
+    EXPECT_THROW(engine->run(config), std::logic_error);
+    EXPECT_EQ(store->size(), 0u);
+    unblock.release();
+    EXPECT_NO_THROW(pending_admin.get());
+    EXPECT_NO_THROW(engine->run(config));
 }

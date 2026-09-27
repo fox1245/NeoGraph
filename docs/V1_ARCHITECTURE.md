@@ -932,6 +932,45 @@ working type.
 8. Pre-v1 layout changes require one explicit rebuild notice. At 1.0, exported
    virtual order and public object layouts follow `docs/ABI_POLICY.md`.
 
+### GraphEngine responsibility inventory (#216)
+
+| Responsibility | Complete public method families (all overloads) | Lifetime / concurrency |
+|---|---|---|
+| Construction / runtime policy | `link` (compiled graph, validated topology, resources, bound generation), `build`, `build_strict`, legacy `compile`; `own_tools`, `set_checkpoint_store`, `set_store`, `set_tool_gate`, `set_tool_execution_controller`, `set_hook_runtime`, `set_runtime_interposition`, `set_retry_policy`, `set_node_retry_policy`, `set_worker_count`, `set_worker_count_auto`, `set_node_cache_enabled`, `set_node_cache_max_entries` | `EngineConfig` and `EngineResources` are consumed at construction; the engine owns transferred tools and holds shared dependencies. Compatibility setters are **before publication only**: do not race them with executions, admin calls, or each other. A worker resize checks for in-flight execution but is not a substitute for construction-time configuration. |
+| Execution | `run`, `run_async`, `run_stream`, `run_stream_async`, `run_until_safe_point_async`, `resume`, `resume_async`, `resume_from`, `resume_from_async`, `resume_from_until_safe_point_async` | Engine (and nodes, stores, tools, provider) must outlive every sync call or async coroutine. Distinct `thread_id`s may execute concurrently; same-thread concurrent runs are still last-writer-wins and need host serialization. Cancellation completes/drains before admin retry. `RunResources` override only their invocation. |
+| State administration | `admin`, `get_state`, `get_state_history`, `update_state`, `update_state_writes`, `fork` | `GraphAdmin` borrows its engine and must not outlive it. On one engine, every state/history read and mutation **rejects** during any execution; execution **rejects** during an admin call. Both facade and legacy direct calls share the same atomic admission policy. Rejected writes do not publish a checkpoint. Distinct engines sharing a store still need an external per-thread owner. |
+| Diagnostics / live cache | `get_graph_name`, `get_store`, `node_cache`, `clear_node_cache` | Name and store are stable after construction; borrowed references require engine lifetime. Cache operations use `NodeCache` synchronization and may run during execution (cache semantics apply); they are not state administration. |
+
+Construction-time `EngineConfig::node_cache_policies` overrides a matching
+legacy `cached_nodes` entry; `EngineConfig::runtime_interposition` binds
+built-in consumers before publication. Both avoid post-build setter windows.
+
+Non-copyable admission guards release their state on normal, exceptional, and
+cancelled coroutine completion; rejected admin calls fail before checkpoint
+publication. The checkpoint store still owns atomicity of individual saves.
+
+Protocol A2A/ACP/gRPC hosts retain the concrete, shared-ownership
+`GraphExecution` capability. It exposes execution attempts and the one
+checkpoint-phase lookup needed to decide whether an ACP session should resume;
+it exposes neither state mutations nor construction policy. `RunInvocation`
+accepts that capability, while its `shared_ptr<GraphEngine>` constructor and
+the hosts' original constructors remain for existing callers. `GraphEngine`
+remains the C++ compatibility facade through the pre-v1 migration window:
+new consumers use `build`/`EngineConfig`/`EngineResources`, `GraphExecution`
+for hosting and `admin()` for state. Remove the legacy `compile`, setter,
+direct-admin and engine-typed host/invocation constructors only at an announced
+v1 ABI rebuild after in-tree and downstream migrations; no unannounced removal.
+
+Fast-path comparison protocol: run the existing `bench_neograph` on the parent
+revision and this revision, same optimized build/toolchain/machine/CPU settings,
+with `5000 1000 1 100 7` (iterations, parallel iterations, one worker,
+warmups, samples). Compare `seq`, `seq_sync`, `par`, `seq_stream_idle` and
+`seq_events` median microseconds per iteration across three process runs.
+Reject a repeatable increase beyond noise before cutover. Admission adds one
+atomic compare-exchange at execution entry/exit only, no heap allocation,
+thread-ID map, or per-super-step lock. No benchmark result is claimed without
+a paired baseline run.
+
 ## Build and package boundaries
 
 Target dependency direction is acyclic:

@@ -298,6 +298,12 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
         engine->set_node_cache_enabled(
             node_name, true, CacheKeyPolicy{CacheScope::Reusable, {}});
     }
+    for (auto& [node_name, policy] : config.node_cache_policies) {
+        engine->set_node_cache_enabled(node_name, true, std::move(policy));
+    }
+    if (config.runtime_interposition) {
+        engine->set_runtime_interposition(std::move(config.runtime_interposition));
+    }
 
     // Signal-based dispatch — see Scheduler. A node becomes ready in
     // super-step S+1 iff some node in step S routed to it (regular edge,
@@ -394,17 +400,10 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
 
 void GraphEngine::set_worker_count(std::size_t n) {
     if (n < 1) n = 1;
-    // Refuse to resize the pool while a run is mid-flight. The old
-    // pool's workers may be holding tasks the executor swap would
-    // drop; safer to make this a hard runtime check than to rely on
-    // the docs. NDEBUG builds keep the throw — debug-only would
-    // hide the same bug in release.
-    if (active_runs_.load(std::memory_order_acquire) != 0) {
-        throw std::logic_error(
-            "GraphEngine::set_worker_count called while a run is in "
-            "flight — resizing the executor would drop tasks queued "
-            "on the old pool. Drain runs before resizing.");
-    }
+    // The same admission gate as state administration closes the old
+    // load-then-swap race: no run may enter until the old pool is joined
+    // and the new executor is installed.
+    AdministrationGuard guard(*this);
     // n == 1 means "no engine-owned thread pool" — fan-out branches
     // dispatch on whichever executor drives the coroutine (single-
     // thread io_context for run_sync, the caller's pool for
@@ -455,6 +454,43 @@ RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
     return default_retry_policy_;
 }
 
+void GraphEngine::enter_execution() {
+    int count = active_runs_.load(std::memory_order_relaxed);
+    for (;;) {
+        if (count < 0) {
+            throw std::logic_error("Cannot execute: engine administration is in progress");
+        }
+        if (active_runs_.compare_exchange_weak(
+                count, count + 1, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) return;
+    }
+}
+
+void GraphEngine::leave_execution() noexcept {
+    active_runs_.fetch_sub(1, std::memory_order_release);
+}
+
+void GraphEngine::enter_administration() const {
+    int idle = 0;
+    if (!active_runs_.compare_exchange_strong(
+            idle, -1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        throw std::logic_error("Cannot administer: engine execution or administration is in progress");
+    }
+}
+
+void GraphEngine::leave_administration() const noexcept {
+    active_runs_.store(0, std::memory_order_release);
+}
+
+GraphEngine::ExecutionGuard::ExecutionGuard(GraphEngine& owner) : engine(owner) {
+    engine.enter_execution();
+}
+GraphEngine::ExecutionGuard::~ExecutionGuard() { engine.leave_execution(); }
+GraphEngine::AdministrationGuard::AdministrationGuard(const GraphEngine& owner) : engine(owner) {
+    engine.enter_administration();
+}
+GraphEngine::AdministrationGuard::~AdministrationGuard() { engine.leave_administration(); }
+
 // =========================================================================
 // get_state / get_state_history / update_state / fork
 // =========================================================================
@@ -492,6 +528,7 @@ std::string GraphAdmin::fork(const std::string& source_thread_id,
 }
 
 std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_) return std::nullopt;
     auto cp_opt = checkpoint_store_->load_latest(thread_id);
     if (!cp_opt) return std::nullopt;
@@ -500,6 +537,7 @@ std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
 
 std::vector<Checkpoint> GraphEngine::get_state_history(
     const std::string& thread_id, int limit) const {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_) return {};
     return checkpoint_store_->list(thread_id, limit);
 }
@@ -581,6 +619,7 @@ void GraphEngine::update_state_writes(
     const std::string& thread_id,
     const std::vector<ChannelWrite>& channel_writes,
     const std::string& as_node) {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot update_state: no checkpoint store configured");
 
@@ -631,6 +670,7 @@ void GraphEngine::update_state_writes(
 std::string GraphEngine::fork(const std::string& source_thread_id,
                                const std::string& new_thread_id,
                                const std::string& checkpoint_id) {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot fork: no checkpoint store configured");
 
@@ -1112,6 +1152,8 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
             if (request) request->reject();
         }
     } safe_point_close_guard{resources.safe_point_request};
+    // Hold admission across checkpoint lookup and the resumed super-step loop.
+    ExecutionGuard execution_guard(*this);
     auto checkpoint_store = resources.checkpoint_store
         ? *resources.checkpoint_store
         : checkpoint_store_;
@@ -1253,17 +1295,10 @@ GraphEngine::execute_graph_async(
     const RuntimeResources* resources) {
     const bool is_resume = resume_context.has_value();
 
-    // RAII inc/dec on the inflight-run counter — set_worker_count()
-    // checks this is zero before swapping executors. Designed to run
-    // through coroutine completion, including exception unwinding.
-    struct ActiveRunGuard {
-        std::atomic<int>* counter;
-        ~ActiveRunGuard() {
-            if (counter) counter->fetch_sub(1, std::memory_order_release);
-        }
-    };
-    active_runs_.fetch_add(1, std::memory_order_acq_rel);
-    ActiveRunGuard active_run_guard{&active_runs_};
+    // The RAII guard releases admission after every normal, cancelled, or
+    // exceptional completion; the resume path holds a second count while
+    // loading its checkpoint.
+    ExecutionGuard active_run_guard(*this);
 
     GraphState state;
     init_state(state);

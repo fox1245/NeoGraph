@@ -30,6 +30,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   later mutations cannot alter running graphs. Python exposes scoped node,
   reducer, and condition registration, `GraphEngine.compile(..., registry=...)`,
   and registry-aware topology schema export. Legacy global APIs remain available.
+- **Execution-only protocol hosting and guarded state administration.**
+  A2A, ACP, and gRPC retain an owning `GraphExecution` capability instead of
+  administrative/configuration access. `GraphAdmin` and legacy direct state
+  calls now reject while an engine executes, and execution rejects during
+  administration. Legacy engine constructors and methods remain compatible
+  through the documented pre-v1 migration window.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

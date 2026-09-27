@@ -22,6 +22,7 @@
 #include <thread>
 #include <string>
 #include <unordered_map>
+#include <neograph/graph/execution.h>
 
 #ifndef NEOGRAPH_VERSION_STRING
 #define NEOGRAPH_VERSION_STRING "dev"
@@ -31,6 +32,15 @@ namespace neograph::grpc {
 
 using namespace neograph::graph;
 namespace pb = neograph::v1;
+// The watcher borrows the RPC's finished flag; join on every exit path.
+struct WatcherLifetime {
+    std::atomic_bool& finished;
+    std::thread& worker;
+    ~WatcherLifetime() {
+        finished.store(true, std::memory_order_release);
+        if (worker.joinable()) worker.join();
+    }
+};
 
 class GraphServiceImpl final : public pb::GraphService::Service {
 public:
@@ -44,6 +54,7 @@ public:
         std::shared_ptr<CancelToken> token;
         std::atomic_bool finished{false};
         std::thread cancel_watcher;
+        WatcherLifetime watcher_lifetime{finished, cancel_watcher};
         auto stop_watcher = [&] {
             finished.store(true, std::memory_order_release);
             if (cancel_watcher.joinable()) cancel_watcher.join();
@@ -104,6 +115,7 @@ public:
         std::shared_ptr<CancelToken> token;
         std::atomic_bool finished{false};
         std::thread cancel_watcher;
+        WatcherLifetime watcher_lifetime{finished, cancel_watcher};
         auto stop_watcher = [&] {
             finished.store(true, std::memory_order_release);
             if (cancel_watcher.joinable()) cancel_watcher.join();
@@ -214,7 +226,7 @@ private:
     // multi_tenant_chatbot cookbook. Distinct graph_def → one engine,
     // shared across requests + threads (GraphEngine is concurrent-safe
     // with distinct thread_ids).
-    std::shared_ptr<GraphEngine> get_engine(const std::string& def_json) {
+    GraphExecution get_engine(const std::string& def_json) {
         const std::string& key =
             def_json.empty() ? default_def_ : def_json;
         if (key.empty())
@@ -226,9 +238,8 @@ private:
             auto it = cache_.find(key);
             if (it != cache_.end()) return it->second;
         }
-        auto eng = std::shared_ptr<GraphEngine>(
-            GraphEngine::compile(neograph::json::parse(key), ctx_)
-                .release());
+        auto eng = GraphExecution(std::shared_ptr<GraphEngine>(
+            GraphEngine::compile(neograph::json::parse(key), ctx_).release()));
         std::lock_guard<std::mutex> lk(mu_);
         auto [it, inserted] = cache_.emplace(key, eng);
         return it->second;
@@ -237,7 +248,7 @@ private:
     NodeContext ctx_;
     std::string default_def_;
     std::mutex  mu_;
-    std::unordered_map<std::string, std::shared_ptr<GraphEngine>> cache_;
+    std::unordered_map<std::string, GraphExecution> cache_;
 };
 
 std::unique_ptr<GraphServiceImpl> make_graph_service(
