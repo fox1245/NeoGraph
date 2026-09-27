@@ -148,8 +148,93 @@ json GraphState::serialize() const {
     return data;
 }
 
+json GraphState::serialize_runtime() const {
+    std::shared_lock lock(mutex_);
+    json data;
+    for (const auto& [name, ch] : channels_) {
+        data["channels"][name] = {{"value", ch.value}, {"version", ch.version}};
+    }
+    data["global_version"] = global_version_;
+    return data;
+}
+
+void GraphState::restore_runtime(const json& data) {
+    std::unique_lock lock(mutex_);
+    for (const auto& [name, channel] : channels_) {
+        if (channel.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral &&
+            (!data.contains("channels") ||
+             !data["channels"].contains(name) ||
+             !data["channels"][name].is_object() ||
+             !data["channels"][name].contains("value") ||
+             !data["channels"][name].contains("version"))) {
+            throw std::runtime_error(
+                "Runtime snapshot is missing ephemeral channel state: " + name);
+        }
+    }
+    if (data.contains("channels")) {
+        for (const auto& [name, ch_data] : data["channels"].items()) {
+            auto it = channels_.find(name);
+            if (it != channels_.end()) {
+                it->second.value   = ch_data["value"];
+                it->second.version = ch_data.value("version", uint64_t(0));
+            }
+        }
+    }
+    global_version_ = data.value("global_version", uint64_t(0));
+}
+
+json GraphState::ephemeral_checkpoint_guard() const {
+    std::shared_lock lock(mutex_);
+    json guard;
+    for (const auto& [name, ch] : channels_) {
+        if (ch.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) {
+            if (guard.is_null()) guard = json::object();
+            guard[name] = ch.version != 0;
+        }
+    }
+    return guard;
+}
+
+void GraphState::restore_checkpoint(const json& data, const json& guard) {
+    std::unique_lock lock(mutex_);
+    json expected;
+    for (const auto& [name, ch] : channels_) {
+        if (ch.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) {
+            if (ch.version != 0)
+                throw std::runtime_error(
+                    "Cannot restore checkpoint into live ephemeral channel: " + name);
+            if (expected.is_null()) expected = json::object();
+            expected[name] = false;
+        }
+    }
+    if (expected.is_null()) {
+        if (!guard.is_null() && guard != json::object())
+            throw std::runtime_error("Checkpoint contains incompatible ephemeral channel policy");
+    } else if (guard != expected) {
+        throw std::runtime_error(
+            "Cannot resume checkpoint: ephemeral channel was written or "
+            "its lifecycle guard is missing/incompatible");
+    }
+    if (data.contains("channels")) {
+        for (const auto& [name, ch_data] : data["channels"].items()) {
+            auto it = channels_.find(name);
+            if (it != channels_.end() &&
+                it->second.lifecycle.persistence != ChannelPersistencePolicy::Ephemeral) {
+                it->second.value   = ch_data["value"];
+                it->second.version = ch_data.value("version", uint64_t(0));
+            }
+        }
+    }
+    global_version_ = data.value("global_version", uint64_t(0));
+}
+
 void GraphState::restore(const json& data) {
     std::unique_lock lock(mutex_);
+    for (const auto& [name, channel] : channels_) {
+        if (channel.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral)
+            throw std::runtime_error(
+                "Cannot restore ephemeral channel without a checkpoint guard: " + name);
+    }
     if (data.contains("channels")) {
         for (const auto& [name, ch_data] : data["channels"].items()) {
             auto it = channels_.find(name);

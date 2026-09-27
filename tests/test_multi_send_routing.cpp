@@ -87,6 +87,19 @@ public:
     std::string get_name() const override { return "worker"; }
 };
 
+class ScratchReadingWorker : public GraphNode {
+public:
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        const auto scratch = in.state.get("scratch").get<std::string>();
+        const auto index = in.state.get("task_idx").get<int>();
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results",
+            json::array({scratch + ":" + std::to_string(index)})});
+        co_return out;
+    }
+    std::string get_name() const override { return "worker"; }
+};
+
 // Terminal marker node: writes a sentinel into the "finalized" channel
 // so the test can verify the engine actually transitioned here.
 class FinalizeMarkerNode : public GraphNode {
@@ -481,4 +494,35 @@ TEST(MultiSendRouting, ResumeAfterInvalidSendDoesNotRecordInvalidTargetCompletio
     ASSERT_EQ(pending.size(), 1u)
         << "resume must not add a completed pending write for the invalid target";
     EXPECT_EQ(pending[0].node_name, "planner");
+}
+
+TEST(MultiSendRouting, EphemeralScratchIsVisibleToEveryIsolatedSend) {
+    NodeFactory::instance().register_type("__rt_ephemeral_planner",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<RoutingPlannerNode>(3);
+        });
+    NodeFactory::instance().register_type("__rt_ephemeral_worker",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<ScratchReadingWorker>();
+        });
+    json def = {
+        {"channels", {
+            {"scratch", {{"reducer", "overwrite"}, {"persistence", "ephemeral"}}},
+            {"task_idx", {{"reducer", "overwrite"}}},
+            {"results", {{"reducer", "append"}}}
+        }},
+        {"nodes", {
+            {"planner", {{"type", "__rt_ephemeral_planner"}}},
+            {"worker", {{"type", "__rt_ephemeral_worker"}}}
+        }},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "planner"}}})}
+    };
+    auto engine = GraphEngine::compile(def, NodeContext{});
+    RunConfig cfg;
+    cfg.input["scratch"] = "live";
+    const auto result = engine->run(cfg);
+    EXPECT_EQ(result.output["channels"]["results"]["value"],
+              json::array({"live:0", "live:1", "live:2"}));
 }

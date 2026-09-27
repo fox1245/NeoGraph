@@ -74,7 +74,7 @@ TEST(GraphState, LatestRetentionKeepsOneArrayValue) {
     EXPECT_EQ(state.get("events"), json::array({4}));
 }
 
-TEST(GraphState, EphemeralChannelIsNotCheckpointedOrRestored) {
+TEST(GraphState, EphemeralChannelRequiresGuardToRestore) {
     GraphState state;
     const ChannelLifecyclePolicy lifecycle{
         ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
@@ -87,8 +87,60 @@ TEST(GraphState, EphemeralChannelIsNotCheckpointedOrRestored) {
     GraphState restored;
     restored.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), json("initial"),
                           lifecycle);
-    restored.restore(snapshot);
+    EXPECT_THROW(restored.restore(snapshot), std::runtime_error);
     EXPECT_EQ(restored.get("scratch"), "initial");
+    EXPECT_THROW(restored.restore_runtime(snapshot), std::runtime_error);
+}
+TEST(GraphState, CheckpointGuardRejectsLostEphemeralWritesAndLegacySnapshots) {
+    const ChannelLifecyclePolicy ephemeral{
+        ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
+    GraphState source;
+    source.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), "initial",
+                        ephemeral);
+    source.init_channel("durable", ReducerType::APPEND, append_fn(), json::array());
+    source.write("durable", json::array({1}));
+    const auto safe_snapshot = source.serialize();
+    const auto safe_guard = source.ephemeral_checkpoint_guard();
+
+    GraphState resumed;
+    resumed.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), "initial",
+                         ephemeral);
+    resumed.init_channel("durable", ReducerType::APPEND, append_fn(), json::array());
+    resumed.restore_checkpoint(safe_snapshot, safe_guard);
+    EXPECT_EQ(resumed.get("durable"), json::array({1}));
+    EXPECT_THROW(resumed.restore_checkpoint(safe_snapshot, json()), std::runtime_error);
+
+    source.write("scratch", "required");
+    const auto unsafe_snapshot = source.serialize();
+    EXPECT_FALSE(unsafe_snapshot["channels"].contains("scratch"));
+    EXPECT_THROW(resumed.restore_checkpoint(unsafe_snapshot,
+                                            source.ephemeral_checkpoint_guard()),
+                 std::runtime_error);
+    EXPECT_EQ(resumed.get("durable"), json::array({1}));
+    EXPECT_EQ(resumed.get("scratch"), "initial");
+    resumed.write("scratch", "live");
+    EXPECT_THROW(resumed.restore_checkpoint(safe_snapshot, safe_guard),
+                 std::runtime_error);
+}
+
+
+TEST(GraphState, IsolatedRuntimeSnapshotKeepsEphemeralValuesAndVersions) {
+    const ChannelLifecyclePolicy ephemeral{
+        ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
+    GraphState source;
+    source.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), "initial",
+                        ephemeral);
+    source.write("scratch", "live");
+    const auto runtime = source.serialize_runtime();
+
+    GraphState isolated;
+    isolated.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), "initial",
+                          ephemeral);
+    isolated.restore_runtime(runtime);
+    EXPECT_EQ(isolated.get("scratch"), "live");
+    EXPECT_EQ(isolated.channel_version("scratch"), source.channel_version("scratch"));
+    EXPECT_EQ(isolated.global_version(), source.global_version());
+    EXPECT_FALSE(isolated.serialize()["channels"].contains("scratch"));
 }
 
 TEST(GraphState, AppendEmpty) {

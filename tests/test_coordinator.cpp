@@ -92,6 +92,31 @@ TEST(CoordinatorSave, RoundTripsCoreFields) {
     EXPECT_EQ(cp->channel_values["channels"]["x"]["value"].get<int>(), 42);
 }
 
+TEST(CoordinatorSave, EphemeralGuardSurvivesCheckpointAndPreventsUnsafeResume) {
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    CheckpointCoordinator coord(store, "ephemeral");
+    const ChannelLifecyclePolicy ephemeral{
+        ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
+    GraphState state;
+    state.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), "initial",
+                       ephemeral);
+
+    coord.save_super_step(state, "before", {"next"}, CheckpointPhase::Before, 0, "", {});
+    auto safe = coord.load_for_resume();
+    GraphState restored;
+    restored.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), "initial",
+                          ephemeral);
+    restored.restore_checkpoint(safe.channel_values,
+        safe.metadata["_neograph_ephemeral_guard"]);
+
+    state.write("scratch", "required");
+    coord.save_super_step(state, "before", {"next"}, CheckpointPhase::Before, 1, "", {});
+    auto unsafe = coord.load_for_resume();
+    EXPECT_THROW(restored.restore_checkpoint(
+        unsafe.channel_values, unsafe.metadata["_neograph_ephemeral_guard"]),
+        std::runtime_error);
+}
+
 // =========================================================================
 // load_for_resume: empty + phase offsets
 // =========================================================================

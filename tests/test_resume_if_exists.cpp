@@ -235,3 +235,51 @@ TEST(ResumeIfExists, ThreeTurnConversation) {
     EXPECT_EQ(msgs[4]["content"], "turn three");
     EXPECT_EQ(msgs[5]["content"], "echo: turn three");
 }
+
+TEST(ResumeIfExists, WrittenEphemeralStateCannotSilentlyResume) {
+    register_echo_once();
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto def = make_chat_graph();
+    def["channels"]["scratch"] = {
+        {"reducer", "overwrite"}, {"initial", "initial"}, {"persistence", "ephemeral"}};
+    auto engine = GraphEngine::compile(def, NodeContext{}, store);
+    RunConfig first;
+    first.thread_id = "ephemeral";
+    first.input["messages"] = user_msg("hello");
+    first.input["scratch"] = "required";
+    engine->run(first);
+    auto cp = store->load_latest("ephemeral");
+    ASSERT_TRUE(cp);
+    EXPECT_FALSE(cp->channel_values["channels"].contains("scratch"));
+
+    RunConfig next;
+    next.thread_id = "ephemeral";
+    next.resume_if_exists = true;
+    EXPECT_THROW(engine->run(next), std::runtime_error);
+    EXPECT_THROW(engine->resume("ephemeral"), std::runtime_error);
+
+    // No runtime scratch write: the explicit guard permits a safe restore.
+    RunConfig untouched;
+    untouched.thread_id = "ephemeral-safe";
+    untouched.input["messages"] = user_msg("safe");
+    engine->run(untouched);
+    untouched.resume_if_exists = true;
+    EXPECT_NO_THROW(engine->run(untouched));
+}
+
+TEST(ResumeIfExists, LegacyCheckpointCannotAssumeEphemeralWasUntouched) {
+    register_echo_once();
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto baseline = GraphEngine::compile(make_chat_graph(), NodeContext{}, store);
+    RunConfig first;
+    first.thread_id = "legacy";
+    first.input["messages"] = user_msg("hello");
+    baseline->run(first);
+
+    auto def = make_chat_graph();
+    def["channels"]["scratch"] = {
+        {"reducer", "overwrite"}, {"persistence", "ephemeral"}};
+    auto changed = GraphEngine::compile(def, NodeContext{}, store);
+    first.resume_if_exists = true;
+    EXPECT_THROW(changed->run(first), std::runtime_error);
+}

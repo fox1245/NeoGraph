@@ -69,8 +69,10 @@ combine via reducers when the step ends.
 
 ## 2. Channels & reducers
 
-Every piece of state lives in a named channel. Channels persist across
-nodes and across super-steps; nodes communicate by writing to them.
+Every piece of state lives in a named channel. By default channels keep their
+materialized value across super-steps and checkpoints; nodes communicate by
+writing to them. Combination, array retention, and checkpoint inclusion are
+independent decisions.
 
 ### Defining channels
 
@@ -87,7 +89,7 @@ nodes and across super-steps; nodes communicate by writing to them.
 | Reducer | New write semantics | Typical use |
 |---|---|---|
 | `"overwrite"` | New value replaces old. Last-writer-wins on parallel writes. | Single-value scratch (current node, current question, route hint). |
-| `"append"` | New list (must be a list!) is concatenated to the existing list. Order: previous-step values first, this-step writes appended in node-execution order. | Conversation messages, search results, fan-out collection. |
+| `"append"` | New list (must be a list!) is concatenated to the existing list. Previous-step values come first; parallel nodes fold in scheduler-ready order (not completion order), then writes in each node's returned order. | Conversation messages, search results, fan-out collection. |
 
 > Both reducers are registered in `ReducerRegistry::ReducerRegistry()`
 > at engine startup ([`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)).
@@ -102,6 +104,134 @@ nodes and across super-steps; nodes communicate by writing to them.
 > The Python callable runs under the GIL; concurrent Send fan-outs
 > serialise on it the same way Python custom nodes do. Re-registering
 > a name replaces the previous reducer.
+
+### Channel lifecycle and checkpoint contract
+
+`reducer` (`overwrite`, `append`, or a registered custom reducer) combines
+updates. `retention` (`unbounded` by default, `latest`, or `bounded` with a
+positive `retention_limit`) trims **arrays after each write**, including
+explicit `ChannelWrite.Mode.Overwrite` writes. It does not expire channels by
+super-step; `latest` still keeps its last element until overwritten. The
+independent `persistence` choice is `checkpoint` (default, full materialized
+value and version) or `ephemeral` (omit value and version from durable
+checkpoints). Bounded retention changes observable state, not just storage:
+it is not a substitute for preserving a full conversation history.
+
+The policy dimensions are distinct: **combination** is the reducer;
+**runtime lifetime** is currently across super-steps (array retention limits
+the retained elements, not the lifetime); **checkpoint representation** is
+currently full materialized state or omission. A proposed per-step lifetime
+would reset to the declared initial value *after* a step's writes have been
+applied and its routing decision completed, before the next step reads state.
+That option is not currently available: safe rollout needs a precise contract
+for interrupts in the middle of a step, pending-write replay, and `Send`
+workers. It must never be conflated with today's `persistence: "ephemeral"`,
+which does **not** reset values at step boundaries.
+
+The engine merges the writes of each node in their returned order. Parallel
+static nodes merge in the scheduler's ready order, multi-`Send` results in
+`Send` invocation order, regardless of finish order; pending writes are
+replayed into those same slots. Overwrite is therefore **ordered
+last-writer-wins**, not a commutative merge. Append preserves element order.
+Custom reducers on concurrent branches must be deterministic, pure under
+replay, and associative if regrouping writes must leave the result unchanged;
+commutativity is additionally required only if callers want order
+independence. Side effects belong in nodes, not reducers. A write's explicit
+overwrite mode bypasses the reducer, then still applies retention.
+
+An ephemeral channel remains live in memory across super-steps, but its
+contents cannot be reconstructed from a checkpoint. Every engine checkpoint made
+with ephemeral channels records their names and whether they have been
+written, without recording their values. Resume (including
+`resume_if_exists`, exact-ID resume, and state updates) rejects a checkpoint
+when an ephemeral value was written, a guard is absent (older checkpoint),
+or the declared ephemeral channel set changed. A checkpoint captured before
+the first ephemeral write may resume safely; pending writes replay from that
+checkpoint in deterministic order. `update_state` refuses to write an
+ephemeral value into a checkpoint. Isolated in-process `Send` workers inherit
+the live ephemeral state; this runtime snapshot is not persisted. Keep
+correctness-critical state in `checkpoint` channels, or reconstruct it
+explicitly from durable inputs in a fresh run; ephemeral is suitable only
+for disposable scratch data.
+Direct `GraphState::restore` also rejects an ephemeral channel: callers must
+use `restore_checkpoint` with its matching guard or `restore_runtime` for a
+same-process, non-durable snapshot that includes every ephemeral value and version.
+
+This guard uses the existing checkpoint metadata field, not a new channel
+blob layout or a bumped store schema: legacy full-value checkpoints keep
+working for graphs without ephemeral channels. On upgrade, a historical
+checkpoint for a graph declaring ephemeral channels has no guard and must
+fail closed; restart from durable inputs rather than guessing whether
+scratch data was needed. Before rolling back to a runtime that does not
+enforce guards, stop resuming threads with ephemeral channels (including
+forks), drain them or restart those threads from known durable inputs, and
+only then downgrade. Older binaries cannot recognize this additive
+metadata field and are not safe readers for such threads.
+
+Checkpoint storage currently uses **full materialized values** for all
+checkpointed channels. Memory, SQLite, and PostgreSQL stores deduplicate
+unchanged `(thread, channel, version)` values across checkpoints, but a
+growing append history changes version on every write and still incurs a
+growing full snapshot. Pending writes log successful tasks in an incomplete
+super-step, not a general append-only channel-delta format.
+
+**Delta-backed policy (design, not an available channel setting):** a future
+store may record ordered `{channel, version, write mode, value}` deltas
+between full snapshots, with a configurable maximum of *K* deltas between
+snapshots (and optionally a byte threshold). Load from the newest complete
+snapshot and replay at most *K* subsequent writes in the scheduler's fold
+order; preserve overwrite resets, retention, version counters, and custom
+reducer identity. Atomic publication must commit snapshot/delta and
+checkpoint pointer together before clearing pending writes; missing links,
+unknown reducer identities, version gaps, or failed replay must error rather
+than return partial state. Custom reducers must be stable and replay-pure.
+This format is **not enabled** until its schema migration and measured cost
+justify it: assign a new checkpoint schema version, migrate old full
+snapshots into a base snapshot without synthesizing historical deltas, retain
+old-reader-readable full snapshots during a reversible rollout, and refuse
+downgrade if a delta-only record exists (or materialize it with the original
+reducer registry before rolling back). Existing overwrite/append/custom
+graphs and all stores continue using the current format by default.
+
+To measure the current full-snapshot baseline, build and run
+`bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload
+512 --backends memory,sqlite` (add `postgres` and `--pg-url` for a local
+isolated test database). The history rows report logical serialized checkpoint
+bytes, p50/p95 save and load latency, and reconstruction depth; the legacy
+rows report blob count. Repeat under an allocation profiler (for example
+`heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps
+256 --payload 512 --backends memory`) to collect allocation count and bytes;
+the native JSON and SQL allocators are not all intercepted by C++ `operator
+new`. Use identical payloads, history lengths, and backend setup for any
+future delta-format comparison; report measured values, not estimated
+savings. SQLite and PostgreSQL durable stores may have different physical
+bytes from the logical serialized checkpoint total.
+The SQLite benchmark defaults to a unique temporary database removed on exit;
+`--sqlite-path` retains its new output file and refuses an existing path.
+
+One measured baseline (Linux x86-64, Debug build, one thread, 256 history
+steps, 512-byte messages, one iteration; not a performance target):
+
+| Backend | Logical checkpoint bytes | Save p50/p95 (µs) | Load p50/p95 (µs) | Replay depth |
+| --- | ---: | ---: | ---: | ---: |
+| Memory | 17,814,952 | 54 / 138 | 141 / 382 | 1 |
+| SQLite | 17,814,952 | 289 / 1,589 | 176 / 474 | 1 |
+
+In a separate repeat before history-thread deletion, SQLite reported a
+14,811,136-byte database file plus a 4,210,672-byte WAL
+(19,021,808 physical file bytes at that sampling point).
+
+On the same workload, a Linux `LD_PRELOAD` shim counting process-wide
+`malloc`, `calloc`, and nonzero `realloc` requests (including benchmark
+construction and JSON parsing) observed **88,277** additional allocation
+requests / **605,289,027** requested bytes for memory and **114,295** /
+**867,319,964** for SQLite versus otherwise identical runs with
+`--history-steps 0`. These are cumulative requests, **not** live memory,
+physical checkpoint bytes, or allocations attributable only to the store.
+Aligned allocations and internal allocator activity are not intercepted.
+The shim is a measurement aid, not a library dependency; repeat with a
+supported allocation profiler and multiple warm runs before drawing
+performance conclusions.
 
 ### Writing to channels
 

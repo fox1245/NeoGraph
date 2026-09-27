@@ -28,6 +28,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can now be receipt-bound and delivered as user data after the complete
   chronological Human/AI/Tool window.
 
+### Fixed
+- **Ephemeral checkpoint resume safety.** Checkpoints with ephemeral channels
+  now record a lifecycle guard in metadata. Resuming a written ephemeral
+  channel, changing its declaration, or loading an older checkpoint without
+  its guard fails explicitly instead of silently restoring its initial value.
+  Isolated multi-`Send` workers and cache keys now see live ephemeral values,
+  while durable overwrite, append, and custom reducers retain their
+  materialized checkpoint format.
+
 ## [0.12.1] - 2026-08-23
 
 ### Fixed

@@ -47,6 +47,16 @@ private:
     std::shared_ptr<std::atomic<int>> counter_;
 };
 
+class ScratchEchoNode : public GraphNode {
+public:
+    std::string get_name() const override { return "work"; }
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"out", in.state.get("scratch")});
+        co_return out;
+    }
+};
+
 std::unique_ptr<GraphEngine> build_engine_with_node(
     std::shared_ptr<std::atomic<int>> counter) {
 
@@ -288,6 +298,33 @@ TEST(NodeCache, EnabledNodeReplaysCachedResult) {
     EXPECT_EQ(engine->node_cache().hit_count(), 2u);
     EXPECT_EQ(engine->node_cache().miss_count(), 1u);
     EXPECT_EQ(engine->node_cache().size(), 1u);
+}
+
+TEST(NodeCache, EphemeralInputParticipatesInReusableCacheKey) {
+    NodeFactory::instance().register_type("scratch_echo_cache",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<ScratchEchoNode>();
+        });
+    json def = {
+        {"channels", {
+            {"scratch", {{"reducer", "overwrite"}, {"persistence", "ephemeral"}}},
+            {"out", {{"reducer", "overwrite"}}}
+        }},
+        {"nodes", {{"work", {{"type", "scratch_echo_cache"}}}}},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "work"}},
+            {{"from", "work"}, {"to", "__end__"}}
+        })}
+    };
+    auto engine = GraphEngine::compile(def, NodeContext{});
+    engine->set_node_cache_enabled(
+        "work", true, CacheKeyPolicy{CacheScope::Reusable, {}});
+    RunConfig cfg;
+    cfg.input["scratch"] = "first";
+    EXPECT_EQ(engine->run(cfg).output["channels"]["out"]["value"], "first");
+    cfg.input["scratch"] = "second";
+    EXPECT_EQ(engine->run(cfg).output["channels"]["out"]["value"], "second");
 }
 
 TEST(NodeCache, ClearDropsEntriesButKeepsEnableState) {

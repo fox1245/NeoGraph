@@ -84,6 +84,16 @@ inline int64_t now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+json with_ephemeral_guard(json metadata, const GraphState& state) {
+    const auto guard = state.ephemeral_checkpoint_guard();
+    if (guard.is_null()) return metadata;
+    if (metadata.is_null()) metadata = json::object();
+    if (!metadata.is_object() || metadata.contains("_neograph_ephemeral_guard"))
+        throw std::runtime_error("Checkpoint metadata conflicts with ephemeral channel guard");
+    metadata["_neograph_ephemeral_guard"] = guard;
+    return metadata;
+}
+
 int resume_start_step(const Checkpoint& checkpoint) {
     if (checkpoint.step < 0) {
         throw std::runtime_error("Checkpoint step must not be negative");
@@ -257,6 +267,7 @@ std::string CheckpointCoordinator::save_super_step(const GraphState&            
     cp.id              = Checkpoint::generate_id();
     cp.thread_id       = thread_id_;
     cp.channel_values  = state.serialize();
+    cp.metadata        = with_ephemeral_guard(json(), state);
     cp.parent_id       = parent_id;
     cp.current_node    = current_node;
     cp.next_nodes      = next_nodes;
@@ -279,6 +290,7 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
+    ctx.metadata       = cp_opt->metadata;
     ctx.phase          = cp_opt->interrupt_phase;
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
@@ -363,7 +375,7 @@ asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
     cp.next_nodes      = next_nodes;
     cp.interrupt_phase = phase;
     cp.barrier_state   = barrier_state;
-    cp.metadata        = metadata;
+    cp.metadata        = with_ephemeral_guard(metadata, state);
     cp.step            = step;
     cp.timestamp       = now_ms();
 
@@ -395,7 +407,7 @@ asio::awaitable<Checkpoint> CheckpointCoordinator::commit_super_step_async(
     checkpoint.next_nodes      = next_nodes;
     checkpoint.interrupt_phase = CheckpointPhase::Completed;
     checkpoint.barrier_state   = barrier_state;
-    checkpoint.metadata        = metadata;
+    checkpoint.metadata        = with_ephemeral_guard(metadata, state);
     checkpoint.step            = step;
     checkpoint.timestamp       = now_ms();
 
@@ -433,6 +445,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
+    ctx.metadata       = cp_opt->metadata;
     ctx.phase          = cp_opt->interrupt_phase;
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
@@ -465,6 +478,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
+    ctx.metadata       = cp_opt->metadata;
     ctx.phase          = cp_opt->interrupt_phase;
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;

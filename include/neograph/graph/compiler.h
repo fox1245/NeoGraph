@@ -66,7 +66,7 @@ struct ChannelDef {
     /// Retention is applied after reducer combination.
     ChannelRetentionPolicy   retention = ChannelRetentionPolicy::Unbounded;
     std::uint64_t             retention_limit = 0;
-    /// Ephemeral channels are omitted from checkpoint snapshots.
+    /// Ephemeral values are omitted; checkpoint metadata guards resume.
     ChannelPersistencePolicy persistence = ChannelPersistencePolicy::Checkpoint;
 };
 

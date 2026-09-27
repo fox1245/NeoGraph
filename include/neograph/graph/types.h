@@ -78,7 +78,7 @@ enum class ChannelRetentionPolicy : std::uint8_t {
  */
 enum class ChannelPersistencePolicy : std::uint8_t {
     Checkpoint, ///< Include value and version in checkpoints.
-    Ephemeral,   ///< Keep in-memory only; restore leaves the initial value.
+    Ephemeral,   ///< Omit value; checkpoint resume rejects written ephemeral state.
 };
 
 struct ChannelLifecyclePolicy {

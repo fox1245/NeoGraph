@@ -102,6 +102,11 @@ void report_validation(const ValidationReport& report, int schema_version) {
         }
     }
 }
+json checkpoint_ephemeral_guard(const json& metadata) {
+    return metadata.is_object() && metadata.contains("_neograph_ephemeral_guard")
+               ? metadata["_neograph_ephemeral_guard"] : json();
+}
+
 } // namespace
 
 // =========================================================================
@@ -521,14 +526,23 @@ void GraphEngine::update_state_writes(
 
     GraphState state;
     init_state(state);
-    state.restore(cp.channel_values);
+    state.restore_checkpoint(cp.channel_values, checkpoint_ephemeral_guard(cp.metadata));
 
     state.apply_writes(channel_writes);
+    const auto guard = state.ephemeral_checkpoint_guard();
+    if (!guard.is_null()) {
+        for (const auto& [name, written] : guard.items()) {
+            if (written == true)
+                throw std::runtime_error("Cannot update checkpoint with ephemeral channel write: " +
+                                         name);
+        }
+    }
 
     Checkpoint new_cp;
     new_cp.id              = Checkpoint::generate_id();
     new_cp.thread_id       = thread_id;
     new_cp.channel_values  = state.serialize();
+    if (!guard.is_null()) new_cp.metadata["_neograph_ephemeral_guard"] = guard;
     new_cp.parent_id       = cp.id;
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
     new_cp.next_nodes      = cp.next_nodes;
@@ -581,10 +595,11 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     // Copy barrier_state so a fork taken mid-AND-join resumes with the
     // same partial-arrival accumulator as its source.
     forked.barrier_state   = cp_opt->barrier_state;
-    forked.metadata        = {{"forked_from", {
+    forked.metadata        = cp_opt->metadata.is_object() ? cp_opt->metadata : json::object();
+    forked.metadata["forked_from"] = {
         {"thread_id", source_thread_id},
         {"checkpoint_id", cp_opt->id}
-    }}};
+    };
     forked.step            = cp_opt->step;
     forked.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1068,6 +1083,10 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
 
     if (resume_context.next_nodes.size() == 1 &&
         resume_context.next_nodes[0] == std::string(END_NODE)) {
+        GraphState completed_state;
+        init_state(completed_state);
+        completed_state.restore_checkpoint(
+            resume_context.channel_values, checkpoint_ephemeral_guard(resume_context.metadata));
         RunResult result;
         result.output = resume_context.channel_values;
 
@@ -1281,7 +1300,8 @@ GraphEngine::execute_graph_async(
     std::vector<std::string> ready;
     if (is_resume) {
         auto& loaded = *resume_context;
-        state.restore(loaded.channel_values);
+        state.restore_checkpoint(
+            loaded.channel_values, checkpoint_ephemeral_guard(loaded.metadata));
         last_checkpoint_id = loaded.checkpoint_id;
         start_step         = loaded.start_step;
         ready              = std::move(loaded.next_nodes);
@@ -1326,7 +1346,8 @@ GraphEngine::execute_graph_async(
                     throw std::runtime_error(
                         "Checkpoint step exceeds the executable range");
                 }
-                state.restore(cp_opt->channel_values);
+                state.restore_checkpoint(
+                    cp_opt->channel_values, checkpoint_ephemeral_guard(cp_opt->metadata));
                 last_checkpoint_id = cp_opt->id;
                 start_step = static_cast<int>(cp_opt->step + 1);
             }
