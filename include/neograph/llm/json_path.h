@@ -13,9 +13,11 @@
  */
 #pragma once
 
+#include <limits>
 #include <neograph/json.h>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace neograph::llm {
@@ -54,23 +56,35 @@ inline bool is_index(const std::string& s) {
 /// Navigate into `root` by dot-path. Returns nullopt if path doesn't resolve.
 inline std::optional<json> at_path(const json& root, const std::string& path) {
     if (path.empty()) return root;
-
-    auto segments = split_path(path);
-    json current = root;
-
-    for (const auto& seg : segments) {
-        if (current.is_object()) {
-            if (!current.contains(seg)) return std::nullopt;
-            current = current[seg];
-        } else if (current.is_array() && is_index(seg)) {
-            size_t idx = std::stoul(seg);
-            if (idx >= current.size()) return std::nullopt;
-            current = current[idx];
+    std::optional<json> current;
+    const json* cursor = &root;
+    std::size_t start = 0;
+    while (start < path.size()) {
+        const auto dot = path.find('.', start);
+        const auto segment = path.substr(start, dot == std::string::npos
+            ? std::string::npos : dot - start);
+        if (cursor->is_object()) {
+            if (!cursor->contains(segment)) return std::nullopt;
+            current.emplace((*cursor)[segment]);
+        } else if (cursor->is_array() && is_index(segment)) {
+            std::size_t index = 0;
+            for (const char digit : segment) {
+                if (index > (std::numeric_limits<std::size_t>::max() -
+                             static_cast<std::size_t>(digit - '0')) / 10) {
+                    return std::nullopt;
+                }
+                index = index * 10 + static_cast<std::size_t>(digit - '0');
+            }
+            if (index >= cursor->size()) return std::nullopt;
+            current.emplace((*cursor)[index]);
         } else {
             return std::nullopt;
         }
+        cursor = &*current;
+        if (dot == std::string::npos) return current;
+        start = dot + 1;
     }
-    return current;
+    return current; // Preserve the historical trailing-dot path convention.
 }
 
 /// True if `path` exists in `root`.

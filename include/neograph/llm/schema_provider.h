@@ -55,12 +55,23 @@ namespace neograph::llm {
 
 namespace test_access { class SchemaProviderTestAccess; }  // fwd-decl for friend
 
+class NEOGRAPH_API OperationError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class NEOGRAPH_API OperationTimeoutError : public OperationError {
+public:
+    using OperationError::OperationError;
+};
+
 /**
  * @brief LLM provider that adapts to any API via a JSON schema.
  *
  * The schema describes connection details, request/response formats,
  * tool call conventions, and streaming protocols for a given LLM vendor.
- * Built-in schemas: "openai", "claude", "gemini".
+ * Built-in chat schemas include "openai", "openai_responses", "claude",
+ * and "gemini"; media schemas include "openai_images" and "veo".
  *
  * @code
  * auto provider = SchemaProvider::create({
@@ -76,7 +87,7 @@ class NEOGRAPH_API SchemaProvider : public Provider {
 public:
     /// Configuration for schema-based providers.
     struct Config {
-        std::string schema_path;  ///< Path to schema file, or built-in name ("openai", "claude", "gemini").
+        std::string schema_path;  ///< Path to schema file or built-in schema name.
         std::string api_key;      ///< API key (or empty for env lookup).
         std::string default_model = "gpt-4o-mini"; ///< Default model name.
         int timeout_seconds = 60; ///< HTTP timeout in seconds.
@@ -243,6 +254,8 @@ public:
         int max_tokens_default = -1;
         std::string stream_field;
         json extra_fields;
+        std::string prompt_field; ///< Non-chat envelope field; empty selects messages.
+        json prompt_template; ///< Structured prompt envelope with $PROMPT/$MODEL values.
 
         /// Issue #33: which body paths a schema declares as bindable
         /// per-call via `CompletionParams::extra_fields`. Schema:
@@ -335,6 +348,11 @@ public:
         std::string stop_reason_status_path;
         std::map<std::string, std::string> stop_reason_status_map;
         std::string default_stop_reason = "unknown";
+        struct ArtifactRule {
+            std::string items_path, type_path, type, match_path, kind;
+            std::string mime_type, mime_path, base64_path, url_path, file_id_path, metadata_path;
+        };
+        std::vector<ArtifactRule> artifacts;
     };
 
     struct StreamConfig {
@@ -422,6 +440,11 @@ public:
     ImageConfig image_;
     ResponseConfig resp_;
     StreamConfig stream_;
+    struct OperationConfig {
+        std::string id_path, done_path, error_path, result_path;
+        std::string poll_endpoint, poll_method = "GET", finalize_endpoint;
+        int poll_interval_ms = 1000;
+    } operation_;
 
     // --- Internal methods ---
     void parse_schema();
@@ -462,7 +485,7 @@ public:
         async::AsyncEndpoint endpoint, std::string path, std::string body,
         std::vector<std::pair<std::string, std::string>> headers,
         int timeout_seconds, std::shared_ptr<graph::CancelToken> cancel_token,
-        const char* cancel_context);
+        const char* cancel_context, bool get = false);
 
     /// WebSocket-mode streaming for OpenAI Responses. Async-native;
     /// `complete_stream` bridges via `neograph::async::run_sync`.
@@ -482,6 +505,10 @@ public:
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;
     std::string parse_stop_reason(const json& resp_json) const;
+    std::vector<GeneratedArtifact> parse_artifacts(const json& response) const;
+    std::string operation_endpoint(const std::string& endpoint,
+                                   const std::string& operation_id,
+                                   std::string_view api_key) const;
     std::string parse_stream_stop_reason(const json& event_json) const;
 
     std::string build_endpoint(const std::string& model, bool streaming,

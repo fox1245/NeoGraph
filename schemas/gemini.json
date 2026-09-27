@@ -94,6 +94,13 @@
     "tool_call_args_is_string": false,
     "usage_path": "usageMetadata",
     "prompt_tokens_field": "promptTokenCount",
+    "artifacts": [{
+      "items_path": "candidates.0.content.parts",
+      "match_path": "inlineData.data",
+      "kind": "image",
+      "mime_path": "inlineData.mimeType",
+      "base64_path": "inlineData.data"
+    }],
     "completion_tokens_field": "candidatesTokenCount",
     "total_tokens_field": "totalTokenCount",
     "stop_reason_path": "candidates.0.finishReason",

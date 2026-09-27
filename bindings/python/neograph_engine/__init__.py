@@ -106,6 +106,7 @@ from ._neograph import (
     ToolCall,
     ChatTool,
     ChatCompletion,
+    GeneratedArtifact,
 
     # Runtime context and controlled provider boundary
     RuntimeTrustClass,
@@ -623,6 +624,7 @@ __all__ = [
     "ToolCall",
     "ChatTool",
     "ChatCompletion",
+    "GeneratedArtifact",
     "RuntimeTrustClass",
     "ContextArtifactKind",
     "ContextPlacement",

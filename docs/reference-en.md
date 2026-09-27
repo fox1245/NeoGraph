@@ -2783,9 +2783,8 @@ public:
     };
 
     static std::unique_ptr<SchemaProvider> create(const Config& config);
-    static std::shared_ptr<Provider>       create_shared(const Config& config);
 
-    ChatCompletion complete(const CompletionParams& params) override;
+    // Synchronous complete() is inherited from Provider.
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) override;
     asio::awaitable<json> request_json_async(
@@ -2816,7 +2815,10 @@ public:
 |------|-----|-------|
 | `"openai"` | OpenAI | Same behavior as `OpenAIProvider` |
 | `"claude"` | Anthropic Claude | Uses SSE event-based streaming |
-| `"gemini"` | Google Gemini | Uses function declarations format |
+| `"gemini"` | Google Gemini | Chat, tools and inline generated image parts |
+| `"openai_responses"` | OpenAI Responses | Chat, SSE/tools and `image_generation_call.result` |
+| `"openai_images"` | OpenAI Images | Prompt request; `data[]` base64 or URL images |
+| `"veo"` | Gemini Veo | Prompt request; submit/poll video operation |
 | `"openrouter_decisions"` | OpenRouter Typesafe/Jev | Raw JSON `POST /api/alpha/decisions`; use `request_json()` rather than Chat Completions |
 
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
@@ -2869,6 +2871,94 @@ const neograph::json result = decisions->request_json({
 `request_json_async()` accepts an optional `CancelToken` and returns the decoded
 JSON response. The method does not infer topology changes or grant authority;
 callers must validate Jev's `answers` against their own bounded selector policy.
+
+**Generated media and operations (#241).** `CompletionParams::prompt` selects a
+schema-defined prompt envelope (and must not be combined with chat messages or
+tools). `request.prompt_field` stamps a top-level/dot-path string (Images);
+`request.prompt_template` is a JSON object with typed `$PROMPT` and `$MODEL`
+substitutions (Veo's `instances[]`). Schemas may also allow specific
+`request.per_call_fields`, including generation options. Chat envelopes are
+unchanged.
+
+`response.artifacts` is an array of independent mappings. Each declares
+`items_path` (JSON dot path to an array), `kind` (`image`, `video`, `file`),
+optionally `type_path`/`type` to select typed items or `match_path` to select
+items containing a field, and one or more `base64_path`, `url_path`,
+`file_id_path`. `mime_type` supplies a default; `mime_path` overrides it when
+present; `metadata_path` preserves provider metadata as JSON. All payloads are
+returned unmodified, in order, as `ChatCompletion::artifacts` with fields
+`kind`, `mime_type`, `base64_data`, `url`, `file_id`, `metadata`. A URL is a
+provider reference, **not downloaded or implicitly authenticated**. The
+Python `ChatCompletion.artifacts` list contains `GeneratedArtifact` objects
+with the same properties. Empty artifact arrays are valid for Responses text
+or tool replies; a successful operation configured to return artifacts must
+produce at least one. JSON payloads are not decoded into bytes by the provider.
+
+`operation` supplies `id_path`, boolean `done_path`, optional `error_path`,
+`poll_endpoint` with `$OPERATION`, `poll_method` (`GET` or `POST`), positive
+`poll_interval_ms`, optional `finalize_endpoint` (GET JSON) and
+`result_path`. Submission uses `connection.endpoint`; polling/finalization
+reuse its authentication and loopback/TLS policy. `result_path` extracts the
+terminal JSON before applying `response.artifacts`. The same call to
+`complete`/`complete_async` drives the full lifecycle; the per-call positive
+`timeout_seconds` (or provider default) bounds it, and a
+`CompletionParams::cancel_token` aborts HTTP and inter-poll waits.
+Invalid/missing status, missing result or invalid artifact payload raises
+`OperationError`; deadline expiry raises `OperationTimeoutError`; caller
+cancellation raises `graph::CancelledException`. Python exposes the first
+two in `neograph_engine.llm`. Unknown operation IDs fail closed; the provider
+does not automatically download a URL or chase provider redirects.
+
+**Integration classes:** APIs using existing chat, prompt, artifact and
+submit/poll/finalize JSON shapes are JSON-only integrations (see
+`schemas/openai_images.json`, `schemas/veo.json` and the post-poll-finalize
+fixture `tests/fixtures/media_finalize.json`). New wire transports, response
+framing, non-JSON binary downloads, or state machines not representable with
+these primitives need a reviewed reusable core strategy, not provider-name
+branches or arbitrary schema-executed code. Application-registered uncommon
+typed primitives are tracked in #242; no registration hook is implied here.
+
+**Opt-in live validation** (runs only when you explicitly set
+`NEOGRAPH_LIVE_MEDIA=1` and the corresponding API key; API keys must stay in
+your environment, never in a schema, test, command history or commit):
+
+```bash
+NEOGRAPH_LIVE_MEDIA=1 python - <<'PY'
+import os
+from neograph_engine import CompletionParams
+from neograph_engine.llm import SchemaProvider
+if os.getenv("NEOGRAPH_LIVE_MEDIA") != "1" or not os.getenv("OPENAI_API_KEY"):
+    raise SystemExit("Set NEOGRAPH_LIVE_MEDIA=1 and OPENAI_API_KEY first")
+for schema, model in (("openai_images", "gpt-image-1"),
+                      ("openai_responses", "gpt-4.1")):
+    p = CompletionParams()
+    p.model = model
+    if schema == "openai_images":
+        p.prompt = "A small blue square"
+    else:
+        from neograph_engine import ChatMessage
+        p.messages = [ChatMessage("user", "Generate a small blue square image")]
+    result = SchemaProvider(schema_path=schema).complete(p)
+    print(schema, [(a.kind, a.mime_type, bool(a.base64_data), bool(a.url))
+                   for a in result.artifacts])
+PY
+
+NEOGRAPH_LIVE_MEDIA=1 python - <<'PY'
+import os
+from neograph_engine import CompletionParams
+from neograph_engine.llm import SchemaProvider
+if os.getenv("NEOGRAPH_LIVE_MEDIA") != "1" or not os.getenv("GEMINI_API_KEY"):
+    raise SystemExit("Set NEOGRAPH_LIVE_MEDIA=1 and GEMINI_API_KEY first")
+p = CompletionParams()
+p.prompt = "A blue kite drifting over a hill"
+p.timeout_seconds = 300
+result = SchemaProvider(schema_path="veo",
+                        default_model="veo-3.0-generate-preview",
+                        timeout_seconds=300).complete(p)
+print([(a.mime_type, a.url, a.file_id) for a in result.artifacts])
+PY
+```
+
 
 **Internal strategy enums** (documented for custom schema authors):
 

@@ -1,0 +1,38 @@
+{
+  "name": "generic-media-fixture",
+  "connection": {
+    "base_url": "https://example.invalid",
+    "endpoint": "/submit",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer "
+  },
+  "request": {
+    "model_field": "",
+    "prompt_template": {"request": {"text": "$PROMPT"}},
+    "temperature_path": null,
+    "stream_field": "",
+    "extra_fields": {}
+  },
+  "operation": {
+    "id_path": "operation.name",
+    "done_path": "state.done",
+    "error_path": "state.error",
+    "poll_endpoint": "/poll/$OPERATION",
+    "poll_method": "POST",
+    "finalize_endpoint": "/final/$OPERATION",
+    "poll_interval_ms": 20,
+    "result_path": "payload"
+  },
+  "response": {
+    "strategy": "output_array",
+    "artifacts": [{
+      "items_path": "files",
+      "kind": "file",
+      "match_path": "id",
+      "mime_path": "content_type",
+      "file_id_path": "id",
+      "url_path": "url",
+      "metadata_path": "info"
+    }]
+  }
+}

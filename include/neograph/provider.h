@@ -118,6 +118,7 @@ struct CompletionParams {
     /// read-idle semantics are transport-specific.
     /// Appended to preserve existing positional aggregate initialization.
     int timeout_seconds = -1;
+    std::string prompt;                ///< Input for schema-defined prompt envelopes.
 };
 
 /**

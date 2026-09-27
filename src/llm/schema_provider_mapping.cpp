@@ -1,6 +1,7 @@
 // Schema-driven, network-free request mapping and response decoding.
 #include <neograph/llm/schema_provider.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
@@ -72,6 +73,19 @@ void SchemaProvider::parse_schema()
     req_.max_tokens_default = r.value("max_tokens_default", -1);
     req_.stream_field = r.value("stream_field", "stream");
     req_.extra_fields = r.value("extra_fields", json::object());
+    req_.prompt_field = r.value("prompt_field", "");
+    if (r.contains("prompt_template")) {
+        req_.prompt_template = r["prompt_template"];
+        if (!req_.prompt_template.is_object() ||
+            req_.prompt_template.dump().find("$PROMPT") == std::string::npos) {
+            throw std::invalid_argument(
+                "SchemaProvider: prompt_template must be an object containing $PROMPT");
+        }
+    }
+    if (!req_.prompt_field.empty() && !req_.messages_field.empty() &&
+        req_.prompt_field == req_.messages_field) {
+        throw std::invalid_argument("SchemaProvider: prompt and messages fields overlap");
+    }
 
     // Per-call body field allowlist (issue #33). Schema declares which
     // body paths a caller can override per-call via
@@ -242,6 +256,51 @@ void SchemaProvider::parse_schema()
         }
     }
     resp_.default_stop_reason = resp.value("default_stop_reason", "unknown");
+    if (resp.contains("artifacts")) {
+        if (!resp["artifacts"].is_array()) {
+            throw std::invalid_argument("SchemaProvider: response.artifacts must be an array");
+        }
+        for (const auto& entry : resp["artifacts"]) {
+            ResponseConfig::ArtifactRule rule;
+            rule.items_path = entry.value("items_path", "");
+            rule.type_path = entry.value("type_path", "");
+            rule.type = entry.value("type", "");
+            rule.match_path = entry.value("match_path", "");
+            rule.kind = entry.value("kind", "");
+            rule.mime_type = entry.value("mime_type", "");
+            rule.mime_path = entry.value("mime_path", "");
+            rule.base64_path = entry.value("base64_path", "");
+            rule.url_path = entry.value("url_path", "");
+            rule.file_id_path = entry.value("file_id_path", "");
+            rule.metadata_path = entry.value("metadata_path", "");
+            if (rule.items_path.empty() || rule.kind.empty() ||
+                (rule.base64_path.empty() && rule.url_path.empty() &&
+                 rule.file_id_path.empty()) ||
+                (rule.type_path.empty() != rule.type.empty())) {
+                throw std::invalid_argument("SchemaProvider: invalid artifact mapping");
+            }
+            resp_.artifacts.push_back(std::move(rule));
+        }
+    }
+    if (schema_.contains("operation")) {
+        const auto& op = schema_["operation"];
+        operation_.id_path = op.value("id_path", "");
+        operation_.done_path = op.value("done_path", "");
+        operation_.error_path = op.value("error_path", "");
+        operation_.result_path = op.value("result_path", "");
+        operation_.poll_endpoint = op.value("poll_endpoint", "");
+        operation_.poll_method = op.value("poll_method", "GET");
+        operation_.finalize_endpoint = op.value("finalize_endpoint", "");
+        operation_.poll_interval_ms = op.value("poll_interval_ms", 1000);
+        if (operation_.id_path.empty() || operation_.done_path.empty() ||
+            operation_.poll_endpoint.find("$OPERATION") == std::string::npos ||
+            (!operation_.finalize_endpoint.empty() &&
+             operation_.finalize_endpoint.find("$OPERATION") == std::string::npos) ||
+            (operation_.poll_method != "GET" && operation_.poll_method != "POST") ||
+            operation_.poll_interval_ms <= 0) {
+            throw std::invalid_argument("SchemaProvider: invalid operation mapping");
+        }
+    }
 
     // --- Streaming ---
     auto st = schema_["streaming"];
@@ -364,6 +423,28 @@ json SchemaProvider::substitute(const json& tmpl, const std::map<std::string, js
         return result;
     }
     return tmpl; // numbers, bools, null
+}
+
+std::string SchemaProvider::operation_endpoint(
+    const std::string& endpoint, const std::string& operation_id,
+    std::string_view api_key) const {
+    if (operation_id.empty() || operation_id.front() == '/' ||
+        operation_id.back() == '/' || operation_id.find("..") != std::string::npos) {
+        throw OperationError("SchemaProvider: invalid operation identifier");
+    }
+    for (const unsigned char c : operation_id) {
+        if (!(std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == ':')) {
+            throw OperationError("SchemaProvider: unsafe operation identifier");
+        }
+    }
+    std::string path = endpoint;
+    const auto pos = path.find("$OPERATION");
+    path.replace(pos, sizeof("$OPERATION") - 1, operation_id);
+    if (!conn_.auth_query_param.empty()) {
+        path += path.find('?') == std::string::npos ? '?' : '&';
+        path += conn_.auth_query_param + "=" + std::string(api_key);
+    }
+    return path;
 }
 
 std::string SchemaProvider::build_endpoint(const std::string& model,
@@ -759,61 +840,51 @@ json SchemaProvider::serialize_tools(const std::vector<ChatTool>& tools) const {
 // ============================================================================
 
 json SchemaProvider::build_body(const CompletionParams& params, bool websocket) const {
-    json body;
-
     std::string model = params.model.empty() ? user_config_.default_model : params.model;
-
-    // Model field (empty string means model goes in URL, not body - e.g., Gemini)
+    const bool prompt_envelope = !req_.prompt_field.empty() || !req_.prompt_template.is_null();
+    if (prompt_envelope &&
+        (params.prompt.empty() || !params.messages.empty() || !params.tools.empty())) {
+        throw std::invalid_argument("SchemaProvider: prompt envelope requires a prompt without messages/tools");
+    }
+    json body = req_.prompt_template.is_null() ? json::object()
+        : substitute(req_.prompt_template, {{"PROMPT", params.prompt}, {"MODEL", model}});
+    if (!req_.prompt_field.empty()) {
+        json_path::set_path(body, req_.prompt_field, params.prompt);
+    }
     if (!req_.model_field.empty()) {
         body[req_.model_field] = model;
     }
 
-    // System prompt handling
-    std::vector<ChatMessage> non_system_messages;
-    std::string system_content;
-
-    for (const auto& msg : params.messages) {
-        if (msg.role == "system") {
-            if (system_content.empty()) {
-                system_content = msg.content;
+    if (!prompt_envelope) {
+        // System prompt and chat messages are exclusively a chat-envelope feature.
+        std::vector<ChatMessage> non_system_messages;
+        std::string system_content;
+        for (const auto& msg : params.messages) {
+            if (msg.role == "system") {
+                if (!system_content.empty()) system_content += "\n\n";
+                system_content += msg.content;
             } else {
-                system_content += "\n\n" + msg.content;
+                non_system_messages.push_back(msg);
             }
-        } else {
-            non_system_messages.push_back(msg);
         }
-    }
-
-    switch (sys_.strategy) {
-        case SystemPromptStrategy::IN_MESSAGES: {
-            // OpenAI: system messages stay in the messages array
-            json msgs = serialize_messages(params.messages);
-            body[req_.messages_field] = msgs;
-            break;
-        }
-        case SystemPromptStrategy::TOP_LEVEL: {
-            // Claude: system is a top-level string field
-            if (!system_content.empty()) {
-                body[sys_.field] = system_content;
-            }
-            json msgs = serialize_messages(non_system_messages);
-            body[req_.messages_field] = msgs;
-            break;
-        }
-        case SystemPromptStrategy::TOP_LEVEL_PARTS: {
-            // Gemini: system_instruction:{parts:[{text:"..."}]}
-            if (!system_content.empty()) {
-                json parts = json::array();
-                json part;
-                part[sys_.text_field] = system_content;
-                parts.push_back(part);
-                json sys_obj;
-                sys_obj[sys_.parts_field] = parts;
-                body[sys_.field] = sys_obj;
-            }
-            json msgs = serialize_messages(non_system_messages);
-            body[req_.messages_field] = msgs;
-            break;
+        switch (sys_.strategy) {
+            case SystemPromptStrategy::IN_MESSAGES:
+                body[req_.messages_field] = serialize_messages(params.messages);
+                break;
+            case SystemPromptStrategy::TOP_LEVEL:
+                if (!system_content.empty()) body[sys_.field] = system_content;
+                body[req_.messages_field] = serialize_messages(non_system_messages);
+                break;
+            case SystemPromptStrategy::TOP_LEVEL_PARTS:
+                if (!system_content.empty()) {
+                    json part;
+                    part[sys_.text_field] = system_content;
+                    json sys_obj;
+                    sys_obj[sys_.parts_field] = json::array({part});
+                    body[sys_.field] = sys_obj;
+                }
+                body[req_.messages_field] = serialize_messages(non_system_messages);
+                break;
         }
     }
 
@@ -905,7 +976,7 @@ json SchemaProvider::build_body(const CompletionParams& params, bool websocket) 
     if (max_tokens <= 0 && req_.max_tokens_required) {
         max_tokens = req_.max_tokens_default;
     }
-    if (max_tokens > 0) {
+    if (max_tokens > 0 && !req_.max_tokens_path.empty()) {
         json_path::set_path(body, req_.max_tokens_path, max_tokens);
     }
 
@@ -1088,6 +1159,57 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
     }
 
     return msg;
+}
+
+std::vector<GeneratedArtifact> SchemaProvider::parse_artifacts(const json& response) const {
+    std::vector<GeneratedArtifact> artifacts;
+    for (const auto& rule : resp_.artifacts) {
+        auto items = json_path::at_path(response, rule.items_path);
+        if (!items) continue;
+        if (!items->is_array()) {
+            throw OperationError("SchemaProvider: artifact items are not an array");
+        }
+        for (const auto& item : *items) {
+            if (!rule.match_path.empty() &&
+                !json_path::has_path(item, rule.match_path)) continue;
+            if (!rule.type_path.empty()) {
+                const auto type = json_path::at_path(item, rule.type_path);
+                if (!type || !type->is_string() ||
+                    type->get<std::string>() != rule.type) continue;
+            }
+            GeneratedArtifact artifact;
+            artifact.kind = rule.kind;
+            artifact.mime_type = rule.mime_type;
+            auto string_field = [&item](const std::string& path) -> std::string {
+                if (path.empty()) return {};
+                const auto value = json_path::at_path(item, path);
+                if (!value || value->is_null()) return {};
+                if (!value->is_string()) {
+                    throw OperationError("SchemaProvider: artifact payload field must be a string");
+                }
+                return value->get<std::string>();
+            };
+            if (!rule.mime_path.empty()) {
+                const auto mime = string_field(rule.mime_path);
+                if (!mime.empty()) artifact.mime_type = mime;
+            }
+            artifact.base64_data = string_field(rule.base64_path);
+            artifact.url = string_field(rule.url_path);
+            artifact.file_id = string_field(rule.file_id_path);
+            const int payload_count = static_cast<int>(!artifact.base64_data.empty()) +
+                                      static_cast<int>(!artifact.url.empty()) +
+                                      static_cast<int>(!artifact.file_id.empty());
+            if (payload_count == 0) {
+                throw OperationError("SchemaProvider: artifact requires a payload");
+            }
+            if (!rule.metadata_path.empty()) {
+                const auto metadata = json_path::at_path(item, rule.metadata_path);
+                if (metadata) artifact.metadata = *metadata;
+            }
+            artifacts.push_back(std::move(artifact));
+        }
+    }
+    return artifacts;
 }
 
 ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {

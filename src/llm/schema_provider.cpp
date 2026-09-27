@@ -30,6 +30,7 @@
 #include <fstream>
 #include <chrono>
 #include <algorithm>
+#include <limits>
 
 namespace neograph::llm {
 
@@ -285,7 +286,7 @@ asio::awaitable<async::HttpResponse> SchemaProvider::post_json(
     async::AsyncEndpoint endpoint, std::string path, std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
     int timeout_seconds, std::shared_ptr<graph::CancelToken> cancel_token,
-    const char* cancel_context)
+    const char* cancel_context, bool get)
 {
     async::RequestOptions opts;
     const int effective_timeout = timeout_seconds > 0
@@ -295,7 +296,12 @@ asio::awaitable<async::HttpResponse> SchemaProvider::post_json(
     }
 
     std::optional<asio::awaitable<async::HttpResponse>> request;
-    if (curl_pool_) {
+    if (get) {
+        auto executor = co_await asio::this_coro::executor;
+        request.emplace(async::async_get(
+            executor, endpoint.host, endpoint.port, path,
+            std::move(headers), endpoint.tls, opts));
+    } else if (curl_pool_) {
         const std::string default_port = endpoint.tls ? "443" : "80";
         const std::string url_host = endpoint.host.find(':') != std::string::npos
             ? "[" + endpoint.host + "]" : endpoint.host;
@@ -372,13 +378,157 @@ SchemaProvider::complete_async(const CompletionParams& params)
         }
         if (!has_ct) headers.emplace_back("Content-Type", "application/json");
     }
+    const bool long_running = !operation_.id_path.empty();
+    auto operation_token = params.cancel_token;
+    asio::any_io_executor executor;
+    std::chrono::steady_clock::time_point deadline;
+    std::optional<asio::steady_timer> deadline_timer;
+    if (long_running) {
+        const int operation_timeout = params.timeout_seconds > 0
+            ? params.timeout_seconds : user_config_.timeout_seconds;
+        if (operation_timeout <= 0) {
+            throw std::invalid_argument("SchemaProvider: operation requires a positive deadline");
+        }
+        executor = co_await asio::this_coro::executor;
+        deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(operation_timeout);
+        operation_token = params.cancel_token ? params.cancel_token->fork()
+                                              : std::make_shared<graph::CancelToken>();
+        deadline_timer.emplace(executor);
+        deadline_timer->expires_at(deadline);
+        deadline_timer->async_wait(
+            [weak = std::weak_ptr<graph::CancelToken>(operation_token)]
+            (const asio::error_code& error) {
+                if (!error) {
+                    if (auto token = weak.lock()) token->cancel();
+                }
+            });
+    }
+    struct StopDeadline {
+        std::optional<asio::steady_timer>& timer;
+        ~StopDeadline() {
+            if (timer) {
+                timer->cancel();
+            }
+        }
+    } stop_deadline{deadline_timer};
+    auto check_operation = [&] {
+        if (params.cancel_token) params.cancel_token->throw_if_cancelled("SchemaProvider operation");
+        if (!operation_.id_path.empty() && std::chrono::steady_clock::now() >= deadline) {
+            throw OperationTimeoutError("SchemaProvider: operation deadline exceeded");
+        }
+    };
+    check_operation();
 
-    auto res = co_await post_json(
-        std::move(endpoint), std::move(endpoint_path), std::move(body_str),
-        std::move(headers), params.timeout_seconds, params.cancel_token,
-        "SchemaProvider completion entry");
-
-    auto resp_json = json::parse(res.body);
+    async::HttpResponse res;
+    try {
+        res = co_await post_json(
+            endpoint, endpoint_path, std::move(body_str), headers,
+            params.timeout_seconds, operation_token, "SchemaProvider completion entry");
+    } catch (const RateLimitError&) {
+        check_operation();
+        throw;
+    } catch (const std::exception& error) {
+        check_operation();
+        if (!operation_.id_path.empty()) {
+            throw OperationError(std::string("SchemaProvider: submission failed: ") + error.what());
+        }
+        throw;
+    }
+    check_operation();
+    json resp_json = json::parse(res.body);
+    const auto submission_usage = operation_.id_path.empty()
+        ? ChatCompletion::Usage{} : parse_usage(resp_json);
+    if (!operation_.id_path.empty()) {
+        if (!operation_.error_path.empty()) {
+            const auto error = json_path::at_path(resp_json, operation_.error_path);
+            if (error && !error->is_null()) {
+                throw OperationError("SchemaProvider: submission failed: " + error->dump());
+            }
+        }
+        const auto id_value = json_path::at_path(resp_json, operation_.id_path);
+        if (!id_value || !id_value->is_string() ||
+            id_value->get<std::string>().empty()) {
+            throw OperationError("SchemaProvider: missing operation identifier");
+        }
+        const std::string operation_id = id_value->get<std::string>();
+        const std::string api_key = get_api_key();
+        auto read_state = [&]() -> bool {
+            const auto error = operation_.error_path.empty()
+                ? std::optional<json>{}
+                : json_path::at_path(resp_json, operation_.error_path);
+            if (error && !error->is_null()) {
+                throw OperationError("SchemaProvider: operation failed: " + error->dump());
+            }
+            const auto done = json_path::at_path(resp_json, operation_.done_path);
+            if (!done || !done->is_boolean()) {
+                throw OperationError("SchemaProvider: missing boolean operation status");
+            }
+            return done->get<bool>();
+        };
+        while (!read_state()) {
+            check_operation();
+            auto pause = std::min(
+                std::chrono::milliseconds(operation_.poll_interval_ms),
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now()));
+            if (pause.count() <= 0) throw OperationTimeoutError(
+                "SchemaProvider: operation deadline exceeded");
+            asio::steady_timer poll_timer(executor);
+            poll_timer.expires_after(pause);
+            // Short slices make cancellation observable even between HTTP requests.
+            while (poll_timer.expiry() > std::chrono::steady_clock::now()) {
+                check_operation();
+                asio::steady_timer slice(executor);
+                slice.expires_after(std::min(std::chrono::milliseconds(50),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        poll_timer.expiry() - std::chrono::steady_clock::now())));
+                co_await slice.async_wait(asio::use_awaitable);
+            }
+            check_operation();
+            const auto poll_path = endpoint.prefix + operation_endpoint(
+                operation_.poll_endpoint, operation_id, api_key);
+            try {
+                res = co_await post_json(endpoint, poll_path, "", headers,
+                    std::max(1, static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                        deadline - std::chrono::steady_clock::now()).count())),
+                    operation_token, "SchemaProvider operation poll",
+                    operation_.poll_method == "GET");
+            } catch (const RateLimitError&) {
+                check_operation();
+                throw;
+            } catch (const std::exception& error) {
+                check_operation();
+                throw OperationError(std::string("SchemaProvider: poll failed: ") + error.what());
+            }
+            check_operation();
+            resp_json = json::parse(res.body);
+        }
+        if (!operation_.finalize_endpoint.empty()) {
+            check_operation();
+            const auto final_path = endpoint.prefix + operation_endpoint(
+                operation_.finalize_endpoint, operation_id, api_key);
+            try {
+                res = co_await post_json(endpoint, final_path, "", headers,
+                    std::max(1, static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                        deadline - std::chrono::steady_clock::now()).count())),
+                    operation_token, "SchemaProvider operation finalize", true);
+            } catch (const RateLimitError&) {
+                check_operation();
+                throw;
+            } catch (const std::exception& error) {
+                check_operation();
+                throw OperationError(std::string("SchemaProvider: finalize failed: ") + error.what());
+            }
+            check_operation();
+            resp_json = json::parse(res.body);
+        }
+        if (!operation_.result_path.empty()) {
+            auto result = json_path::at_path(resp_json, operation_.result_path);
+            if (!result) throw OperationError("SchemaProvider: missing operation result");
+            resp_json = std::move(*result);
+        }
+    }
 
     // parse_response / parse_usage read config strings + walk the freshly
     // parsed resp_json (thread-local). Still holding the lock is cheapest
@@ -390,7 +540,13 @@ SchemaProvider::complete_async(const CompletionParams& params)
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
         completion.message = parse_response(resp_json);
-        completion.usage = parse_usage(resp_json);
+        completion.artifacts = parse_artifacts(resp_json);
+        if (!operation_.id_path.empty() && !resp_.artifacts.empty() &&
+            completion.artifacts.empty()) {
+            throw OperationError("SchemaProvider: operation returned no mapped artifacts");
+        }
+        completion.usage = operation_.id_path.empty()
+            ? parse_usage(resp_json) : submission_usage;
         completion.stop_reason = parse_stop_reason(resp_json);
         if (completion.stop_reason.empty()) {
             completion.stop_reason = completion.message.tool_calls.empty()
@@ -916,7 +1072,7 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
             // tolerance — the server occasionally sends keep-alive
             // shaped frames that aren't application events.
             continue;
-        }
+             }
 
         consume_ws_event(state, j, on_chunk);
     }

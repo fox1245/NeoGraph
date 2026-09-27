@@ -58,6 +58,7 @@ add_executable(neograph_tests
     test_deep_research_human_review.cpp
     test_async_conn_pool.cpp
     test_schema_provider_wire_contract.cpp
+    test_schema_provider_media.cpp
     test_async_http_errors.cpp
     test_async_sse_parser.cpp
     test_async_ws_codec.cpp

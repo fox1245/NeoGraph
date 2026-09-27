@@ -1,0 +1,32 @@
+{
+  "name": "openai-images",
+  "connection": {
+    "base_url": "https://api.openai.com",
+    "endpoint": "/v1/images/generations",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "request": {
+    "model_field": "model",
+    "prompt_field": "prompt",
+    "temperature_path": null,
+    "max_tokens_path": "",
+    "stream_field": "",
+    "extra_fields": {},
+    "per_call_fields": ["size", "quality", "n", "response_format"]
+  },
+  "response": {
+    "strategy": "output_array",
+    "output_path": "output",
+    "default_stop_reason": "end_turn",
+    "artifacts": [{
+      "items_path": "data",
+      "kind": "image",
+      "mime_type": "image/png",
+      "base64_path": "b64_json",
+      "url_path": "url",
+      "metadata_path": "revised_prompt"
+    }]
+  }
+}

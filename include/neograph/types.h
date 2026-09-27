@@ -67,11 +67,24 @@ struct ChatTool {
     json parameters;          ///< JSON Schema object describing the tool's parameters.
 };
 
+/// Generated provider media. At least one payload/reference field is populated;
+/// a provider may supply both a URL and file handle for one artifact.
+/// Metadata preserves provider fields not represented by the common contract.
+struct GeneratedArtifact {
+    std::string kind;         ///< "image", "video", or "file".
+    std::string mime_type;
+    std::string base64_data;  ///< Encoded bytes, not decoded or copied into a second buffer.
+    std::string url;
+    std::string file_id;
+    json metadata = json::object();
+};
+
 /**
  * @brief LLM completion response including the message and token usage.
  */
 struct ChatCompletion {
     ChatMessage message;  ///< The response message from the LLM.
+    std::vector<GeneratedArtifact> artifacts; ///< Generated media in provider order.
 
     /// Normalized reason the provider stopped: `end_turn`, `max_tokens`,
     /// `stop_sequence`, `tool_use`, `content_filter`, `refusal`, or `unknown`.

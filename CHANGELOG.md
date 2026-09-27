@@ -43,6 +43,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   calls now reject while an engine executes, and execution rejects during
   administration. Legacy engine constructors and methods remain compatible
   through the documented pre-v1 migration window.
+- **Schema-generated media and long-running operations (#241).** Built-in
+  OpenAI Responses, Images and Gemini/Veo schemas now project generated image
+  and video outputs into typed C++/Python artifacts, including encoded data,
+  MIME, URLs, file handles and provider metadata. JSON prompt envelopes and
+  generic submit/poll/finalize mappings share the provider's deadline,
+  cancellation and typed operation errors. Deterministic loopback coverage
+  includes mixed chat/tools/images, Veo completion, file finalization,
+  cancellation, timeout and provider failures.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,
