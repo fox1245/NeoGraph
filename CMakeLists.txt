@@ -966,7 +966,10 @@ if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
         src/harness/contract.cpp
     )
     if(NEOGRAPH_BUILD_MCP_CLIENT)
-        target_sources(neograph_harness PRIVATE src/mcp/harness_mcp_backend.cpp)
+        target_sources(neograph_harness PRIVATE
+            src/mcp/harness_mcp_backend.cpp
+            src/mcp/adoption.cpp
+        )
     endif()
     if(NEOGRAPH_BUILD_A2A)
         target_sources(neograph_harness PRIVATE src/a2a/harness_backend.cpp)

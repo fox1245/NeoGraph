@@ -119,6 +119,8 @@ class NEOGRAPH_API MCPClient {
      * MCPClient itself or any MCPTool produced by get_tools().
      */
     explicit MCPClient(std::vector<std::string> argv);
+    /// Hardened local subprocess constructor with an explicit cwd and replacement environment.
+    explicit MCPClient(StdioClientConfig config);
 
     MCPClient(const MCPClient&) = delete;
     MCPClient& operator=(const MCPClient&) = delete;

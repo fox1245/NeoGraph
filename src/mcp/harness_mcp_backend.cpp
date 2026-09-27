@@ -1,5 +1,6 @@
 #include <neograph/mcp/harness_mcp_backend.h>
 
+#include <neograph/mcp/adoption.h>
 #include <neograph/mcp/client.h>
 
 #include <stdexcept>
@@ -31,4 +32,12 @@ HarnessCapabilityExecutor make_mcp_harness_capability_executor(
     };
 }
 
+HarnessCapabilityExecutor make_mcp_harness_capability_executor_from_registry(
+    std::shared_ptr<HardenedMcpClientRegistry> registry) {
+    if (!registry) throw std::invalid_argument("MCP adoption registry is required");
+    return [registry = std::move(registry)](const json& tool, const json& arguments,
+                                             const std::shared_ptr<graph::CancelToken>& cancel) {
+        return registry->capability_executor()(tool, arguments, cancel);
+    };
+}
 } // namespace neograph::mcp

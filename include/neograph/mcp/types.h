@@ -12,7 +12,8 @@
 #include <neograph/api.h>
 #include <neograph/types.h>
 
-#include <chrono>
+#include <cstddef>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -29,6 +30,19 @@ struct NEOGRAPH_API MCPClientConfig {
     std::chrono::milliseconds request_timeout{std::chrono::seconds(30)};
     HeaderList                headers;
     HeaderProvider            header_provider;
+};
+
+/** Explicit subprocess boundary for local credentialless MCP adoption. */
+struct NEOGRAPH_API StdioClientConfig {
+    std::vector<std::string> argv;
+    std::filesystem::path cwd;
+    /// Replacement environment. An empty list is an intentionally empty env.
+    std::vector<std::pair<std::string, std::string>> environment;
+    bool replace_environment = false;
+    std::size_t max_frame_bytes = 16 * 1024 * 1024;
+    std::size_t max_stderr_bytes = 64 * 1024;
+    std::chrono::milliseconds startup_timeout{10000};
+    std::chrono::milliseconds request_timeout{30000};
 };
 
 class NEOGRAPH_API MCPError : public std::runtime_error {

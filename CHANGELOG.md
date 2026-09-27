@@ -61,6 +61,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   creation-time diagnostics. Python registration remains intentionally
   unsupported, and shared-library loading is documented as a possible linked
   ABI arrangement rather than an implemented dynamic plugin system.
+- **Credentialless OpenCode global MCP adoption.** Added inspection-only,
+  redacted discovery of user-global local stdio definitions plus explicit
+  pinned/trusted-mutable launch and tool-manifest approvals. Adopted clients
+  use canonical identity checks, replacement environments, bounded local
+  subprocesses, and fail-closed manifest intersection; project/HTTP entries,
+  imported secrets, recursion, and unknown or unselected tools remain denied.
+- **Local authenticated Harness workers.** The opt-in installable stdio MCP host
+  can preflight and delegate read-only worker calls to installed OpenCode,
+  Claude Code, or Codex CLIs using their own saved login. The Provider path
+  remains explicit; no host credential files or OAuth tokens enter NeoGraph.
+  Subprocess trees, output/events, time and usage are bounded and host errors
+  remain distinct from schema failures.
 - **Transport-independent MCP protocol sessions.** HTTP and subprocess stdio
   now share JSON-RPC correlation, initialization, tool discovery, and tool
   adaptation while retaining separate transport ownership. Added typed

@@ -273,6 +273,7 @@ baseline); remote/server deployment should use direct Provider credentials.
 
 ### Direct API provider (standalone/server)
 
+
 Build and install the opt-in local server (the host CLI mode itself needs
 no NeoGraph-specific model key):
 
@@ -297,6 +298,45 @@ For host interoperability smoke tests only, set `NEOGRAPH_HARNESS_SMOKE=1`
 with `--executor provider`. It uses a deterministic in-process provider
 returning a valid zero-findings review, requires no API key, and is not an
 LLM quality test.
+### Credentialless OpenCode global MCP adoption
+
+Single-user local installations may explicitly adopt selected credentialless
+stdio servers from the OpenCode user-global `opencode.json` source through
+`<neograph/mcp/adoption.h>`. Discovery is inspection-only: it reads only that
+regular, user-owned global file, never project/workspace configuration or OAuth
+stores, and never starts a server. HTTP entries, disabled entries, imported
+environment or file references, unsupported fields, shell executors, and
+recursive NeoGraph entries are rejected.
+
+Adoption requires explicit no-credential `argv` attestation, a separate launch
+identity approval, and a selected-tool/schema capability manifest. `pinned`
+records bind source content, canonical cwd, executable identity, argv, tool
+schemas, and policy version; `trusted_mutable` is an explicit, visibly labeled
+alternative and does not claim executable immutability. Status records contain
+only hashes and names, never command arguments, raw configuration, stderr, or
+credentials. Harness authority is the intersection of the worker declaration,
+adopted manifest, static Harness policy, and process boundary; MCP annotations
+cannot expand it, and unknown/unselected/list-changed tools are denied.
+
+The adopted client uses an absolute executable, canonical cwd, replacement
+allowlist environment, bounded protocol frames, and process-group shutdown.
+Credential-bearing modes (`secret_injected`, `host_brokered`), remote HTTP MCP,
+and arbitrary shell/CLI execution remain unsupported.
+The installable example can wire this registry into the Harness capability
+executor without copying MCP configuration:
+
+```bash
+export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
+export NEOGRAPH_HARNESS_MCP_SERVER=github
+export NEOGRAPH_HARNESS_MCP_TOOL=issue_read
+export NEOGRAPH_HARNESS_MCP_SCHEMA_HASH=sha256:...   # approved tools/list digest
+export NEOGRAPH_HARNESS_MCP_ARGV_ATTESTED=1
+neograph-harness-mcp --executor provider
+```
+
+Use `NEOGRAPH_HARNESS_MCP_TRUST=trusted_mutable` only for an explicit mutable
+approval. `--host-status` with the source configured prints discovery-only
+redacted records and never starts a downstream server.
 
 Durable host-brokered calls require both record and checkpoint persistence.
 The example enables both with one explicit directory:

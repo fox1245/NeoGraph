@@ -241,7 +241,7 @@ using AsyncHandle  = asio::posix::stream_descriptor;
 class StdioSession final : public Transport {
 public:
     static std::shared_ptr<StdioSession> spawn(const std::vector<std::string>& argv);
-
+    static std::shared_ptr<StdioSession> spawn(StdioClientConfig config);
     ~StdioSession();
 
     TransportCapabilities capabilities() const noexcept override {
@@ -285,13 +285,12 @@ private:
     std::thread io_thread_;
     std::mutex  io_thread_mtx_;
 
-    /// Stop the worker and drop everything bound to io_, in that order. Called
-    /// from both platforms' destructors before the subprocess is reaped.
     void shutdown_async_io() noexcept;
     void run_io();
-
+    void terminate_process() noexcept;
     std::string abuffer_; ///< Pending bytes on the single async reader.
-
+    std::size_t max_frame_bytes_ = 16 * 1024 * 1024;
+    std::chrono::milliseconds request_timeout_{30000};
     // Capacity-one channel serializes only frame writes. A waiting writer
     // suspends cooperatively; it never blocks the transport's I/O thread.
     using AsyncLock = asio::experimental::channel<void(asio::error_code)>;
@@ -421,6 +420,12 @@ PipePair make_overlapped_pipe(const char* name_prefix, bool parent_reads) {
 }
 } // namespace
 
+std::shared_ptr<StdioSession> StdioSession::spawn(StdioClientConfig config) {
+    auto session = spawn(config.argv);
+    session->max_frame_bytes_ = std::max<std::size_t>(1024, config.max_frame_bytes);
+    session->request_timeout_ = config.request_timeout.count() > 0 ? config.request_timeout : std::chrono::milliseconds(30000);
+    return session;
+}
 std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
     if (argv.empty()) {
         throw std::invalid_argument("StdioSession::spawn: argv is empty");
@@ -496,6 +501,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
 StdioSession::~StdioSession() {
     shutdown_async_io();   // see the POSIX destructor
 
+
     if (stdin_h_)  { CloseHandle(stdin_h_); stdin_h_ = nullptr; }
     if (stdout_h_) { CloseHandle(stdout_h_); stdout_h_ = nullptr; }
 
@@ -512,14 +518,24 @@ StdioSession::~StdioSession() {
         process_ = nullptr;
     }
 }
+void StdioSession::terminate_process() noexcept {
+    if (!process_) return;
+    TerminateProcess(process_, 1);
+}
 
 #else  // !_WIN32
 
 std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
+    StdioClientConfig config;
+    config.argv = argv;
+    return spawn(std::move(config));
+}
+
+std::shared_ptr<StdioSession> StdioSession::spawn(StdioClientConfig config) {
+    const auto& argv = config.argv;
     if (argv.empty()) {
         throw std::invalid_argument("StdioSession::spawn: argv is empty");
     }
-    // Prepare PATH lookup, argv, and the fallback close bound in the parent.
     // After fork the child may inherit libc locks held by another thread, so
     // it only uses async-signal-safe syscalls before execve or _Exit.
     std::vector<char*> cargv;
@@ -551,6 +567,17 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
             start = end + 1;
         }
     }
+
+    std::vector<std::string> child_environment;
+    std::vector<char*> child_envp;
+    if (config.replace_environment) {
+        child_environment.reserve(config.environment.size());
+        for (const auto& [key, value] : config.environment)
+            child_environment.push_back(key + "=" + value);
+        child_envp.reserve(child_environment.size() + 1);
+        for (auto& item : child_environment) child_envp.push_back(item.data());
+        child_envp.push_back(nullptr);
+    }
     long max_fd = ::sysconf(_SC_OPEN_MAX);
     if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
 
@@ -577,21 +604,21 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
     }
 
     if (pid == 0) {
+        ::setpgid(0, 0);
         // --- child ---
         if (::dup2(in_pipe[0], STDIN_FILENO) < 0
             || ::dup2(out_pipe[1], STDOUT_FILENO) < 0) {
             std::_Exit(127);
         }
-        // Keep the new stdin/stdout even if pipes reused fd 0/1. Pipe fd 2
-        // must still close if the parent had no stderr descriptor.
+        // Never inherit the host's stderr stream; diagnostics are intentionally
+        // separate from MCP stdout and bounded by the parent boundary.
+        const int stderr_fd = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (stderr_fd >= 0) { ::dup2(stderr_fd, STDERR_FILENO); ::close(stderr_fd); }
+        if (!config.cwd.empty() && ::chdir(config.cwd.c_str()) != 0) std::_Exit(126);
         const int pipes[] = {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1]};
         for (int fd : pipes) {
             if (fd != STDIN_FILENO && fd != STDOUT_FILENO) ::close(fd);
         }
-
-        // Close inherited descriptors without opendir/readdir/atoi or
-        // sysconf in the post-fork child. Linux close_range handles even high
-        // descriptors; elsewhere use the bound calculated before fork.
 #if defined(__linux__) && defined(SYS_close_range)
         if (::syscall(SYS_close_range, 3u, ~0u, 0u) != 0) {
 #endif
@@ -599,15 +626,13 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
 #if defined(__linux__) && defined(SYS_close_range)
         }
 #endif
-
-        // execvp is not guaranteed async-signal-safe: try the precomputed
-        // PATH candidates with execve, preserving its script fallback.
+        char* const* environment = config.replace_environment ? child_envp.data() : ::environ;
         for (const auto& candidate : candidates) {
-            ::execve(candidate.c_str(), cargv.data(), ::environ);
+            ::execve(candidate.c_str(), cargv.data(), environment);
             const int error = errno;
             if (error == ENOEXEC) {
                 shell_argv[1] = const_cast<char*>(candidate.c_str());
-                ::execve("/bin/sh", shell_argv.data(), ::environ);
+                ::execve("/bin/sh", shell_argv.data(), environment);
                 break;
             }
             if (error == EACCES || error == ENOENT || error == ENOTDIR) continue;
@@ -618,6 +643,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
         std::_Exit(127);
     }
 
+    ::setpgid(pid, pid);
     // --- parent ---
     ::close(in_pipe[0]);
     in_pipe[0] = -1;
@@ -626,6 +652,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
 
     try {
         auto sess = std::shared_ptr<StdioSession>(new StdioSession());
+        sess->max_frame_bytes_ = std::max<std::size_t>(1024, config.max_frame_bytes);
+        sess->request_timeout_ = config.request_timeout.count() > 0 ? config.request_timeout : std::chrono::milliseconds(30000);
         sess->pid_       = pid;
         sess->stdin_fd_  = in_pipe[1];
         sess->stdout_fd_ = out_pipe[0];
@@ -649,15 +677,17 @@ StdioSession::~StdioSession() {
     if (stdout_fd_ >= 0) ::close(stdout_fd_);
 
     if (pid_ > 0) {
+        const pid_t group = pid_;
+        ::kill(-group, SIGTERM);
         ::kill(pid_, SIGTERM);
-
-        // Poll for exit up to ~500 ms, then SIGKILL.
+        // Poll for exit up to ~500 ms, then SIGKILL the whole process group.
         for (int i = 0; i < 50; ++i) {
             int status = 0;
             pid_t w = ::waitpid(pid_, &status, WNOHANG);
             if (w == pid_) { pid_ = -1; return; }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        ::kill(-group, SIGKILL);
         ::kill(pid_, SIGKILL);
         int status = 0;
         ::waitpid(pid_, &status, 0);
@@ -665,6 +695,18 @@ StdioSession::~StdioSession() {
     }
 }
 
+void StdioSession::terminate_process() noexcept {
+    if (pid_ <= 0) return;
+    const pid_t group = pid_;
+    ::kill(-group, SIGTERM);
+    ::kill(pid_, SIGTERM);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ::kill(-group, SIGKILL);
+    ::kill(pid_, SIGKILL);
+    int status = 0;
+    while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
+    pid_ = -1;
+}
 #endif  // _WIN32
 
 void StdioSession::run_io() {
@@ -730,7 +772,7 @@ asio::awaitable<std::string>
 StdioSession::async_read_line_locked(AsyncHandle& out) {
     auto nl = abuffer_.find('\n');
     if (nl == std::string::npos) {
-        asio::streambuf sbuf(16 * 1024 * 1024);
+        asio::streambuf sbuf(max_frame_bytes_);
         // Seed asio's streambuf with whatever we already have so
         // async_read_until doesn't re-read those bytes.
         if (!abuffer_.empty()) {
@@ -859,6 +901,8 @@ asio::awaitable<json> StdioSession::exchange(
         || deadline <= std::chrono::steady_clock::now()) {
         throw_rpc_bound(deadline, cancel_token);
     }
+    if (deadline == std::chrono::steady_clock::time_point::max() && request_timeout_.count() > 0)
+        deadline = std::chrono::steady_clock::now() + request_timeout_;
     // A transport with no requests pays no worker thread.
     {
         std::lock_guard<std::mutex> g(io_thread_mtx_);
@@ -876,7 +920,10 @@ asio::awaitable<json> StdioSession::exchange(
             asio::co_spawn(io_.get_executor(), do_exchange(std::move(request)),
                            asio::use_awaitable)
             || wait_for_rpc_bound(deadline, cancel_token));
-        if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
+        if (result.index() == 1) {
+            terminate_process();
+            throw_rpc_bound(deadline, cancel_token);
+        }
         co_return std::get<0>(std::move(result));
     } catch (const std::system_error& e) {
         throw MCPTransportError(e.code() == asio::error::operation_aborted
@@ -1259,6 +1306,9 @@ MCPClient::MCPClient(const std::string& server_url, MCPClientConfig config)
 MCPClient::MCPClient(std::vector<std::string> argv)
   : session_(std::make_shared<detail::ProtocolSession>(
         detail::StdioSession::spawn(argv))) {}
+MCPClient::MCPClient(StdioClientConfig config)
+  : session_(std::make_shared<detail::ProtocolSession>(
+        detail::StdioSession::spawn(std::move(config)))) {}
 
 
 asio::awaitable<json> MCPClient::rpc_call_async(
