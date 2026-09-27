@@ -68,6 +68,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shutdown, HTTP status, and invalid wire responses; JSON-RPC server errors
   continue to expose `MCPError` codes. stdio sync and async calls now share
   its session-owned I/O path and support concurrent calls after cancellation.
+- **Local authenticated Harness workers.** The opt-in installable stdio MCP host
+  can preflight and delegate read-only worker calls to installed OpenCode,
+  Claude Code, or Codex CLIs using their own saved login. The Provider path
+  remains explicit; no host credential files or OAuth tokens enter NeoGraph.
+  Subprocess trees, output/events, time and usage are bounded and host errors
+  remain distinct from schema failures.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

@@ -1,5 +1,6 @@
 #include <neograph/llm/openai_provider.h>
 #include <neograph/mcp/harness.h>
+#include <neograph/mcp/harness_host_agent.h>
 #include <neograph/mcp/server.h>
 #ifdef NEOGRAPH_HARNESS_HAVE_HTTP
 #include <neograph/mcp/http_server.h>
@@ -21,6 +22,7 @@
 #endif
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -74,58 +76,107 @@ public:
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const bool smoke_mode = environment("NEOGRAPH_HARNESS_SMOKE") == "1";
-    const auto api_key    = environment("NEOGRAPH_HARNESS_API_KEY", "OPENROUTER_API_KEY");
-    if (!smoke_mode && api_key.empty()) {
-        std::cerr << "Set NEOGRAPH_HARNESS_API_KEY or OPENROUTER_API_KEY\n";
+    auto executor = environment("NEOGRAPH_HARNESS_EXECUTOR");
+    auto host_model = environment("NEOGRAPH_HARNESS_HOST_MODEL");
+    bool status_only = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--executor" && index + 1 < argc) executor = argv[++index];
+        else if (flag == "--host-model" && index + 1 < argc) host_model = argv[++index];
+        else if (flag == "--host-status") status_only = true;
+        else {
+            std::cerr << "Usage: neograph-harness-mcp [--executor provider|opencode|claude|codex]"
+                         " [--host-model MODEL] [--host-status]\n";
+            return 2;
+        }
+    }
+    if (executor.empty()) executor = "provider";
+    const bool host_mode = executor != "provider";
+    if (host_mode && (executor != "opencode" && executor != "claude" && executor != "codex")) {
+        std::cerr << "Select --executor provider, opencode, claude, or codex; auto is not supported\n";
+        return 2;
+    }
+    if (host_mode && environment("NEOGRAPH_HARNESS_TRANSPORT") == "http") {
+        std::cerr << "Host CLI delegation is local stdio only; HTTP needs explicit provider credentials\n";
+        return 2;
+    }
+    neograph::mcp::HostAgentExecutorConfig agent_config;
+    if (host_mode) {
+        agent_config.host = executor;
+        agent_config.model = host_model;
+        agent_config.workspace = std::filesystem::current_path();
+        const auto preflight = neograph::mcp::preflight_host_agent(agent_config);
+        std::cerr << "Host: " << preflight.host << ", executable: "
+                  << (preflight.executable.empty() ? "missing" : "available")
+                  << ", model: " << preflight.model << ", version: " << preflight.version
+                  << ", mode: local read-only CLI\n" << preflight.detail << '\n';
+        if (status_only) return preflight.available ? 0 : 2;
+        if (!preflight.available) return 2;
+    } else if (status_only) {
+        std::cerr << "Provider mode: direct API credentials (no host login preflight)\n";
+        return 0;
+    }
+    const auto api_key = host_mode ? std::string{} :
+                         environment("NEOGRAPH_HARNESS_API_KEY", "OPENROUTER_API_KEY");
+    if (!host_mode && !smoke_mode && api_key.empty()) {
+        std::cerr << "Set NEOGRAPH_HARNESS_API_KEY or OPENROUTER_API_KEY, or select a local host executor\n";
         return 2;
     }
 
     neograph::llm::OpenAIProvider::Config provider_config;
-    provider_config.api_key         = api_key;
-    provider_config.base_url        = "https://openrouter.ai/api";
-    provider_config.default_model   = "~deepseek/deepseek-v4-flash-latest";
+    provider_config.api_key          = api_key;
+    provider_config.base_url         = "https://openrouter.ai/api";
+    provider_config.default_model    = "~deepseek/deepseek-v4-flash-latest";
     provider_config.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider;
-    if (smoke_mode) {
+    if (smoke_mode && !host_mode) {
         provider                      = std::make_shared<SmokeReviewProvider>();
         provider_config.default_model = "harness-smoke";
-    } else {
+    } else if (!host_mode) {
         provider = neograph::llm::OpenAIProvider::create_shared(provider_config);
     }
-
     constexpr const char* kProviderBindingIdentity =
         "sha256:7df70a8b692b53148480c9eb019db87cac5c2c7e1c53a351ff628651ab219c14";
     constexpr const char* kProviderImplementationDigest =
         "sha256:67ac4b0f2d57b2ca169623008f2fad2ff4ed726e05eb570a36f69fa4edad7847";
+    constexpr const char* kHostImplementationDigest =
+        "sha256:b3e0def356fbca55e33c78a7029232c413f9cfb17923de6735ce15f4f568e2b6";
     constexpr const char* kSupportModuleDigest =
         "sha256:a328e0824ca6438669e42ee0bb8c42634cc9613d66240cdd649c36b3b279030d";
     constexpr const char* kToolingModuleDigest =
         "sha256:aa8500648d5b30cecb1ef06dcf2eb861b126928de6715ff54bbe7857105b285f";
 
-    neograph::mcp::HarnessProviderExecutorConfig executor_config;
-    executor_config.provider = provider;
-    executor_config.model    = provider_config.default_model;
-
     neograph::mcp::HarnessServiceConfig harness_config;
     neograph::mcp::HarnessProgramHostConfig host_config;
-    host_config.worker_executor =
-        neograph::mcp::make_provider_harness_executor(std::move(executor_config));
-    host_config.compiler_build_id        = "neograph-harness-example-v1";
-    host_config.provider_binding_identity = kProviderBindingIdentity;
-    host_config.provider_host_configuration = {
-        {"base_url", provider_config.base_url},
-        {"model", provider_config.default_model},
-        {"provider", provider->get_name()},
-    };
+    if (host_mode) {
+        host_config.worker_executor = neograph::mcp::make_host_agent_executor(agent_config);
+    } else {
+        neograph::mcp::HarnessProviderExecutorConfig executor_config;
+        executor_config.provider = provider;
+        executor_config.model = provider_config.default_model;
+        host_config.worker_executor =
+            neograph::mcp::make_provider_harness_executor(std::move(executor_config));
+    }
+    host_config.compiler_build_id = "neograph-harness-example-v1";
+    host_config.provider_binding_identity =
+        host_mode ? kHostImplementationDigest
+                  : kProviderBindingIdentity;
+    host_config.provider_host_configuration = host_mode ?
+        neograph::json{{"executor", executor}, {"model", host_model.empty() ? "host default" : host_model},
+                       {"mode", "local-read-only-cli"}} :
+        neograph::json{{"base_url", provider_config.base_url},
+                       {"model", provider_config.default_model}, {"provider", provider->get_name()}};
     host_config.snapshots.owner_scope = "neograph-harness-example";
     const neograph::program::ExecutableIdentity provider_identity{
         neograph::program::ExecutableKind::Provider, "harness.provider", "1.0.0",
-        std::string(kProviderImplementationDigest)};
+        host_mode ? std::string(kHostImplementationDigest)
+                  : std::string(kProviderImplementationDigest)};
     host_config.snapshots.registry.provider = neograph::mcp::HarnessProviderRegistration{
         {provider_identity, neograph::program::EffectMode::Brokered,
-         "neograph-harness-example-provider", {}, {}, {}},
+         host_mode ? "neograph-harness-local-host-worker" : "neograph-harness-example-provider",
+         {}, {}, {}},
         {neograph::json{{"type", "object"}}, neograph::json{{"type", "object"}}}};
     host_config.snapshots.allowed_module_digests = {
         provider_identity.implementation_digest,

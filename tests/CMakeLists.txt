@@ -275,6 +275,7 @@ endif()
 if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
         test_harness_contract.cpp
+        test_harness_host_agent.cpp
     )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
     if(NEOGRAPH_BUILD_QUICKJS_CONTROL)

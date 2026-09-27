@@ -172,34 +172,131 @@ JSON remains internal/interchange data. See
 describes the retained compatibility behavior and migration diagnostics; it
 does not authorize new legacy source semantics.
 
-## Build And Run
+## Local authenticated host workers
 
-Build the local stdio server with the OpenAI-compatible provider adapter:
+`neograph-harness-mcp` can delegate worker inference to one explicitly selected,
+already authenticated local CLI. This is **model delegation**, not credential
+inheritance: NeoGraph never opens the host's auth files, accepts OAuth tokens,
+or translates a subscription into a provider API key. The official host
+process uses its own saved login. Requires Linux for process-group isolation;
+the host backend fails closed on other platforms. No `auto` selection: multiple
+authenticated hosts must not trigger a silent billing/policy decision.
+
+```bash
+opencode auth login                 # or claude auth login / codex login, once
+neograph-harness-mcp --executor opencode --host-status
+neograph-harness-mcp --executor opencode --host-model openai/YOUR_MODEL
+```
+
+Choose `--executor claude` or `--executor codex` for the other CLIs; omit
+`--host-model` to request that adapter's host default. Environment alternatives
+are `NEOGRAPH_HARNESS_EXECUTOR` and `NEOGRAPH_HARNESS_HOST_MODEL`. Status and
+normal startup perform a bounded, non-secret version/login preflight first,
+and OpenCode verifies explicit model names through `opencode models`.
+Claude and Codex do not expose the same portable model-list API; their
+model-selection errors are reported from the attempted request. Missing CLI,
+logout, unsupported output, quota, policy, and model failures are not silently
+converted into provider calls. Exact model or `host default`, CLI version,
+executor identity, and mode appear in status/host metadata, without credentials.
+
+Embedders and future shared-process MCP configuration can construct the same
+boundary from `<neograph/mcp/harness_host_agent.h>`:
+`preflight_host_agent(config)` first, then
+`HarnessProgramHostConfig::worker_executor = make_host_agent_executor(config)`.
+The `HostAgentExecutorConfig` workspace is an explicit canonical root; bind
+its non-secret executor/model identity in `provider_host_configuration` so
+retained artifacts cannot be resumed against another route. This boundary
+does not modify the direct `Provider` executor or require outbound MCP
+Sampling.
+
+The subprocess profile is intentionally read-only and local stdio only.
+OpenCode runs `--pure` from a fresh, temporary config directory with only
+read/glob/grep allowed; `.env` and known host credential paths remain denied
+to the model's read tool, and the workspace root is granted read-only
+external-path access. Claude runs `-p --safe-mode --permission-mode plan` with only
+Read/Glob/Grep, not `--bare` (which skips subscription login). Codex runs
+`exec --ignore-user-config --ignore-rules --ephemeral --sandbox read-only`. Every subprocess
+gets a targeted environment allowlist with direct-provider and unrelated
+repository/cloud credentials excluded, a depth marker forbidding nested
+NeoGraph host delegation, bounded prompt/event/stdout/stderr capture, and a
+deadline; cancellation terminates the process group. No shell evaluates
+prompts or model IDs. Program-level schema verification and bounded retries
+still apply; CLI-generated JSON is not trusted until accepted by the worker
+schema gate. Usage is accounted from the host's machine-readable completion
+events. These CLI transports do not offer a universal hard generation-time
+token cap: an over-budget response is rejected and never sent to the judge,
+but its upstream usage may already have been billed. Workspace read-only
+permissions are a host policy boundary, not an OS mount namespace; use an
+isolated OS account/container where untrusted repository or host policy needs
+strong filesystem confinement. The local CLI adapter does not accept Harness
+capability tools; use the direct Provider executor for capability-rich workers.
+
+Live tests are opt-in on a trusted, authenticated private runner:
+`NEOGRAPH_HARNESS_LIVE_HOST=claude|codex|opencode` selects the one installed
+CLI, and `NEOGRAPH_HARNESS_LIVE_MODEL` optionally fixes its model.
+The OpenCode OAuth job additionally sets
+`NEOGRAPH_HARNESS_LIVE_OPENCODE_OAUTH=1` and an available `openai/...` model.
+The test confirms `opencode auth list` reports OpenAI OAuth (non-secret)
+before executing. The marker is a test gate, never a credential. Missing
+login, model, or gate produces an explicit skip, not fabricated inference.
+
+The MCP server can be registered with each host using its standard local
+stdio configuration, substituting the installed `neograph-harness-mcp` binary
+found on your PATH (do not paste credentials into the MCP entry):
+
+```bash
+claude mcp add neograph-harness -- neograph-harness-mcp --executor claude
+codex mcp add neograph-harness -- neograph-harness-mcp --executor codex
+```
+
+For OpenCode, run `opencode mcp add` and choose a local server with command
+`neograph-harness-mcp --executor opencode` in its guided prompts. The
+equivalent supported `opencode.json` entry is:
+
+```json
+{"mcp":{"neograph-harness":{"type":"local","command":["neograph-harness-mcp","--executor","opencode"],"enabled":true}}}
+```
+
+See [OpenCode CLI](https://opencode.ai/docs/cli/),
+[Claude CLI](https://code.claude.com/docs/en/cli-reference),
+[Claude authentication](https://code.claude.com/docs/en/authentication),
+[Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
+and [Codex authentication](https://learn.chatgpt.com/docs/auth).
+Host subscription quotas, rate limits, model eligibility, retention,
+organization policy and data handling still govern delegated calls. Claude.ai
+subscription use by third-party products may require Anthropic approval;
+this opt-in installed-CLI path is **not** approval to redistribute a hosted
+Claude subscription backend. Do not infer that login to one host grants
+access to a different vendor or model. This local backend does not enable
+remote HTTP delegation or MCP Sampling (unsupported on the portable host
+baseline); remote/server deployment should use direct Provider credentials.
+
+### Direct API provider (standalone/server)
+
+Build and install the opt-in local server (the host CLI mode itself needs
+no NeoGraph-specific model key):
 
 ```bash
 cmake -S . -B build-harness \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
-  -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_LLM=ON \
-  -DNEOGRAPH_BUILD_MCP_SERVER=ON
-cmake --build build-harness --target example_harness_mcp_server -j
-export OPENAI_API_KEY=your-key
-export NEOGRAPH_HARNESS_MODEL=gpt-4o-mini
+  -DNEOGRAPH_BUILD_MCP_SERVER=ON \
+  -DNEOGRAPH_BUILD_HARNESS_MCP_BINARY=ON
+cmake --build build-harness --target neograph_harness_mcp -j
+cmake --install build-harness --prefix "$HOME/.local"
+export NEOGRAPH_HARNESS_API_KEY=your-key
+neograph-harness-mcp --executor provider
 ```
 
-`NEOGRAPH_HARNESS_API_KEY` takes precedence over `OPENAI_API_KEY`.
-`NEOGRAPH_HARNESS_BASE_URL` selects any OpenAI-compatible endpoint. The server
-accepts both an unversioned base such as `https://openrouter.ai/api` and the
-provider's documented versioned form such as `https://openrouter.ai/api/v1`;
-it adds `/v1` only when missing. The server writes protocol messages only to
-stdout and diagnostics only to stderr. See the
-[OpenRouter quickstart](https://openrouter.ai/docs/quickstart) for its current
-endpoint format.
+`NEOGRAPH_HARNESS_API_KEY` takes precedence over `OPENROUTER_API_KEY`
+for the included OpenRouter example. Unlike local host execution, direct
+provider mode requires its own API key. The server writes protocol messages
+only to stdout and diagnostics only to stderr.
 
-For host interoperability smoke tests only, set `NEOGRAPH_HARNESS_SMOKE=1`.
-That explicit mode uses a deterministic in-process provider returning a valid
-zero-findings review, requires no API key, and must not be used as an LLM
-quality test.
+For host interoperability smoke tests only, set `NEOGRAPH_HARNESS_SMOKE=1`
+with `--executor provider`. It uses a deterministic in-process provider
+returning a valid zero-findings review, requires no API key, and is not an
+LLM quality test.
 
 Durable host-brokered calls require both record and checkpoint persistence.
 The example enables both with one explicit directory:

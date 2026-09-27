@@ -959,6 +959,7 @@ if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
         src/mcp/harness_file_store.cpp
         src/mcp/harness_journal.cpp
         src/mcp/harness_provider.cpp
+        src/mcp/harness_host_agent.cpp
         src/mcp/harness_program_translator.cpp
         src/mcp/harness_program_store.cpp
         src/mcp/harness_program_host.cpp
