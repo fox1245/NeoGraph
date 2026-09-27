@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
-#include <set>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -537,6 +537,11 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
             {bundle_id});
         report.bundles_removed += result_count(bundle);
     }
+    std::sort(report.references.begin(), report.references.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.version_id, lhs.reason) <
+                         std::tie(rhs.version_id, rhs.reason);
+              });
     transaction.commit();
     return report;
 }

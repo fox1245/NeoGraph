@@ -4,7 +4,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
-#include <set>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -242,6 +242,11 @@ ProgramRetentionReport InMemoryProgramStore::collect_garbage(
             }
         if (!referenced && impl_->bundles.erase(bundle_id) != 0) ++report.bundles_removed;
     }
+    std::sort(report.references.begin(), report.references.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.version_id, lhs.reason) <
+                         std::tie(rhs.version_id, rhs.reason);
+              });
     return report;
 }
 

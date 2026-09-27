@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
-#include <set>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -459,6 +459,11 @@ ProgramRetentionReport SQLiteProgramStore::collect_garbage(
         statement.step_done();
         if (sqlite3_changes(impl_->db) != 0) ++report.bundles_removed;
     }
+    std::sort(report.references.begin(), report.references.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.version_id, lhs.reason) <
+                         std::tie(rhs.version_id, rhs.reason);
+              });
     transaction.commit();
     return report;
 }
