@@ -137,7 +137,7 @@ public:
     const TenantScope& scope() const noexcept { return scope_; }
 
     void put(const graph::Namespace& ns, const std::string& key,
-             const graph::json& value) override;
+             const json& value) override;
     std::optional<graph::StoreItem> get(const graph::Namespace& ns,
                                          const std::string& key) const override;
     std::vector<graph::StoreItem> search(const graph::Namespace& ns_prefix,

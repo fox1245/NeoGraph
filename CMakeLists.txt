@@ -562,6 +562,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/history.cpp
     src/core/evolution.cpp
     src/core/harness_bench.cpp
+    src/core/tenant.cpp
     src/observability/openinference.cpp
 )
 add_library(neograph_core ${NEOGRAPH_CORE_SOURCES})

@@ -173,7 +173,7 @@ graph::StoreItem ScopedStore::public_item(graph::StoreItem item) const {
     return item;
 }
 
-void ScopedStore::put(const graph::Namespace& ns, const std::string& key, const graph::json& value) {
+void ScopedStore::put(const graph::Namespace& ns, const std::string& key, const json& value) {
     backend_->put(private_namespace(ns), key, value);
 }
 

@@ -42,8 +42,9 @@ TEST(TenantIsolation, ScopeAuthorizationIsExactAndCredentialFree) {
 }
 
 TEST(TenantQuota, AdmissionAndRAIIRelease) {
-    TenantQuota quota(TenantQuotas{.max_concurrency = 1, .max_artifacts = 1,
-                                   .max_model_tokens = 10, .max_cost_microunits = 4});
+    TenantQuota quota(TenantQuotas{.max_concurrency = 1,
+                                   .max_model_tokens = 10, .max_cost_microunits = 4,
+                                   .max_artifacts = 1});
     {
         auto lease = TenantQuotaLease::acquire(quota, true);
         EXPECT_EQ(quota.active(), 1U);
