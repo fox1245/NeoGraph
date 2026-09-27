@@ -270,6 +270,9 @@ class NEOGRAPH_API ACPServer {
     /// thread for the full duration. Drain or cancel before
     /// destruction if you need a bounded-latency teardown.
     void stop();
+    /// Bound concurrently executing sessions; reject excess prompts before
+    /// any graph node runs. Defaults to 32.
+    void set_max_inflight_prompts(std::size_t limit);
     bool initialized() const;
 
     /// Handle for issuing agent→client requests (fs/*, etc.). On first

@@ -111,6 +111,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across restart, and blocks unresolved external outcomes instead of retrying.
   Program Core grants now require a Tool effect broker; standalone Core and
   Agent callers can supply an explicit host-owned broker identity.
+- **Shared Graph host conformance.** A2A, ACP, and opt-in gRPC now exercise
+  the same real-engine invocation, cancellation, admission, terminal-result,
+  and nested Store/ToolGate contract. The gRPC suite has a dedicated CI gate.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

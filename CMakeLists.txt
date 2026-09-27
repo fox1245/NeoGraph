@@ -1124,10 +1124,8 @@ endif()
 # the build tree, and graph_service.cpp implements the service against
 # neograph_core. Independent of MCP — this is NeoGraph's own gRPC API.
 #
-# NOTE: this path is not exercised in the reference CI environment
-# (no grpc++/protoc there). The OFF-default build is fully verified;
-# the ON build's protoc codegen wiring should be confirmed on the
-# first grpc++-equipped build. See ROADMAP_v1.md.
+# The default CI build leaves this OFF. The separate grpc-graph-contract
+# CI job installs the toolchain and builds/runs the opt-in host suite.
 # ===========================================================================
 if(NEOGRAPH_BUILD_GRPC)
     set(_ng_proto "${PROJECT_SOURCE_DIR}/proto/neograph.proto")

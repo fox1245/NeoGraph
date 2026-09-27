@@ -321,6 +321,29 @@ terminal states, diagnostics, cancellation, streaming, checkpoint/resume, and
 owner-scope behavior must pass the shared contract suite plus protocol-specific
 wire tests.
 
+#### Graph-host conformance gate (issue #215)
+
+Every new host exposing a Core graph must implement `tests/graph_host_contract.h`'s
+`Host` adapter against its **real public request, cancel, and shutdown APIs** and
+register `check_contract` as a CTest target. The minimum gate asserts mapped
+session identity and input at the running node; in-flight cancellation reaching
+the node, a cooperative provider, and a mediated contextual tool (the negative
+adapter must demonstrably fail); ordered node/host terminal events;
+distinct completion, interrupt, max-steps, error, and cancel results; nested
+Store lookup and denied ToolGate dispatch; admission rejection without a node
+start; and shutdown that drains or cancels in-flight work. The deterministic
+fixture does not use a live model or external service. A2A, ACP, and gRPC
+implement the same suite in `tests/test_graph_host_*_contract.cpp`; encoding,
+decoding, and protocol-specific interaction stay in their existing suites.
+
+The gRPC target exists only with `NEOGRAPH_BUILD_GRPC=ON`: the CI
+`grpc-graph-contract` job installs grpc++ and protoc and builds/runs that
+target explicitly. An ordinary default-OFF build **does not** run gRPC
+conformance and must not be cited as evidence for it. This is the legacy
+Core graph-host boundary; it does not substitute for the separate Program
+runtime conformance gate above.
+
+
 
 ### Remote collaboration contract
 

@@ -9,6 +9,7 @@
 #include <set>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -673,6 +674,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     bool        graph_failed = false;
                     std::string agent_text;
                     std::string graph_error;
+                    std::string boundary_status = "completed";
                     neograph::graph::RunResult run_result;
 
                     try {
@@ -690,6 +692,8 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                             ? invocation.resume(neograph::json(
                                   a.extract_user_text(req.prompt)))
                             : invocation.run();
+                        boundary_status = std::string(
+                            neograph::graph::to_string(outcome.status));
                         if (outcome.cancelled()) {
                             stop = StopReason::Cancelled;
                         } else if (!outcome.succeeded() || !outcome.run_result) {
@@ -697,6 +701,9 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                             graph_error = outcome.error.empty()
                                 ? "graph invocation failed"
                                 : outcome.error;
+                        } else if (outcome.status ==
+                                   neograph::graph::InvocationStatus::MaxSteps) {
+                            stop = StopReason::MaxTurnRequests;
                         } else {
                             run_result = std::move(*outcome.run_result);
                             if (!run_result.interrupted) {
@@ -705,10 +712,12 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                             }
                         }
                     } catch (const std::exception& e) {
+                        boundary_status = "error";
                         graph_failed = true;
                         graph_error = e.what();
                     } catch (...) {
                         graph_failed = true;
+                        boundary_status = "error";
                         graph_error = "unknown exception";
                     }
 
@@ -781,6 +790,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     // have been emitted, then commit the one terminal response.
                     commit_terminal(
                         stop, !graph_failed && run_result.interrupted);
+                    if (stop == StopReason::Cancelled) boundary_status = "cancelled";
 
                     // The terminal state is now committed and the old cancel
                     // token is no longer reachable. Admit the next turn before
@@ -793,6 +803,8 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                         resp.stop_reason = stop;
                         neograph::json rj;
                         to_json(rj, resp);
+                        rj["_meta"]["neograph/invocation_status"] =
+                            boundary_status;
                         response_attempted = true;
                         emit(jsonrpc_result(std::move(rj), id));
                     }
@@ -927,6 +939,13 @@ void ACPServer::fail_next_handle_message_for_testing() {
 void ACPServer::stop() {
     impl_->stop_flag.store(true, std::memory_order_release);
 }
+void ACPServer::set_max_inflight_prompts(std::size_t limit) {
+    if (limit == 0 || limit > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("ACP prompt limit must be a positive int");
+    std::lock_guard lock(impl_->workers_mu);
+    impl_->max_inflight_prompts = static_cast<int>(limit);
+}
+
 
 bool ACPServer::is_running() const {
     return impl_->running.load(std::memory_order_acquire);

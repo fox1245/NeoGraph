@@ -1,9 +1,8 @@
 // neograph::grpc service implementation.
 //
-// NOTE: not compiled in the reference CI environment (no grpc++/
-// protoc). Built only when -DNEOGRAPH_BUILD_GRPC=ON. The OFF-default
-// engine build is fully verified; confirm protoc codegen + this TU on
-// the first grpc++-equipped build. See ROADMAP_v1.md.
+// Built only with -DNEOGRAPH_BUILD_GRPC=ON. The opt-in CI
+// grpc-graph-contract job installs grpc++/protoc and executes the host
+// conformance target; the default-OFF build never probes for either.
 
 #ifdef NEOGRAPH_HAVE_GRPC
 
@@ -17,6 +16,7 @@
 
 #include <mutex>
 #include <atomic>
+#include <optional>
 #include <chrono>
 #include <stdexcept>
 #include <thread>
@@ -32,51 +32,39 @@ namespace neograph::grpc {
 
 using namespace neograph::graph;
 namespace pb = neograph::v1;
-// The watcher borrows the RPC's finished flag; join on every exit path.
-struct WatcherLifetime {
-    std::atomic_bool& finished;
-    std::thread& worker;
-    ~WatcherLifetime() {
-        finished.store(true, std::memory_order_release);
-        if (worker.joinable()) worker.join();
-    }
-};
 
 class GraphServiceImpl final : public pb::GraphService::Service {
 public:
-    GraphServiceImpl(NodeContext ctx, std::string default_graph_json)
-        : ctx_(std::move(ctx)),
-          default_def_(std::move(default_graph_json)) {}
+    GraphServiceImpl(NodeContext ctx, std::string default_graph_json,
+                     std::shared_ptr<GraphEngine> default_engine = {},
+                     std::size_t max_inflight_runs = 0)
+        : ctx_(std::move(ctx)), default_def_(std::move(default_graph_json)),
+          max_inflight_runs_(max_inflight_runs) {
+        if (default_engine && !default_def_.empty())
+            cache_.emplace(default_def_, std::move(default_engine));
+    }
 
     ::grpc::Status RunGraph(::grpc::ServerContext* sctx,
                             const pb::RunGraphRequest* req,
                             pb::RunGraphResponse* resp) override {
+        Admission admission(*this);
+        if (!admission.accepted())
+            return ::grpc::Status(::grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                  "graph host in-flight limit reached");
         std::shared_ptr<CancelToken> token;
-        std::atomic_bool finished{false};
-        std::thread cancel_watcher;
-        WatcherLifetime watcher_lifetime{finished, cancel_watcher};
-        auto stop_watcher = [&] {
-            finished.store(true, std::memory_order_release);
-            if (cancel_watcher.joinable()) cancel_watcher.join();
-        };
+        std::optional<CancelWatcher> watcher;
         try {
             auto engine = get_engine(req->graph_def_json());
             RunConfig cfg = build_config(*req);
             token = std::make_shared<CancelToken>();
             cfg.cancel_token = token;
-            cancel_watcher = std::thread([sctx, token, &finished] {
-                while (!finished.load(std::memory_order_acquire)
-                       && !sctx->IsCancelled()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-                if (sctx->IsCancelled()) token->cancel();
-            });
+            watcher.emplace(sctx, token);
 
             RunInvocationRequest request;
             request.config = std::move(cfg);
             RunInvocation invocation(engine, std::move(request));
             auto outcome = invocation.run();
-            stop_watcher();
+            watcher->stop();
             if (outcome.cancelled()) {
                 resp->set_error("cancelled");
                 return ::grpc::Status(::grpc::StatusCode::CANCELLED,
@@ -99,7 +87,7 @@ public:
             for (const auto& n : r.execution_trace)
                 resp->add_execution_trace(n);
         } catch (const std::exception& e) {
-            stop_watcher();
+            if (watcher) watcher->stop();
             // Engine-side failure surfaces in the payload, not as a
             // transport error — caller distinguishes "graph threw"
             // from "gRPC broke".
@@ -112,14 +100,12 @@ public:
             ::grpc::ServerContext* sctx,
             const pb::RunGraphRequest* req,
             ::grpc::ServerWriter<pb::GraphEvent>* writer) override {
+        Admission admission(*this);
+        if (!admission.accepted())
+            return ::grpc::Status(::grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                  "graph host in-flight limit reached");
         std::shared_ptr<CancelToken> token;
-        std::atomic_bool finished{false};
-        std::thread cancel_watcher;
-        WatcherLifetime watcher_lifetime{finished, cancel_watcher};
-        auto stop_watcher = [&] {
-            finished.store(true, std::memory_order_release);
-            if (cancel_watcher.joinable()) cancel_watcher.join();
-        };
+        std::optional<CancelWatcher> watcher;
         try {
             auto engine = get_engine(req->graph_def_json());
             RunConfig cfg = build_config(*req);
@@ -149,17 +135,11 @@ public:
                 if (!writer->Write(out)) token->cancel();
             };
 
-            cancel_watcher = std::thread([sctx, token, &finished] {
-                while (!finished.load(std::memory_order_acquire)
-                       && !sctx->IsCancelled()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-                if (sctx->IsCancelled()) token->cancel();
-            });
+            watcher.emplace(sctx, token);
 
             RunInvocation invocation(engine, std::move(request));
             auto outcome = invocation.run();
-            stop_watcher();
+            watcher->stop();
             if (outcome.cancelled()) {
                 return ::grpc::Status(::grpc::StatusCode::CANCELLED,
                                       "graph invocation cancelled");
@@ -191,7 +171,7 @@ public:
                 return ::grpc::Status(::grpc::StatusCode::CANCELLED,
                                       "gRPC stream closed by client");
         } catch (const std::exception& e) {
-            stop_watcher();
+            if (watcher) watcher->stop();
             pb::GraphEvent err;
             err.set_kind(pb::GraphEvent::DEBUG);
             err.set_payload_json(
@@ -211,6 +191,44 @@ public:
     }
 
 private:
+    class CancelWatcher {
+    public:
+        CancelWatcher(::grpc::ServerContext* context, std::shared_ptr<CancelToken> token)
+            : worker_([context, token = std::move(token)](std::stop_token stop) {
+                while (!stop.stop_requested() && !context->IsCancelled())
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                if (!stop.stop_requested() && context->IsCancelled()) token->cancel();
+            }) {}
+        ~CancelWatcher() { stop(); }
+        void stop() {
+            worker_.request_stop();
+            if (worker_.joinable()) worker_.join();
+        }
+    private:
+        std::jthread worker_;
+    };
+    class Admission {
+    public:
+        explicit Admission(GraphServiceImpl& owner) : owner_(owner) {
+            auto current = owner_.inflight_runs_.load(std::memory_order_relaxed);
+            while (owner_.max_inflight_runs_ == 0 ||
+                   current < owner_.max_inflight_runs_) {
+                if (owner_.inflight_runs_.compare_exchange_weak(
+                        current, current + 1, std::memory_order_acq_rel,
+                        std::memory_order_relaxed)) {
+                    accepted_ = true;
+                    break;
+                }
+            }
+        }
+        ~Admission() {
+            if (accepted_) owner_.inflight_runs_.fetch_sub(1, std::memory_order_release);
+        }
+        bool accepted() const noexcept { return accepted_; }
+    private:
+        GraphServiceImpl& owner_;
+        bool accepted_ = false;
+    };
     RunConfig build_config(const pb::RunGraphRequest& req) {
         RunConfig cfg;
         cfg.thread_id = req.thread_id();
@@ -248,13 +266,18 @@ private:
     NodeContext ctx_;
     std::string default_def_;
     std::mutex  mu_;
+    std::size_t max_inflight_runs_ = 0;
+    std::atomic<std::size_t> inflight_runs_{0};
     std::unordered_map<std::string, GraphExecution> cache_;
 };
 
-std::unique_ptr<GraphServiceImpl> make_graph_service(
-        NodeContext ctx, std::string default_graph_json) {
+std::unique_ptr<pb::GraphService::Service> make_graph_service(
+        NodeContext ctx, std::string default_graph_json,
+        std::shared_ptr<GraphEngine> default_engine,
+        std::size_t max_inflight_runs) {
     return std::make_unique<GraphServiceImpl>(
-        std::move(ctx), std::move(default_graph_json));
+        std::move(ctx), std::move(default_graph_json),
+        std::move(default_engine), max_inflight_runs);
 }
 
 void run_server(const std::string& address,

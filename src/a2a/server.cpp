@@ -520,16 +520,23 @@ Task A2AServer::Impl::run_graph(
         if (outcome.cancelled()) {
             result = build_failure_task(task_id, context_id, "(canceled)");
             result.status.state = TaskState::Canceled;
-        } else if (!outcome.run_result) {
+        } else if (!outcome.succeeded() || !outcome.run_result) {
             result = build_failure_task(
                 task_id, context_id,
                 std::string("graph run failed: ") + outcome.error);
+        } else if (outcome.status == neograph::graph::InvocationStatus::Interrupted) {
+            result = build_response_task(task_id, context_id, "Graph execution interrupted");
+            result.status.state = TaskState::InputRequired;
+        } else if (outcome.status == neograph::graph::InvocationStatus::MaxSteps) {
+            result = build_failure_task(task_id, context_id, "graph max steps exhausted");
         } else {
             const auto& rr = *outcome.run_result;
             auto agent_text = extract_agent_text(rr.output, a.output_channel());
             result = build_response_task(task_id, context_id, agent_text,
                                          a.build_output_artifact(rr.output, task_id));
         }
+        result.metadata["neograph/invocation_status"] =
+            std::string(neograph::graph::to_string(outcome.status));
     } catch (const std::exception& e) {
         result = build_failure_task(
             task_id, context_id,
@@ -561,6 +568,7 @@ Task A2AServer::Impl::run_graph(
         TaskStatusUpdateEvent ev;
         ev.task_id    = task_id;
         ev.context_id = context_id;
+        ev.metadata = result.metadata;
         ev.status     = result.status;
         ev.final      = true;
         on_event(ev);

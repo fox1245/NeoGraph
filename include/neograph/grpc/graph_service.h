@@ -11,6 +11,8 @@
 
 #ifdef NEOGRAPH_HAVE_GRPC
 
+#include <cstddef>
+#include <neograph.grpc.pb.h>
 #include <memory>
 #include <string>
 
@@ -19,16 +21,19 @@
 
 namespace neograph::grpc {
 
-class GraphServiceImpl;
-
-/// Build a GraphService bound to a NodeContext. When
-/// `default_graph_json` is non-empty, a `RunGraphRequest` that omits
-/// `graph_def_json` reuses a precompiled engine for that default.
-/// Per-distinct-graph engines are compiled lazily and cached
-/// (hash-keyed, the same multi-tenant pattern as the cookbook).
-std::unique_ptr<GraphServiceImpl> make_graph_service(
+/// Build a concrete GraphService as a complete generated service base, so
+/// embedders can register it with grpc::ServerBuilder.
+/// A nonempty `default_graph_json` selects the default graph. An optional
+/// `default_engine` must be compiled from those same bytes and is reused
+/// instead of compiling another engine (for example, when a host configures
+/// Store and ToolGate before accepting requests). Other graph definitions
+/// compile lazily and are cached. `max_inflight_runs` is the concurrent RPC
+/// admission cap; zero preserves the existing unbounded default.
+std::unique_ptr<neograph::v1::GraphService::Service> make_graph_service(
     neograph::graph::NodeContext ctx,
-    std::string default_graph_json = "");
+    std::string default_graph_json = "",
+    std::shared_ptr<neograph::graph::GraphEngine> default_engine = {},
+    std::size_t max_inflight_runs = 0);
 
 /// Convenience: build + run a blocking gRPC server on `address`
 /// (e.g. "0.0.0.0:50051") with insecure credentials until the

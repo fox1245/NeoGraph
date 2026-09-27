@@ -14,6 +14,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  grpc-graph-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install opt-in gRPC toolchain
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential pkg-config \
+            libssl-dev libgrpc++-dev protobuf-compiler protobuf-compiler-grpc
+      - name: Configure gRPC boundary gate
+        run: |
+          cmake -S . -B build-grpc \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_GRPC=ON \
+            -DNEOGRAPH_BUILD_A2A=OFF \
+            -DNEOGRAPH_BUILD_ACP=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF \
+            -DNEOGRAPH_BUILD_SQLITE=OFF \
+            -DNEOGRAPH_USE_LIBCURL=OFF \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF
+      - name: Build and execute gRPC shared contract
+        run: |
+          cmake --build build-grpc --target neograph_grpc_graph_contract_tests -j2
+          ctest --test-dir build-grpc -R '^neograph.grpc_graph_contract$' \
+            --output-on-failure
+
   build-and-test:
     runs-on: ubuntu-latest
 

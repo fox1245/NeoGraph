@@ -330,6 +330,14 @@ if(NEOGRAPH_BUILD_A2A)
     )
     add_test(NAME neograph.a2a_collaboration
              COMMAND neograph_a2a_collaboration_tests)
+    add_executable(neograph_a2a_graph_contract_tests
+        test_graph_host_a2a_contract.cpp)
+    target_compile_definitions(neograph_a2a_graph_contract_tests PRIVATE
+        NEOGRAPH_A2A_TESTING)
+    target_link_libraries(neograph_a2a_graph_contract_tests PRIVATE
+        neograph::a2a GTest::gtest_main)
+    add_test(NAME neograph.a2a_graph_contract
+             COMMAND neograph_a2a_graph_contract_tests)
 endif()
 
 # The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote
@@ -375,6 +383,22 @@ if(NEOGRAPH_BUILD_ACP)
         neograph::acp
         GTest::gtest_main
     )
+
+    add_executable(neograph_acp_graph_contract_tests
+        test_graph_host_acp_contract.cpp)
+    target_link_libraries(neograph_acp_graph_contract_tests PRIVATE
+        neograph::acp GTest::gtest_main)
+    add_test(NAME neograph.acp_graph_contract
+             COMMAND neograph_acp_graph_contract_tests)
+endif()
+
+if(NEOGRAPH_BUILD_GRPC)
+    add_executable(neograph_grpc_graph_contract_tests
+        test_graph_host_grpc_contract.cpp)
+    target_link_libraries(neograph_grpc_graph_contract_tests PRIVATE
+        neograph::grpc GTest::gtest_main)
+    add_test(NAME neograph.grpc_graph_contract
+             COMMAND neograph_grpc_graph_contract_tests)
 endif()
 
 # Smoke tests for the async::async_get helper added with the A2A client
