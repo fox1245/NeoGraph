@@ -16,6 +16,52 @@ Measurements: 1000 concurrent real OpenAI calls / 6 customers / 3 topologies /
 > one compile cache entry and you're done.** Fits in <30 MB per process.
 
 This cookbook is a working minimal implementation of that structure.
+## Isolation contract (production boundary)
+
+The measurements above are **topology-sharing measurements**, not a security
+or capacity claim for a production SaaS host. A production ingress creates an
+immutable `TenantScope` after authentication and gives each tenant its own
+provider/model policy, `GraphRegistry` snapshot, `ToolSet`, `ScopedStore`,
+`ScopedCheckpointStore`, Harness record namespace, and `TenantQuota`:
+
+```cpp
+auto backend_store = std::make_shared<InMemoryStore>(); // or a tenant DB
+auto backend_checkpoints = std::make_shared<InMemoryCheckpointStore>();
+TenantScope scope("tenant-a", "authz-a"); // trusted ingress only
+ScopedStore store(scope, backend_store);
+ScopedCheckpointStore checkpoints(scope, backend_checkpoints);
+TenantQuota quota({.max_concurrency = 32, .max_queue = 64,
+                   .max_model_tokens = 2'000'000, .max_artifacts = 1000});
+```
+
+The same public `thread_id`, checkpoint ID, Harness run ID, artifact ID, or
+result URI can safely occur in another tenant: scoped adapters map it to a
+private backend namespace and wrong-tenant lookups return absence. Resume,
+replay, fork, cancellation, and dereference must all use the same ingress
+scope; do not route those operations from an unscoped identifier.
+
+`CatalogConfig::materialization_context_identity` is a stable, non-secret host
+identity for the provider/model policy, tool catalog, store binding, and
+registry snapshot. It is part of the generation-cache identity. Provider
+credentials, authorization tokens, and topology JSON never belong in that
+identity, cache keys, journals, logs, or diagnostics. Omit the field only when
+the exact capability receipts are intentionally equivalent.
+
+The mock program below demonstrates measured topology reuse. It does **not**
+prove tenant isolation, provider isolation, quota behavior, or production
+memory extrapolations. Production hosts should keep one scoped engine/resource
+binding per tenant and measure their own stores, provider routes, and quotas.
+### Offline isolated-host reference
+
+```bash
+cmake --build build --target cookbook_multi_tenant_isolated_host
+./build/cookbook_multi_tenant_isolated_host
+```
+
+This reference host serves two tenants in one process with distinct topology,
+provider/model policy, tool policy, stores, and quotas. It uses synthetic
+identities and no network credentials; replace its ingress and control-plane
+lookups with deployment-owned implementations before production use.
 
 ## Scenario
 

@@ -6,6 +6,7 @@ add_executable(neograph_tests
     test_engine_config.cpp
     test_checkpoint.cpp
     test_store.cpp
+    test_tenant.cpp
     test_node.cpp
     test_node_header.cpp
     test_loader.cpp

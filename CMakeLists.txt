@@ -956,6 +956,7 @@ endif()
 if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_harness
         src/mcp/harness.cpp
+        src/mcp/tenant.cpp
         src/mcp/harness_file_store.cpp
         src/mcp/harness_journal.cpp
         src/mcp/harness_provider.cpp
@@ -1484,6 +1485,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(cookbook_multi_tenant_mock
             examples/cookbook/multi_tenant_chatbot/server.cpp)
         target_link_libraries(cookbook_multi_tenant_mock PRIVATE
+            neograph::core)
+        add_executable(cookbook_multi_tenant_isolated_host
+            examples/cookbook/multi_tenant_chatbot/isolated_host.cpp)
+        target_link_libraries(cookbook_multi_tenant_isolated_host PRIVATE
             neograph::core)
 
         if(NEOGRAPH_BUILD_LLM)

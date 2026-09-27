@@ -871,14 +871,17 @@ struct EngineGenerationCache::Impl {
         std::string registry_fingerprint;
         std::string compiler_build_id;
         std::string capability_binding_root;
+        std::string materialization_context_identity;
         std::size_t worker_count = 1;
 
         bool operator<(const Key& other) const noexcept {
             return std::tie(bundle_id, core_name, compiled_plan_identity, registry_fingerprint,
-                            compiler_build_id, capability_binding_root, worker_count) <
+                            compiler_build_id, capability_binding_root,
+                            materialization_context_identity, worker_count) <
                    std::tie(other.bundle_id, other.core_name, other.compiled_plan_identity,
                             other.registry_fingerprint, other.compiler_build_id,
-                            other.capability_binding_root, other.worker_count);
+                            other.capability_binding_root,
+                            other.materialization_context_identity, other.worker_count);
         }
     };
 
@@ -899,6 +902,7 @@ struct ProgramCatalog::Impl {
          std::string                            build_id,
          CatalogCapabilityBinder                binder,
          std::size_t                            workers,
+         std::string                            context_identity,
          std::shared_ptr<const ModuleStore>     modules,
          std::string                            host)
         : program_store(std::move(store)),
@@ -907,6 +911,7 @@ struct ProgramCatalog::Impl {
           compiler_build_id(std::move(build_id)),
           capability_binder(std::move(binder)),
           worker_count(workers),
+          materialization_context_identity(std::move(context_identity)),
           module_store(std::move(modules)),
           host_identity(std::move(host)) {}
 
@@ -916,6 +921,7 @@ struct ProgramCatalog::Impl {
     std::string                            compiler_build_id;
     CatalogCapabilityBinder                capability_binder;
     std::size_t                            worker_count = 1;
+    std::string                            materialization_context_identity;
     std::shared_ptr<const ModuleStore>     module_store;
     std::string                            host_identity;
 
@@ -935,6 +941,10 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
     if (config.worker_count == 0) {
         throw std::invalid_argument("CatalogConfig worker_count must be positive");
     }
+    if (!config.materialization_context_identity.empty()) {
+        detail::validate_token(config.materialization_context_identity,
+                               "Catalog materialization_context_identity");
+    }
     if (!config.host_identity.empty()) {
         detail::validate_token(config.host_identity, "Catalog host_identity");
     }
@@ -952,6 +962,7 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
     impl_ = std::make_unique<Impl>(std::move(config.program_store), std::move(config.registry),
                                    std::move(config.engines), std::move(config.compiler_build_id),
                                    std::move(config.capability_binder), config.worker_count,
+                                   std::move(config.materialization_context_identity),
                                    std::move(config.module_store), std::move(config.host_identity));
 }
 
@@ -1513,7 +1524,7 @@ ProgramVersion ProgramCatalog::materialize(
     EngineGenerationCache::Impl::Key key{
         bundle.id(),          recomputed_plan->name,    recomputed_plan->compiled_plan_identity,
         registry_fingerprint, impl_->compiler_build_id, binding_root,
-        impl_->worker_count};
+        impl_->materialization_context_identity, impl_->worker_count};
     auto&                                               cache = *impl_->engines->impl_;
     std::lock_guard                                     cache_lock(cache.mutex);
     auto                                                cached = cache.generations.find(key);

@@ -91,6 +91,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies the configured authenticator to ordinary message, stream, task-get,
   and task-cancel RPCs as well as collaboration envelopes. The default remains
   false for legacy compatibility.
+- **Trusted-ingress tenant isolation (#244).** Added immutable `TenantScope`,
+  fail-closed scoped Store/CheckpointStore and Harness namespaces, RAII-safe
+  per-tenant concurrency/queue/token/cost/artifact quotas, and a
+  non-secret `CatalogConfig::materialization_context_identity` cache
+  partition. The existing multi-tenant cookbook now labels topology-sharing
+  measurements separately from production isolation and extrapolation.
 - **Host-owned A2A control-message interception.** `ProgramAgentAdapter` can
   now route an authenticated typed message to a host callback before starting
   `ProgramRuntime`. The callback must preserve task/context identity and its
