@@ -62,10 +62,14 @@ same release, and rebuild custom subclasses at every announced boundary.
 - `Provider` keeps its established vtable under the permanent compatibility
   decision. New implementations should derive from `CompletionProvider`; that
   migration does not alter the existing `Provider` layout.
-- The planned `CheckpointStore` async migration must follow this policy.
-  Before v1, any vtable break requires an announced rebuild boundary. After
-  v1, new capability interfaces and adapters must be preferred over changing
-  the stable `CheckpointStore` layout.
+- `CheckpointStore` retains its existing vtable and object layout for the
+  pre-v1 migration. Sync defaults now fail explicitly instead of crossing to
+  async overrides; async defaults offload synchronous overrides. Async-only
+  subclasses must migrate to `AsyncCheckpointStore` and
+  `adapt_async_checkpoint_store()` for a sync facade. New capability interfaces
+  and adapters do not change the legacy vtable or checkpoint wire format.
+  Rebuild custom backends with matching headers at the next announced boundary;
+  do not hot-swap a pre-v1 shared library into an existing process.
 
 ## Verification
 

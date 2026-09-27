@@ -1,8 +1,6 @@
-// Stage 3 / Semester 3.1 regression — CheckpointStore now exposes
-// async peers (save_async, load_latest_async, …) alongside the sync
-// API. Each pair is connected by a crossover default: subclasses
-// override one side and inherit the other through run_sync /
-// co_return.
+// Non-recursive checkpoint contract: the engine awaits canonical async
+// operations; explicit adapters expose native async and offloaded sync-only
+// backends to the legacy synchronous administration surface.
 //
 // InMemoryCheckpointStore provides direct async peers because its storage is
 // local mutex-protected memory. These cases pin its value semantics; the
@@ -165,6 +163,36 @@ public:
     std::optional<Checkpoint> saved;
 };
 
+class NativeAsyncOnlyStore final : public AsyncCheckpointStore {
+public:
+    asio::awaitable<void> save_async(const Checkpoint& cp) override {
+        last_thread = std::this_thread::get_id();
+        saved = cp;
+        co_return;
+    }
+    asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id) override {
+        last_thread = std::this_thread::get_id();
+        co_return saved && saved->thread_id == thread_id ? saved : std::nullopt;
+    }
+    asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id) override {
+        co_return saved && saved->id == id ? saved : std::nullopt;
+    }
+    asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit) override {
+        if (limit > 0 && saved && saved->thread_id == thread_id)
+            co_return std::vector<Checkpoint>{*saved};
+        co_return std::vector<Checkpoint>{};
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
+        if (saved && saved->thread_id == thread_id) saved.reset();
+        co_return;
+    }
+    std::optional<Checkpoint> saved;
+    std::thread::id last_thread;
+};
+
 } // namespace
 
 TEST(CheckpointAsyncDefault, InMemorySaveAndLoadLatestRoundTrip) {
@@ -316,6 +344,11 @@ TEST(CheckpointAsyncDefault, NeitherSideOverrideFailsClosed) {
     EXPECT_THROW(
         neograph::async::run_sync(store.save_async(make_cp("empty", 1))),
         std::logic_error);
+    EXPECT_THROW(store.save(make_cp("empty", 1)), std::logic_error);
+    EXPECT_THROW(store.load_latest("empty"), std::logic_error);
+    EXPECT_THROW(store.load_by_id("missing"), std::logic_error);
+    EXPECT_THROW(store.list("empty"), std::logic_error);
+    EXPECT_THROW(store.delete_thread("empty"), std::logic_error);
 }
 
 TEST(CheckpointCapabilities, AdapterDelegatesCoreAsyncAndPendingWrites) {
@@ -353,4 +386,35 @@ TEST(CheckpointCapabilities, CoreOnlyAdapterProvidesLegacyAsyncFallback) {
     auto loaded = neograph::async::run_sync(store->load_latest_async("core-only"));
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->id, cp.id);
+}
+
+TEST(CheckpointCapabilities, NativeAsyncBackendProvidesExplicitSyncFacade) {
+    auto native = std::make_shared<NativeAsyncOnlyStore>();
+    std::weak_ptr<NativeAsyncOnlyStore> lifetime = native;
+    auto store = adapt_async_checkpoint_store(native);
+    native.reset();
+    const auto cp = make_cp("native-async", 2);
+    store->save(cp);
+    auto loaded = neograph::async::run_sync(store->load_latest_async(cp.thread_id));
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->id, cp.id);
+    auto still_owned = lifetime.lock();
+    ASSERT_TRUE(still_owned);
+    EXPECT_EQ(still_owned->last_thread, std::this_thread::get_id());
+    still_owned.reset();
+    auto by_id = store->load_by_id(cp.id);
+    ASSERT_TRUE(by_id);
+    EXPECT_EQ(by_id->step, 2);
+    auto listed = store->list(cp.thread_id, 1);
+    ASSERT_EQ(listed.size(), 1U);
+    EXPECT_EQ(listed.front().id, cp.id);
+    EXPECT_TRUE(store->get_writes(cp.thread_id, cp.id).empty());
+    store->delete_thread(cp.thread_id);
+    EXPECT_FALSE(neograph::async::run_sync(store->load_latest_async(cp.thread_id)));
+    store.reset();
+    EXPECT_TRUE(lifetime.expired());
+}
+
+TEST(CheckpointCapabilities, AsyncAdapterRejectsNullBackend) {
+    EXPECT_THROW((void)adapt_async_checkpoint_store(nullptr), std::invalid_argument);
 }

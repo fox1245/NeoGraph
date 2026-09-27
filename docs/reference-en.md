@@ -383,10 +383,9 @@ public:
 | `invoke(params, on_chunk)` | Callback-selected compatibility entry point used by existing engine code. |
 | `get_name()` | Human-readable provider identifier (only pure virtual). |
 
-**Override-at-least-one-side contract**: each `(sync, async)` pair
-defaults to the other; overriding neither yields infinite mutual
-recursion at call time. Same shape as `CheckpointStore`'s sync↔async
-bridge below.
+**Provider override-at-least-one-side contract**: each `(sync, async)`
+pair defaults to the other; a subclass overriding neither recurses.
+Checkpoint storage uses explicit non-recursive adapters instead.
 
 These methods have no planned removal and no deprecation warnings. Compatibility
 and security fixes continue to apply; new capabilities may be exposed only through
@@ -2034,23 +2033,26 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 
 ### CheckpointStore
 
-Abstract interface for checkpoint persistence. Implement this to store checkpoints
-in a database, file system, or any other backend.
-
-> **Writing a custom store?** New implementations should implement the smallest
-> applicable capability: `CheckpointStoreCore`, optionally
-> `AsyncCheckpointStore` and/or `PendingWritesCheckpointStore`, then pass it
-> through `adapt_checkpoint_store()`. The existing `CheckpointStore` interface
-> remains the compatibility contract. Its async defaults invoke the sync methods;
-> a sync-only backend therefore remains valid, but its async calls are blocking.
-> See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
+The legacy ABI-compatible persistence facade. New sync-only backends derive
+`CheckpointStoreCore` (five pure operations) and call
+`adapt_checkpoint_store()`; native async backends derive
+`AsyncCheckpointStore` (five pure coroutine operations) and call
+`adapt_async_checkpoint_store()`. Both adapters expose `CheckpointStore`
+to existing GraphEngine, protocol hosts, gRPC checkpoint users, and Python
+binding entry points. Async engine operations call the canonical async peers;
+sync-only backends are offloaded to a bounded pool, while native async
+operations run on the caller's executor. The legacy synchronous defaults
+throw on missing capabilities rather than recursing. Durable pending writes
+are an independent optional `PendingWritesCheckpointStore` capability; without
+it, resume replays the full super-step. The persisted schema is unchanged.
+See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
 
 ```cpp
 class CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
-    // ── Sync core (5 virtuals, non-pure with bridge defaults) ──────
+    // ── Sync facade (5 virtuals; missing operation throws) ──────
     virtual void save(const Checkpoint& cp);
     virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
     virtual std::optional<Checkpoint> load_by_id(const std::string& id);
@@ -2058,7 +2060,7 @@ public:
                                            int limit = 100);
     virtual void delete_thread(const std::string& thread_id);
 
-    // ── Async peers (5 virtuals, default co_return the sync call) ──
+    // ── Async peers (5 virtuals; sync-only operations offload) ──
     virtual asio::awaitable<void> save_async(const Checkpoint& cp);
     virtual asio::awaitable<std::optional<Checkpoint>>
         load_latest_async(const std::string& thread_id);

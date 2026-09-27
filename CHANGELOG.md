@@ -12,6 +12,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Non-recursive async-primary checkpoint adapters.** Native coroutine
+  stores use `AsyncCheckpointStore` plus `adapt_async_checkpoint_store()`;
+  sync-only stores use `CheckpointStoreCore` plus the bounded-worker adapter.
+  Legacy missing sync operations now fail explicitly without changing the
+  `CheckpointStore` vtable or checkpoint wire schema.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,
