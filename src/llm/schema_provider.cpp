@@ -412,6 +412,7 @@ SchemaProvider::complete_async(const CompletionParams& params)
     asio::any_io_executor executor;
     std::chrono::steady_clock::time_point deadline;
     std::optional<asio::steady_timer> deadline_timer;
+    const bool long_running = !operation_.id_path.empty();
     if (long_running) {
         const int operation_timeout = params.timeout_seconds > 0
             ? params.timeout_seconds : user_config_.timeout_seconds;

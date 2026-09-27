@@ -18,20 +18,24 @@ std::filesystem::path write_schema(const std::string& suffix,
     const auto path = std::filesystem::temp_directory_path() /
         ("neograph_schema_primitives_" + suffix + ".json");
     std::ofstream out(path);
-    out << R"({
-      "name":"synthetic",
-      "connection":{"base_url":"https://synthetic.invalid","endpoint":"/complete","transport":")"
-        << transport << R"("},
-      "execution":{"mode":")" << mode << R"("},
-      "request":{"model_field":"model","messages_field":"messages","stream_field":"stream"},
-      "system_prompt":{"strategy":"in_messages"},
-      "messages":{"role_field":"role","content_field":"content"},
-      "tool_definition":{"wrapper":"function"},
-      "tool_call_in_message":{"strategy":"tool_calls_array"},
-      "tool_result":{"strategy":"flat"},
-      "response":{"strategy":"choices_message","artifact_parser":")" << parser << R"("},
-      "streaming":{"format":"sse_data"}
-    })";
+    const neograph::json schema = {
+        {"name", "synthetic"},
+        {"connection", {{"base_url", "https://synthetic.invalid"},
+                        {"endpoint", "/complete"}, {"transport", transport}}},
+        {"execution", {{"mode", mode}}},
+        {"request", {{"model_field", "model"}, {"messages_field", "messages"},
+                     {"stream_field", "stream"}}},
+        {"system_prompt", {{"strategy", "in_messages"}}},
+        {"messages", {{"role_field", "role"}, {"content_field", "content"}}},
+        {"tool_definition", {{"wrapper", "function"}}},
+        {"tool_call_in_message", {{"strategy", "tool_calls_array"}}},
+        {"tool_result", {{"strategy", "flat"}}},
+        {"response", {{"strategy", "choices_message"},
+                      {"message_path", "choices.0.message"},
+                      {"artifact_parser", parser}}},
+        {"streaming", {{"format", "sse_data"}}}
+    };
+    out << schema.dump(2);
     return path;
 }
 
