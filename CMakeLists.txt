@@ -695,6 +695,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
             src/program/sqlite_store.cpp
             src/program/sqlite_transition_store.cpp
             src/program/sqlite_core_tool_grant_store.cpp
+            src/program/sqlite_provider_call_broker.cpp
         )
         target_include_directories(neograph_program_sqlite
             PUBLIC

@@ -199,6 +199,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
     endif()
     if(TARGET neograph_program_sqlite)
+        target_sources(neograph_program_tests PRIVATE test_program_provider_journal.cpp)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         )

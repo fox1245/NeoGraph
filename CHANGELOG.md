@@ -92,6 +92,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   executable-binding fingerprint; revocation survives restart and blocks all
   attempts using that grant ID. Effect results still require a separate
   per-call durable Tool broker.
+- **Durable Program Core provider calls.** Hosts can bind an invocation-scoped
+  `SQLiteProgramProviderCallJournal` through the existing Program resolver.
+  It writes a durable marker before built-in Core provider transport, binds
+  exact call slot/request/deployment independently of attempt provenance,
+  stores completions for restart replay, and requires external evidence to
+  reconcile uncertain outcomes without silent re-dispatch.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,
