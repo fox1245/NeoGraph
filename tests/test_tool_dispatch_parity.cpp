@@ -162,9 +162,12 @@ NodeOutput drive(GraphNode& node, const GraphState& state) {
 // Distinct legacy synchronous tools overlap after the default async bridge
 // offloads each call to the bounded blocking pool.
 TEST(ToolDispatchParity, SyncToolsOverlapOnToolNode) {
-    SyncSleepTool a("a"), b("b"), c("c");
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SyncSleepTool>("a"));
+    tools.push_back(std::make_unique<SyncSleepTool>("b"));
+    tools.push_back(std::make_unique<SyncSleepTool>("c"));
     NodeContext ctx;
-    ctx.tools = {&a, &b, &c};
+    ctx.tools = ToolSet(std::move(tools));
     ToolDispatchNode node("tools", ctx);
 
     GraphState state;
@@ -177,9 +180,12 @@ TEST(ToolDispatchParity, SyncToolsOverlapOnToolNode) {
 
 // Claim 2a. Async tools DO overlap on ToolNode. This is the behavior Agent lacks.
 TEST(ToolDispatchParity, AsyncToolsOverlapOnToolNode) {
-    AsyncSleepTool a("a"), b("b"), c("c");
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<AsyncSleepTool>("a"));
+    tools.push_back(std::make_unique<AsyncSleepTool>("b"));
+    tools.push_back(std::make_unique<AsyncSleepTool>("c"));
     NodeContext ctx;
-    ctx.tools = {&a, &b, &c};
+    ctx.tools = ToolSet(std::move(tools));
     ToolDispatchNode node("tools", ctx);
 
     GraphState state;
@@ -192,9 +198,10 @@ TEST(ToolDispatchParity, AsyncToolsOverlapOnToolNode) {
 
 TEST(ToolDispatchParity, CancellationReachesContextAwareTool) {
     auto probe = std::make_shared<ToolCancelProbe>();
-    ContextAwareCancelTool tool(probe);
     NodeContext node_context;
-    node_context.tools = {&tool};
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<ContextAwareCancelTool>(probe));
+    node_context.tools = ToolSet(std::move(tools));
     ToolDispatchNode node("tools", node_context);
 
     GraphState state;
@@ -335,23 +342,22 @@ TEST(ToolDispatchParity, ScalingToTwentyTools) {
     for (int i = 0; i < kN; ++i) names.push_back("t" + std::to_string(i));
 
     // Serial reference: repeated calls to one resource key.
-    SyncSleepTool shared("shared");
     NodeContext serial_ctx;
-    serial_ctx.tools = {&shared};
+    std::vector<std::unique_ptr<Tool>> serial_tools;
+    serial_tools.push_back(std::make_unique<SyncSleepTool>("shared"));
+    serial_ctx.tools = ToolSet(std::move(serial_tools));
     ToolDispatchNode serial_node("tools", serial_ctx);
     GraphState serial_state;
     seed(serial_state, {assistant_calling(std::vector<std::string>(kN, "shared"))});
     auto serial = timed([&] { drive(serial_node, serial_state); });
 
     // Concurrent: N distinct synchronous tools through the same dispatch.
-    std::vector<std::unique_ptr<SyncSleepTool>> sync_owned;
-    std::vector<Tool*> sync_tools;
+    std::vector<std::unique_ptr<Tool>> sync_tools;
     for (const auto& n : names) {
-        sync_owned.push_back(std::make_unique<SyncSleepTool>(n));
-        sync_tools.push_back(sync_owned.back().get());
+        sync_tools.push_back(std::make_unique<SyncSleepTool>(n));
     }
     NodeContext sync_ctx;
-    sync_ctx.tools = sync_tools;
+    sync_ctx.tools = ToolSet(std::move(sync_tools));
     ToolDispatchNode sync_node("tools", sync_ctx);
     GraphState sync_state;
     seed(sync_state, {assistant_calling(names)});

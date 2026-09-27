@@ -203,7 +203,7 @@ harness never acts. [`the_beast_apex.cpp`](the_beast_apex.cpp) is the
 monster: the model is handed a **tool catalog** and asked to author a
 ReAct agent — `llm_call` ⇄ `tool_dispatch` looping on `has_tool_calls`.
 The harness it writes is gated for coherence, then **spawned with the
-tools bound** (`ctx.tools` + `engine->own_tools`). The spawned agent then
+tools bound** (an owned `ToolSet` in `EngineConfig::node_context.tools`). The spawned agent then
 decides, on its own, which tools to call and when.
 
 ```console

@@ -126,7 +126,7 @@ $ ./build/cookbook_the_beast_copy_ninja "Grace"
 
 ## Apex — 装备吞噬工具
 
-存根工作线程演示证明生成的工具链是*连贯的*，但工具链从不行动。[`the_beast_apex.cpp`](the_beast_apex.cpp) 才是怪物：模型被交给一个**工具目录**并要求编写一个 ReAct 智能体 — `llm_call` ⇄ `tool_dispatch` 在 `has_tool_calls` 上循环。它编写的工具链经过连贯性门控，然后**以绑定工具的方式生成**（`ctx.tools` + `engine->own_tools`）。生成的智能体随后自行决定调用哪些工具以及何时调用。
+存根工作线程演示证明生成的工具链是*连贯的*，但工具链从不行动。[`the_beast_apex.cpp`](the_beast_apex.cpp) 才是怪物：模型被交给一个**工具目录**并要求编写一个 ReAct 智能体 — `llm_call` ⇄ `tool_dispatch` 在 `has_tool_calls` 上循环。它编写的工具链经过连贯性门控，然后**以绑定工具的方式生成**（`EngineConfig::node_context.tools` 中持有的 `ToolSet`）。生成的智能体随后自行决定调用哪些工具以及何时调用。
 
 ```console
 $ cmake --build build --target cookbook_the_beast_apex

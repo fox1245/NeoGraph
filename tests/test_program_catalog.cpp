@@ -4,7 +4,6 @@
 #include <neograph/program/program.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
-#include <neograph/program/program.h>
 #include <neograph/program/store.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_store.h>
@@ -755,7 +754,8 @@ TEST(ProgramCatalogTest, NodeFactoriesReceiveOnlyTheirExactCapabilities) {
             ++trusted_factories;
             EXPECT_TRUE(context.provider);
             EXPECT_EQ(context.tools.size(), 1U);
-            if (!context.tools.empty()) EXPECT_EQ(context.tools.front()->get_name(), "catalog-tool");
+            if (!context.tools.empty())
+                EXPECT_EQ(context.tools.view().front()->get_name(), "catalog-tool");
             return std::make_unique<CatalogNode>(name);
         },
         json{{"type", "object"}}, json::object(),
@@ -774,10 +774,11 @@ TEST(ProgramCatalogTest, NodeFactoriesReceiveOnlyTheirExactCapabilities) {
         json{{"from", "a"}, {"to", "b"}},
         json{{"from", "b"}, {"to", "c"}},
         json{{"from", "c"}, {"to", "__end__"}}});
-    CatalogTool bound_tool;
     NodeContext context;
     context.provider = std::make_shared<CatalogProvider>();
-    context.tools.push_back(&bound_tool);
+    std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
+    owned_tools.push_back(std::make_unique<CatalogTool>());
+    context.tools = neograph::ToolSet(std::move(owned_tools));
     auto topology = neograph::program::detail::RegistrySnapshotAccess::parse_local(
         snapshot, definition);
     (void)neograph::program::detail::RegistrySnapshotAccess::link_local(
@@ -817,13 +818,13 @@ TEST(ProgramCatalogTest, FixedBrokeredCoreNodesDispatchOnlyThroughRunGate) {
         json{{"from", "__start__"}, {"to", "llm"}},
         json{{"from", "llm"}, {"to", "tools"}},
         json{{"from", "tools"}, {"to", "__end__"}}});
-    CatalogTool bound_tool;
-    CatalogTool out_of_scope_tool("out-of-scope");
     NodeContext context;
     auto model = std::make_shared<CatalogToolCallingProvider>();
     context.provider = model;
-    context.tools.push_back(&bound_tool);
-    context.tools.push_back(&out_of_scope_tool);
+    std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
+    owned_tools.push_back(std::make_unique<CatalogTool>());
+    owned_tools.push_back(std::make_unique<CatalogTool>("out-of-scope"));
+    context.tools = neograph::ToolSet(std::move(owned_tools));
     auto topology = neograph::program::detail::RegistrySnapshotAccess::parse_local(
         snapshot, definition);
     auto compiled = neograph::program::detail::RegistrySnapshotAccess::link_local(

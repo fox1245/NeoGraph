@@ -136,9 +136,9 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
         if (!config.node_context.tools.empty()) {
             throw std::invalid_argument(
                 "GraphEngine::build received both EngineResources::tools and "
-                "NodeContext::tools; use the owned ToolSet only");
+                "NodeContext::tools; supply one owned ToolSet");
         }
-        config.node_context.tools = resources.tools.view();
+        config.node_context.tools = std::move(resources.tools);
     }
 
     resources.registry = resources.registry ? resources.registry->snapshot()
@@ -231,9 +231,9 @@ std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
         if (!config.node_context.tools.empty()) {
             throw std::invalid_argument(
                 "GraphEngine::link received both EngineResources::tools and "
-                "NodeContext::tools; use the owned ToolSet only");
+                "NodeContext::tools; supply one owned ToolSet");
         }
-        config.node_context.tools = resources.tools.view();
+        config.node_context.tools = std::move(resources.tools);
     }
 
     resources.registry = resources.registry ? resources.registry->snapshot()
@@ -250,6 +250,12 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
                                                     EngineConfig    config,
                                                     EngineResources resources,
                                                     bool validate) {
+    if (!cg.tools.empty() && !resources.tools.empty()) {
+        throw std::invalid_argument(
+            "GraphEngine::link received tools in both CompiledGraph and "
+            "EngineResources; compiled nodes retain their original ToolSet");
+    }
+
     // Static semantic analysis (issue #75 M2). Strict documents:
     // errors throw, warnings go to stderr. Legacy documents: only
     // errors are surfaced (as stderr warnings — they were silent
@@ -285,7 +291,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->tool_gate_           = std::move(config.tool_gate);
     engine->tool_execution_controller_ = std::move(config.tool_execution_controller);
     engine->hook_runtime_        = std::move(config.hook_runtime);
-    engine->owned_tools_         = std::move(resources.tools).release();
+    engine->tools_               = cg.tools.empty() ? std::move(resources.tools)
+                                                   : std::move(cg.tools);
     engine->node_cache_.set_max_entries(config.node_cache_max_entries);
     for (const auto& node_name : config.cached_nodes) {
         engine->set_node_cache_enabled(
@@ -348,19 +355,6 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
 // Configuration helpers
 // =========================================================================
 
-void GraphEngine::own_tools(std::vector<std::unique_ptr<Tool>> tools) {
-    std::unique_ptr<Tool> generation_identity;
-    for (auto& tool : owned_tools_) {
-        if (dynamic_cast<GraphGenerationIdentityCarrier*>(tool.get())) {
-            generation_identity = std::move(tool);
-            break;
-        }
-    }
-    owned_tools_ = std::move(tools);
-    if (generation_identity) {
-        owned_tools_.push_back(std::move(generation_identity));
-    }
-}
 
 const GraphGenerationIdentity* GraphEngine::bound_generation_identity() const noexcept {
     for (const auto& tool : owned_tools_) {

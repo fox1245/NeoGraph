@@ -185,8 +185,9 @@ silently stranded during teardown.
 ## Rules for safe concurrent use
 
 - Configuration mutators (`set_retry_policy`, `set_checkpoint_store`,
-  `set_store`, `own_tools`, …) must be called **before** any concurrent
-  `run()`. Treat the engine as frozen after the first dispatch.
+  `set_store`, …) must be called **before** any concurrent `run()`. Bind
+  tools in the owned `NodeContext::tools` or `EngineResources::tools` at
+  compile time. Treat the engine as frozen after the first dispatch.
 - Concurrent `run()` calls sharing the **same** `thread_id` do not crash
   but produce unspecified checkpoint interleaving. Serialize per-session
   access yourself if you need deterministic history.

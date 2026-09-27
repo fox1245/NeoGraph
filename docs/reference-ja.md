@@ -605,16 +605,18 @@ struct ConditionalEdge {
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // 所有する固定ツール集合
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-新しいエンジンでは、ポインターを個別に管理する代わりに `EngineResources` 経由で `ToolSet` を移動することを推奨します。
-`GraphEngine::build()` は対応する非所有ビューを `NodeContext` に結び付け、
-エンジンの寿命中はすべてのツールを生存させます。
+`NodeContext::tools` に `ToolSet(std::move(tools))` を設定するか、コンテキストが空の場合に
+`EngineResources::tools` へ渡します。`GraphCompiler::compile()` とリンク済みエンジンは
+同じツールを共有所有し、コンテキストの再代入では既存のエンジンを変更しません。
+ファクトリーは `ctx.tools.view()` で一時的にポインターを参照できます。
+Python および MCP ツールにも同じコンパイル時の所有権規則が適用されます。
 ### GraphEvent
 ストリーミングによるグラフ実行中に発行されるイベントです。
 ```cpp
@@ -1191,7 +1193,7 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+    // ツールはコンパイル前に NodeContext または EngineResources へ渡す
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1381,13 +1383,8 @@ std::string fork(const std::string& source_thread_id,
 | `new_thread_id` | `std::string` | 新しいスレッド識別子 |
 | `checkpoint_id` | `std::string` | 任意。特定のチェックポイントから fork (デフォルト: 最新) |
 **戻り値:** 新しく fork した状態のチェックポイント ID。
-#### `own_tools`
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-ツールの所有権をエンジンへ移します。エンジンはツールを保持し、すべての `NodeContext.tools` 参照について
-生ポインターをエンジンの寿命中有効に保ちます。
+ツールは `NodeContext::tools` または `EngineResources::tools` でコンパイル前に所有されます。
+コンパイル後の所有権移譲はありません。
 #### `set_checkpoint_store`
 ```cpp
 void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);

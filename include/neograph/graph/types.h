@@ -11,6 +11,7 @@
 #include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
+#include <neograph/tool_set.h>
 #include <neograph/types.h>
 
 #include <cstddef>
@@ -385,16 +386,11 @@ class GraphRegistry;
  */
 struct NodeContext {
     std::shared_ptr<Provider> provider;    ///< LLM provider for making completions.
-    /// Non-owning tool pointers consumed by node factories at compile()
-    /// time. **Lifetime contract**: the pointees must outlive the
-    /// GraphEngine. New code should pass an owned ToolSet through
-    /// EngineResources; compatibility code can call
-    /// `engine.own_tools(std::move(unique_ptr_vec))` after compile, or keep the
-    /// owning unique_ptrs alive in the caller's scope for at least as long as
-    /// the engine. Constructing NodeContext from a
-    /// throwaway unique_ptr collection that goes out of scope before
-    /// `engine->run()` returns leaves these pointers dangling and is UB.
-    std::vector<Tool*>        tools;
+    /// Owned tool collection, shared cheaply across copies of this context,
+    /// the compiled graph, and the linked engine. Assignment replaces the
+    /// context's selection without invalidating earlier compiled engines.
+    /// Factories may use tools.view() for temporary raw-pointer lookup.
+    ToolSet                   tools;
     std::string               model;       ///< Model name override (empty = use provider default).
     std::string               instructions; ///< System prompt / instructions for the LLM.
     json                      extra_config; ///< Additional configuration (node-type specific).

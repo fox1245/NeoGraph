@@ -117,6 +117,22 @@ private:
     Tool* tool_;
 };
 
+class NamedProbeTool final : public Tool {
+public:
+    NamedProbeTool(std::string value, std::shared_ptr<std::atomic<int>> destroyed)
+        : value_(std::move(value)), destroyed_(std::move(destroyed)) {}
+    ~NamedProbeTool() override { ++*destroyed_; }
+    ChatTool get_definition() const override {
+        return {"named_probe", "Ownership lifetime probe", json::object()};
+    }
+    std::string execute(const json&) override { return value_; }
+    std::string get_name() const override { return "named_probe"; }
+
+private:
+    std::string value_;
+    std::shared_ptr<std::atomic<int>> destroyed_;
+};
+
 class RegistryProbeNode final : public GraphNode {
 public:
     explicit RegistryProbeNode(std::string name) : name_(std::move(name)) {}
@@ -422,7 +438,7 @@ TEST(EngineResourcesTest, KeepsOwnedToolSetAliveForEngineLifetime) {
             if (context.tools.size() != 1) {
                 throw std::runtime_error("owned ToolSet was not bound to NodeContext");
             }
-            return std::make_unique<ToolProbeNode>(context.tools.front());
+            return std::make_unique<ToolProbeNode>(context.tools.view().front());
         });
 
     std::vector<std::unique_ptr<Tool>> tools;
@@ -440,6 +456,114 @@ TEST(EngineResourcesTest, KeepsOwnedToolSetAliveForEngineLifetime) {
 
     engine.reset();
     EXPECT_EQ(OwnedProbeTool::destructions.load(), 1);
+}
+
+TEST(EngineResourcesTest, ContextReassignmentDoesNotReplaceCompiledEngineTools) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "reassigned_tool_probe",
+        [](const std::string&, const json&, const NodeContext& context) {
+            return std::make_unique<ToolProbeNode>(context.tools.view().front());
+        });
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    NodeContext context;
+    std::vector<std::unique_ptr<Tool>> first_tools;
+    first_tools.push_back(std::make_unique<NamedProbeTool>("first", destroyed));
+    context.tools = ToolSet(std::move(first_tools));
+
+    EngineConfig first_config;
+    first_config.node_context = context;
+    EngineResources first_resources;
+    first_resources.registry = registry;
+    auto first = GraphEngine::build(one_node_graph("reassigned_tool_probe"),
+                                    std::move(first_config), std::move(first_resources));
+
+    std::vector<std::unique_ptr<Tool>> second_tools;
+    second_tools.push_back(std::make_unique<NamedProbeTool>("second", destroyed));
+    context.tools = ToolSet(std::move(second_tools));
+    EngineConfig second_config;
+    second_config.node_context = context;
+    EngineResources second_resources;
+    second_resources.registry = registry;
+    auto second = GraphEngine::build(one_node_graph("reassigned_tool_probe"),
+                                     std::move(second_config), std::move(second_resources));
+    context.tools = ToolSet{};
+
+    EXPECT_EQ(destroyed->load(), 0);
+    EXPECT_EQ(first->run(RunConfig{}).channel<std::string>("output"), "first");
+    EXPECT_EQ(second->run(RunConfig{}).channel<std::string>("output"), "second");
+    first.reset();
+    EXPECT_EQ(destroyed->load(), 1);
+    EXPECT_EQ(second->run(RunConfig{}).channel<std::string>("output"), "second");
+    second.reset();
+    EXPECT_EQ(destroyed->load(), 2);
+}
+
+TEST(EngineResourcesTest, DirectCompileAndLinkRetainToolsAfterContextDies) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "linked_tool_probe",
+        [](const std::string&, const json&, const NodeContext& context) {
+            return std::make_unique<ToolProbeNode>(context.tools.view().front());
+        });
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    CompiledGraph compiled;
+    {
+        NodeContext temporary;
+        std::vector<std::unique_ptr<Tool>> tools;
+        tools.push_back(std::make_unique<NamedProbeTool>("linked", destroyed));
+        temporary.tools = ToolSet(std::move(tools));
+        compiled = GraphCompiler::compile(one_node_graph("linked_tool_probe"),
+                                          temporary, *registry);
+    }
+    EXPECT_EQ(destroyed->load(), 0);
+    EngineResources resources;
+    resources.registry = registry;
+    auto engine = GraphEngine::link(std::move(compiled), EngineConfig{},
+                                    std::move(resources));
+    EXPECT_EQ(engine->run(RunConfig{}).channel<std::string>("output"), "linked");
+    engine.reset();
+    EXPECT_EQ(destroyed->load(), 1);
+}
+
+TEST(EngineResourcesTest, ScopedToolSetCannotAdoptUnownedPointer) {
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> owned;
+    owned.push_back(std::make_unique<NamedProbeTool>("selected", destroyed));
+    ToolSet full(std::move(owned));
+    auto* original = full.view().front();
+    NamedProbeTool unrelated("unowned", destroyed);
+
+    EXPECT_THROW((void)full.select({&unrelated}), std::invalid_argument);
+    auto selected = full.select({original});
+    full = ToolSet{};
+    EXPECT_EQ(selected.view().front()->execute(json::object()), "selected");
+    EXPECT_EQ(destroyed->load(), 0);
+    selected = ToolSet{};
+    EXPECT_EQ(destroyed->load(), 1);
+}
+
+TEST(EngineResourcesTest, ScopedToolSetCannotWidenItsOwnSelection) {
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> owned;
+    owned.push_back(std::make_unique<NamedProbeTool>("allowed", destroyed));
+    owned.push_back(std::make_unique<NamedProbeTool>("denied", destroyed));
+    ToolSet full(std::move(owned));
+    const auto tools = full.view();
+    const auto scoped = full.select({tools[0]});
+
+    EXPECT_THROW((void)scoped.select({tools[1]}), std::invalid_argument);
+    EXPECT_THROW((void)scoped.select({tools[0], tools[1]}), std::invalid_argument);
+    EXPECT_EQ(scoped.select({tools[0]}).view().front(), tools[0]);
+    EXPECT_TRUE(scoped.select({}).empty());
+}
+
+TEST(EngineResourcesTest, RejectsNullOwnedToolsBeforeNodeConstruction) {
+    std::vector<std::unique_ptr<Tool>> unique;
+    unique.push_back(nullptr);
+    EXPECT_THROW((void)ToolSet(std::move(unique)), std::invalid_argument);
+    std::vector<std::shared_ptr<Tool>> shared{nullptr};
+    EXPECT_THROW((void)ToolSet(std::move(shared)), std::invalid_argument);
 }
 
 TEST(EngineResourcesTest, IsolatesNodeReducerAndConditionRegistrationsPerEngine) {
@@ -569,6 +693,22 @@ TEST(EngineResourcesTest, RejectsAmbiguousOwnedAndRawToolBindings) {
     EngineConfig   config;
     OwnedProbeTool raw_tool;
     config.node_context.tools = {&raw_tool};
+
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<OwnedProbeTool>());
+    EngineResources resources;
+    resources.tools = ToolSet(std::move(tools));
+
+    EXPECT_THROW(
+        (void)GraphEngine::build(one_node_graph("unused"), std::move(config), std::move(resources)),
+        std::invalid_argument);
+}
+
+TEST(EngineResourcesTest, RejectsAmbiguousOwnedToolBindings) {
+    EngineConfig config;
+    std::vector<std::unique_ptr<Tool>> context_tools;
+    context_tools.push_back(std::make_unique<OwnedProbeTool>());
+    config.node_context.tools = ToolSet(std::move(context_tools));
 
     std::vector<std::unique_ptr<Tool>> tools;
     tools.push_back(std::make_unique<OwnedProbeTool>());

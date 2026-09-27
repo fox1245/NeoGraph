@@ -1001,6 +1001,7 @@ CompiledGraph GraphCompiler::link(TopologySpec         topology,
                                   const NodeContext&   default_context,
                                   const GraphRegistry& registry) {
     CompiledGraph cg;
+    cg.tools             = default_context.tools;
     cg.name              = std::move(topology.name);
     cg.channel_defs      = std::move(topology.channel_defs);
     cg.edges             = std::move(topology.edges);
@@ -1036,6 +1037,7 @@ CompiledGraph GraphCompiler::link_local(TopologySpec         topology,
                                         const NodeContext&   default_context,
                                         const GraphRegistry& registry) {
     CompiledGraph cg;
+    cg.tools             = default_context.tools;
     cg.name              = std::move(topology.name);
     cg.channel_defs      = std::move(topology.channel_defs);
     cg.edges             = std::move(topology.edges);

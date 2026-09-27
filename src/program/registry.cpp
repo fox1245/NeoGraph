@@ -119,13 +119,14 @@ graph::NodeContext node_capability_context(
         throw std::invalid_argument("Node requires a different Provider");
     narrowed.provider_name = std::move(provider_name);
     if (!wants_provider || !allow_executable_bindings) narrowed.provider.reset();
-    narrowed.tools.clear();
+    std::vector<Tool*> selected;
     narrowed.tool_definitions.clear();
-    for (auto* tool : context.tools) {
+    for (auto* tool : context.tools.view()) {
         if (!tool_names.erase(tool->get_name())) continue;
         narrowed.tool_definitions.push_back(tool->get_definition());
-        if (allow_executable_bindings) narrowed.tools.push_back(tool);
+        if (allow_executable_bindings) selected.push_back(tool);
     }
+    narrowed.tools = context.tools.select(std::move(selected));
     if (!tool_names.empty())
         throw std::invalid_argument("Node requires an unbound Tool");
     return narrowed;

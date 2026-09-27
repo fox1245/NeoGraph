@@ -185,8 +185,8 @@ log("pending={} active={} completed={} rejected={}",
 ## 안전한 동시 사용을 위한 규칙
 
 - 구성 변경자(`set_retry_policy`, `set_checkpoint_store`,
-`set_store`, `own_tools`, …)는 동시 실행 **전에** 호출되어야 합니다.
-`run()`. 첫 번째 파견 이후에는 엔진을 정지 상태로 취급하십시오.
+`set_store`, …)는 동시 실행 **전에** 호출해야 합니다. 도구는 컴파일 전에
+`NodeContext::tools` 또는 `EngineResources::tools`로 전달합니다. 첫 실행 이후에는 엔진 구성을 변경하지 마십시오.
 - **동일** `thread_id`를 공유하는 동시 `run()` 통화는 충돌하지 않습니다.
 그러나 지정되지 않은 체크포인트 인터리빙을 생성합니다. 세션별 ​​직렬화
 결정론적 이력이 필요한 경우 직접 액세스하세요.

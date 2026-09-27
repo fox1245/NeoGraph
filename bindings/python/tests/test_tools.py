@@ -156,9 +156,8 @@ def test_tool_dispatch_executes_python_tool():
 
 
 def test_engine_takes_ownership_of_tools():
-    """After compile, the Python tool reference can drop without
-    breaking subsequent runs — engine.own_tools() should have stashed
-    a unique_ptr<PyToolOwner> internally."""
+    """The engine's owned ToolSet retains a Python Tool after local
+    references are dropped, across subsequent runs."""
     emit_type = _next_type("emit_own")
 
     invocations = []
@@ -195,12 +194,22 @@ def test_engine_takes_ownership_of_tools():
     }
     engine = neograph.GraphEngine.compile(definition, ctx)
 
-    # Drop both the Python Tool object and the NodeContext. If the
-    # engine didn't take ownership, the next run would crash on a
-    # use-after-free in the C++ Tool* dispatch table.
+    class ReplacementTool(TrackedTool):
+        def execute(self, arguments):
+            return "replacement"
+
+    ctx.tools = [ReplacementTool()]
+    second = neograph.GraphEngine.compile(definition, ctx)
     del tool, ctx
 
-    engine.run(neograph.RunConfig(thread_id="t1", input={"messages": []}))
+    first_result = engine.run(
+        neograph.RunConfig(thread_id="t1", input={"messages": []}))
+    second_result = second.run(
+        neograph.RunConfig(thread_id="t2", input={"messages": []}))
+    first_messages = first_result.output["channels"]["messages"]["value"]
+    second_messages = second_result.output["channels"]["messages"]["value"]
+    assert [m["content"] for m in first_messages if m.get("role") == "tool"] == ["ok"]
+    assert [m["content"] for m in second_messages if m.get("role") == "tool"] == ["replacement"]
     assert invocations == [{"a": 1}]
 
 

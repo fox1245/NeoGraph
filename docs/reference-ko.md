@@ -732,17 +732,18 @@ LLM provider, tools, and configuration.
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // Owned fixed collection of tools
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-For new engines, prefer moving a `ToolSet` through `EngineResources` instead
-of managing the pointees separately. `GraphEngine::build()` binds the
-corresponding non-owning view into `NodeContext` and keeps every tool alive for
-the engine's lifetime.
+Set `NodeContext::tools = ToolSet(std::move(tools))`, or supply
+`EngineResources::tools` when the context has no tools. Compilation and the
+engine share ownership of the exact collection; reassigning the context cannot
+invalidate an earlier engine. Factories may use `ctx.tools.view()` for temporary
+raw lookup. Python and MCP tools use the same compile-time ownership contract.
 
 ### GraphEvent
 
@@ -1402,7 +1403,7 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+    // Bind tools through NodeContext or EngineResources before compilation.
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1630,14 +1631,8 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
-#### `own_tools`
-
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-Transfers tool ownership to the engine. The engine stores them and keeps raw pointers
-valid for the lifetime of all `NodeContext.tools` references.
+Tool ownership is established in `NodeContext::tools` or
+`EngineResources::tools` before compilation. There is no post-compile transfer.
 
 #### `set_checkpoint_store`
 

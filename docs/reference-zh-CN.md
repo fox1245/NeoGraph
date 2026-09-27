@@ -719,16 +719,17 @@ struct ConditionalEdge {
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // 持有的固定工具集合
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-对于新的引擎，优先通过 `EngineResources` 移动 `ToolSet`，而非分别管理
-所指向的对象。`GraphEngine::build()` 将对应的非持有视图绑定到
-`NodeContext`，并在引擎的生命周期内保持每个工具存活。
+将 `ToolSet(std::move(tools))` 赋给 `NodeContext::tools`，或者在上下文工具为空时
+通过 `EngineResources::tools` 提供。编译结果及引擎共同持有同一批工具；
+重新赋值上下文不会改变已有引擎。工厂可用 `ctx.tools.view()` 临时查找指针。
+Python 和 MCP 工具遵守相同的编译期所有权规则。
 
 ### GraphEvent
 
@@ -1372,7 +1373,7 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+    // 在编译前通过 NodeContext 或 EngineResources 绑定工具。
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1593,14 +1594,8 @@ std::string fork(const std::string& source_thread_id,
 
 **返回：** 新分叉状态的检查点 ID。
 
-#### `own_tools`
-
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-将工具所有权转移给引擎。引擎存储它们并保持原始指针对所有
-`NodeContext.tools` 引用的生命周期有效。
+工具在编译前由 `NodeContext::tools` 或 `EngineResources::tools` 持有；
+不再存在编译之后的所有权转移。
 
 #### `set_checkpoint_store`
 

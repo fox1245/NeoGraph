@@ -39,6 +39,13 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
+### 编译期工具所有权
+
+将 Python `Tool`、原生 C++ 工具以及 `MCPClient.get_tools()` 的结果统一传入
+`ng.NodeContext(tools=[...])`。编译前会快照至持有工具的 `ToolSet`；
+引擎在 `run()` 和 `resume()` 期间持续持有。之后重新赋值上下文的 `tools`
+只影响下一次编译，不会改变已有引擎；MCP 工具保留原生异步执行路径。
+
 ## Core API 对等性
 
 Python 暴露的是 C++ 执行能力，而非独立的 Python 调度器：

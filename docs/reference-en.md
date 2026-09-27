@@ -734,17 +734,24 @@ LLM provider, tools, and configuration.
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // Owned fixed collection of available tools
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-For new engines, prefer moving a `ToolSet` through `EngineResources` instead
-of managing the pointees separately. `GraphEngine::build()` binds the
-corresponding non-owning view into `NodeContext` and keeps every tool alive for
-the engine's lifetime.
+Construct `ToolSet(std::move(unique_tools))` for a standalone Core context, or
+pass it in `EngineResources::tools` when `NodeContext::tools` is empty. A
+`ToolSet` can also adopt `std::vector<std::shared_ptr<Tool>>` for shared host
+tools. Copies retain the same pointees: context reassignment cannot change a
+previously compiled graph. `GraphCompiler::compile()` retains the collection
+until `GraphEngine::link()` takes it; `GraphEngine::build()` does both steps.
+Built-in `LLMCallNode` and `ToolDispatchNode` also retain this collection
+when used without a `GraphEngine`. Factories may call `ctx.tools.view()` for
+temporary raw lookup; only the owned collection survives dispatch. This has
+no per-call ownership work. Supplying nonempty tools in both context and
+resources is rejected.
 
 ### GraphEvent
 
@@ -1452,7 +1459,6 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1681,14 +1687,8 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
-#### `own_tools`
-
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-Transfers tool ownership to the engine. The engine stores them and keeps raw pointers
-valid for the lifetime of all `NodeContext.tools` references.
+Tool ownership is established before compilation via `NodeContext::tools` or
+`EngineResources::tools`; there is no post-compilation ownership transfer.
 
 #### `set_checkpoint_store`
 

@@ -126,7 +126,7 @@ $ ./build/cookbook_the_beast_copy_ninja "Grace"
 
 ## Apex — 하네스가 도구를 삼킨다
 
-스텁 워커 데모는 생성된 하네스가 *일관성*이 있음을 증명하지만, 하네스는 결코 행동하지 않습니다. [`the_beast_apex.cpp`](the_beast_apex.cpp)이 진짜 핵심입니다: 모델에 **도구 카탈로그**가 주어지고 ReAct 에이전트를 작성하라는 요청을 받습니다 — `llm_call` ⇄ `tool_dispatch`가 `has_tool_calls`에서 반복됩니다. 작성된 하네스는 일관성에 대해 게이트 검사를 받은 다음 **도구가 바인딩된 채로 스폰됩니다** (`ctx.tools` + `engine->own_tools`). 스폰된 에이전트는 그런 다음 스스로 어떤 도구를 언제 호출할지 결정합니다.
+스텁 워커 데모는 생성된 하네스가 *일관성*이 있음을 증명하지만, 하네스는 결코 행동하지 않습니다. [`the_beast_apex.cpp`](the_beast_apex.cpp)이 진짜 핵심입니다: 모델에 **도구 카탈로그**가 주어지고 ReAct 에이전트를 작성하라는 요청을 받습니다 — `llm_call` ⇄ `tool_dispatch`가 `has_tool_calls`에서 반복됩니다. 작성된 하네스는 일관성에 대해 게이트 검사를 받은 다음 **도구가 바인딩된 채로 스폰됩니다** (`EngineConfig::node_context.tools`의 소유된 `ToolSet`). 스폰된 에이전트는 그런 다음 스스로 어떤 도구를 언제 호출할지 결정합니다.
 
 ```console
 $ cmake --build build --target cookbook_the_beast_apex

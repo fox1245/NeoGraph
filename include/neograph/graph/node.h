@@ -216,6 +216,7 @@ public:
 private:
     std::string              name_;
     std::shared_ptr<Provider> provider_;
+    ToolSet                 tools_owner_;
     std::vector<Tool*>       tools_;
     std::string              model_;
     std::string              instructions_;
@@ -251,6 +252,7 @@ public:
 
 private:
     std::string        name_;
+    ToolSet           tools_owner_;
     std::vector<Tool*> tools_;
 };
 

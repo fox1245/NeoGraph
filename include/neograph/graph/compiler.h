@@ -127,6 +127,8 @@ struct NEOGRAPH_API RoundTripReport {
 struct CompiledGraph {
     std::string                                       name;
     std::vector<ChannelDef>                           channel_defs;
+    /// Retains tools referenced by the compiled node instances until link().
+    ToolSet                                         tools;
     std::map<std::string, std::unique_ptr<GraphNode>> nodes;
     std::vector<Edge>                                 edges;
     std::vector<ConditionalEdge>                      conditional_edges;

@@ -818,19 +818,11 @@ void init_graph(py::module_& m) {
                 // accessed via the Python side first.
                 NodeContext ctx = ctx_obj.cast<NodeContext>();
 
-                // Materialize the Python Tools as PyToolOwner-backed
-                // unique_ptrs. After compile(), we transfer ownership
-                // to the engine via own_tools() so the engine keeps
-                // them alive for as long as it lives — and the raw
-                // pointers we stash in ctx.tools below stay valid.
-                std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
+                // Wrap Python, native MCP, and C++ Tool objects into the same
+                // owned ToolSet before factories can retain their pointers.
                 if (py::hasattr(ctx_obj, "_pytools")) {
-                    owned_tools = wrap_python_tools(ctx_obj.attr("_pytools"));
-                    ctx.tools.clear();
-                    ctx.tools.reserve(owned_tools.size());
-                    for (auto& up : owned_tools) {
-                        ctx.tools.push_back(up.get());
-                    }
+                    ctx.tools = neograph::ToolSet(
+                        wrap_python_tools(ctx_obj.attr("_pytools")));
                 }
 
                 auto store = store_obj.is_none()
@@ -846,10 +838,8 @@ void init_graph(py::module_& m) {
                     resources.registry = registry;
                     unique = GraphEngine::build(j, std::move(config), std::move(resources));
                 } else {
+                    // GIL held: compile is fast (just walks the JSON).
                     unique = GraphEngine::compile(j, ctx, std::move(store));
-                }
-                if (!owned_tools.empty()) {
-                    unique->own_tools(std::move(owned_tools));
                 }
                 auto engine = std::shared_ptr<GraphEngine>(unique.release());
                 py::object result = py::cast(engine);

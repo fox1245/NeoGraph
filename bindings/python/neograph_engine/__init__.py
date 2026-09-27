@@ -393,13 +393,10 @@ class AsyncTool(Tool):
 class NodeContext(_CppNodeContext):
     """Engine context — provider, tools, model, instructions.
 
-    Subclasses the C++ ``_CppNodeContext`` binding. The C++ struct
-    has a ``vector<Tool*>`` for tools, but we can't populate it from
-    Python directly (raw-pointer ownership doesn't translate). Instead,
-    the Python-side ``tools`` list lives in a ``_pytools`` dynamic
-    attribute, and ``GraphEngine.compile()`` reads it back to wrap each
-    Python Tool in a C++ trampoline (``PyToolOwner``) and transfer
-    ownership to the engine.
+    Python ``tools`` live in the ``_pytools`` attribute; the compile binding
+    wraps them into an owned C++ ``ToolSet`` before constructing nodes. The
+    compiled engine retains the same tool objects independently of subsequent
+    Python context reassignment or list mutation.
     """
 
     def __init__(self, provider=None, tools=None,
@@ -414,9 +411,17 @@ class NodeContext(_CppNodeContext):
             extra_config=extra_config or {},
         )
         self.provider = provider
-        # Stash the Python tool list on the wrapper. compile() reads
-        # it via py::hasattr / py::object.attr("_pytools").
+        # compile() snapshots this replaceable Python list into a ToolSet.
         self._pytools = list(tools or [])
+
+    @property
+    def tools(self):
+        """Mutable Python tool list; compilation snapshots its current entries."""
+        return self._pytools
+
+    @tools.setter
+    def tools(self, value):
+        self._pytools = list(value or [])
 
 
 class RateLimitError(RuntimeError):

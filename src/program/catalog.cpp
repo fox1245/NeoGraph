@@ -235,7 +235,7 @@ void validate_capability_binding(const std::vector<ExecutableIdentity>& requeste
                         "Owned Tool identity inspection failed with a non-standard exception");
     }
 
-    binding.node_context.tools = binding.tools.view();
+    binding.node_context.tools = binding.tools;
 }
 
 bool contains_source_kind(const std::vector<SourceKind>& values, SourceKind wanted) {
@@ -1554,7 +1554,7 @@ ProgramVersion ProgramCatalog::materialize(
             config.worker_count = impl_->worker_count;
             graph::EngineResources resources;
             resources.registry = runtime_registry;
-            resources.tools    = std::move(binding.tools);
+            // The compiled graph already retains the exact bound ToolSet.
             auto unique_engine = graph::GraphEngine::link(
                 std::move(compiled), std::move(config), std::move(resources),
                 graph::GraphGenerationIdentity{

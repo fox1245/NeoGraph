@@ -256,7 +256,7 @@ class ToolCallSeedNode final : public GraphNode {
     std::string get_name() const override { return "seed"; }
 };
 
-std::shared_ptr<GraphEngine> build_tool_dispatch_engine(Tool* tool) {
+std::shared_ptr<GraphEngine> build_tool_dispatch_engine(std::shared_ptr<Tool> tool) {
     NodeFactory::instance().register_type("acp_tool_call_seed",
         [](const std::string&, const neograph::json&, const NodeContext&) {
             return std::make_unique<ToolCallSeedNode>();
@@ -275,7 +275,7 @@ std::shared_ptr<GraphEngine> build_tool_dispatch_engine(Tool* tool) {
         })},
     };
     NodeContext ctx;
-    ctx.tools = {tool};
+    ctx.tools = neograph::ToolSet(std::vector<std::shared_ptr<Tool>>{std::move(tool)});
     auto unique = GraphEngine::compile(def, ctx);
     return std::shared_ptr<GraphEngine>(std::move(unique));
 }
@@ -1080,7 +1080,7 @@ TEST(ACPServer, CancelReachesToolDispatchAndEmitsOneTerminalResponse) {
     auto probe = std::make_shared<ToolDispatchProbe>();
     auto tool = std::make_shared<CancellableToolDispatchTool>(probe);
     CapturingSink cap;
-    ACPServer server(build_tool_dispatch_engine(tool.get()),
+    ACPServer server(build_tool_dispatch_engine(tool),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
     initialize_server(server);
     server.set_notification_sink(cap.as_sink());

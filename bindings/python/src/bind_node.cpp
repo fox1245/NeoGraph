@@ -186,9 +186,9 @@ translate_node_interrupt(py::error_already_set& e) {
 
 // PyToolOwner: bridges the C++ Tool interface to a held Python user
 // object. Created at GraphEngine.compile() time from the
-// `_pytools` attribute on the Python NodeContext wrapper, then
-// transferred to the engine via own_tools(). Pattern parallels
-// PyGraphNodeOwner — same GIL handshake, same destructor caveat.
+// `_pytools` attribute on the Python NodeContext wrapper, then retained
+// by the compiled graph's ToolSet. Pattern parallels PyGraphNodeOwner —
+// same GIL handshake, same destructor caveat.
 // Worker pool for AsyncTool bodies (issue #96).
 //
 // Overlapping Python tools means running their bodies on separate threads —
@@ -413,7 +413,8 @@ std::shared_ptr<PyCallable> make_gil_safe(PyCallable&& fn) {
 void register_scoped_python_node(graph::GraphRegistry& registry, const std::string& type,
                                  py::function factory) {
     auto held = make_gil_safe(std::move(factory));
-    registry.register_type(type,
+    registry.register_type(
+        type,
         [held](const std::string& name, const json& config,
                const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
             py::gil_scoped_acquire g;
@@ -422,10 +423,8 @@ void register_scoped_python_node(graph::GraphRegistry& registry, const std::stri
         });
 }
 
-// Public helper exposed via json_bridge.h. Wraps each item in the
-// list as a unique_ptr<Tool> backed by a PyToolOwner trampoline.
-// Caller (GraphEngine.compile binding) is responsible for transferring
-// ownership to the engine via own_tools().
+// Wrap Python and native tools into a single owning ToolSet before compilation.
+// The compiled graph and its engine independently retain the exact collection.
 std::vector<std::unique_ptr<neograph::Tool>>
 wrap_python_tools(py::handle tools_list) {
     std::vector<std::unique_ptr<neograph::Tool>> out;

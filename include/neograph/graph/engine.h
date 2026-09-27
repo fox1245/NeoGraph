@@ -109,6 +109,9 @@ struct EngineConfig {
  * a GraphRegistry selects its built-in + engine-local palette instead; this
  * registry is snapshotted before compilation, so later registration cannot
  * affect the resulting engine. ToolSet ownership transfers to the engine.
+ * The ToolSet is selected when NodeContext::tools is empty; supplying both
+ * nonempty collections is ambiguous and rejected. The compiled graph and
+ * engine retain ownership independently of these temporary resources.
  */
 struct EngineResources {
     ToolSet                              tools;
@@ -482,9 +485,8 @@ public:
     /**
      * @brief Link with owned tools and a per-engine registry overlay.
      *
-     * For directly compiled graphs, the caller must have used tools.view() in
-     * the NodeContext and the same registry in GraphCompiler::compile(). The
-     * canonical build() overload performs both bindings automatically.
+     * Directly compiled graphs already retain their NodeContext ToolSet.
+     * The canonical build() overload also binds the registry automatically.
      */
     static std::unique_ptr<GraphEngine> link(CompiledGraph   graph,
                                              EngineConfig    config,
@@ -523,10 +525,10 @@ public:
     static std::unique_ptr<GraphEngine> build(const json& definition, EngineConfig config);
 
     /**
-     * @brief Build with exact tool ownership and a local-first registry.
+     * @brief Build with owned tools and a local-first registry.
      *
-     * resources.tools replaces NodeContext::tools with pointers to the owned
-     * collection. Supplying both forms is rejected as ambiguous.
+     * resources.tools is selected when NodeContext::tools is empty.
+     * Supplying both nonempty ToolSets is rejected as ambiguous.
      */
     static std::unique_ptr<GraphEngine> build(const json&     definition,
                                                EngineConfig    config,
@@ -815,15 +817,6 @@ public:
 
     // ── Configuration ──
 
-    /**
-     * @brief Transfer tool ownership to the engine.
-     *
-     * The engine takes ownership of the tools and keeps them alive for
-     * the duration of the engine's lifetime.
-     *
-     * @param tools Vector of tool unique_ptrs to transfer.
-     */
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
 
     /**
      * @brief Set the checkpoint persistence store.
@@ -1093,6 +1086,9 @@ private:
     /// by init_state() to construct GraphState channels.
     std::vector<ChannelDef> channel_defs_;
 
+    ToolSet                             tools_;
+    /// Host-generation identity carrier, separate from executable tools.
+    std::vector<std::unique_ptr<Tool>> owned_tools_;
     std::map<std::string, std::unique_ptr<GraphNode>> nodes_;
     /// True only for opt-in per-invocation children; skips UUIDs on legacy runs.
     bool has_per_invocation_subgraph_ = false;
@@ -1116,7 +1112,6 @@ private:
 
     std::shared_ptr<CheckpointStore> checkpoint_store_;
     std::shared_ptr<Store>           store_;
-    std::vector<std::unique_ptr<Tool>> owned_tools_;
 
     // Retry policies
     RetryPolicy default_retry_policy_;

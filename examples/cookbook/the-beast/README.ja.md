@@ -126,7 +126,7 @@ $ ./build/cookbook_the_beast_copy_ninja "Grace"
 
 ## Apex — ハーネスはツールを食い尽くす
 
-スタブワーカーのデモは、生成されたハーネスが*コヒーレント*であることを証明するが、ハーネスは決して動作しない。[`the_beast_apex.cpp`](the_beast_apex.cpp) が怪物である：モデルは**ツールカタログ**を渡され、ReActエージェントを作成するよう求められる — `llm_call` ⇄ `tool_dispatch` が`has_tool_calls`上でループする。それが書くハーネスはコヒーレンスのためにゲートされ、その後**ツールをバインドした状態でスポーンされる**（`ctx.tools` + `engine->own_tools`）。スポーンされたエージェントは、どのツールをいつ呼ぶかを独自に決定する。
+スタブワーカーのデモは、生成されたハーネスが*コヒーレント*であることを証明するが、ハーネスは決して動作しない。[`the_beast_apex.cpp`](the_beast_apex.cpp) が怪物である：モデルは**ツールカタログ**を渡され、ReActエージェントを作成するよう求められる — `llm_call` ⇄ `tool_dispatch` が`has_tool_calls`上でループする。それが書くハーネスはコヒーレンスのためにゲートされ、その後**ツールをバインドした状態でスポーンされる**（`EngineConfig::node_context.tools` の所有する `ToolSet`）。スポーンされたエージェントは、どのツールをいつ呼ぶかを独自に決定する。
 
 ```console
 $ cmake --build build --target cookbook_the_beast_apex

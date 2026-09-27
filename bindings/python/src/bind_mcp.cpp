@@ -21,10 +21,9 @@
 // conservative by default: repeated calls to one tool name serialize until the
 // host declares otherwise.
 
-// So wrap_python_tools now recognises a bound C++ Tool and passes it through
-// behind a SharedToolRef, which keeps the Python-owned shared_ptr alive while
-// the engine holds a raw Tool*. test_http_tool_calls_overlap is what stops the
-// native async path or the explicit host policy from regressing.
+// wrap_python_tools retains the native C++ Tool inside a SharedToolRef in
+// the engine's ToolSet, preserving its asynchronous dispatch and keeping
+// the Python-owned shared_ptr alive through every run.
 
 #include "json_bridge.h"
 

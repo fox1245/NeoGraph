@@ -115,7 +115,7 @@ TEST(MCPStdioInGraph, AToolFromAStdioServerSurvivesAGraphRun) {
     ASSERT_FALSE(tools.empty());
 
     NodeContext ctx;
-    for (auto& t : tools) ctx.tools.push_back(t.get());
+    ctx.tools = ToolSet(std::move(tools));
 
     auto engine = GraphEngine::compile(graph_def(), ctx);
 
@@ -152,7 +152,7 @@ TEST(MCPStdioInGraph, TheSameClientSurvivesASecondRun) {
     ASSERT_FALSE(tools.empty());
 
     NodeContext ctx;
-    for (auto& t : tools) ctx.tools.push_back(t.get());
+    ctx.tools = ToolSet(std::move(tools));
     auto engine = GraphEngine::compile(graph_def(), ctx);
 
     for (int i = 0; i < 2; ++i) {

@@ -141,7 +141,7 @@ admission 会原子地预留 pending 槽位，所以并发调用者无法超过 
 ## 安全并发使用规则
 
 - 配置修改函数（`set_retry_policy`, `set_checkpoint_store`,
-`set_store`, `own_tools`, ...) 必须在任何并发 `run()` 之前调用。第一次调度后应把引擎视为冻结。
+`set_store`, ...) 必须在任何并发 `run()` 之前调用。工具须在编译前绑定至 `NodeContext::tools` 或 `EngineResources::tools`。
 - 共享**相同** `thread_id` 的并发 `run()` 调用不会崩溃
 但会产生未指定的检查点交错。如果你需要确定性历史记录，请自行序列化每个会话的访问。
 - 自定义 `GraphNode`子类必须是**无状态或自同步**。

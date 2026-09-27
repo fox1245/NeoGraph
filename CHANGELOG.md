@@ -11,6 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Owned graph tool bindings.** `NodeContext::tools` is now an owned,
+  copyable `ToolSet` retained across compilation and engine linkage. Context
+  reassignment does not invalidate earlier engines; the unsafe post-compile
+  `GraphEngine::own_tools()` transfer has been removed. Python-defined,
+  MCP-discovered and native C++ tools use the same compile-time lifetime rule.
+
 ### Added
 - **Non-recursive async-primary checkpoint adapters.** Native coroutine
   stores use `AsyncCheckpointStore` plus `adapt_async_checkpoint_store()`;

@@ -39,6 +39,14 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
+### コンパイル時のツール所有権
+
+Python `Tool`、ネイティブ C++ ツール、`MCPClient.get_tools()` の結果を
+`ng.NodeContext(tools=[...])` に渡します。コンパイル前に所有する `ToolSet` に
+スナップショットされ、エンジンが `run()` と `resume()` の間保持します。
+後からコンテキストの `tools` を再代入しても既存のエンジンは変わらず、
+次回のコンパイルにだけ反映されます。MCP ツールのネイティブ非同期処理も維持されます。
+
 ## Core APIパリティ
 
 Pythonは、独立したPythonスケジューラではなく、C++の実行機能を公開します:

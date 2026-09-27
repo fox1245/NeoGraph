@@ -79,7 +79,8 @@ std::string SyncGraphNode::get_name() const {
 LLMCallNode::LLMCallNode(const std::string& name, const NodeContext& ctx)
     : name_(name)
     , provider_(ctx.provider)
-    , tools_(ctx.tools)
+    , tools_owner_(ctx.tools)
+    , tools_(tools_owner_.view())
     , model_(ctx.model)
     , instructions_(ctx.instructions)
 {}
@@ -174,7 +175,8 @@ asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
 
 ToolDispatchNode::ToolDispatchNode(const std::string& name, const NodeContext& ctx)
     : name_(name)
-    , tools_(ctx.tools)
+    , tools_owner_(ctx.tools)
+    , tools_(tools_owner_.view())
 {}
 
 asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
