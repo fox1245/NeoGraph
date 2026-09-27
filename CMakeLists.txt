@@ -871,6 +871,8 @@ if(NEOGRAPH_BUILD_LLM)
         src/llm/openai_provider.cpp
         src/llm/schema_strategy_registry.cpp
         src/llm/schema_provider.cpp
+        src/llm/schema_provider_mapping.cpp
+        src/llm/schema_provider_stream_parser.cpp
         src/llm/rate_limited_provider.cpp
         src/llm/agent.cpp
     )

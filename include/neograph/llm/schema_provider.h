@@ -39,11 +39,17 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <map>
 #include <vector>
 
-namespace neograph::async { class ConnPool; class CurlH2Pool; }
+namespace neograph::async {
+class ConnPool;
+class CurlH2Pool;
+struct AsyncEndpoint;
+struct HttpResponse;
+}
 
 namespace neograph::llm {
 
@@ -368,10 +374,10 @@ public:
     // Each Provider::complete() goes through run_sync, which creates a
     // fresh asio::io_context per call. A ConnPool bound to that
     // throw-away executor would survive only one request — defeating
-    // its purpose. So SchemaProvider owns its own long-lived
-    // io_context + worker thread; the pool is bound to that, and
-    // every complete_async dispatches through it. Successive calls to
-    // the same host then amortise TCP connect + TLS handshake.
+    // its purpose. So SchemaProvider owns a long-lived io_context and
+    // worker thread for the default ConnPool path. post_json dispatches
+    // non-streaming calls through that pool or the optional curl pool;
+    // successive calls amortise TCP connect and TLS handshake.
     std::unique_ptr<asio::io_context> http_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> http_work_;
     std::thread http_thread_;
@@ -396,10 +402,9 @@ public:
     std::unique_ptr<asio::io_context> bridge_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> bridge_work_;
     std::thread bridge_thread_;
-    // libcurl-backed HTTP/2 pool with multiplexing. Default transport
-    // for SchemaProvider — passes Cloudflare/anti-bot WAFs (it IS curl)
-    // and gives us native HTTP/2 stream multiplexing for parallel
-    // fan-out workloads.
+    // Optional libcurl-backed HTTP/2 pool (prefer_libcurl=true). post_json
+    // selects this only for non-streaming HTTP; SSE uses httplib and the
+    // Responses WebSocket path owns its native async connection.
     std::unique_ptr<async::CurlH2Pool>  curl_pool_;
 
     // --- Parsed config ---
@@ -421,10 +426,43 @@ public:
     // --- Internal methods ---
     void parse_schema();
 
-    json build_body(const CompletionParams& params) const;
+    json build_body(const CompletionParams& params, bool websocket = false) const;
+    json build_sse_body(const CompletionParams& params) const;
+    json build_ws_body(const CompletionParams& params) const;
     json serialize_messages(const std::vector<ChatMessage>& messages) const;
     json serialize_tools(const std::vector<ChatTool>& tools) const;
     json serialize_single_message(const ChatMessage& msg) const;
+
+    // Per-request value-level streaming decoder state. No sockets or
+    // executors: callers can feed fixture lines independently of transport.
+    struct StreamParseState {
+        struct EventBlock {
+            std::string type, id, name, args;
+            int index = -1;
+        };
+        ChatCompletion completion;
+        std::string full_content;
+        std::map<int, ToolCall> tc_map;
+        std::vector<EventBlock> event_blocks;
+        int event_block_index = -1;
+        int gemini_tc_index = 0;
+        std::string current_event_type;
+        std::string observed_stop_reason;
+        bool terminal_event_seen = false;
+    };
+    bool consume_stream_line(StreamParseState& state, const std::string& line,
+                             const StreamCallback& on_chunk) const;
+    void consume_ws_event(StreamParseState& state, const json& event,
+                          const StreamCallback& on_chunk) const;
+    ChatCompletion finish_stream(StreamParseState& state) const;
+
+    // Owns HTTP/1.1 vs HTTP/2 selection and operation-local cancellation
+    // for both chat completions and schema-described JSON endpoints.
+    asio::awaitable<async::HttpResponse> post_json(
+        async::AsyncEndpoint endpoint, std::string path, std::string body,
+        std::vector<std::pair<std::string, std::string>> headers,
+        int timeout_seconds, std::shared_ptr<graph::CancelToken> cancel_token,
+        const char* cancel_context);
 
     /// WebSocket-mode streaming for OpenAI Responses. Async-native;
     /// `complete_stream` bridges via `neograph::async::run_sync`.
@@ -477,9 +515,45 @@ class SchemaProviderTestAccess {
         return sp.build_body(params);
     }
 
+    static json build_sse_body(const SchemaProvider& sp,
+                               const CompletionParams& params) {
+        return sp.build_sse_body(params);
+    }
+
+    static json build_ws_body(const SchemaProvider& sp,
+                              const CompletionParams& params) {
+        return sp.build_ws_body(params);
+    }
+
     static ChatMessage parse_response(const SchemaProvider& sp,
                                       const json& response) {
         return sp.parse_response(response);
+    }
+
+    static ChatCompletion parse_stream_lines(
+        const SchemaProvider& sp, const std::vector<std::string>& lines,
+        const StreamCallback& on_chunk = {}) {
+        SchemaProvider::StreamParseState state;
+        state.completion.message.role = "assistant";
+        for (const auto& line : lines) {
+            if (!sp.consume_stream_line(state, line, on_chunk)) break;
+        }
+        return sp.finish_stream(state);
+    }
+
+    static ChatCompletion parse_ws_events(
+        const SchemaProvider& sp, const std::vector<json>& events,
+        const StreamCallback& on_chunk = {}) {
+        SchemaProvider::StreamParseState state;
+        state.completion.message.role = "assistant";
+        for (const auto& event : events) {
+            sp.consume_ws_event(state, event, on_chunk);
+            if (state.terminal_event_seen) break;
+        }
+        if (!state.terminal_event_seen) {
+            throw std::runtime_error("openai-responses ws: server closed before response.completed");
+        }
+        return sp.finish_stream(state);
     }
 };
 

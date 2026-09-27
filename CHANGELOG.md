@@ -17,6 +17,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reassignment does not invalidate earlier engines; the unsafe post-compile
   `GraphEngine::own_tools()` transfer has been removed. Python-defined,
   MCP-discovered and native C++ tools use the same compile-time lifetime rule.
+- **SchemaProvider internal responsibilities (#220).** Schema-driven request
+  serialization and response decoding now live in a network-free mapping unit;
+  SSE and WebSocket event state machines consume fixture values independently
+  of sockets. The provider continues to own its HTTP/SSE bridge, native
+  WebSocket path, and pooled HTTP/1.1 or optional libcurl HTTP/2 selection.
+  Chat and arbitrary JSON calls share operation-local cancellation and HTTP
+  error handling. Public provider and schema contracts are unchanged.
 
 ### Added
 - **Non-recursive async-primary checkpoint adapters.** Native coroutine
