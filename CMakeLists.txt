@@ -870,6 +870,7 @@ if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm
         src/llm/openai_provider.cpp
         src/llm/schema_strategy_registry.cpp
+        src/llm/schema_primitive_registry.cpp
         src/llm/schema_provider.cpp
         src/llm/schema_provider_mapping.cpp
         src/llm/schema_provider_stream_parser.cpp
@@ -1792,6 +1793,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # 자리에 인용되는 코드.
         add_executable(example_minimal examples/51_minimal.cpp)
         target_link_libraries(example_minimal PRIVATE neograph::core)
+
+        # Example 65: provider-scoped synthetic transport/execution/artifacts.
+        add_executable(example_schema_primitive_registry
+            examples/65_schema_primitive_registry.cpp)
+        target_link_libraries(example_schema_primitive_registry PRIVATE
+            neograph::core neograph::llm)
 
         # Schema dump tool — prints NodeFactory::export_schema() as JSON.
         # The drift-proof artifact source for external tooling (the

@@ -30,6 +30,7 @@
 #include <neograph/provider.h>
 #include <neograph/llm/json_path.h>
 #include <neograph/llm/schema_strategy_registry.h>
+#include <neograph/llm/schema_primitive_registry.h>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <cstddef>
@@ -120,6 +121,12 @@ public:
         std::size_t max_stream_response_bytes = 16u * 1024u * 1024u;
         /// WebSocket handshake, frame, and assembled-message limits.
         async::WsClientOptions websocket_options;
+        /// Explicitly injected C++ factories for schema transport,
+        /// execution-mode, and artifact-parser primitives. The registry is
+        /// copied at provider creation; later mutations are not observed.
+        std::shared_ptr<const SchemaPrimitiveRegistry> primitive_registry;
+        /// Trace metadata copied into every primitive request context.
+        std::map<std::string, std::string> trace_metadata;
     };
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
@@ -426,6 +433,13 @@ public:
     std::unique_ptr<async::CurlH2Pool>  curl_pool_;
 
     // --- Parsed config ---
+    SchemaPrimitiveRegistry primitive_registry_;
+    std::string transport_primitive_name_;
+    std::string execution_primitive_name_;
+    std::string artifact_parser_primitive_name_;
+    SchemaTransportFactory transport_factory_;
+    SchemaExecutionFactory execution_factory_;
+    SchemaArtifactParserFactory artifact_parser_factory_;
     SchemaStrategyRegistry strategy_registry_;
     Config user_config_;
     json schema_;
@@ -505,7 +519,9 @@ public:
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;
     std::string parse_stop_reason(const json& resp_json) const;
-    std::vector<GeneratedArtifact> parse_artifacts(const json& response) const;
+    std::vector<GeneratedArtifact> parse_artifacts(
+        const json& response,
+        const SchemaPrimitiveRequestContext* request_context = nullptr) const;
     std::string operation_endpoint(const std::string& endpoint,
                                    const std::string& operation_id,
                                    std::string_view api_key) const;

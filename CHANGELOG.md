@@ -51,6 +51,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cancellation and typed operation errors. Deterministic loopback coverage
   includes mixed chat/tools/images, Veo completion, file finalization,
   cancellation, timeout and provider failures.
+
+- **Public SchemaProvider primitive registry (#242).** Added an explicitly
+  injected, provider-scoped C++ `SchemaPrimitiveRegistry` for custom
+  transport, execution-mode, and artifact-parser factories. Built-in names
+  remain automatic; duplicate names reject unless replacement is explicit,
+  providers copy factory ownership at creation, and concurrent use is safe.
+  Schema paths, primitive categories, and missing names are included in
+  creation-time diagnostics. Python registration remains intentionally
+  unsupported, and shared-library loading is documented as a possible linked
+  ABI arrangement rather than an implemented dynamic plugin system.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

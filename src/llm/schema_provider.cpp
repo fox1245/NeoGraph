@@ -109,7 +109,10 @@ struct SchemaProvider::StreamCancelControl {
 // ============================================================================
 
 SchemaProvider::SchemaProvider(Config config, json schema)
-    : strategy_registry_(config.strategy_registry
+    : primitive_registry_(config.primitive_registry
+                          ? *config.primitive_registry
+                          : SchemaPrimitiveRegistry::standard())
+    , strategy_registry_(config.strategy_registry
                          ? *config.strategy_registry
                          : SchemaStrategyRegistry::standard())
     , user_config_(std::move(config))
@@ -294,9 +297,23 @@ asio::awaitable<async::HttpResponse> SchemaProvider::post_json(
     if (effective_timeout > 0) {
         opts.timeout = std::chrono::seconds(effective_timeout);
     }
-
     std::optional<asio::awaitable<async::HttpResponse>> request;
-    if (get) {
+    if (transport_factory_) {
+        SchemaPrimitiveRequestContext context;
+        context.endpoint = endpoint;
+        context.path = path;
+        context.body = std::move(body);
+        context.headers = std::move(headers);
+        context.timeout_seconds = effective_timeout;
+        context.get = get;
+        if (effective_timeout > 0) {
+            context.deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(effective_timeout);
+        }
+        context.cancellation = cancel_token;
+        context.trace_metadata = user_config_.trace_metadata;
+        request.emplace(transport_factory_(std::move(context)));
+    } else if (get) {
         auto executor = co_await asio::this_coro::executor;
         request.emplace(async::async_get(
             executor, endpoint.host, endpoint.port, path,
@@ -378,7 +395,19 @@ SchemaProvider::complete_async(const CompletionParams& params)
         }
         if (!has_ct) headers.emplace_back("Content-Type", "application/json");
     }
-    const bool long_running = !operation_.id_path.empty();
+    SchemaPrimitiveRequestContext primitive_context;
+    primitive_context.endpoint = endpoint;
+    primitive_context.path = endpoint_path;
+    primitive_context.body = body_str;
+    primitive_context.headers = headers;
+    primitive_context.timeout_seconds = params.timeout_seconds > 0
+        ? params.timeout_seconds : user_config_.timeout_seconds;
+    if (primitive_context.timeout_seconds > 0) {
+        primitive_context.deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(primitive_context.timeout_seconds);
+    }
+    primitive_context.cancellation = params.cancel_token;
+    primitive_context.trace_metadata = user_config_.trace_metadata;
     auto operation_token = params.cancel_token;
     asio::any_io_executor executor;
     std::chrono::steady_clock::time_point deadline;
@@ -421,19 +450,38 @@ SchemaProvider::complete_async(const CompletionParams& params)
     check_operation();
 
     async::HttpResponse res;
-    try {
-        res = co_await post_json(
-            endpoint, endpoint_path, std::move(body_str), headers,
-            params.timeout_seconds, operation_token, "SchemaProvider completion entry");
-    } catch (const RateLimitError&) {
-        check_operation();
-        throw;
-    } catch (const std::exception& error) {
-        check_operation();
-        if (!operation_.id_path.empty()) {
-            throw OperationError(std::string("SchemaProvider: submission failed: ") + error.what());
+    if (execution_factory_) {
+        SchemaExecutionContext execution_context;
+        execution_context.mode = execution_primitive_name_;
+        execution_context.request = primitive_context;
+        execution_context.request.cancellation = operation_token;
+        execution_context.transport =
+            [this](SchemaPrimitiveRequestContext request)
+                -> asio::awaitable<async::HttpResponse> {
+                co_return co_await post_json(
+                    std::move(request.endpoint), std::move(request.path),
+                    std::move(request.body), std::move(request.headers),
+                    request.timeout_seconds, std::move(request.cancellation),
+                    "SchemaProvider custom execution", request.get);
+            };
+        const json result = co_await execution_factory_(std::move(execution_context));
+        res.status = 200;
+        res.body = result.dump();
+    } else {
+        try {
+            res = co_await post_json(
+                endpoint, endpoint_path, std::move(body_str), headers,
+                params.timeout_seconds, operation_token, "SchemaProvider completion entry");
+        } catch (const RateLimitError&) {
+            check_operation();
+            throw;
+        } catch (const std::exception& error) {
+            check_operation();
+            if (!operation_.id_path.empty()) {
+                throw OperationError(std::string("SchemaProvider: submission failed: ") + error.what());
+            }
+            throw;
         }
-        throw;
     }
     check_operation();
     json resp_json = json::parse(res.body);
@@ -540,10 +588,8 @@ SchemaProvider::complete_async(const CompletionParams& params)
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
         completion.message = parse_response(resp_json);
-        completion.artifacts = parse_artifacts(resp_json);
-        if (!operation_.id_path.empty() && !resp_.artifacts.empty() &&
-            completion.artifacts.empty()) {
-            throw OperationError("SchemaProvider: operation returned no mapped artifacts");
+        if (!artifact_parser_factory_) {
+            completion.artifacts = parse_artifacts(resp_json, &primitive_context);
         }
         completion.usage = operation_.id_path.empty()
             ? parse_usage(resp_json) : submission_usage;
@@ -553,6 +599,13 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 ? resp_.default_stop_reason
                 : "tool_use";
         }
+    }
+    if (artifact_parser_factory_) {
+        completion.artifacts = parse_artifacts(resp_json, &primitive_context);
+    }
+    if (!operation_.id_path.empty() && !resp_.artifacts.empty() &&
+        completion.artifacts.empty()) {
+        throw OperationError("SchemaProvider: operation returned no mapped artifacts");
     }
 
     co_return completion;

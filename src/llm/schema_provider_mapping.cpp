@@ -18,9 +18,34 @@ bool model_omits_temperature(const std::string& model) {
 void SchemaProvider::parse_schema()
 {
     provider_name_ = schema_.value("name", "unknown");
+    auto require_primitive = [this](SchemaPrimitiveCategory category,
+                                     const std::string& name,
+                                     const char* path) {
+        if (!primitive_registry_.contains(category, name)) {
+            throw std::invalid_argument(
+                std::string("SchemaProvider: unknown primitive at schema path ") +
+                path + " (category " + SchemaPrimitiveRegistry::category_name(category) +
+                "): " + name);
+        }
+    };
 
-    // --- Connection ---
     auto c = schema_["connection"];
+    transport_primitive_name_ = c.value("transport",
+                                        c.value("transport_primitive", "http"));
+    require_primitive(SchemaPrimitiveCategory::Transport,
+                      transport_primitive_name_, "connection.transport");
+    const auto& transport = primitive_registry_.transport(transport_primitive_name_);
+    if (transport) transport_factory_ = transport;
+
+    execution_primitive_name_ = schema_.value("execution_mode", "standard");
+    if (schema_.contains("execution") && schema_["execution"].is_object()) {
+        execution_primitive_name_ =
+            schema_["execution"].value("mode", execution_primitive_name_);
+    }
+    require_primitive(SchemaPrimitiveCategory::ExecutionMode,
+                      execution_primitive_name_, "execution.mode");
+    const auto& execution = primitive_registry_.execution_mode(execution_primitive_name_);
+    if (execution) execution_factory_ = execution;
     conn_.base_url = user_config_.base_url_override.empty()
         ? c.value("base_url", "")
         : user_config_.base_url_override;
@@ -256,6 +281,13 @@ void SchemaProvider::parse_schema()
         }
     }
     resp_.default_stop_reason = resp.value("default_stop_reason", "unknown");
+
+    artifact_parser_primitive_name_ = resp.value("artifact_parser", "rules");
+    require_primitive(SchemaPrimitiveCategory::ArtifactParser,
+                      artifact_parser_primitive_name_, "response.artifact_parser");
+    const auto& artifact_parser =
+        primitive_registry_.artifact_parser(artifact_parser_primitive_name_);
+    if (artifact_parser) artifact_parser_factory_ = artifact_parser;
     if (resp.contains("artifacts")) {
         if (!resp["artifacts"].is_array()) {
             throw std::invalid_argument("SchemaProvider: response.artifacts must be an array");
@@ -1161,7 +1193,16 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
     return msg;
 }
 
-std::vector<GeneratedArtifact> SchemaProvider::parse_artifacts(const json& response) const {
+std::vector<GeneratedArtifact> SchemaProvider::parse_artifacts(
+    const json& response,
+    const SchemaPrimitiveRequestContext* request_context) const {
+    if (artifact_parser_factory_) {
+        if (!request_context) {
+            throw OperationError(
+                "SchemaProvider: custom artifact parser requires a request context");
+        }
+        return artifact_parser_factory_(response, *request_context);
+    }
     std::vector<GeneratedArtifact> artifacts;
     for (const auto& rule : resp_.artifacts) {
         auto items = json_path::at_path(response, rule.items_path);

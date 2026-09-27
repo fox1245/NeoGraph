@@ -2842,6 +2842,55 @@ auto custom = neograph::llm::SchemaProvider::create({
 });
 ```
 
+### Schema primitive registry (C++ only)
+
+Applications that need a transport, execution mode, or artifact representation
+not covered by the reviewed built-ins can inject a
+`SchemaPrimitiveRegistry` through `Config::primitive_registry`. The registry is
+copied during `SchemaProvider::create`; it is not process-global, and later
+registration does not affect an existing provider. Names are unique per
+category: duplicate registration rejects, while `replace_*` (or the explicit
+`SchemaPrimitiveRegistration::Replace` policy) is required for replacement.
+Factories are owned by the copied registry, so capture shared state explicitly
+and keep the registry alive while creating providers. Provider calls can run
+concurrently; factories receive an operation-owned context containing the
+normalized endpoint, body, headers, cancellation token, deadline, and trace
+metadata.
+
+```cpp
+#include <neograph/llm/schema_primitive_registry.h>
+
+auto registry = std::make_shared<neograph::llm::SchemaPrimitiveRegistry>();
+registry->register_transport(
+    "synthetic_echo",
+    [](neograph::llm::SchemaPrimitiveRequestContext request)
+        -> asio::awaitable<neograph::async::HttpResponse> {
+        neograph::async::HttpResponse response;
+        response.status = 200;
+        response.body = R"({\"choices\":[{\"message\":{\"role\":\"assistant\",
+            \"content\":\"synthetic\"}}]})";
+        co_return response;
+    });
+auto provider = neograph::llm::SchemaProvider::create({
+    .schema_path = "synthetic_schema.json",
+    .primitive_registry = registry
+});
+```
+
+JSON selects these factories declaratively with
+`connection.transport`, `execution.mode`, and
+`response.artifact_parser`. Every referenced name is resolved during provider
+creation; an unknown name reports its schema path, category, and missing name.
+The executable contract remains typed C++ callbacks, not scripting JSON.
+
+The extension surface is intentionally C++ only today. Python can consume
+providers and typed artifacts but cannot register foreign callbacks; this avoids
+keeping Python objects across provider worker threads. An optional shared
+library can provide the same C++ factories when compiled against a compatible
+NeoGraph ABI, but dynamic loading, symbol discovery, and ABI version
+negotiation are not implemented. A plugin must therefore be linked explicitly
+and obey the host's compiler/standard-library and NeoGraph ABI.
+
 **Raw JSON endpoints:** `SchemaProvider` can also use a schema's connection and
 authentication contract without forcing the response through `ChatCompletion`.
 The built-in `openrouter_decisions` schema targets OpenRouter's Typesafe/Jev
