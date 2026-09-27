@@ -12,7 +12,7 @@
 #include <string>
 #include <string_view>
 
-namespace neograph::program {
+#include <vector>
 
 /** Result of an atomic owner-scoped activation compare-and-swap. */
 enum class ProgramActivationResult : std::uint8_t {
@@ -54,10 +54,19 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+/** One durable reason an admitted version remains retained. */
+struct NEOGRAPH_PROGRAM_API ProgramRetentionReference {
+    std::string version_id;
+    std::string reason;
+
+    bool operator==(const ProgramRetentionReference&) const = default;
+};
+
 /** Counts immutable records removed by reference-aware collection. */
 struct ProgramRetentionReport {
     std::uint64_t versions_removed = 0;
     std::uint64_t bundles_removed  = 0;
+    std::vector<ProgramRetentionReference> references;
 };
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramActivationResult result) noexcept;

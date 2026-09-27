@@ -216,9 +216,13 @@ ProgramRetentionReport InMemoryProgramStore::collect_garbage(
     }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
     const auto active = impl_->activations.find(owner_scope);
-    if (active != impl_->activations.end()) keep.insert(active->second.value.active_version_id());
-
     ProgramRetentionReport report;
+    for (const auto& pinned_id : pinned_version_ids)
+        report.references.push_back({pinned_id, "host_pin"});
+    if (active != impl_->activations.end()) {
+        keep.insert(active->second.value.active_version_id());
+        report.references.push_back({active->second.value.active_version_id(), "active_pointer"});
+    }
     std::set<std::string, std::less<>> bundles_to_check;
     for (auto it = impl_->versions.begin(); it != impl_->versions.end();) {
         if (it->second.value.ownership_scope() == owner_scope && !keep.contains(it->first)) {

@@ -415,12 +415,15 @@ ProgramRetentionReport SQLiteProgramStore::collect_garbage(
             throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
     }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
+    ProgramRetentionReport report;
+    for (const auto& pinned_id : pinned_version_ids)
+        report.references.push_back({pinned_id, "host_pin"});
     const auto active = load_activation(impl_->db, owner_scope);
     if (active) {
         verify_activation_target(impl_->db, *active);
         keep.insert(active->active_version_id());
+        report.references.push_back({active->active_version_id(), "active_pointer"});
     }
-
     Statement list(impl_->db,
                    "SELECT id, bundle_id, owner_scope, canonical_bytes FROM program_versions "
                    "WHERE owner_scope = ?1 ORDER BY id");
@@ -442,7 +445,6 @@ ProgramRetentionReport SQLiteProgramStore::collect_garbage(
         }
     }
 
-    ProgramRetentionReport report;
     for (const auto& id : remove) {
         Statement statement(impl_->db, "DELETE FROM program_versions WHERE id = ?1");
         statement.bind_text(1, id);

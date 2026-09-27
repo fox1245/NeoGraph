@@ -525,6 +525,28 @@ MigrationPlan build_migration_plan(const ProgramVersion& source,
                 source_facts.runtime_contract, target_facts.runtime_contract);
     add_mapping(data, MigrationDimension::Recovery, "exact_dependency_receipts",
                 source.id(), target.id());
+    add_mapping(data, MigrationDimension::Schema, "exact_checkpoint_schema_version",
+                source_material, target_material);
+    add_mapping(data, MigrationDimension::Reducers, "exact_channel_reducer_and_presence",
+                source_facts.runtime_contract, target_facts.runtime_contract);
+    add_mapping(data, MigrationDimension::Barriers, "exact_checkpoint_barrier_membership",
+                source.id(), target.id());
+    add_mapping(data, MigrationDimension::PendingWork, "reject_unrepresented_pending_work",
+                source.id(), target.id());
+    add_mapping(data, MigrationDimension::PendingEvents, "reject_unrepresented_pending_events",
+                source.id(), target.id());
+    add_mapping(data, MigrationDimension::Subscriptions, "reject_unrepresented_subscriptions",
+                source.id(), target.id());
+    add_mapping(data, MigrationDimension::Resume, "preserve_interrupt_resume_identity",
+                source.id(), target.id());
+    add_mapping(data, MigrationDimension::NodeLocal, "reject_opaque_node_local_state",
+                source.id(), target.id());
+    add_mapping(data, MigrationDimension::Reconciliation,
+                "preserve_unresolved_effect_reconciliation", source.id(), target.id());
+    add_mapping(data, MigrationDimension::TerminalOutput, "exact_terminal_output_contract",
+                source_facts.runtime_contract, target_facts.runtime_contract);
+    add_mapping(data, MigrationDimension::CheckpointLineage,
+                "preserve_checkpoint_parent_and_journal_lineage", source.id(), target.id());
 
     const auto mismatch = [&](MigrationDimension dimension, std::string code,
                               std::string message, json source_value,
@@ -800,6 +822,17 @@ std::string_view to_string(MigrationDimension dimension) noexcept {
         case MigrationDimension::Materialization: return "materialization";
         case MigrationDimension::Contract: return "contract";
         case MigrationDimension::Recovery: return "recovery";
+        case MigrationDimension::Schema: return "schema";
+        case MigrationDimension::Reducers: return "reducers";
+        case MigrationDimension::Barriers: return "barriers";
+        case MigrationDimension::PendingWork: return "pending_work";
+        case MigrationDimension::PendingEvents: return "pending_events";
+        case MigrationDimension::Subscriptions: return "subscriptions";
+        case MigrationDimension::Resume: return "resume";
+        case MigrationDimension::NodeLocal: return "node_local";
+        case MigrationDimension::Reconciliation: return "reconciliation";
+        case MigrationDimension::TerminalOutput: return "terminal_output";
+        case MigrationDimension::CheckpointLineage: return "checkpoint_lineage";
     }
     return "continuation";
 }
@@ -823,7 +856,17 @@ MigrationDimension migration_dimension_from_string(std::string_view value) {
     if (value == "materialization") return MigrationDimension::Materialization;
     if (value == "contract") return MigrationDimension::Contract;
     if (value == "recovery") return MigrationDimension::Recovery;
-    throw std::invalid_argument("Unknown MigrationPlan dimension: " + std::string(value));
+    if (value == "schema") return MigrationDimension::Schema;
+    if (value == "reducers") return MigrationDimension::Reducers;
+    if (value == "barriers") return MigrationDimension::Barriers;
+    if (value == "pending_work") return MigrationDimension::PendingWork;
+    if (value == "pending_events") return MigrationDimension::PendingEvents;
+    if (value == "subscriptions") return MigrationDimension::Subscriptions;
+    if (value == "resume") return MigrationDimension::Resume;
+    if (value == "node_local") return MigrationDimension::NodeLocal;
+    if (value == "reconciliation") return MigrationDimension::Reconciliation;
+    if (value == "terminal_output") return MigrationDimension::TerminalOutput;
+    if (value == "checkpoint_lineage") return MigrationDimension::CheckpointLineage;
 }
 
 }  // namespace neograph::program

@@ -103,9 +103,18 @@ enum class MigrationDimension : std::uint8_t {
     Materialization,
     Contract,
     Recovery,
-
-    // The original P5 dimensions remain stable at values 0..13.
-    // New dimensions are appended to preserve persisted enum ordering.
+    /// Explicit state-contract coverage appended for generation migration.
+    Schema,
+    Reducers,
+    Barriers,
+    PendingWork,
+    PendingEvents,
+    Subscriptions,
+    Resume,
+    NodeLocal,
+    Reconciliation,
+    TerminalOutput,
+    CheckpointLineage,
 };
 
 /** Stable, machine-readable evidence for one migration dimension. */

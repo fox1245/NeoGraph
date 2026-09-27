@@ -1339,8 +1339,8 @@ TEST(ProgramCatalogTest, MigrationPlanCoversEveryDimensionWithNarrowMappings) {
     const auto plan = fixture.catalog.plan_migration("tenant:catalog", source.id(), target.id());
     ASSERT_TRUE(plan.is_compatible());
     EXPECT_TRUE(plan.diagnostics().empty());
-    ASSERT_EQ(plan.mappings().size(), 19U);
-    for (std::uint8_t index = 0; index < 19; ++index) {
+    ASSERT_EQ(plan.mappings().size(), 30U);
+    for (std::uint8_t index = 0; index < 30; ++index) {
         EXPECT_EQ(static_cast<std::uint8_t>(plan.mappings()[index].dimension), index);
         EXPECT_FALSE(plan.mappings()[index].rule.empty());
     }

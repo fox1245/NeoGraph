@@ -487,9 +487,13 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
             throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
     }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
+    ProgramRetentionReport report;
+    for (const auto& pinned_id : pinned_version_ids)
+        report.references.push_back({pinned_id, "host_pin"});
     if (const auto active = load_activation(impl_->connection, owner_scope)) {
         verify_activation_target(impl_->connection, *active);
         keep.insert(active->active_version_id());
+        report.references.push_back({active->active_version_id(), "active_pointer"});
     }
 
     auto result = exec_params(
@@ -520,7 +524,6 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
         }
     }
 
-    ProgramRetentionReport report;
     for (const auto& id : remove) {
         const auto deleted = exec_params(
             impl_->connection, "DELETE FROM neograph_program_versions WHERE id = $1", {id});
