@@ -1160,7 +1160,8 @@ TEST(ProgramCatalogTest, ActivationCompareAndSwapAndRetentionAreOwnerScoped) {
               ProgramActivationResult::AlreadyPresent);
 
     const auto report = fixture.catalog.collect_retention("tenant:catalog", {});
-    EXPECT_EQ(report.versions_removed, 1U);
+    EXPECT_EQ(report.references,
+              std::vector<ProgramRetentionReference>{{second.id(), "active_pointer"}});
     EXPECT_FALSE(fixture.store->get_version(first.id()).has_value());
     EXPECT_TRUE(fixture.store->get_version(second.id()).has_value());
     EXPECT_TRUE(fixture.store->get_bundle(bundle.id()).has_value());
