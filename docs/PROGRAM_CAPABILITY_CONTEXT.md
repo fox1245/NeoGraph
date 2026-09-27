@@ -30,14 +30,35 @@ outside `NodeContext` or perform its own effects; these rules are capability
 attenuation, not a process sandbox or proof that arbitrary native code is pure.
 Hosts must review and pin native factories and declare their effects honestly.
 
-Program Core operations also require a host-owned `ProgramCoreToolGrant` for
-mediated tool dispatch. The grant must match owner, Program version, run,
-operation, and attempt and contain a gate and controller. Missing or stale
-grants deny the tool call, including after reconnect. A denied tool call is a
-tool result and may leave the Program itself `Completed`; inspect effect
-receipts when deciding whether the requested work succeeded. The host remains
-responsible for durable grant-record recovery, per-tool decisions, and effect
-reconciliation. Program does not yet persist or reconcile `grant_id` itself.
+Program Core operations require a host-owned `ProgramCoreToolGrant` for
+mediated Tool dispatch. The runtime checks owner, Program version, run,
+operation, attempt, **admitted executable-binding fingerprint**, nonempty grant
+ID, gate and controller. Missing or stale grants deny the Tool call, including
+after reconnect. A denied Tool call is a Tool result and may leave the Program
+itself `Completed`; inspect effect receipts when deciding whether the requested
+work succeeded.
+
+Hosts that need a persistent grant identity can admit an exact
+`ProgramCoreToolGrantRecord` in `SQLiteProgramCoreToolGrantStore` before
+starting a run with an explicit run ID. The binding fingerprint is
+`capability_binding_receipt_root(version.core_materialization_receipt().capability_bindings)`.
+Install `make_durable_core_tool_grant_resolver(store, policy_factory)` as
+`RuntimeConfig.core_tool_grant_resolver`: it reloads the record for every
+operation, including reconnect, and accepts only a fresh host policy with
+identical grant ID, owner, version, run, operation, attempt and binding.
+Admission is idempotent only for an identical active record; conflicting IDs
+or bindings cannot replace it. A resumed Program advances its attempt, so the
+host must explicitly admit the still-authorized grant for that attempt before
+resuming. The same grant ID may cover those attempts only within the same
+owner/version/run/operation/binding; revocation disables all its admitted
+attempts. Stored records contain no credentials, Tool pointers or callbacks.
+
+The host alone decides whether to admit and how to rebuild per-Tool gate and
+controller policy. The record is authority evidence, **not** an effect result:
+the host must still journal each Tool dispatch, completion and uncertain
+outcome through the per-call effect broker. This does not promise exactly-once
+external execution or constrain arbitrary trusted native code calling a Tool
+outside mediated dispatch.
 
 Existing brokered custom factories that used `NodeContext.provider` or
 `NodeContext.tools` must move execution to a fixed Core node, use a separately

@@ -662,6 +662,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/journal.cpp
         src/program/lineage.cpp
         src/program/run_record.cpp
+        src/program/core_tool_grant_store.cpp
         src/program/transition_store.cpp
         src/program/catalog.cpp
     src/program/runtime.cpp
@@ -693,6 +694,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         add_library(neograph_program_sqlite
             src/program/sqlite_store.cpp
             src/program/sqlite_transition_store.cpp
+            src/program/sqlite_core_tool_grant_store.cpp
         )
         target_include_directories(neograph_program_sqlite
             PUBLIC

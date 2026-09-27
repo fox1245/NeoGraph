@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=21211053daf9b0e714438ca1369ac260173985bb042ca3effce2f3300588d1a6 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **Program Core Tool grant の永続 ID。** ホストは所有者スコープ内の
+  正確な Tool grant を SQLite に承認し、Program 操作と再接続のたびに
+  gate/controller を再結合できます。ランタイムは承認された実行バインディング
+  fingerprint も確認し、取消は再起動後も有効で同じ grant ID の全試行を
+  拒否します。効果の結果には別途、呼び出し単位の永続 Tool broker が必要です。
 - **Program ベース A2A サービスの厳格認証。** Program A2A コンストラクタに
   オプトインの `require_authenticated_requests` を追加しました。有効時は
   collaboration envelope だけでなく通常の message、stream、task 取得・取消

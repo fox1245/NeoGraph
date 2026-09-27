@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=21211053daf9b0e714438ca1369ac260173985bb042ca3effce2f3300588d1a6 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **Program Core Tool grant 的持久身份。** 宿主可在 SQLite 中批准受所有者
+  作用域约束的精确 Tool grant，并在每次 Program 操作及重连时重新绑定
+  gate/controller。运行时还校验已批准的可执行绑定 fingerprint；撤销在重启后
+  仍然有效，并阻止该 grant ID 的所有尝试。效果结果仍需单独的逐调用持久
+  Tool broker。
 - **Program 驱动 A2A 服务的严格认证。** Program A2A 构造函数新增可选的
   `require_authenticated_requests` 标志。启用后，除协作 envelope 外，普通
   message、stream、task 查询和取消 RPC 也必须通过已配置的 authenticator。

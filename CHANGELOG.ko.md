@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=21211053daf9b0e714438ca1369ac260173985bb042ca3effce2f3300588d1a6 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,11 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **Program Core Tool grant의 영속 식별자.** 호스트는 소유자 범위의 정확한
+  Tool grant를 SQLite에 승인하고 Program 작업 및 재연결마다 gate/controller를
+  다시 결합할 수 있습니다. 런타임은 승인된 실행 바인딩 fingerprint도 검사하며,
+  철회는 재시작 후에도 유지되어 해당 grant ID의 모든 시도를 차단합니다.
+  효과 결과는 별도의 호출별 영속 Tool broker가 필요합니다.
 - **Program 기반 A2A 서비스의 엄격 인증.** Program A2A 생성자에 선택적
   `require_authenticated_requests` 플래그를 추가했습니다. 활성화하면 협업
   envelope뿐 아니라 일반 message, stream, task 조회 및 취소 RPC에도 설정된

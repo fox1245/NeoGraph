@@ -86,6 +86,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remains explicit; no host credential files or OAuth tokens enter NeoGraph.
   Subprocess trees, output/events, time and usage are bounded and host errors
   remain distinct from schema failures.
+- **Durable Program Core Tool grant identities.** Hosts may admit an exact,
+  owner-scoped Tool grant in SQLite and rebind its gate/controller on each
+  Program operation and reconnect. The runtime also checks the admitted
+  executable-binding fingerprint; revocation survives restart and blocks all
+  attempts using that grant ID. Effect results still require a separate
+  per-call durable Tool broker.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

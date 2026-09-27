@@ -5,6 +5,7 @@
 #include <neograph/hook_outbox.h>
 #include <neograph/hook_runtime.h>
 #include <neograph/program/program.h>
+#include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/store.h>
 #include <neograph/tool_dispatch.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
@@ -22,6 +23,7 @@
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_store.h>
 #include <neograph/program/sqlite_transition_store.h>
+#include <neograph/program/sqlite_core_tool_grant_store.h>
 
 #include <sqlite3.h>
 #endif
@@ -2268,6 +2270,7 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
         grant.operation_id = std::string(context.operation_id);
         grant.attempt = context.attempt;
         grant.grant_id = "grant-allowed";
+        grant.binding_fingerprint = std::string(context.binding_fingerprint);
         grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {
             co_return neograph::ToolDecision::allow();
@@ -2300,6 +2303,8 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
             stale.operation_id = "a-different-operation";
         if (context.run_id == "stale-attempt") ++stale.attempt;
         stale.grant_id = "grant-stale";
+        stale.binding_fingerprint = context.run_id == "stale-binding"
+            ? "another-binding" : std::string(context.binding_fingerprint);
         stale.gate = [](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {
             co_return neograph::ToolDecision::allow();
@@ -2311,6 +2316,7 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
     EXPECT_EQ(invoke("stale-run").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(invoke("stale-operation").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(invoke("stale-attempt").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(invoke("stale-binding").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
 }
 
@@ -2426,6 +2432,7 @@ TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
         grant.operation_id = std::string(context.operation_id);
         grant.attempt = context.attempt;
         grant.grant_id = "grant-before-restart";
+        grant.binding_fingerprint = std::string(context.binding_fingerprint);
         grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {
             co_return neograph::ToolDecision::allow();
@@ -2473,6 +2480,156 @@ TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
     EXPECT_EQ(allowed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
 }
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramRuntimeTest, DurableCoreToolGrantRebindsExactAuthorityAcrossRestart) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = program_document("runtime-mediated-dispatch");
+    document["root"]["definition"]["interrupt_before"] = json::array({"work"});
+    const auto version = fixture.admit_document(std::move(document));
+    const auto binding = capability_binding_receipt_root(
+        version.core_materialization_receipt().capability_bindings);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("neograph-core-tool-grant-" + Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    const auto make_policy = [](const ProgramCoreToolGrantRecord& record)
+        -> std::optional<ProgramCoreToolGrant> {
+        ProgramCoreToolGrant authorized;
+        authorized.owner_scope = record.owner_scope;
+        authorized.program_version_id = record.program_version_id;
+        authorized.run_id = record.run_id;
+        authorized.operation_id = record.operation_id;
+        authorized.attempt = record.attempt;
+        authorized.binding_fingerprint = record.binding_fingerprint;
+        authorized.grant_id = record.grant_id;
+        authorized.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        authorized.controller = std::make_shared<neograph::ToolExecutionController>();
+        return authorized;
+    };
+    fixture.core_tool_grant_resolver =
+        make_durable_core_tool_grant_resolver(store, make_policy);
+    fixture.runtime = fixture.make_runtime();
+
+    const auto context = ProgramCoreToolGrantContext{
+        "tenant:runtime", version.id(), "durable-grant-run", "root", 1, binding};
+    const auto record = ProgramCoreToolGrantRecord{
+        std::string(context.owner_scope), std::string(context.program_version_id),
+        std::string(context.run_id), std::string(context.operation_id),
+        context.attempt, binding, "host-grant-1"};
+    ASSERT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::Admitted);
+    EXPECT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::AlreadyPresent);
+    auto conflicting = record;
+    conflicting.grant_id = "substituted-grant";
+    EXPECT_EQ(store->admit(conflicting), ProgramCoreToolGrantAdmission::Conflict);
+    EXPECT_FALSE(store->load(ProgramCoreToolGrantContext{
+        "other-tenant", version.id(), context.run_id, "root", 1, binding}));
+
+    ProgramInvocation request{json::object(), grant(), "trace-durable-tool-grant", {}};
+    request.requested_run_id = std::string(context.run_id);
+    const auto interrupted = fixture.runtime->start(
+        "tenant:runtime", version, std::move(request)).wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    fixture.runtime.reset();
+    fixture.core_tool_grant_resolver = {};
+    store.reset();
+    store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    fixture.core_tool_grant_resolver =
+        make_durable_core_tool_grant_resolver(store, make_policy);
+    fixture.runtime = fixture.make_runtime();
+    const auto reconnected = fixture.runtime->reconnect(
+        "tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(reconnected.status(), ProgramTerminalStatus::Interrupted);
+    // Resume advances the Program attempt; the trusted host explicitly
+    // re-admits its existing authority for that attempt before dispatch.
+    auto next_attempt = record;
+    next_attempt.attempt = 2;
+    ASSERT_EQ(store->admit(next_attempt), ProgramCoreToolGrantAdmission::Admitted);
+    const auto resumed = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json::object(), "trace-durable-tool-resume")).wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+    EXPECT_TRUE(store->revoke(context));
+    EXPECT_FALSE(store->load(context));
+    EXPECT_FALSE(store->load(ProgramCoreToolGrantContext{
+        context.owner_scope, context.program_version_id, context.run_id,
+        context.operation_id, 2, context.binding_fingerprint}));
+    EXPECT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::Conflict);
+}
+
+TEST(ProgramRuntimeTest, DurableCoreToolGrantRejectsChangedBindingAndHostPolicy) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-mediated-dispatch");
+    const auto binding = capability_binding_receipt_root(
+        version.core_materialization_receipt().capability_bindings);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("neograph-core-tool-grant-negative-" + Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    const ProgramCoreToolGrantRecord record{
+        "tenant:runtime", version.id(), "different-binding", "root", 1,
+        "different-executable-binding", "host-grant-negative"};
+    ASSERT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::Admitted);
+    fixture.core_tool_grant_resolver =
+        make_durable_core_tool_grant_resolver(store,
+            [](const ProgramCoreToolGrantRecord& persisted)
+                -> std::optional<ProgramCoreToolGrant> {
+                ProgramCoreToolGrant unauthorized;
+                unauthorized.owner_scope = persisted.owner_scope;
+                unauthorized.program_version_id = persisted.program_version_id;
+                unauthorized.run_id = persisted.run_id;
+                unauthorized.operation_id = persisted.operation_id;
+                unauthorized.attempt = persisted.attempt;
+                unauthorized.binding_fingerprint = persisted.binding_fingerprint;
+                unauthorized.grant_id = "another-grant";
+                unauthorized.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+                    -> asio::awaitable<neograph::ToolDecision> {
+                    co_return neograph::ToolDecision::allow();
+                };
+                unauthorized.controller =
+                    std::make_shared<neograph::ToolExecutionController>();
+                return unauthorized;
+            });
+    fixture.runtime = fixture.make_runtime();
+    ProgramInvocation request{json::object(), grant(), "trace-wrong-binding", {}};
+    request.requested_run_id = record.run_id;
+    EXPECT_EQ(fixture.runtime->start("tenant:runtime", version, std::move(request))
+                  .wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+    EXPECT_FALSE(store->load(ProgramCoreToolGrantContext{
+        "tenant:runtime", version.id(), record.run_id, "root", 1, binding}));
+    auto policy_mismatch = record;
+    policy_mismatch.run_id = "wrong-host-policy";
+    policy_mismatch.binding_fingerprint = binding;
+    policy_mismatch.grant_id = "recorded-grant";
+    ASSERT_EQ(store->admit(policy_mismatch), ProgramCoreToolGrantAdmission::Admitted);
+    ProgramInvocation next{json::object(), grant(), "trace-wrong-policy", {}};
+    next.requested_run_id = policy_mismatch.run_id;
+    EXPECT_EQ(fixture.runtime->start("tenant:runtime", version, std::move(next))
+                  .wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+}
+#endif
 
 TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEvents) {
     completed_calls.store(0);

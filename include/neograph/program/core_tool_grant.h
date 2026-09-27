@@ -21,6 +21,8 @@ struct ProgramCoreToolGrantContext {
     std::string_view run_id;
     std::string_view operation_id;
     std::uint64_t attempt = 0;
+    /// Exact admitted executable-binding root; a version alone is not a host binding.
+    std::string_view binding_fingerprint;
 };
 
 /**
@@ -37,6 +39,7 @@ struct ProgramCoreToolGrant {
     std::string operation_id;
     std::uint64_t attempt = 0;
     std::string grant_id;
+    std::string binding_fingerprint;
     ToolGate gate;
     std::shared_ptr<ToolExecutionController> controller;
     /// Optional host-owned per-call effect journal for this exact grant.

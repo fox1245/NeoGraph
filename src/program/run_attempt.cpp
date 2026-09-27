@@ -1447,6 +1447,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     grant->run_id == control->run_id &&
                     grant->operation_id == operation_id &&
                     grant->attempt == control->attempt && !grant->grant_id.empty() &&
+                    grant->binding_fingerprint == control->binding_fingerprint &&
                     grant->gate && grant->controller) {
                     resources.tool_gate = grant->gate;
                     resources.tool_execution_controller = grant->controller;

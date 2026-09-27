@@ -2004,7 +2004,8 @@ std::optional<ProgramCoreToolGrant> RunControl::resolve_core_tool_grant(
     }
     if (!resolver) return std::nullopt;
     return resolver(ProgramCoreToolGrantContext{
-        owner_scope, program_version_id, run_id, operation_id, attempt});
+        owner_scope, program_version_id, run_id, operation_id, attempt,
+        binding_fingerprint});
 }
 
 void RunControl::set_core_provider_call_resolver(ProgramCoreProviderCallResolver resolver,
