@@ -254,6 +254,11 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->name_              = std::move(cg.name);
     engine->channel_defs_      = std::move(cg.channel_defs);
     engine->nodes_             = std::move(cg.nodes);
+    engine->has_per_invocation_subgraph_ = std::any_of(
+        engine->nodes_.begin(), engine->nodes_.end(), [](const auto& entry) {
+            const auto* child = dynamic_cast<const SubgraphNode*>(entry.second.get());
+            return child && child->persistence() == SubgraphPersistence::PerInvocation;
+        });
     engine->edges_             = std::move(cg.edges);
     engine->conditional_edges_ = std::move(cg.conditional_edges);
     engine->interrupt_before_  = std::move(cg.interrupt_before);
@@ -493,6 +498,62 @@ std::vector<Checkpoint> GraphEngine::get_state_history(
     const std::string& thread_id, int limit) const {
     if (!checkpoint_store_) return {};
     return checkpoint_store_->list(thread_id, limit);
+}
+
+std::optional<NestedCheckpoint> GraphEngine::inspect_nested_checkpoint(
+    const std::string& root_thread_id,
+    const std::vector<SubgraphPathStep>& path,
+    std::shared_ptr<CheckpointStore> run_checkpoint_store) const {
+    if (path.empty())
+        throw std::invalid_argument("Nested checkpoint lookup requires a graph path");
+    const GraphEngine* engine = this;
+    auto store = run_checkpoint_store ? std::move(run_checkpoint_store) : checkpoint_store_;
+    std::string thread_id = root_thread_id;
+    NestedCheckpoint nested;
+    nested.graph_path.reserve(path.size());
+    for (const auto& step : path) {
+        const auto node = engine->nodes_.find(step.node_name);
+        if (node == engine->nodes_.end())
+            throw std::out_of_range("Unknown subgraph path node: " + step.node_name);
+        const auto* child = dynamic_cast<const SubgraphNode*>(node->second.get());
+        if (!child)
+            throw std::invalid_argument("Graph path node is not a subgraph: " + step.node_name);
+        if (child->persistence() == SubgraphPersistence::Stateless)
+            throw std::invalid_argument("Stateless subgraph has no checkpoint to inspect");
+
+        std::optional<Checkpoint> parent_cp;
+        if (store) {
+            parent_cp = step.parent_checkpoint_id.empty()
+                ? store->load_latest(thread_id)
+                : store->load_by_id(step.parent_checkpoint_id);
+            if (parent_cp && parent_cp->thread_id != thread_id)
+                throw std::invalid_argument("Checkpoint does not belong to the graph path");
+        }
+        std::string graph_invocation_id;
+        if (child->persistence() == SubgraphPersistence::PerInvocation) {
+            if (!parent_cp) return std::nullopt;
+            const auto& metadata = parent_cp->metadata;
+            if (!metadata.is_object() || !metadata.contains("_neograph") ||
+                !metadata["_neograph"].is_object() ||
+                !metadata["_neograph"].contains("subgraph_invocation_id") ||
+                !metadata["_neograph"]["subgraph_invocation_id"].is_string())
+                throw std::runtime_error(
+                    "PerInvocation parent checkpoint lacks graph invocation identity");
+            graph_invocation_id =
+                metadata["_neograph"]["subgraph_invocation_id"].get<std::string>();
+        }
+        thread_id = child->checkpoint_thread_id(
+            thread_id, step.parent_step, step.task_id, graph_invocation_id);
+        engine = &child->child_engine();
+        if (!store) store = engine->checkpoint_store_;
+        nested.graph_path.push_back(step.node_name);
+    }
+    if (!store) return std::nullopt;
+    auto checkpoint = store->load_latest(thread_id);
+    if (!checkpoint) return std::nullopt;
+    nested.thread_id = std::move(thread_id);
+    nested.checkpoint = std::move(*checkpoint);
+    return nested;
 }
 
 void GraphEngine::update_state(const std::string& thread_id,
@@ -1110,11 +1171,13 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
 asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     RunConfig config,
     const RunContext& parent,
-    GraphStreamCallback cb) {
+    GraphStreamCallback cb,
+    SubgraphPersistence persistence) {
     RunMetadata metadata;
     metadata.deadline            = parent.deadline;
     metadata.trace_id            = parent.trace_id;
     metadata.run_id              = parent.run_id;
+    metadata.owner_scope        = parent.tool_execution_identity.owner_scope;
     metadata.budget_cancel_token = parent.budget_cancel_token;
 
     RuntimeResources resources;
@@ -1131,10 +1194,16 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
         resources.provider_call_broker = parent_runtime->provider_call_broker;
         resources.tool_effect_broker = parent_runtime->tool_effect_broker;
     }
+    if (persistence == SubgraphPersistence::Stateless) {
+        if (parent_runtime && parent_runtime->is_resume)
+            throw std::runtime_error("Stateless subgraph cannot resume a parent invocation");
+        resources.checkpoint_store = std::shared_ptr<CheckpointStore>{};
+    }
     auto journal = std::make_shared<detail::SubgraphWriteJournal>();
     resources.subgraph_write_journal = journal;
 
-    if (parent_runtime && parent_runtime->is_resume && resources.checkpoint_store) {
+    if (parent_runtime && parent_runtime->is_resume &&
+        resources.checkpoint_store && *resources.checkpoint_store) {
         auto checkpoint = co_await (*resources.checkpoint_store)->load_latest_async(
             config.thread_id);
         if (checkpoint) {
@@ -1280,6 +1349,22 @@ GraphEngine::execute_graph_async(
     ctx.tool_execution_identity.thread_id = config.thread_id;
 
     auto runtime = std::make_shared<detail::RunContextRuntime>();
+    if (has_per_invocation_subgraph_) {
+        if (is_resume) {
+            const auto& stored = resume_context->metadata;
+            if (!stored.is_object() || !stored.contains("_neograph") ||
+                !stored["_neograph"].is_object() ||
+                !stored["_neograph"].contains("subgraph_invocation_id") ||
+                !stored["_neograph"]["subgraph_invocation_id"].is_string() ||
+                stored["_neograph"]["subgraph_invocation_id"].get<std::string>().empty())
+                throw std::runtime_error(
+                    "Cannot resume PerInvocation subgraph without persisted invocation identity");
+            runtime->graph_invocation_id =
+                stored["_neograph"]["subgraph_invocation_id"].get<std::string>();
+        } else {
+            runtime->graph_invocation_id = Checkpoint::generate_id();
+        }
+    }
     runtime->checkpoint_store = checkpoint_store;
     if (resources) {
         runtime->provider_call_broker = resources->provider_call_broker;

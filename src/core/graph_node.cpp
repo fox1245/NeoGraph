@@ -11,6 +11,7 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -45,22 +46,6 @@ ProviderBrokerScope provider_broker_scope(const RunContext& context,
     return {runtime->provider_call_broker, std::move(identity)};
 }
 
-// Child checkpoint identities must be stable for one logical invocation yet
-// distinct for sibling Send workers. Length-framing avoids delimiter collisions
-// when callers use arbitrary thread IDs or node names.
-std::string child_thread_id(const RunContext& parent, std::string_view node_name) {
-    // An empty root thread ID intentionally disables checkpointing. Deriving a
-    // shared anonymous child ID would re-enable it and let concurrent anonymous
-    // runs collide in the same child namespace.
-    if (parent.thread_id.empty()) return {};
-
-    const auto runtime = detail::runtime_for(parent);
-    const std::string invocation_id = runtime ? runtime->invocation_id : "root";
-    return "subgraph/" + length_frame(parent.thread_id)
-         + length_frame(node_name)
-         + length_frame(std::to_string(parent.step))
-         + length_frame(invocation_id);
-}
 
 }  // namespace
 
@@ -336,12 +321,35 @@ asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
 SubgraphNode::SubgraphNode(const std::string& name,
                            std::shared_ptr<GraphEngine> subgraph,
                            std::map<std::string, std::string> input_map,
-                           std::map<std::string, std::string> output_map)
+                           std::map<std::string, std::string> output_map,
+                           SubgraphPersistence persistence)
     : name_(name)
     , subgraph_(std::move(subgraph))
     , input_map_(std::move(input_map))
     , output_map_(std::move(output_map))
-{}
+    , persistence_(persistence)
+{
+    if (!subgraph_) throw std::invalid_argument("SubgraphNode requires a child engine");
+}
+
+std::string SubgraphNode::checkpoint_thread_id(
+    const std::string& parent_thread_id, int parent_step,
+    std::string_view task_id, std::string_view graph_invocation_id) const {
+    if (persistence_ == SubgraphPersistence::Stateless) return {};
+    if (persistence_ == SubgraphPersistence::Legacy)
+        return parent_thread_id.empty() ? std::string{}
+            : "subgraph/" + length_frame(parent_thread_id) + length_frame(name_)
+                + length_frame(std::to_string(parent_step)) + length_frame(task_id);
+    if (parent_thread_id.empty())
+        throw std::invalid_argument("Stateful subgraph policy requires a parent thread ID");
+    if (persistence_ == SubgraphPersistence::PerThread)
+        return "subgraph/thread/" + length_frame(parent_thread_id) + length_frame(name_);
+    if (graph_invocation_id.empty())
+        throw std::invalid_argument("PerInvocation subgraph requires a parent graph invocation ID");
+    return "subgraph/run/" + length_frame(parent_thread_id) + length_frame(name_)
+        + length_frame(graph_invocation_id) + length_frame(std::to_string(parent_step))
+        + length_frame(task_id);
+}
 
 json SubgraphNode::build_subgraph_input(const GraphState& state) const {
     json input;
@@ -379,50 +387,60 @@ std::vector<ChannelWrite> SubgraphNode::map_output_writes(
 }
 
 asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
+    const auto runtime = detail::runtime_for(in.ctx);
+    const std::string_view task_id = runtime
+        ? std::string_view(runtime->invocation_id) : std::string_view("root");
     RunConfig config;
-    config.thread_id    = child_thread_id(in.ctx, name_);
-    config.input        = build_subgraph_input(in.state);
-    config.stream_mode  = in.ctx.stream_mode;
+    config.thread_id = checkpoint_thread_id(
+        in.ctx.thread_id, in.ctx.step, task_id,
+        runtime ? std::string_view(runtime->graph_invocation_id) : std::string_view{});
+    if (persistence_ == SubgraphPersistence::Stateless)
+        config.thread_id = "subgraph/stateless/" + Checkpoint::generate_id();
+    if (persistence_ == SubgraphPersistence::PerThread)
+        config.resume_if_exists = true;
+    config.input = build_subgraph_input(in.state);
+    config.stream_mode = in.ctx.stream_mode;
     config.cancel_token = in.ctx.cancel_token;
     config.model_token_budget = in.ctx.model_token_budget;
-    config.budget_exhausted   = in.ctx.budget_exhausted;
-    // #88: hand the parent's accumulator down. A subgraph runs on its own engine
-    // with its own RunConfig, so without this a graph that delegates its LLM work
-    // to a subgraph reports zero tokens — which reads as "this run was free".
-    config.usage        = in.ctx.usage;
+    config.budget_exhausted = in.ctx.budget_exhausted;
+    config.usage = in.ctx.usage;
 
-    std::vector<ChannelWrite> child_writes;
-    if (in.stream_cb) {
-        // Forward the parent's stream sink so subgraph events (LLM
-        // tokens, node enter/exit, etc.) surface at the parent
-        // graph's caller without buffering.
-        auto result = co_await subgraph_->run_subgraph_async(
-            std::move(config), in.ctx, *in.stream_cb);
-        if (result.result.interrupted) {
-            const auto reason = result.result.interrupt_value.value(
-                "reason", "subgraph interrupted");
-            if (result.result.interrupt_value.contains("value")) {
-                throw NodeInterrupt(reason, result.result.interrupt_value["value"]);
-            }
-            throw NodeInterrupt(reason);
+    // Refuse overlapping writes to one persistent child namespace on this
+    // compiled engine instead of racing load_latest() against save().
+    struct NamespaceLease {
+        std::mutex& mutex;
+        std::set<std::string>& active;
+        std::string key;
+        NamespaceLease(std::mutex& m, std::set<std::string>& a, const std::string& id)
+            : mutex(m), active(a), key(id) {
+            std::lock_guard<std::mutex> guard(mutex);
+            if (!active.insert(key).second)
+                throw std::runtime_error("Persistent subgraph namespace already running");
         }
-        child_writes = std::move(result.writes);
-    } else {
-        auto result = co_await subgraph_->run_subgraph_async(
-            std::move(config), in.ctx, nullptr);
-        if (result.result.interrupted) {
-            const auto reason = result.result.interrupt_value.value(
-                "reason", "subgraph interrupted");
-            if (result.result.interrupt_value.contains("value")) {
-                throw NodeInterrupt(reason, result.result.interrupt_value["value"]);
-            }
-            throw NodeInterrupt(reason);
+        ~NamespaceLease() {
+            std::lock_guard<std::mutex> guard(mutex);
+            active.erase(key);
         }
-        child_writes = std::move(result.writes);
+    };
+    std::optional<NamespaceLease> lease;
+    if (persistence_ == SubgraphPersistence::PerThread)
+        lease.emplace(active_mutex_, active_per_thread_, config.thread_id);
+
+    // Forward the parent's stream sink without buffering child events.
+    auto result = co_await subgraph_->run_subgraph_async(
+        std::move(config), in.ctx,
+        in.stream_cb ? *in.stream_cb : GraphStreamCallback{}, persistence_);
+    if (result.result.interrupted) {
+        if (persistence_ == SubgraphPersistence::Stateless)
+            throw std::runtime_error("Stateless subgraph does not support interrupt/resume");
+        const auto reason = result.result.interrupt_value.value(
+            "reason", "subgraph interrupted");
+        if (result.result.interrupt_value.contains("value"))
+            throw NodeInterrupt(reason, result.result.interrupt_value["value"]);
+        throw NodeInterrupt(reason);
     }
-
     NodeOutput out;
-    out.writes = map_output_writes(child_writes);
+    out.writes = map_output_writes(result.writes);
     co_return out;
 }
 

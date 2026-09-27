@@ -16,6 +16,7 @@ std::unordered_map<const RunContext*, std::shared_ptr<const RunContextRuntime>> 
 constexpr const char* kMetadataNamespace = "_neograph";
 constexpr const char* kJournalVersion = "subgraph_write_journal_version";
 constexpr const char* kJournal = "subgraph_write_journal";
+constexpr const char* kGraphInvocation = "subgraph_invocation_id";
 
 }  // namespace
 
@@ -46,12 +47,16 @@ void append_applied_writes(const RunContext& context,
 
 json checkpoint_metadata_for(const RunContext& context) {
     auto runtime = runtime_for(context);
-    if (!runtime || !runtime->subgraph_write_journal) return json();
+    if (!runtime || !runtime->checkpoint_store) return json();
 
     json metadata;
-    metadata[kMetadataNamespace][kJournalVersion] = 1;
-    metadata[kMetadataNamespace][kJournal] =
-        serialize_channel_writes(runtime->subgraph_write_journal->writes);
+    if (!runtime->graph_invocation_id.empty())
+        metadata[kMetadataNamespace][kGraphInvocation] = runtime->graph_invocation_id;
+    if (runtime->subgraph_write_journal) {
+        metadata[kMetadataNamespace][kJournalVersion] = 1;
+        metadata[kMetadataNamespace][kJournal] =
+            serialize_channel_writes(runtime->subgraph_write_journal->writes);
+    }
     return metadata;
 }
 

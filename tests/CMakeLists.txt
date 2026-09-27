@@ -16,6 +16,7 @@ add_executable(neograph_tests
     test_usage_accounting.cpp
     test_subgraph_context.cpp
     test_subgraph_output_deltas.cpp
+    test_subgraph_persistence.cpp
     test_plan_execute_graph.cpp
     test_signal_dispatch.cpp
     test_multi_node_resume.cpp

@@ -1068,7 +1068,8 @@ public:
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
                  std::map<std::string, std::string> input_map = {},
-                 std::map<std::string, std::string> output_map = {});
+                 std::map<std::string, std::string> output_map = {},
+                 SubgraphPersistence persistence = SubgraphPersistence::Legacy);
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
@@ -1080,6 +1081,7 @@ public:
 | `subgraph` | `std::shared_ptr<GraphEngine>` | The compiled child graph engine |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` mapping. Read from parent, write to child input |
 | `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` mapping. Rename and forward child-produced write deltas to the parent |
+| `persistence` | `SubgraphPersistence` | `Legacy` (compatible), `PerInvocation`, `PerThread`, or `Stateless`; JSON topology nodes use the lower-case `persistence` string |
 
 If the maps are empty, channels are mapped by name (identity mapping).
 
@@ -1090,6 +1092,35 @@ child's final serialized state as a new reducer input. Consequently inherited
 append/custom values are not applied twice. Output mapping does not infer
 snapshot replacement; a child must emit `ChannelWrite::Mode::Overwrite` when it
 intends to replace the mapped parent value.
+#### Child persistence and inspection
+
+| Mode | Child checkpoint namespace | Start/resume | Store precedence |
+|------|----------------------------|--------------|------------------|
+| `Legacy` (default) | Length-framed parent thread, node, parent step, task ID (`subgraph/...`) | Historical behavior: a fresh parent starts a fresh child; parent resume loads the matching child snapshot | Parent run's checkpoint backend if present; otherwise child's configured backend |
+| `PerInvocation` | `subgraph/run/` plus parent thread, node, persisted parent graph-invocation UUID, step, and task ID | A new parent run gets a fresh namespace; parent resume restores the UUID and the child write journal | Parent, then child |
+| `PerThread` | `subgraph/thread/` plus parent thread and node | Fresh calls seed child state from the previous checkpoint before applying new input; parent resume resumes a matching child snapshot; overlapping calls on the same compiled node/namespace fail rather than race | Parent, then child |
+| `Stateless` | None | Child checkpoints are disabled even if the child has a backend. Interrupt/resume is unsupported and rejected; Store, cancellation, and ToolGate still propagate | No checkpoint backend; parent Store then child Store |
+
+Explicit stateful modes require a nonempty parent thread ID. `Legacy` retains
+the exact pre-#238 namespace and checkpoint wire format, including the existing
+empty-thread behavior. `PerInvocation` records `_neograph.subgraph_invocation_id`
+in parent checkpoint metadata; old checkpoints without it cannot resume after
+an opt-in policy change. `PerThread` is a shared namespace: a host sharing the
+same durable backend between *different* engines/processes must also coordinate
+their admission; the node-local guard only covers one compiled node. Avoid
+switching an existing thread between policies without an explicit migration.
+
+Use `GraphEngine::inspect_nested_checkpoint(root_thread, path[, run_store])`
+to traverse child and grandchild checkpoints. Each `SubgraphPathStep` supplies
+the child node name, parent super-step, stable Core task ID (`s0:child` or a
+Send task ID), and optionally the exact parent checkpoint ID to pin an older
+invocation. The result contains `graph_path`, child `thread_id`, and the
+complete `Checkpoint` (including serialized channel values and checkpoint ID).
+A checkpoint ID from a different thread or a stateless path is rejected.
+Pass the same run-scoped checkpoint store used by `RunResources` when it
+overrode the engine's backend. The public
+`SubgraphNode::checkpoint_thread_id()` reconstructs one segment's namespace.
+
 
 #### Runtime-context propagation
 

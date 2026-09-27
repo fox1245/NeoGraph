@@ -138,6 +138,22 @@ struct RunResources {
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
 };
 
+/// One edge in a nested checkpoint lookup. Task IDs are the engine's stable
+/// static/Send invocation IDs (for example, "s0:child").
+struct SubgraphPathStep {
+    std::string node_name;
+    int parent_step = 0;
+    std::string task_id;
+    /// Pin a historical parent checkpoint rather than its latest checkpoint.
+    std::string parent_checkpoint_id;
+};
+
+struct NestedCheckpoint {
+    std::vector<std::string> graph_path;
+    std::string thread_id;
+    Checkpoint checkpoint;
+};
+
 /**
  * @brief Configuration for a graph execution run.
  */
@@ -749,6 +765,15 @@ public:
     std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                               int limit = 100) const;
 
+    /// Inspect a descendant's checkpoint by graph path and exact node invocation.
+    /// Pass the run-scoped root store if it overrode the engine's configured store.
+    /// Returns nullopt for an absent checkpoint; rejects stateless paths and
+    /// mismatched checkpoint IDs instead of reading another thread's state.
+    std::optional<NestedCheckpoint> inspect_nested_checkpoint(
+        const std::string& root_thread_id,
+        const std::vector<SubgraphPathStep>& path,
+        std::shared_ptr<CheckpointStore> run_checkpoint_store = {}) const;
+
     /**
      * @brief Update the state for a thread by applying channel writes.
      *
@@ -1042,7 +1067,8 @@ private:
     asio::awaitable<SubgraphRunResult> run_subgraph_async(
         RunConfig config,
         const RunContext& parent,
-        GraphStreamCallback cb);
+        GraphStreamCallback cb,
+        SubgraphPersistence persistence);
 
     /// Super-step loop (coroutine). Owns: state init, interrupt
     /// gates, resume load, super-step commit, routing via Scheduler.
@@ -1068,6 +1094,8 @@ private:
     std::vector<ChannelDef> channel_defs_;
 
     std::map<std::string, std::unique_ptr<GraphNode>> nodes_;
+    /// True only for opt-in per-invocation children; skips UUIDs on legacy runs.
+    bool has_per_invocation_subgraph_ = false;
     std::vector<Edge>            edges_;
     std::vector<ConditionalEdge> conditional_edges_;
 

@@ -20,6 +20,8 @@ struct RunContextRuntime {
     std::shared_ptr<CheckpointStore> checkpoint_store;
     std::shared_ptr<SubgraphWriteJournal> subgraph_write_journal;
     std::string invocation_id;
+    /// Persisted only when this graph directly owns a PerInvocation child.
+    std::string graph_invocation_id;
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
     bool is_resume = false;

@@ -284,10 +284,21 @@ NodeFactory::NodeFactory() {
                     output_map[k] = v.get<std::string>();
                 }
             }
+            SubgraphPersistence persistence = SubgraphPersistence::Legacy;
+            if (config.contains("persistence")) {
+                const auto policy = config["persistence"].get<std::string>();
+                if (policy == "per_invocation") persistence = SubgraphPersistence::PerInvocation;
+                else if (policy == "per_thread") persistence = SubgraphPersistence::PerThread;
+                else if (policy == "stateless") persistence = SubgraphPersistence::Stateless;
+                else if (policy != "legacy")
+                    throw std::invalid_argument("subgraph node '" + name +
+                                                "': unknown persistence policy: " + policy);
+            }
 
-            return std::make_unique<SubgraphNode>(name,
-                std::shared_ptr<GraphEngine>(inner.release()),
-                                                  std::move(input_map), std::move(output_map));
+
+            return std::make_unique<SubgraphNode>(
+                name, std::shared_ptr<GraphEngine>(inner.release()),
+                std::move(input_map), std::move(output_map), persistence);
         },
         json::parse(R"JSON({
             "type": "object",
@@ -305,6 +316,11 @@ NodeFactory::NodeFactory() {
                     "type": "object",
                     "additionalProperties": { "type": "string" },
                     "description": "Map inner channel name -> outer channel name for outputs."
+                },
+                "persistence": {
+                    "type": "string",
+                    "enum": ["legacy", "per_invocation", "per_thread", "stateless"],
+                    "description": "Child checkpoint lifetime; legacy preserves existing identities."
                 }
             },
             "required": ["definition"]

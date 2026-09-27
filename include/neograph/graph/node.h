@@ -37,6 +37,9 @@
 #include <asio/awaitable.hpp>
 
 #include <stdexcept>
+#include <mutex>
+#include <set>
+#include <string_view>
 
 namespace neograph { class RuntimeInterpositionController; }
 namespace neograph::graph {
@@ -294,6 +297,14 @@ private:
     std::vector<ChannelWrite> route_from(const std::string& intent) const;
 };
 
+/// A subgraph's checkpoint lifetime. Legacy preserves the pre-#238 wire identity.
+enum class SubgraphPersistence {
+    Legacy,         ///< Existing parent-thread/step/task namespace (compatibility default).
+    PerInvocation,  ///< Fresh namespace for each parent run; durable across its resume.
+    PerThread,      ///< Retain channel state across parent runs on the same thread.
+    Stateless       ///< No child checkpoint or child interrupt/resume.
+};
+
 /**
  * @brief Node that runs a compiled GraphEngine as a single node (hierarchical composition).
  *
@@ -335,7 +346,17 @@ public:
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
                  std::map<std::string, std::string> input_map = {},
-                 std::map<std::string, std::string> output_map = {});
+                 std::map<std::string, std::string> output_map = {},
+                 SubgraphPersistence persistence = SubgraphPersistence::Legacy);
+
+    SubgraphPersistence persistence() const noexcept { return persistence_; }
+    const GraphEngine& child_engine() const noexcept { return *subgraph_; }
+    /// Reconstruct an inspection namespace from its parent path and invocation.
+    /// PerInvocation requires the parent's persisted graph invocation ID.
+    std::string checkpoint_thread_id(
+        const std::string& parent_thread_id, int parent_step,
+        std::string_view task_id,
+        std::string_view graph_invocation_id = {}) const;
 
     /// v0.4 PR 9a: unified ``run`` — drives the child engine via
     /// ``run_async`` (or ``run_stream_async`` when ``in.stream_cb``
@@ -351,6 +372,9 @@ private:
     std::shared_ptr<GraphEngine> subgraph_;
     std::map<std::string, std::string> input_map_;
     std::map<std::string, std::string> output_map_;
+    SubgraphPersistence persistence_;
+    std::mutex active_mutex_;
+    std::set<std::string> active_per_thread_;
 
     json build_subgraph_input(const GraphState& state) const;
     std::vector<ChannelWrite> map_output_writes(

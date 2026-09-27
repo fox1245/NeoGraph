@@ -41,6 +41,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Isolated multi-`Send` workers and cache keys now see live ephemeral values,
   while durable overwrite, append, and custom reducers retain their
   materialized checkpoint format.
+- **Explicit subgraph persistence modes and nested inspection.** `SubgraphNode`
+  now supports compatibility `Legacy`, fresh durable `PerInvocation`,
+  retained `PerThread`, and fail-closed `Stateless` policies. Stable
+  length-framed namespaces, parent checkpoint invocation identity, nested
+  `GraphEngine::inspect_nested_checkpoint()` lookup, and same-node
+  persistent namespace collision rejection preserve cancellation, Store,
+  ToolGate, and ordered output-delta behavior. SQLite/PostgreSQL reopen
+  coverage is included where the backend is enabled.
 
 ## [0.12.1] - 2026-08-23
 
