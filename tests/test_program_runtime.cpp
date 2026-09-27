@@ -2260,7 +2260,8 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
                                         effect_broker](
         const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
         if (context.owner_scope != "tenant:runtime" ||
-            context.program_version_id != version_id || context.run_id != "allowed" ||
+            context.program_version_id != version_id ||
+            (context.run_id != "allowed" && context.run_id != "no-broker") ||
             context.operation_id != "root" || context.attempt != 1)
             return std::nullopt;
         ProgramCoreToolGrant grant;
@@ -2276,16 +2277,22 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
             co_return neograph::ToolDecision::allow();
         };
         grant.controller = allowed_controller;
-        grant.effect_broker = effect_broker;
+        if (context.run_id == "allowed") grant.effect_broker = effect_broker;
         return grant;
     };
     fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("no-broker").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
     EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
     EXPECT_EQ(mediated_tool_controller.load(), allowed_controller.get());
     ASSERT_EQ(effect_broker->seen.size(), 1U);
     EXPECT_EQ(effect_broker->seen[0].owner_scope, "tenant:runtime");
     EXPECT_EQ(effect_broker->seen[0].run_id, "allowed");
+    EXPECT_EQ(effect_broker->seen[0].program_version_id, version.id());
+    EXPECT_EQ(effect_broker->seen[0].operation_id, "root");
+    EXPECT_EQ(effect_broker->seen[0].grant_id, "grant-allowed");
+    EXPECT_EQ(effect_broker->seen[0].attempt, 1U);
     EXPECT_FALSE(effect_broker->seen[0].thread_id.empty());
     EXPECT_FALSE(effect_broker->seen[0].task_id.empty());
     EXPECT_EQ(effect_broker->seen[0].call_ordinal, 0U);
@@ -2438,6 +2445,7 @@ TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
             co_return neograph::ToolDecision::allow();
         };
         grant.controller = std::make_shared<neograph::ToolExecutionController>();
+        grant.effect_broker = std::make_shared<ProgramToolEffectProbe>();
         return grant;
     };
     fixture.runtime = fixture.make_runtime();

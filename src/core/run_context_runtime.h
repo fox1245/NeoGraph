@@ -24,6 +24,7 @@ struct RunContextRuntime {
     std::string graph_invocation_id;
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
+    ToolEffectGrantIdentity tool_effect_grant;
     bool is_resume = false;
 };
 

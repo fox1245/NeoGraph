@@ -44,6 +44,7 @@ struct ToolExecutionContext {
     std::shared_ptr<ToolEffectBroker> effect_broker;
     /// Stable Core node invocation slot, populated by GraphEngine.
     std::string effect_task_id;
+    ToolEffectGrantIdentity effect_grant;
     std::optional<std::chrono::steady_clock::time_point> deadline;
     /// Optional host-owned lifecycle boundary shared by all tool consumers.
     std::shared_ptr<HookRuntime> hook_runtime;

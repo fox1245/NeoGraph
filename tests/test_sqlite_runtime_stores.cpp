@@ -1,11 +1,33 @@
 #include <neograph/sqlite_runtime_stores.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/types.h>
+#include <neograph/graph/engine.h>
+#include <neograph/graph/node.h>
+#include <neograph/graph/cancel.h>
+#ifdef NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM
+#include <neograph/llm/agent.h>
+#endif
+#include <neograph/tool_dispatch.h>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
+#ifdef __linux__
+#include <cerrno>
+#include <cstdlib>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char** environ;
+#endif
 
 using namespace neograph;
 namespace {
@@ -136,3 +158,568 @@ TEST(SQLiteRuntimeStores, HistoryHeadAndSnapshotRejectSqlMetadataCorruption) {
     EXPECT_THROW(store.history_head(feed), std::exception);
     EXPECT_THROW(store.snapshot_history(feed, 1, 1), std::exception);
 }
+
+namespace {
+class ToolEffectTestFiles {
+public:
+    ToolEffectTestFiles() {
+        static std::atomic<std::uint64_t> next{0};
+        const auto token = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())
+                         + "-" + std::to_string(++next);
+        path_ = std::filesystem::temp_directory_path() / ("ng-tool-effect-" + token);
+        if (!std::filesystem::create_directory(path_))
+            throw std::runtime_error("cannot reserve Tool effect test directory");
+    }
+    ~ToolEffectTestFiles() { std::error_code ignored; std::filesystem::remove_all(path_, ignored); }
+    ToolEffectTestFiles(const ToolEffectTestFiles&) = delete;
+    ToolEffectTestFiles& operator=(const ToolEffectTestFiles&) = delete;
+    std::string journal() const { return (path_ / "journal.sqlite").string(); }
+    std::string ledger() const { return (path_ / "sdk.sqlite").string(); }
+private:
+    std::filesystem::path path_;
+};
+
+using FixtureDb = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
+using FixtureStmt = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
+FixtureDb fixture_db(const std::string& path) {
+    sqlite3* raw = nullptr;
+    const int status = sqlite3_open(path.c_str(), &raw);
+    FixtureDb db(raw, sqlite3_close);
+    if (status != SQLITE_OK) throw std::runtime_error("cannot open fixture SQLite database");
+    return db;
+}
+
+class LedgerTool final : public Tool {
+public:
+    LedgerTool(std::string name, std::string ledger_path, bool throw_after_write = false,
+               std::chrono::milliseconds delay = {},
+               std::shared_ptr<graph::CancelToken> cancel_after_write = {},
+               std::shared_ptr<std::atomic<bool>> signal_after_write = {},
+               bool crash_after_write = false)
+        : name_(std::move(name)), ledger_path_(std::move(ledger_path)),
+          throw_after_write_(throw_after_write), delay_(delay),
+          cancel_after_write_(std::move(cancel_after_write)),
+          signal_after_write_(std::move(signal_after_write)),
+          crash_after_write_(crash_after_write) {
+        const auto db = fixture_db(ledger_path_);
+        if (sqlite3_exec(db.get(), "CREATE TABLE IF NOT EXISTS sdk_effects "
+                               "(id INTEGER PRIMARY KEY, payload TEXT NOT NULL)",
+                         nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw std::runtime_error("cannot create fixture effect ledger");
+    }
+    ChatTool get_definition() const override {
+        ChatTool definition;
+        definition.name = name_;
+        definition.description = "External SQLite SDK write fixture";
+        definition.parameters = json::object();
+        return definition;
+    }
+    std::string get_name() const override { return name_; }
+    std::string execute(const json& arguments) override {
+        sqlite3_int64 effect_id;
+        {
+            const auto db = fixture_db(ledger_path_);
+            sqlite3_stmt* raw_statement = nullptr;
+            if (sqlite3_prepare_v2(db.get(), "INSERT INTO sdk_effects(payload) VALUES (?)",
+                                   -1, &raw_statement, nullptr) != SQLITE_OK)
+                throw std::runtime_error("fixture SDK prepare failed");
+            FixtureStmt statement(raw_statement, sqlite3_finalize);
+            const auto payload = arguments.dump();
+            sqlite3_bind_text(statement.get(), 1, payload.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(statement.get()) != SQLITE_DONE)
+                throw std::runtime_error("fixture SDK write failed");
+            effect_id = sqlite3_last_insert_rowid(db.get());
+        }
+        if (signal_after_write_) signal_after_write_->store(true, std::memory_order_release);
+#ifdef __linux__
+        if (crash_after_write_) std::_Exit(77);
+#endif
+        if (delay_ != std::chrono::milliseconds::zero()) std::this_thread::sleep_for(delay_);
+        if (cancel_after_write_) {
+            cancel_after_write_->cancel();
+            throw graph::CancelledException("SDK effect committed before cancellation");
+        }
+        if (throw_after_write_) throw std::runtime_error("response lost after external commit");
+        return json{{"effect_id", effect_id}, {"payload", arguments}}.dump();
+    }
+    static int count(const std::string& path) {
+        const auto db = fixture_db(path);
+        sqlite3_stmt* raw_statement = nullptr;
+        if (sqlite3_prepare_v2(db.get(), "SELECT count(*) FROM sdk_effects",
+                               -1, &raw_statement, nullptr) != SQLITE_OK)
+            throw std::runtime_error("cannot inspect fixture ledger");
+        FixtureStmt statement(raw_statement, sqlite3_finalize);
+        return sqlite3_step(statement.get()) == SQLITE_ROW
+            ? sqlite3_column_int(statement.get(), 0) : -1;
+    }
+private:
+    std::string name_;
+    std::string ledger_path_;
+    bool throw_after_write_;
+    std::chrono::milliseconds delay_;
+    std::shared_ptr<graph::CancelToken> cancel_after_write_;
+    std::shared_ptr<std::atomic<bool>> signal_after_write_;
+    bool crash_after_write_;
+};
+
+ToolExecutionContext tool_context(const std::shared_ptr<SQLiteToolEffectBroker>& broker,
+                                   std::string run = "program-run") {
+    ToolExecutionContext execution;
+    execution.effect_broker = broker;
+    execution.identity.owner_scope = "tenant";
+    execution.identity.root_run_id = std::move(run);
+    execution.identity.thread_id = "core-thread";
+    execution.effect_task_id = "s2:node:task-123";
+    execution.effect_grant = {"program-v1", "operation-1", "grant-1", 1};
+    execution.effect_grant.binding_fingerprint = "admitted-program-binding:v1";
+    return execution;
+}
+
+ToolCall sdk_call(std::string model_id, std::string name, std::string arguments) {
+    return ToolCall{std::move(model_id), std::move(name), std::move(arguments)};
+}
+
+std::vector<ChatMessage> broker_dispatch(std::vector<ToolCall> calls,
+                                         std::vector<Tool*> tools,
+                                         ToolExecutionContext execution,
+                                         ToolGate gate = {}) {
+    return async::run_sync(dispatch_tool_calls(std::move(calls), std::move(tools),
+                                                std::move(gate), {}, std::move(execution)));
+}
+} // namespace
+
+TEST(SQLiteToolEffects, ReopenReplaysExactReceiptWithoutSDKWriteAndRejectsChangedAuthority) {
+    ToolEffectTestFiles files;
+    const auto journal_path = files.journal();
+    const auto ledger_path = files.ledger();
+    LedgerTool tool("write", ledger_path);
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1:endpoint:a"}});
+    auto context = tool_context(broker);
+    auto initial = broker_dispatch({sdk_call("model-one", "write", R"({"a":1,"b":2})")},
+                                   {&tool}, context);
+    ASSERT_EQ(initial.size(), 1u);
+    ASSERT_EQ(initial[0].tool_status, "succeeded");
+    ASSERT_EQ(LedgerTool::count(ledger_path), 1);
+    broker.reset();
+    broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1:endpoint:a"}});
+    context.effect_broker = broker;
+    context.effect_grant.attempt = 3;
+    auto replay = broker_dispatch({sdk_call("different-model-id", "write", R"({"b":2,"a":1})")},
+                                  {&tool}, context);
+    ASSERT_EQ(replay.size(), 1u);
+    EXPECT_EQ(replay[0].content, initial[0].content);
+    EXPECT_EQ(replay[0].tool_call_id, "different-model-id");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+
+    for (const auto& mutated : {"grant", "version", "operation", "binding", "arguments"}) {
+        auto changed = context;
+        auto args = std::string(R"({"a":1,"b":2})");
+        if (std::string(mutated) == "grant") changed.effect_grant.grant_id = "other-grant";
+        if (std::string(mutated) == "version") changed.effect_grant.program_version_id = "other-version";
+        if (std::string(mutated) == "operation") changed.effect_grant.operation_id = "other-operation";
+        if (std::string(mutated) == "binding") changed.effect_grant.binding_fingerprint = "different-binding";
+        if (std::string(mutated) == "arguments") args = R"({"a":8,"b":2})";
+        const auto denied = broker_dispatch({sdk_call("model-one", "write", args)},
+                                            {&tool}, changed);
+        ASSERT_EQ(denied.size(), 1u);
+        EXPECT_EQ(denied[0].tool_status, "rejected");
+    }
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+    auto changed_executable = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v2:endpoint:b"}});
+    context.effect_broker = changed_executable;
+    auto denied = broker_dispatch({sdk_call("model-one", "write", R"({"a":1,"b":2})")},
+                                  {&tool}, context);
+    ASSERT_EQ(denied.size(), 1u);
+    EXPECT_EQ(denied[0].tool_status, "rejected");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+    LedgerTool renamed("renamed", ledger_path);
+    context.effect_broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&renamed, "sdk-build:v1:endpoint:a"}});
+    const auto wrong_tool = broker_dispatch(
+        {sdk_call("model-one", "renamed", R"({"a":1,"b":2})")}, {&renamed}, context);
+    ASSERT_EQ(wrong_tool.size(), 1u);
+    EXPECT_EQ(wrong_tool[0].tool_status, "rejected");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+}
+
+TEST(SQLiteToolEffects, MissingMarkerAndBatchGateDenialDoNotCallSDK) {
+    ToolEffectTestFiles files;
+    const auto journal_path = files.journal();
+    const auto ledger_path = files.ledger();
+    LedgerTool tool("write", ledger_path);
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    auto context = tool_context(broker);
+    ToolGate deny = [](ToolCall, ToolGateContext) -> asio::awaitable<ToolDecision> {
+        co_return ToolDecision::deny("host grant denied");
+    };
+    auto denied = broker_dispatch({sdk_call("first", "write", "{}")}, {&tool}, context, deny);
+    EXPECT_EQ(denied[0].tool_status, "rejected");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 0);
+    const auto raw = fixture_db(journal_path);
+    ASSERT_EQ(sqlite3_exec(raw.get(), "CREATE TRIGGER refuse_tool_marker BEFORE INSERT "
+                                "ON neograph_tool_effects BEGIN SELECT RAISE(FAIL, 'marker refused'); END",
+                           nullptr, nullptr, nullptr), SQLITE_OK);
+    auto refused = broker_dispatch({sdk_call("first", "write", "{}")}, {&tool}, context);
+    ASSERT_EQ(refused.size(), 1u);
+    EXPECT_EQ(refused[0].tool_status, "failed");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 0);
+}
+
+TEST(SQLiteToolEffects, FailedReceiptCommitBlocksRedispatchAfterSDKWrite) {
+    ToolEffectTestFiles files;
+    LedgerTool tool("write", files.ledger());
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    const auto raw = fixture_db(files.journal());
+    ASSERT_EQ(sqlite3_exec(raw.get(), "CREATE TRIGGER refuse_tool_receipt BEFORE UPDATE "
+                                "ON neograph_tool_effects BEGIN SELECT RAISE(FAIL, 'receipt refused'); END",
+                           nullptr, nullptr, nullptr), SQLITE_OK);
+    auto context = tool_context(broker);
+    EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+    broker.reset();
+    context.effect_broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    EXPECT_THROW(broker_dispatch({sdk_call("two", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+}
+
+TEST(SQLiteToolEffects, ExternalCommitWithoutReceiptBlocksRestartAndAdvancedAttempt) {
+    ToolEffectTestFiles files;
+    const auto journal_path = files.journal();
+    const auto ledger_path = files.ledger();
+    LedgerTool tool("write", ledger_path, true);
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    auto context = tool_context(broker);
+    EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    ASSERT_EQ(LedgerTool::count(ledger_path), 1);
+    broker.reset();
+    context.effect_broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    context.effect_grant.attempt = 5;
+    EXPECT_THROW(broker_dispatch({sdk_call("another", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+}
+
+TEST(SQLiteToolEffects, IndependentConcurrentRunsAndBatchOrdinalsHaveDistinctEffects) {
+    ToolEffectTestFiles files;
+    const auto journal_path = files.journal();
+    const auto ledger_path = files.ledger();
+    LedgerTool tool("write", ledger_path);
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    std::atomic<int> completed{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&, i] {
+            const auto context = tool_context(broker, "run-" + std::to_string(i));
+            const auto result = broker_dispatch(
+                {sdk_call("same-model-id", "write", R"({"segment":1})"),
+                 sdk_call("same-model-id", "write", R"({"segment":2})")},
+                {&tool}, context);
+            if (result.size() == 2 && result[0].tool_status == "succeeded" &&
+                result[1].tool_status == "succeeded") ++completed;
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    EXPECT_EQ(completed.load(), 4);
+    EXPECT_EQ(LedgerTool::count(ledger_path), 8);
+    auto replay = broker_dispatch(
+        {sdk_call("new-id", "write", R"({"segment":1})"),
+         sdk_call("new-id", "write", R"({"segment":2})")},
+        {&tool}, tool_context(broker, "run-2"));
+    EXPECT_EQ(replay[0].tool_status, "succeeded");
+    EXPECT_EQ(replay[1].tool_status, "succeeded");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 8);
+    // Reordering the same model IDs does not reassign a committed ordinal.
+    const auto swapped = broker_dispatch(
+        {sdk_call("same-model-id", "write", R"({"segment":2})"),
+         sdk_call("same-model-id", "write", R"({"segment":1})")},
+        {&tool}, tool_context(broker, "run-2"));
+    EXPECT_EQ(swapped[0].tool_status, "rejected");
+    EXPECT_EQ(swapped[1].tool_status, "rejected");
+    EXPECT_EQ(LedgerTool::count(ledger_path), 8);
+}
+
+TEST(SQLiteToolEffects, CancellationAfterSDKCommitLeavesUnresolvedMarker) {
+    ToolEffectTestFiles files;
+    auto token = std::make_shared<graph::CancelToken>();
+    LedgerTool tool("write", files.ledger(), false, {}, token);
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    auto context = tool_context(broker);
+    context.cancel_token = token;
+    EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
+                 graph::CancelledException);
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+    context.effect_broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    context.cancel_token.reset();
+    EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+}
+
+TEST(SQLiteToolEffects, TimeoutAfterSDKCommitDoesNotRedispatch) {
+    ToolEffectTestFiles files;
+    LedgerTool tool("write", files.ledger(), false, std::chrono::milliseconds(120));
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    auto controller = std::make_shared<ToolExecutionController>();
+    ToolExecutionPolicy policy;
+    policy.execution_timeout = std::chrono::milliseconds(5);
+    policy.effect = ToolEffectClass::ExternalWrite;
+    controller->policies()->upsert("write", policy);
+    auto context = tool_context(broker);
+    context.controller = controller;
+    EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    ASSERT_EQ(LedgerTool::count(files.ledger()), 1);
+    context.effect_broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+}
+
+TEST(SQLiteToolEffects, SimultaneousSameSlotCannotDispatchTwice) {
+    ToolEffectTestFiles files;
+    auto signalled = std::make_shared<std::atomic<bool>>(false);
+    LedgerTool tool("write", files.ledger(), false, std::chrono::milliseconds(150),
+                    {}, signalled);
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    auto context = tool_context(broker);
+    std::atomic<bool> first_succeeded{false};
+    std::string first_error;
+    std::jthread first([&] {
+        try {
+            const auto result = broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context);
+            first_succeeded = result.size() == 1 && result[0].tool_status == "succeeded";
+        } catch (const std::exception& error) {
+            first_error = error.what();
+        }
+    });
+    for (int i = 0; i < 500 && !signalled->load(std::memory_order_acquire); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(signalled->load(std::memory_order_acquire));
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+    EXPECT_THROW(broker_dispatch({sdk_call("another", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    first.join();
+    EXPECT_TRUE(first_succeeded) << first_error;
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+}
+
+#ifdef __linux__
+namespace {
+class ChildReaper {
+public:
+    explicit ChildReaper(pid_t pid) : pid_(pid) {}
+    ChildReaper(const ChildReaper&) = delete;
+    ChildReaper& operator=(const ChildReaper&) = delete;
+    ~ChildReaper() {
+        if (pid_ > 0) {
+            int ignored = 0;
+            while (::waitpid(pid_, &ignored, 0) == -1 && errno == EINTR) {}
+        }
+    }
+    int wait() {
+        int status = 0;
+        pid_t observed;
+        do { observed = ::waitpid(pid_, &status, 0); } while (observed == -1 && errno == EINTR);
+        if (observed != pid_) throw std::runtime_error("Tool effect fixture child wait failed");
+        pid_ = -1;
+        return status;
+    }
+private:
+    pid_t pid_;
+};
+} // namespace
+
+TEST(SQLiteToolEffects, ProcessCrashBlocksEffectAfterRestart) {
+    if (const char* child_journal = std::getenv("NG_TOOL_EFFECT_CRASH_JOURNAL")) {
+        const char* child_ledger = std::getenv("NG_TOOL_EFFECT_CRASH_LEDGER");
+        if (!child_ledger) throw std::runtime_error("Tool effect fixture missing child ledger");
+        LedgerTool tool("write", child_ledger, false, {}, {}, {}, true);
+        auto broker = std::make_shared<SQLiteToolEffectBroker>(
+            child_journal, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+        (void)broker_dispatch({sdk_call("first", "write", "{}")}, {&tool}, tool_context(broker));
+        std::_Exit(79); // The child must terminate inside Tool::execute, before receipt.
+    }
+
+    ToolEffectTestFiles files;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
+    const std::string journal_env = "NG_TOOL_EFFECT_CRASH_JOURNAL=" + files.journal();
+    const std::string ledger_env = "NG_TOOL_EFFECT_CRASH_LEDGER=" + files.ledger();
+    std::vector<char*> child_env;
+    for (auto entry = environ; *entry; ++entry) {
+        if (!std::string_view(*entry).starts_with("NG_TOOL_EFFECT_CRASH_"))
+            child_env.push_back(*entry);
+    }
+    child_env.push_back(const_cast<char*>(journal_env.c_str()));
+    child_env.push_back(const_cast<char*>(ledger_env.c_str()));
+    child_env.push_back(nullptr);
+    std::string selector = "--gtest_filter=SQLiteToolEffects.ProcessCrashBlocksEffectAfterRestart";
+    char* child_args[] = {const_cast<char*>(executable.c_str()), selector.data(), nullptr};
+    pid_t pid = -1;
+    ASSERT_EQ(::posix_spawn(&pid, executable.c_str(), nullptr, nullptr,
+                            child_args, child_env.data()), 0);
+    ChildReaper child(pid);
+    const int status = child.wait();
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 77);
+    ASSERT_EQ(LedgerTool::count(files.ledger()), 1);
+
+    LedgerTool tool("write", files.ledger());
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        files.journal(), std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    auto context = tool_context(broker);
+    context.effect_grant.attempt = 4;
+    EXPECT_THROW(broker_dispatch({sdk_call("different-id", "write", "{}")}, {&tool}, context),
+                 graph::NodeInterrupt);
+    EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+}
+#endif
+
+namespace {
+class ToolEffectAssistantNode final : public graph::GraphNode {
+public:
+    asio::awaitable<graph::NodeResult> run(graph::NodeInput) override {
+        graph::NodeResult result;
+        result.writes.push_back(graph::ChannelWrite{
+            "messages", json::array({json{
+                {"role", "assistant"}, {"content", ""},
+                {"tool_calls", json::array({json{
+                    {"id", "model-id"}, {"name", "write"},
+                    {"arguments", R"({"item":"core"})"}}})}}})});
+        co_return result;
+    }
+    std::string get_name() const override { return "tool-effect-source"; }
+};
+} // namespace
+
+TEST(SQLiteToolEffects, StandaloneCoreRunResourcesBrokerReplaysWithoutEngineMutation) {
+    ToolEffectTestFiles files;
+    const auto journal_path = files.journal();
+    const auto ledger_path = files.ledger();
+    LedgerTool tool("write", ledger_path);
+    graph::NodeFactory::instance().register_type("sqlite_tool_effect_source",
+        [](const std::string&, const json&, const graph::NodeContext&) {
+            return std::make_unique<ToolEffectAssistantNode>();
+        });
+    const auto graph_definition = json{
+        {"name", "sqlite_tool_effect_graph"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {{"source", {{"type", "sqlite_tool_effect_source"}}},
+                   {"tools", {{"type", "tool_dispatch"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "source"}},
+                                json{{"from", "source"}, {"to", "tools"}},
+                                json{{"from", "tools"}, {"to", "__end__"}}})}};
+    graph::NodeContext nodes;
+    nodes.tools = {&tool};
+    auto engine = graph::GraphEngine::compile(graph_definition, nodes);
+    graph::RunConfig config;
+    config.thread_id = "core-thread";
+    graph::RunMetadata metadata;
+    metadata.owner_scope = "tenant";
+    metadata.run_id = "standalone-core-run";
+    auto broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    graph::RunResources resources;
+    resources.tool_effect_broker = broker;
+    resources.tool_effect_grant = {"", "standalone-operation", "host-grant", 1};
+    const auto first = async::run_sync(engine->run_async(config, metadata, resources));
+    EXPECT_FALSE(first.interrupted);
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+    broker.reset();
+    resources.tool_effect_broker = std::make_shared<SQLiteToolEffectBroker>(
+        journal_path, std::vector<SQLiteToolExecutableBinding>{{&tool, "sdk-build:v1"}});
+    resources.tool_effect_grant.attempt = 2;
+    const auto replay = async::run_sync(engine->run_async(config, metadata, resources));
+    EXPECT_FALSE(replay.interrupted);
+    EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+}
+
+#ifdef NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM
+namespace {
+class SDKAgentProvider final : public Provider {
+public:
+    ChatCompletion complete(const CompletionParams& params) override {
+        ChatCompletion result;
+        if (std::any_of(params.messages.begin(), params.messages.end(),
+                        [](const ChatMessage& message) { return message.role == "tool"; })) {
+            result.message = ChatMessage{"assistant", "done"};
+        } else {
+            result.message.role = "assistant";
+            result.message.tool_calls.push_back(sdk_call("untrusted-model-id", "write", R"({"item":"agent"})"));
+        }
+        return result;
+    }
+    ChatCompletion complete_stream(const CompletionParams& params,
+                                   const StreamCallback&) override { return complete(params); }
+    std::string get_name() const override { return "sdk-agent-fixture"; }
+};
+} // namespace
+
+TEST(SQLiteToolEffects, StandaloneAgentDeniesAndReplaysPendingAssistantOnRestart) {
+    ToolEffectTestFiles files;
+    const auto ledger_path = files.ledger();
+    const auto journal_path = files.journal();
+    std::vector<ChatMessage> denied_messages{{"user", "write"}};
+    {
+        auto effect = std::make_unique<LedgerTool>("write", ledger_path);
+        auto* tool = effect.get();
+        std::vector<std::unique_ptr<Tool>> tools;
+        tools.push_back(std::move(effect));
+        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools));
+        agent.set_tool_gate([](ToolCall, ToolGateContext) -> asio::awaitable<ToolDecision> {
+            co_return ToolDecision::deny("no SDK writes");
+        });
+        auto context = tool_context(std::make_shared<SQLiteToolEffectBroker>(
+            journal_path, std::vector<SQLiteToolExecutableBinding>{{tool, "sdk-build:v1"}}),
+            "denied-agent-run");
+        EXPECT_EQ(agent.run(denied_messages, 3, context), "done");
+        EXPECT_EQ(LedgerTool::count(ledger_path), 0);
+    }
+
+    std::vector<ChatMessage> messages{{"user", "write"}};
+    {
+        auto effect = std::make_unique<LedgerTool>("write", ledger_path);
+        auto* tool = effect.get();
+        std::vector<std::unique_ptr<Tool>> tools;
+        tools.push_back(std::move(effect));
+        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools));
+        auto context = tool_context(std::make_shared<SQLiteToolEffectBroker>(
+            journal_path, std::vector<SQLiteToolExecutableBinding>{{tool, "sdk-build:v1"}}),
+            "allowed-agent-run");
+        EXPECT_EQ(agent.run(messages, 3, context), "done");
+        EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+    }
+    messages.pop_back(); // Reconnect with the committed assistant, not its final answer.
+    messages.pop_back(); // Its Tool reply was not persisted by the standalone host.
+    {
+        auto effect = std::make_unique<LedgerTool>("write", ledger_path);
+        auto* tool = effect.get();
+        std::vector<std::unique_ptr<Tool>> tools;
+        tools.push_back(std::move(effect));
+        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools));
+        auto context = tool_context(std::make_shared<SQLiteToolEffectBroker>(
+            journal_path, std::vector<SQLiteToolExecutableBinding>{{tool, "sdk-build:v1"}}),
+            "allowed-agent-run");
+        context.effect_grant.attempt = 2;
+        EXPECT_EQ(agent.run(messages, 3, context), "done");
+        EXPECT_EQ(LedgerTool::count(ledger_path), 1);
+    }
+}
+#endif

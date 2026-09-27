@@ -98,6 +98,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact call slot/request/deployment independently of attempt provenance,
   stores completions for restart replay, and requires external evidence to
   reconcile uncertain outcomes without silent re-dispatch.
+- **Durable mediated Tool effect journal.** An invocation-scoped SQLite host
+  broker records the exact Program grant, executable binding, Core task/call
+  slot and rewritten arguments before dispatch, replays verified receipts
+  across restart, and blocks unresolved external outcomes instead of retrying.
+  Program Core grants now require a Tool effect broker; standalone Core and
+  Agent callers can supply an explicit host-owned broker identity.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,

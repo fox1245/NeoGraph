@@ -1448,10 +1448,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     grant->operation_id == operation_id &&
                     grant->attempt == control->attempt && !grant->grant_id.empty() &&
                     grant->binding_fingerprint == control->binding_fingerprint &&
-                    grant->gate && grant->controller) {
+                    grant->gate && grant->controller && grant->effect_broker) {
                     resources.tool_gate = grant->gate;
                     resources.tool_execution_controller = grant->controller;
                     resources.tool_effect_broker = grant->effect_broker;
+                    resources.tool_effect_grant = {
+                        grant->program_version_id, grant->operation_id,
+                        grant->grant_id, grant->attempt};
+                    resources.tool_effect_grant.binding_fingerprint = grant->binding_fingerprint;
                 } else {
                     // A capability receipt binds code, not authority for an effect.
                     // Native nodes calling Tool::execute directly remain a separate

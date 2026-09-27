@@ -3,9 +3,11 @@
 #include <neograph/context_store.h>
 #include <neograph/controlled_provider.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/tool_effect_broker.h>
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace neograph {
 
@@ -71,4 +73,31 @@ public:
 private: struct Impl; std::unique_ptr<Impl> impl_;
 };
 
+
+/**
+ * Concrete write-ahead mediated Tool broker. A binding names exact executable
+ * code/configuration/remote target, not just the LLM-visible tool name.
+ * The host must validate grant authority before installing the broker.
+ * Tool pointers are non-owning: the owning Agent or Core engine must keep each
+ * exact instance alive until every in-flight broker call has completed.
+ */
+struct SQLiteToolExecutableBinding {
+    Tool* tool = nullptr;
+    std::string executable_id;
+};
+
+class NEOGRAPH_API SQLiteToolEffectBroker final : public ToolEffectBroker {
+public:
+    SQLiteToolEffectBroker(std::string database_path,
+                           std::vector<SQLiteToolExecutableBinding> bindings);
+    ~SQLiteToolEffectBroker() override;
+    SQLiteToolEffectBroker(const SQLiteToolEffectBroker&) = delete;
+    SQLiteToolEffectBroker& operator=(const SQLiteToolEffectBroker&) = delete;
+    asio::awaitable<ToolExecutionResult> execute(
+        ToolEffectIdentity identity, Tool& tool, json arguments,
+        ToolExecutionContext context) override;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 }  // namespace neograph

@@ -86,11 +86,54 @@ Agent::complete(const std::vector<ChatMessage>& messages)
     return completion;
 }
 
+namespace {
+std::vector<ChatMessage> dispatch_agent_batch(
+    const std::vector<ChatMessage>& messages, std::vector<ToolCall> calls,
+    std::vector<Tool*> tools, ToolGate gate, ToolExecutionContext execution) {
+    if (execution.effect_broker) {
+        // The assistant message must already be present in persisted history.
+        // Model ToolCall.id is correlation only, not the logical slot.
+        const auto turns = std::count_if(messages.begin(), messages.end(),
+            [](const ChatMessage& message) {
+                return message.role == "assistant" && !message.tool_calls.empty();
+            });
+        execution.effect_task_id = "agent:turn:" + std::to_string(turns - 1);
+    }
+    return neograph::async::run_sync(
+        dispatch_tool_calls(std::move(calls), std::move(tools), std::move(gate), {},
+                            std::move(execution)));
+}
+} // namespace
+
 std::string
 Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
 {
+    return run(messages, max_iterations, {});
+}
+
+std::string Agent::run(std::vector<ChatMessage>& messages, int max_iterations,
+                       ToolExecutionContext effect_context) {
+    if (max_iterations <= 0)
+        throw std::runtime_error("Agent exceeded max iterations (" +
+                                 std::to_string(max_iterations) + ")");
     ensure_system_message(messages);
+    if (effect_context.effect_broker &&
+        (effect_context.identity.owner_scope.empty() ||
+         effect_context.identity.root_run_id.empty() ||
+         effect_context.identity.thread_id.empty() ||
+         effect_context.effect_grant.grant_id.empty() ||
+         effect_context.effect_grant.operation_id.empty()))
+        throw std::invalid_argument("Agent Tool broker requires exact host run and grant identity");
+    if (!effect_context.controller) effect_context.controller = tool_execution_controller_;
+    if (!effect_context.hook_runtime) effect_context.hook_runtime = hook_runtime_;
     auto tool_defs = get_tool_definitions();
+
+    if (effect_context.effect_broker && !messages.empty() &&
+        messages.back().role == "assistant" && !messages.back().tool_calls.empty()) {
+        auto pending = dispatch_agent_batch(messages, messages.back().tool_calls,
+                                            tool_ptrs(), tool_gate_, effect_context);
+        for (auto& message : pending) messages.push_back(std::move(message));
+    }
 
     for (int i = 0; i < max_iterations; ++i) {
         CompletionParams params;
@@ -116,11 +159,9 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
         // used to call the blocking execute() one tool at a time while the
         // node fanned the same calls out concurrently; three 300 ms async
         // tools took 900 ms here and 300 ms there.
-        ToolExecutionContext execution;
-        execution.controller = tool_execution_controller_;
-        execution.hook_runtime = hook_runtime_;
-        auto tool_msgs = neograph::async::run_sync(
-            dispatch_tool_calls(msg.tool_calls, tool_ptrs(), tool_gate_, {}, std::move(execution)));
+        auto execution = effect_context;
+        auto tool_msgs = dispatch_agent_batch(messages, msg.tool_calls, tool_ptrs(),
+                                              tool_gate_, std::move(execution));
         for (auto& tm : tool_msgs) {
             messages.push_back(std::move(tm));
         }
@@ -133,11 +174,35 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
 std::string
 Agent::run_stream(std::vector<ChatMessage>& messages,
                   const StreamCallback& on_chunk,
-                  int max_iterations)
-{
+                  int max_iterations) {
+    return run_stream(messages, on_chunk, max_iterations, {});
+}
+
+std::string Agent::run_stream(std::vector<ChatMessage>& messages,
+                              const StreamCallback& on_chunk, int max_iterations,
+                              ToolExecutionContext effect_context) {
+    if (max_iterations <= 0)
+        throw std::runtime_error("Agent exceeded max iterations (" +
+                                 std::to_string(max_iterations) + ")");
+    if (effect_context.effect_broker &&
+        (effect_context.identity.owner_scope.empty() ||
+         effect_context.identity.root_run_id.empty() ||
+         effect_context.identity.thread_id.empty() ||
+         effect_context.effect_grant.grant_id.empty() ||
+         effect_context.effect_grant.operation_id.empty()))
+        throw std::invalid_argument("Agent Tool broker requires exact host run and grant identity");
     ensure_system_message(messages);
-    auto tool_defs = get_tool_definitions();
+    if (!effect_context.controller) effect_context.controller = tool_execution_controller_;
+    if (!effect_context.hook_runtime) effect_context.hook_runtime = hook_runtime_;
     bool has_done_tool_calls = false;
+    if (effect_context.effect_broker && !messages.empty() &&
+        messages.back().role == "assistant" && !messages.back().tool_calls.empty()) {
+        auto pending = dispatch_agent_batch(messages, messages.back().tool_calls,
+                                            tool_ptrs(), tool_gate_, effect_context);
+        for (auto& message : pending) messages.push_back(std::move(message));
+        has_done_tool_calls = true;
+    }
+    auto tool_defs = get_tool_definitions();
 
     for (int i = 0; i < max_iterations; ++i) {
         CompletionParams params;
@@ -194,11 +259,9 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
         // survived this long.
         auto calls = messages.back().tool_calls;
 
-        ToolExecutionContext execution;
-        execution.controller = tool_execution_controller_;
-        execution.hook_runtime = hook_runtime_;
-        auto tool_msgs = neograph::async::run_sync(
-            dispatch_tool_calls(std::move(calls), tool_ptrs(), tool_gate_, {}, std::move(execution)));
+        auto execution = effect_context;
+        auto tool_msgs = dispatch_agent_batch(messages, std::move(calls), tool_ptrs(),
+                                              tool_gate_, std::move(execution));
         for (auto& tm : tool_msgs) {
             messages.push_back(std::move(tm));
         }

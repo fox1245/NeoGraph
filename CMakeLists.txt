@@ -850,6 +850,7 @@ if(NEOGRAPH_BUILD_SQLITE)
         src/core/sqlite_evidence_ledger.cpp
         src/core/research_task_board.cpp
         src/core/sqlite_runtime_stores.cpp
+        src/core/sqlite_tool_effect_broker.cpp
     )
 
     target_include_directories(neograph_sqlite

@@ -121,6 +121,7 @@ ToolExecutionContext make_tool_execution_context(const RunContext& ctx) {
     if (const auto runtime = detail::runtime_for(ctx)) {
         execution.effect_broker = runtime->tool_effect_broker;
         execution.effect_task_id = runtime->invocation_id;
+        execution.effect_grant = runtime->tool_effect_grant;
     }
     return execution;
 }

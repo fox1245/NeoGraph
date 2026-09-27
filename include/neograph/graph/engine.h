@@ -149,6 +149,8 @@ struct RunResources {
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
     /// Host broker for mediated Tool effects in this invocation and subgraphs.
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
+    /// Exact grant identity attached to this invocation's mediated Tool calls.
+    ToolEffectGrantIdentity tool_effect_grant;
 };
 
 /// One edge in a nested checkpoint lookup. Task IDs are the engine's stable
@@ -1009,6 +1011,7 @@ private:
         std::shared_ptr<ToolExecutionController> tool_execution_controller;
         std::shared_ptr<ProviderCallBroker> provider_call_broker;
         std::shared_ptr<ToolEffectBroker> tool_effect_broker;
+        ToolEffectGrantIdentity tool_effect_grant;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };

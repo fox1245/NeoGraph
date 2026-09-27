@@ -60,6 +60,32 @@ outcome through the per-call effect broker. This does not promise exactly-once
 external execution or constrain arbitrary trusted native code calling a Tool
 outside mediated dispatch.
 
+`SQLiteToolEffectBroker` in `neograph::sqlite` implements durable write-ahead
+ dispatch for `dispatch_tool_calls`: construct it with a durable SQLite path and
+ host-registered `{Tool*, executable_id}` bindings. The executable ID must pin the
+ actual code, configuration, remote destination and credential authority, not
+ merely the model-visible Tool name. Pass that broker in the Program grant or in
+ standalone Core `RunResources::tool_effect_broker`; set the matching
+ `tool_effect_grant` for standalone Core. Built-in and host-registered nodes
+ using `make_tool_execution_context` inherit these invocation-scoped resources,
+ without changing a shared engine. Standalone `llm::Agent::run`/`run_stream`
+ accept a per-run `ToolExecutionContext` with the same broker, stable owner/run/
+ thread identity, operation and host grant; callers must persist the assistant
+ message history if they want its pending batch to replay on reconnect. The
+ legacy unbrokered Agent/Core paths remain explicitly lower-guarantee.
+
+For each Core task and batch ordinal, the broker commits a SQLite FULL-sync
+marker before calling the controller; marker failure executes no Tool. The receipt
+binds owner/run/thread/task/ordinal, Program version/binding, operation/grant,
+exact registered executable and canonical rewritten arguments. Model `ToolCall.id`
+is correlation only. A confirmed receipt replays without dispatch; conflicting
+identity/authority/arguments are rejected. A pending marker, timeout, cancellation,
+failed execution after dispatch or failed receipt commit requires external
+reconciliation and blocks redispatch across restart. Attempt changes are recorded
+as provenance, not a new call slot. Do not claim exactly-once external outcomes:
+even a durable marker cannot determine whether an external service committed
+before a crash.
+
 Existing brokered custom factories that used `NodeContext.provider` or
 `NodeContext.tools` must move execution to a fixed Core node, use a separately
 reviewed host broker, or be admitted as `TrustedNative` under the host's trusted

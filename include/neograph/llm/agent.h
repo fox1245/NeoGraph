@@ -75,6 +75,11 @@ class NEOGRAPH_API Agent {
      */
     std::string run(std::vector<ChatMessage>& messages,
                     int max_iterations = 10);
+    /// Per-run host Tool broker context; caller supplies stable owner/run/thread
+    /// and grant identity. An interrupted batch is replayed from messages on
+    /// reconnect before another provider turn is requested.
+    std::string run(std::vector<ChatMessage>& messages, int max_iterations,
+                    ToolExecutionContext effect_context);
 
     /**
      * @brief Run the agent loop with streaming token output.
@@ -89,6 +94,9 @@ class NEOGRAPH_API Agent {
     std::string run_stream(std::vector<ChatMessage>& messages,
                            const StreamCallback& on_chunk,
                            int max_iterations = 10);
+    std::string run_stream(std::vector<ChatMessage>& messages,
+                           const StreamCallback& on_chunk, int max_iterations,
+                           ToolExecutionContext effect_context);
 
     /**
      * @brief Perform a single LLM completion (no tool loop).

@@ -154,6 +154,11 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                 ToolEffectIdentity identity;
                 identity.owner_scope = call_execution.identity.owner_scope;
                 identity.run_id = call_execution.identity.root_run_id;
+                identity.program_version_id = call_execution.effect_grant.program_version_id;
+                identity.operation_id = call_execution.effect_grant.operation_id;
+                identity.grant_id = call_execution.effect_grant.grant_id;
+                identity.attempt = call_execution.effect_grant.attempt;
+                identity.binding_fingerprint = call_execution.effect_grant.binding_fingerprint;
                 identity.thread_id = call_execution.identity.thread_id;
                 identity.task_id = call_execution.effect_task_id;
                 identity.call_ordinal = call_index;

@@ -540,6 +540,11 @@ if(NEOGRAPH_BUILD_SQLITE)
         GTest::gtest_main
     )
     gtest_discover_tests(neograph_sqlite_runtime_store_tests)
+    if(TARGET neograph::llm)
+        target_link_libraries(neograph_sqlite_runtime_store_tests PRIVATE neograph::llm)
+        target_compile_definitions(neograph_sqlite_runtime_store_tests PRIVATE NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM)
+        target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM)
+    endif()
 endif()
 
 add_executable(neograph_runtime_turn_tests

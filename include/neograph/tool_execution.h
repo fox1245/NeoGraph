@@ -126,6 +126,16 @@ struct ToolExecutionIdentity {
     std::string request_id;
 };
 
+/** Exact host authorization for one invocation of mediated Tool dispatch. */
+struct ToolEffectGrantIdentity {
+    std::string program_version_id;
+    std::string operation_id;
+    std::string grant_id;
+    /// Retry provenance; advancing attempt must not change the logical call slot.
+    std::uint64_t attempt = 0;
+    std::string binding_fingerprint;
+};
+
 /**
  * Host-owned policy for a named tool.
  *
