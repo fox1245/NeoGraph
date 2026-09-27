@@ -286,7 +286,7 @@ std::string classify_error(std::string_view text) {
         return "HOST_AUTH: authenticate with the selected host CLI";
     if (has_ci(text, "quota") || has_ci(text, "rate_limit") ||
         has_ci(text, "rate limit") || has_ci(text, "usage limit"))
-        return "HOST_QUOTA: selected host quota exceeded";
+        return "HOST_QUOTA: selected host usage limit reached";
     if (has_ci(text, "model_not_found") || has_ci(text, "model not found") ||
         has_ci(text, "unknown model") || has_ci(text, "model unavailable"))
         return "HOST_MODEL: selected model unavailable";
@@ -347,7 +347,11 @@ FinalValue final_value(const std::string& host, const std::string& output, std::
                                redacted_excerpt(std::string_view(output).substr(begin, end - begin));
                 return result;
             }
-            const auto type = event->value("type", "");
+            if (!event->contains("type") || !event->at("type").is_string()) {
+                result.error = "invalid host event field types";
+                return result;
+            }
+            const auto type = event->at("type").get<std::string>();
             if (host == "opencode") {
                 if (type == "text" && event->contains("part") && event->at("part").is_object() && event->at("part").value("type", "") == "text")
                     text += event->at("part").value("text", "");
