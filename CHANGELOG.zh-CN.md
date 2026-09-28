@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9ecb063dc2a927e790d49eb32c0876d7dc3e5a2ebda5b992bdf12557f980f85e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8017d50b54c23889394a663284d662683c25d2920dff7ba5c7647a521c93ef42 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
   `ContextPlacement::AfterHistory`。现有 artifact kind 的 system message
   行为保持不变，同时可以将显式不受信任的 RAW 或 derived context 绑定到
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
+
+### 修复
+- **TSan CI RSS 检查。** 由于 shadow memory 和运行时管理开销可能超过
+  普通构建的阈值，在 GCC/Clang ThreadSanitizer 下跳过仅适用于普通构建的
+  RSS 上限检查。保留 sanitizer 下的 200 路并发 stress test，以及非
+  sanitizer 构建中原有的 10 MiB RSS 上限。
 
 ## [0.12.1] - 2026-08-23
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9ecb063dc2a927e790d49eb32c0876d7dc3e5a2ebda5b992bdf12557f980f85e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8017d50b54c23889394a663284d662683c25d2920dff7ba5c7647a521c93ef42 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -30,6 +30,12 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   system message 동작은 유지하면서, 명시적으로 신뢰되지 않은 RAW 또는
   derived context를 receipt에 결합해 전체 Human/AI/Tool 시간순 이력 뒤에
   user data로 전달할 수 있습니다.
+
+### 수정됨
+- **TSan CI RSS 검사.** shadow memory와 런타임 관리 비용이 일반 빌드용
+  임계값을 초과할 수 있으므로 GCC/Clang ThreadSanitizer에서는 일반 빌드용
+  RSS 제한 검사를 제외합니다. sanitizer의 200개 동시 실행 stress test와
+  비-sanitizer 빌드의 기존 10 MiB RSS 제한은 유지합니다.
 
 ## [0.12.1] - 2026-08-23
 

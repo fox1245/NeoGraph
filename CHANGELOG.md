@@ -33,6 +33,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can now be receipt-bound and delivered as user data after the complete
   chronological Human/AI/Tool window.
 
+### Fixed
+- **TSan CI RSS gate.** Skip the native-only RSS bound under GCC and Clang
+  ThreadSanitizer, whose shadow memory and runtime bookkeeping can exceed
+  the native threshold. Keep the 200-run concurrent stress test enabled under
+  sanitizers and the unchanged 10 MiB RSS bound in non-sanitizer builds.
+
 ## [0.12.1] - 2026-08-23
 
 ### Fixed

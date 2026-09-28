@@ -178,21 +178,26 @@ TEST(ConcurrentStress, TwoHundredOverlappingRunsAllSucceed) {
 // RSS doesn't grow under sustained concurrent load.
 // ---------------------------------------------------------------- //
 //
-// Skipped under AddressSanitizer because ASan's shadow memory + redzone
-// metadata grow with every allocation it observes, so RSS measurements
-// are dominated by the sanitizer's bookkeeping rather than NeoGraph's
-// allocation behaviour. ASan/LSan have their own per-allocation leak
-// detection (run via the sanitizer-test CI gate); this test exists for
-// the non-sanitizer Debug/Release runs.
+// ASan and TSan add shadow memory and allocator/thread bookkeeping, so
+// process RSS cannot isolate NeoGraph's allocation behaviour under either
+// sanitizer. Keep this bound for non-sanitizer Debug/Release runs.
+// ASan/LSan check leaks independently; TwoHundredOverlappingRunsAllSucceed
+// above remains enabled under both sanitizers to exercise concurrent dispatch.
 TEST(ConcurrentStress, RssBoundedOverHundredsOfConcurrentRuns) {
 #if defined(__has_feature)
 #  if __has_feature(address_sanitizer)
     GTEST_SKIP() << "RSS check unreliable under ASan (shadow-memory growth swamps signal); "
                     "LSan exit-time check covers the leak path independently";
 #  endif
+#  if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "RSS check unreliable under TSan (shadow memory and runtime bookkeeping)";
+#  endif
 #endif
 #if defined(__SANITIZE_ADDRESS__)
     GTEST_SKIP() << "RSS check unreliable under ASan (GCC __SANITIZE_ADDRESS__)";
+#endif
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "RSS check unreliable under TSan (GCC __SANITIZE_THREAD__)";
 #endif
 
     if (read_rss_kb() < 0) {
