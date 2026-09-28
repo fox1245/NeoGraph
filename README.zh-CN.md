@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=6ba467cfa403c387e0a433c35a7d0002d1579850b8820d50544b399c8cadb239 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=b55194bbadc8c3c1d7ad7d1de6c96629aaeb960f4cc4b5c5f66d33ac710ec351 -->
 <p align="center">
 <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -68,6 +68,7 @@ cmake --build build --parallel
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON
@@ -76,6 +77,34 @@ cmake --build build-program --parallel
 ```
 
 参见[examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp)和[QuickJS 编写边界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)。
+
+### 性能构建
+
+Ninja 和 Unix Makefiles 等单配置生成器在 `CMAKE_BUILD_TYPE` 为空时不会
+选择优化级别。NeoGraph 会对此配置发出警告，因为 GCC/Clang 会在没有
+Release 的 `-O3 -DNDEBUG` 标志时编译 QuickJS 和 NeoGraph。
+
+在 GCC 或 Clang 上进行本机性能构建：
+
+```bash
+cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
+cmake --build build-performance --parallel
+```
+
+`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` 会在优化配置中加入
+`-march=native -mtune=native`。它能提升本机吞吐量，但会使产物不可移植；
+分发二进制时请关闭它。Release 加固默认保持启用。
+
+在 GCC/Clang 上，最终的 Release 配置对 QuickJS 使用 C11、对 NeoGraph
+使用 C++20 和 `-O3 -DNDEBUG`。默认加固包含
+`-D_GLIBCXX_ASSERTIONS`、`-fstack-protector-strong`、
+`-fcf-protection=full`、Linux 的 `-D_FORTIFY_SOURCE=2` 以及
+RELRO/NOW 链接。默认不启用 LTO 或本机特定调优。
 
 <a id="two-runtime-layers"></a>
 ## 两个运行时层
@@ -178,6 +207,8 @@ cmake -S . -B build-core \
 |---|---|
 | `NEOGRAPH_BUILD_PROGRAM` | 持久化 Program 值、目录、运行时、血缘及迁移 |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program 编写及生成器命令 |
+| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 为优化配置选择不可移植的本机指令调优 |
+| `NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG` | 单配置构建缺少 `CMAKE_BUILD_TYPE`、可能遗漏 Release 优化标志时发出警告 |
 | `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python 扩展 |
 | `NEOGRAPH_BUILD_SQLITE` | SQLite 检查点、上下文、Hook 及提供方回执存储 |
 | `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL 检查点及 Program 持久化组件 |

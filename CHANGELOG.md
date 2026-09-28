@@ -12,6 +12,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Performance build configuration.** Added an opt-in
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` switch for local GCC/Clang builds,
+  plus a warning when a single-config generator omits `CMAKE_BUILD_TYPE` and
+  would silently miss Release optimization flags. Release hardening remains
+  enabled by default.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,
