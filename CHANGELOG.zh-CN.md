@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9ecb063dc2a927e790d49eb32c0876d7dc3e5a2ebda5b992bdf12557f980f85e -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **性能构建配置。** 新增面向本机 GCC/Clang 构建的可选
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` 开关；当单配置生成器未设置
+  `CMAKE_BUILD_TYPE`、因而遗漏 Release 优化标志时发出警告。Release 加固
+  默认保持启用。
 - **Program 驱动 A2A 服务的严格认证。** Program A2A 构造函数新增可选的
   `require_authenticated_requests` 标志。启用后，除协作 envelope 外，普通
   message、stream、task 查询和取消 RPC 也必须通过已配置的 authenticator。

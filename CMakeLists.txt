@@ -45,6 +45,39 @@ endif()
 # ===========================================================================
 option(NEOGRAPH_ENABLE_HARDENING "Hardening flags in Release builds (canaries, FORTIFY, CFI)" ON)
 option(NEOGRAPH_ENABLE_SHA256_ACCELERATION "Use runtime-gated SHA-256 CPU acceleration" ON)
+option(NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION
+       "Use host-specific instruction tuning in optimized configurations (non-portable)"
+       OFF)
+option(NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG
+       "Warn when a single-config generator omits CMAKE_BUILD_TYPE"
+       ON)
+if(NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG
+   AND NOT CMAKE_CONFIGURATION_TYPES
+   AND NOT CMAKE_BUILD_TYPE)
+    message(WARNING
+        "NeoGraph: CMAKE_BUILD_TYPE is empty; single-config builds will not add "
+        "Release optimization flags. Use -DCMAKE_BUILD_TYPE=Release for performance.")
+endif()
+if(NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
+       AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(
+            $<$<CONFIG:Release>:-march=native>
+            $<$<CONFIG:Release>:-mtune=native>
+            $<$<CONFIG:RelWithDebInfo>:-march=native>
+            $<$<CONFIG:RelWithDebInfo>:-mtune=native>
+            $<$<CONFIG:MinSizeRel>:-march=native>
+            $<$<CONFIG:MinSizeRel>:-mtune=native>
+        )
+        message(STATUS
+                "NeoGraph native optimization: enabled "
+                "(-march=native -mtune=native).")
+    else()
+        message(WARNING
+            "NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION requested, but this compiler pair "
+            "does not support GNU/Clang native tuning flags; ignoring.")
+    endif()
+endif()
 if(NEOGRAPH_ENABLE_HARDENING
    AND NOT CMAKE_CXX_FLAGS MATCHES "fsanitize="
    AND NOT MSVC)

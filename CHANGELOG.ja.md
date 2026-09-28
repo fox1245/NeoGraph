@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9ecb063dc2a927e790d49eb32c0876d7dc3e5a2ebda5b992bdf12557f980f85e -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **パフォーマンスビルド構成。** ローカルの GCC/Clang ビルド向けに
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` オプションを追加し、単一構成
+  ジェネレーターで `CMAKE_BUILD_TYPE` が空のため Release 最適化フラグが
+  付かない場合に警告するようにしました。Release のハードニングは既定で
+  有効です。
 - **Program ベース A2A サービスの厳格認証。** Program A2A コンストラクタに
   オプトインの `require_authenticated_requests` を追加しました。有効時は
   collaboration envelope だけでなく通常の message、stream、task 取得・取消

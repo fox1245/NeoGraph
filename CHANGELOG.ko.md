@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7532000a606d31bd33b572489fe0c8ae482c0497c04cdf645187a820824f1258 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9ecb063dc2a927e790d49eb32c0876d7dc3e5a2ebda5b992bdf12557f980f85e -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **성능 빌드 구성.** 로컬 GCC/Clang 빌드에서 사용할 수 있는
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` 선택 옵션과, 단일 구성 생성기에서
+  `CMAKE_BUILD_TYPE`이 비어 Release 최적화 플래그가 빠질 때 경고하는 기능을
+  추가했습니다. Release 하드닝은 기본으로 유지됩니다.
 - **Program 기반 A2A 서비스의 엄격 인증.** Program A2A 생성자에 선택적
   `require_authenticated_requests` 플래그를 추가했습니다. 활성화하면 협업
   envelope뿐 아니라 일반 message, stream, task 조회 및 취소 RPC에도 설정된
