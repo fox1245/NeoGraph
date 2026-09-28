@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8017d50b54c23889394a663284d662683c25d2920dff7ba5c7647a521c93ef42 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -30,6 +30,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **宣传视频依赖安全。** 将 `docs/promo/package-lock.json` 中的间接依赖
+  `js-yaml` 从 4.3.1 更新至 4.3.2，修复通过合并空映射耗尽 CPU 的
+  拒绝服务漏洞（CVE-2026-84375 / GHSA-2883-xcg3-v3hh）。
 - **TSan CI RSS 检查。** 由于 shadow memory 和运行时管理开销可能超过
   普通构建的阈值，在 GCC/Clang ThreadSanitizer 下跳过仅适用于普通构建的
   RSS 上限检查。保留 sanitizer 下的 200 路并发 stress test，以及非

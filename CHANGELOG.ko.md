@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8017d50b54c23889394a663284d662683c25d2920dff7ba5c7647a521c93ef42 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -32,6 +32,9 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **홍보 영상 의존성 보안.** `docs/promo/package-lock.json`의 간접 의존성
+  `js-yaml`을 4.3.1에서 4.3.2로 갱신해 빈 객체 병합으로 CPU를 고갈시키는
+  서비스 거부 취약점(CVE-2026-84375 / GHSA-2883-xcg3-v3hh)을 수정했습니다.
 - **TSan CI RSS 검사.** shadow memory와 런타임 관리 비용이 일반 빌드용
   임계값을 초과할 수 있으므로 GCC/Clang ThreadSanitizer에서는 일반 빌드용
   RSS 제한 검사를 제외합니다. sanitizer의 200개 동시 실행 stress test와

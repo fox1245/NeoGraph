@@ -34,6 +34,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Promo dependency security.** Updated the transitive `js-yaml` dependency
+  from 4.3.1 to 4.3.2 in `docs/promo/package-lock.json` to fix the empty-merge
+  CPU denial of service vulnerability (CVE-2026-84375 / GHSA-2883-xcg3-v3hh).
 - **TSan CI RSS gate.** Skip the native-only RSS bound under GCC and Clang
   ThreadSanitizer, whose shadow memory and runtime bookkeeping can exceed
   the native threshold. Keep the 200-run concurrent stress test enabled under

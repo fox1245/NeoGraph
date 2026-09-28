@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8017d50b54c23889394a663284d662683c25d2920dff7ba5c7647a521c93ef42 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -33,6 +33,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **プロモ動画の依存関係のセキュリティ。** `docs/promo/package-lock.json` の
+  間接依存 `js-yaml` を 4.3.1 から 4.3.2 に更新し、空のマッピングの
+  マージで CPU を消費するサービス拒否脆弱性
+  (CVE-2026-84375 / GHSA-2883-xcg3-v3hh) を修正しました。
 - **TSan CI の RSS 検査。** shadow memory とランタイムの管理コストが
   通常ビルド用の閾値を超えることがあるため、GCC/Clang ThreadSanitizer
   では通常ビルド用の RSS 上限検査をスキップします。sanitizer での
