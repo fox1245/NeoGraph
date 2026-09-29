@@ -157,8 +157,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolation and descendant cleanup; host output draining is bounded.
   macOS startup supports Darwin signal macros and reads the inherited
   environment through its platform accessor before fork.
-- **Clean-runner gRPC contract gate.** CI explicitly installs Protobuf
+- **Clean-runner contract gates.** CI explicitly installs Protobuf
   development headers and libraries, not only its compiler/runtime packages.
+  Isolated stdio fixtures explicitly approve their discovered Python search path.
 - **Tenant-safe durable Harness records.** Scoped IDs and references round-trip
   through File/SQLite stores, long File keys use bounded hash filenames, and
   SQLite retention cannot delete another namespace's records or journals.

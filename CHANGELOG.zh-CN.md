@@ -50,8 +50,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   schema 变化会终止仍被引用的 client。加固启动与 stderr 限额、handle/FD
   隔离、后代清理及输出读取上限。
   macOS 启动支持 Darwin 信号宏，并在 fork 前通过平台访问器读取继承环境。
-- **干净 runner 上的 gRPC 契约检查。** CI 显式安装 Protobuf 开发头文件与库，
+- **干净 runner 上的契约检查。** CI 显式安装 Protobuf 开发头文件与库，
   而不只是编译器和运行时包。
+  隔离 stdio fixture 显式批准用于发现 Python 的搜索路径。
 - **租户安全的持久 Harness 记录。** File/SQLite 中的作用域 ID 和引用可往返，
   长 File 键使用固定长度 hash 文件名。SQLite 保留策略不会删除其他 namespace
   的记录或 journal。

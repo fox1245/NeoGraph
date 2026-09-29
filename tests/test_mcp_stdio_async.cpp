@@ -486,6 +486,9 @@ TEST(MCPStdioAsync, HardenedReplacementEnvironmentAndWorkingDirectory) {
     config.cwd = directory.path;
     config.replace_environment = true;
     config.environment = {{"NEOGRAPH_APPROVED_VALUE", "approved"}};
+    // Use the same interpreter search path that python_cmd() checked above.
+    if (const char* path = std::getenv("PATH"))
+        config.environment.emplace_back("PATH", path);
 #ifdef _WIN32
     if (const char* root = std::getenv("SystemRoot"))
         config.environment.emplace_back("SystemRoot", root);
