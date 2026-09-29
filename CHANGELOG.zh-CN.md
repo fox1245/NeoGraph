@@ -67,6 +67,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
   `error` 对象的 HTTP 200 表示上游故障（例如所选提供方的 502），而提供方此前以不透明的
   `json::at: key not found: choices` 失败。现在会抛出携带网关消息的 API 错误（正文中的
   `429` 代码抛出 `RateLimitError`），没有 `choices` 的正文同样给出说明性错误。
+- **Deep Research 不再把被截断的 completion 当作完成的报告。**
+  `create_deep_research_graph` 之前把在 `max_tokens` 处被截断的空 completion（把全部输出
+  预算花在隐藏推理上的推理模型）当作成功答案，导致 `example_deep_research` 以退出码 0
+  结束却输出空的最终报告（实测 3/3）。现在其 LLM 调用会以加倍的输出预算重试空的
+  `max_tokens` 截断（最多两次，上限 16384 token）；空的最终报告视为错误，部分被截断的
+  报告会标注 `Incomplete`。`DeepResearchTruncation.*` 覆盖预算阶梯。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

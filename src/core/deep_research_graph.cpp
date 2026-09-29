@@ -20,6 +20,38 @@ namespace {
 
 constexpr const char* kResearcherNodeName = "researcher";
 
+// A completion the provider cut off at `max_tokens` before it produced any
+// visible text or tool call. Reasoning models spend the output budget on
+// hidden reasoning first, so a small `max_tokens` can yield exactly this
+// (empty `content`, stop reason `max_tokens`). It must never be taken for a
+// successful answer.
+constexpr int kMaxTokensRetries = 2;
+constexpr int kMaxTokensCeiling = 16384;
+
+bool is_empty_truncation(const ChatCompletion& c) {
+    return c.stop_reason == "max_tokens" && c.message.content.empty()
+        && c.message.tool_calls.empty();
+}
+
+// Runs `invoke(params)` (which dispatches through the node's
+// invoke_provider) and, on an empty max_tokens truncation, retries with the
+// output budget doubled (bounded by kMaxTokensRetries / kMaxTokensCeiling).
+// Every attempt's tokens are recorded (#88). The last completion is returned
+// as-is, so callers still see a truncation that survived the retries.
+template <class Invoke>
+asio::awaitable<ChatCompletion> complete_with_budget(
+        Invoke invoke, CompletionParams params, const RunContext& ctx) {
+    for (int attempt = 0;; ++attempt) {
+        ChatCompletion completion = co_await invoke(params);
+        record_usage(ctx, completion);
+        if (!is_empty_truncation(completion) || attempt >= kMaxTokensRetries
+            || params.max_tokens <= 0 || params.max_tokens >= kMaxTokensCeiling) {
+            co_return completion;
+        }
+        params.max_tokens = std::min(params.max_tokens * 2, kMaxTokensCeiling);
+    }
+}
+
 // =========================================================================
 // Prompts — inspired by langchain-ai/open_deep_research/prompts.py.
 //
@@ -224,9 +256,11 @@ public:
         params.cancel_token = in.ctx.cancel_token;
         std::vector<ChatMessage> host{{"system", SUPERVISOR_SYSTEM}};
         std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-        auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                   std::move(host), std::move(supplemental));
-        record_usage(in.ctx, completion);   // #88
+        auto completion = co_await complete_with_budget(
+            [&](CompletionParams p) {
+                return invoke_provider(provider_, std::move(p), {}, host, supplemental);
+            },
+            std::move(params), in.ctx);   // records usage (#88)
 
         json asst;
         to_json(asst, completion.message);
@@ -530,9 +564,11 @@ public:
             params.cancel_token = in.ctx.cancel_token;
             std::vector<ChatMessage> host{{"system", RESEARCHER_SYSTEM}};
             std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-            auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                       std::move(host), std::move(supplemental));
-            record_usage(in.ctx, completion);   // #88
+            auto completion = co_await complete_with_budget(
+                [&](CompletionParams p) {
+                    return invoke_provider(provider_, std::move(p), {}, host, supplemental);
+                },
+                std::move(params), in.ctx);   // records usage (#88)
             auto& msg = completion.message;
             convo.push_back(msg);
 
@@ -620,9 +656,17 @@ private:
         try {
             std::vector<ChatMessage> host{{"system", COMPRESS_SYSTEM}};
             std::vector<ChatMessage> supplemental(compress_msgs.begin() + 1, compress_msgs.end());
-            auto completion = co_await invoke_provider(provider_, std::move(cp), {},
-                                                       std::move(host), std::move(supplemental));
-            record_usage(ctx, completion);   // #88
+            auto completion = co_await complete_with_budget(
+                [&](CompletionParams p) {
+                    return invoke_provider(provider_, std::move(p), {}, host, supplemental);
+                },
+                std::move(cp), ctx);   // records usage (#88)
+            if (is_empty_truncation(completion)) {
+                // Still empty after the bounded retries: say so instead of
+                // handing the supervisor a blank findings entry.
+                co_return std::string("(compression failed: output truncated at max_tokens "
+                                      "with no visible text)");
+            }
             std::string out = completion.message.content;
             // Hard cap regardless of what the model produced. Protects the
             // supervisor's accumulated context from unbounded growth across
@@ -752,16 +796,31 @@ public:
             try {
                 std::vector<ChatMessage> host{{"system", FINAL_REPORT_SYSTEM}};
                 std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-                completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                      std::move(host), std::move(supplemental));
-                record_usage(in.ctx, completion);   // #88
+                completion = co_await complete_with_budget(
+                    [&](CompletionParams p) {
+                        return invoke_provider(provider_, std::move(p), {}, host, supplemental);
+                    },
+                    std::move(params), in.ctx);   // records usage (#88)
             } catch (...) {
                 eptr = std::current_exception();
             }
             if (!eptr) {
+                // A truncated completion is not a finished report. Empty text
+                // (a reasoning model that spent its whole budget thinking)
+                // is a hard error; partial text is kept but flagged.
+                if (completion.message.content.empty()) {
+                    throw std::runtime_error(
+                        "final_report: completion produced no report text (stop reason '"
+                        + completion.stop_reason + "'); the output budget may be too small "
+                        "for a reasoning model");
+                }
+                std::string report = completion.message.content;
+                if (completion.stop_reason == "max_tokens") {
+                    report += "\n\n> **Incomplete:** the report was cut off at the "
+                              "output token limit (max_tokens).\n";
+                }
                 NodeOutput out;
-                out.writes.push_back(ChannelWrite{"final_report",
-                    json(completion.message.content)});
+                out.writes.push_back(ChannelWrite{"final_report", json(std::move(report))});
                 co_return out;
             }
             try {
