@@ -167,6 +167,16 @@ struct ProgramChildQuotaConfig {
       /// A missing resolver or binding then fails the Core operation closed.
       bool require_core_provider_call_broker = false;
   };
+/**
+ * Experimental owner-scoped new-run selection. The activation is the exact
+ * durable pointer observed at admission; the handle pins its admitted version
+ * and does not consult that pointer again while executing.
+ */
+struct ProgramActiveRun {
+    ProgramActivation activation;
+    ProgramHandle handle;
+};
+
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
     explicit ProgramRuntime(RuntimeConfig config);
@@ -182,6 +192,14 @@ public:
      * runtime-only projection internally.
      */
     ProgramHandle start(RunInvocation invocation);
+    /**
+     * Select the current admitted activation exactly once for a new top-level
+     * run. program_version_id must be empty: an explicit version request uses
+     * start() instead. A missing/collected or mismatched activation fails before
+     * publishing a run. Later CAS activation cannot redirect the pinned run.
+     */
+    ProgramActiveRun start_active(RunInvocation invocation,
+                                  std::shared_ptr<ProgramEventSink> events = {});
     /// Attach a runtime-only event sink without extending the canonical request.
     ProgramHandle start(RunInvocation invocation, std::shared_ptr<ProgramEventSink> events);
     /**
@@ -301,7 +319,8 @@ public:
 private:
     ProgramHandle start_resolved(std::string_view      owner_scope,
                                  const ProgramVersion& version,
-                                 ProgramInvocation     invocation);
+                                 ProgramInvocation     invocation,
+                                 bool                  active_selection = false);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -3020,6 +3020,7 @@ std::vector<json> SqliteHarnessRecordStore::list_events(const std::string& run_i
 
 HarnessRetentionResult SqliteHarnessRecordStore::cleanup_retained(
     const HarnessRetentionPolicy& policy) {
+    if (!policy.namespace_prefix.empty()) validate_id(policy.namespace_prefix);
     std::set<std::string> protected_runs;
     std::set<std::string> protected_artifacts;
     for (const auto& run_id : policy.protected_run_ids) {
@@ -3035,16 +3036,19 @@ HarnessRetentionResult SqliteHarnessRecordStore::cleanup_retained(
     std::lock_guard        lock(impl_->mutex);
     impl_->exec("BEGIN IMMEDIATE;");
     try {
-        const auto count = [&](const char* table) {
-            const std::string sql = std::string("SELECT COUNT(*) FROM ") + table;
-            Statement         statement(impl_->db, sql.c_str());
+        const auto count = [&](const char* table, const char* id_column) {
+            const std::string sql = std::string("SELECT COUNT(*) FROM ") + table +
+                                    " WHERE substr(" + id_column + ", 1, length(?)) = ?";
+            Statement statement(impl_->db, sql.c_str());
+            statement.bind_text(1, policy.namespace_prefix);
+            statement.bind_text(2, policy.namespace_prefix);
             if (statement.step() != SQLITE_ROW) {
                 throw_sqlite_error(impl_->db, "retention count failed");
             }
             return static_cast<std::size_t>(statement.int64(0));
         };
 
-        auto run_count = count("neograph_harness_runs");
+        auto run_count = count("neograph_harness_runs", "run_id");
         while (run_count > policy.max_runs) {
             Statement candidates(
                 impl_->db,
@@ -3052,9 +3056,12 @@ HarnessRetentionResult SqliteHarnessRecordStore::cleanup_retained(
                 "WHERE candidate.status IN "
                 "('completed','failed','cancelled','timeout','expired','max_steps_exhausted') "
                 "AND candidate.program_run_id='' "
+                "AND substr(candidate.run_id, 1, length(?)) = ? "
                 "AND NOT EXISTS (SELECT 1 FROM neograph_harness_runs AS dependent "
                 "WHERE dependent.source_run_id=candidate.run_id) "
                 "ORDER BY candidate.updated_at_ms, candidate.run_id");
+            candidates.bind_text(1, policy.namespace_prefix);
+            candidates.bind_text(2, policy.namespace_prefix);
             std::string run_id;
             while (true) {
                 const auto step = candidates.step();
@@ -3088,16 +3095,19 @@ HarnessRetentionResult SqliteHarnessRecordStore::cleanup_retained(
             --run_count;
         }
 
-        auto artifact_count = count("neograph_harness_artifacts");
+        auto artifact_count = count("neograph_harness_artifacts", "artifact_id");
         while (artifact_count > policy.max_artifacts) {
             Statement candidates(
                 impl_->db,
                 "SELECT artifact.artifact_id FROM neograph_harness_artifacts AS artifact "
                 "WHERE COALESCE(json_extract(artifact.record_json, '$.format'), '') "
                 "<> 'neograph-harness-program-adapter-artifact' "
+                "AND substr(artifact.artifact_id, 1, length(?)) = ? "
                 "AND NOT EXISTS (SELECT 1 FROM neograph_harness_runs AS run "
                 "WHERE run.artifact_id=artifact.artifact_id) "
                 "ORDER BY artifact.created_at_ms, artifact.artifact_id");
+            candidates.bind_text(1, policy.namespace_prefix);
+            candidates.bind_text(2, policy.namespace_prefix);
             std::string artifact_id;
             while (true) {
                 const auto step = candidates.step();

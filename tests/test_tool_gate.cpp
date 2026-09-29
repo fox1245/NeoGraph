@@ -519,11 +519,12 @@ TEST(ToolGate, ResumeAfterApprovalRunsEachToolExactlyOnce) {
             return std::make_unique<ToolCallingNode>();
         });
 
-    auto read  = std::make_unique<SpyTool>("read",  &g_runs_a);
-    auto shell = std::make_unique<SpyTool>("shell", &g_runs_b);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SpyTool>("read", &g_runs_a));
+    tools.push_back(std::make_unique<SpyTool>("shell", &g_runs_b));
 
     NodeContext ctx;
-    ctx.tools = {read.get(), shell.get()};
+    ctx.tools = ToolSet(std::move(tools));
 
     auto store  = std::make_shared<InMemoryCheckpointStore>();
     auto engine = GraphEngine::compile(gate_graph(), ctx, store);
@@ -581,11 +582,12 @@ TEST(ToolGate, ARefusalStillRefusesAfterTheResume) {
             return std::make_unique<ToolCallingNode>();
         });
 
-    auto read  = std::make_unique<SpyTool>("read",  &g_runs_a);
-    auto shell = std::make_unique<SpyTool>("shell", &g_runs_b);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SpyTool>("read", &g_runs_a));
+    tools.push_back(std::make_unique<SpyTool>("shell", &g_runs_b));
 
     NodeContext ctx;
-    ctx.tools = {read.get(), shell.get()};
+    ctx.tools = ToolSet(std::move(tools));
 
     auto store  = std::make_shared<InMemoryCheckpointStore>();
     auto engine = GraphEngine::compile(gate_graph(), ctx, store);

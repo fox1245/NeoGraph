@@ -31,7 +31,7 @@
 
 #include <neograph/api.h>
 #include <neograph/acp/types.h>
-#include <neograph/graph/engine.h>
+#include <neograph/graph/execution.h>
 
 #include <chrono>
 #include <iosfwd>
@@ -199,6 +199,10 @@ class NEOGRAPH_API ACPServer {
     ACPServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
               neograph::json info,
               std::shared_ptr<ACPGraphAdapter> adapter = {});
+    /// Preferred constructor: restrict the host to graph execution.
+    ACPServer(neograph::graph::GraphExecution execution,
+              neograph::json info,
+              std::shared_ptr<ACPGraphAdapter> adapter = {});
 
     ~ACPServer();
 
@@ -266,6 +270,9 @@ class NEOGRAPH_API ACPServer {
     /// thread for the full duration. Drain or cancel before
     /// destruction if you need a bounded-latency teardown.
     void stop();
+    /// Bound concurrently executing sessions; reject excess prompts before
+    /// any graph node runs. Defaults to 32.
+    void set_max_inflight_prompts(std::size_t limit);
     bool initialized() const;
 
     /// Handle for issuing agent→client requests (fs/*, etc.). On first

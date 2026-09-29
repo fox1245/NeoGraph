@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-run-invocation-v1.schema.json",
+  "title": "NeoGraph durable Program run invocation",
+  "type": "object",
+  "required": ["format", "storage_schema_version", "id", "protocol_revision", "owner_scope", "agent_id", "program_version_id", "run_id", "parent_run_id", "budget", "input", "message_sequence", "idempotency_key", "correlation_id", "artifact"],
+  "properties": {
+    "format": {"const": "neograph-program-run-invocation"},
+    "storage_schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/identity"},
+    "protocol_revision": {"const": 1},
+    "owner_scope": {"type": "string", "minLength": 1},
+    "agent_id": {"type": "string", "minLength": 1},
+    "program_version_id": {"$ref": "#/$defs/identity"},
+    "run_id": {"type": "string", "minLength": 1},
+    "parent_run_id": {"type": "string"},
+    "budget": {"$ref": "#/$defs/budget"},
+    "input": {},
+    "message_sequence": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "correlation_id": {"type": "string", "minLength": 1},
+    "artifact": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/artifact"}]},
+    "selected_activation": {"$ref": "program-activation-v1.schema.json"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "identity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "budget": {
+      "type": "object",
+      "required": ["wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency", "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth", "max_total_children"],
+      "properties": {
+        "wall_time_ms": {"type": "integer", "minimum": 0},
+        "model_tokens": {"type": "integer", "minimum": 0},
+        "monetary_microunits": {"type": "integer", "minimum": 0},
+        "max_concurrency": {"type": "integer", "minimum": 0},
+        "max_program_operations": {"type": "integer", "minimum": 0},
+        "max_core_steps": {"type": "integer", "minimum": 0},
+        "max_dynamic_compiles": {"type": "integer", "minimum": 0},
+        "max_child_depth": {"type": "integer", "minimum": 0},
+        "max_total_children": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["artifact_identity", "uri", "media_type", "size_bytes"],
+      "properties": {
+        "artifact_identity": {"type": "string", "minLength": 1},
+        "uri": {"type": "string", "minLength": 1},
+        "media_type": {"type": "string", "minLength": 1},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -7,6 +7,8 @@ unaffected.
 """
 
 import neograph_engine as neograph
+import pytest
+
 
 
 _uid = 0
@@ -69,6 +71,77 @@ def _user(content):
 def _msgs(result):
     return result.output["channels"]["messages"]["value"]
 
+
+@pytest.mark.parametrize("writes_scratch", [False, True])
+def test_ephemeral_checkpoint_resume_is_explicit(writes_scratch):
+    node_type = _next_type("ephemeral")
+
+    class Producer(neograph.GraphNode):
+        def get_name(self):
+            return "producer"
+
+        def run(self, _input):
+            if writes_scratch:
+                return [neograph.ChannelWrite("scratch", "required")]
+            return []
+
+    neograph.NodeFactory.register_type(
+        node_type, lambda _name, _config, _ctx: Producer())
+    definition = {
+        "channels": {"scratch": {"reducer": "overwrite",
+                                 "initial": "initial", "persistence": "ephemeral"}},
+        "nodes": {"producer": {"type": node_type}},
+        "edges": [{"from": "__start__", "to": "producer"},
+                  {"from": "producer", "to": "__end__"}],
+    }
+    engine = neograph.GraphEngine.compile(
+        definition, neograph.NodeContext(), neograph.InMemoryCheckpointStore())
+    engine.run(neograph.RunConfig(thread_id="ephemeral-run"))
+    continuation = neograph.RunConfig(thread_id="ephemeral-run", resume_if_exists=True)
+    if writes_scratch:
+        with pytest.raises(RuntimeError, match="ephemeral channel"):
+            engine.run(continuation)
+        with pytest.raises(RuntimeError, match="ephemeral channel"):
+            engine.resume("ephemeral-run")
+    else:
+        engine.run(continuation)
+
+@pytest.mark.parametrize(
+    ("retention", "limit", "expected"),
+    [("bounded", 2, ["two", "three"]), ("latest", 0, ["three"])],
+)
+def test_append_retention_survives_python_checkpoint_resume(retention, limit, expected):
+    node_type = _next_type("retention")
+
+    class Writer(neograph.GraphNode):
+        def get_name(self):
+            return "writer"
+
+        def run(self, input):
+            return [neograph.ChannelWrite("events", [input.state.get("prompt")])]
+
+    neograph.NodeFactory.register_type(
+        node_type, lambda _name, _config, _ctx: Writer())
+    definition = {
+        "channels": {
+            "prompt": {"reducer": "overwrite"},
+            "events": {"reducer": "append", "retention": retention,
+                       "retention_limit": limit},
+        },
+        "nodes": {"writer": {"type": node_type}},
+        "edges": [{"from": "__start__", "to": "writer"},
+                  {"from": "writer", "to": "__end__"}],
+    }
+    store = neograph.InMemoryCheckpointStore()
+    engine = neograph.GraphEngine.compile(definition, neograph.NodeContext(), store)
+    for index, value in enumerate(("one", "two", "three")):
+        result = engine.run(neograph.RunConfig(
+            thread_id="retained-events", input={"prompt": value},
+            resume_if_exists=index > 0))
+
+    assert result.output["channels"]["events"]["value"] == expected
+    assert store.load_latest("retained-events").channel_values[
+        "channels"]["events"]["value"] == expected
 
 def test_default_off_starts_fresh_each_run():
     """Back-compat: same thread_id without the flag still starts fresh."""

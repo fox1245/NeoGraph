@@ -11,7 +11,111 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Portable WASM smoke builds.** Distro Emscripten 3.1.x now enables
+  Asio's available coroutine header explicitly and avoids unsupported
+  stack-protector symbols only for WASM targets; native hardening is unchanged.
+- **Bounded async transport failures.** Stdio MCP exchanges preserve reader
+  protocol/connection errors instead of masking them behind the RPC deadline,
+  and a timed-out request no longer kills the shared subprocess session.
+  SchemaProvider cancellation normalizes concurrent socket-reset races to
+  `asio::error::operation_aborted`.
+- **Owned graph tool bindings.** `NodeContext::tools` is now an owned,
+  copyable `ToolSet` retained across compilation and engine linkage. Context
+  reassignment does not invalidate earlier engines; the unsafe post-compile
+  `GraphEngine::own_tools()` transfer has been removed. Python-defined,
+  MCP-discovered and native C++ tools use the same compile-time lifetime rule.
+- **SchemaProvider internal responsibilities (#220).** Schema-driven request
+  serialization and response decoding now live in a network-free mapping unit;
+  SSE and WebSocket event state machines consume fixture values independently
+  of sockets. The provider continues to own its HTTP/SSE bridge, native
+  WebSocket path, and pooled HTTP/1.1 or optional libcurl HTTP/2 selection.
+  Chat and arbitrary JSON calls share operation-local cancellation and HTTP
+  error handling. Public provider and schema contracts are unchanged.
+
 ### Added
+- **Non-recursive async-primary checkpoint adapters.** Native coroutine
+  stores use `AsyncCheckpointStore` plus `adapt_async_checkpoint_store()`;
+  sync-only stores use `CheckpointStoreCore` plus the bounded-worker adapter.
+  Legacy missing sync operations now fail explicitly without changing the
+  `CheckpointStore` vtable or checkpoint wire schema.
+- **Engine-scoped graph registries (#218).** `GraphRegistry` defaults to
+  built-ins without process-global custom entries; `GlobalFallback` opts into
+  legacy registrations. Engines snapshot registrations at construction, so
+  later mutations cannot alter running graphs. Python exposes scoped node,
+  reducer, and condition registration, `GraphEngine.compile(..., registry=...)`,
+  and registry-aware topology schema export. Legacy global APIs remain available.
+- **Execution-only protocol hosting and guarded state administration.**
+  A2A, ACP, and gRPC retain an owning `GraphExecution` capability instead of
+  administrative/configuration access. `GraphAdmin` and legacy direct state
+  calls now reject while an engine executes, and execution rejects during
+  administration. Legacy engine constructors and methods remain compatible
+  through the documented pre-v1 migration window.
+- **Schema-generated media and long-running operations (#241).** Built-in
+  OpenAI Responses, Images and Gemini/Veo schemas now project generated image
+  and video outputs into typed C++/Python artifacts, including encoded data,
+  MIME, URLs, file handles and provider metadata. JSON prompt envelopes and
+  generic submit/poll/finalize mappings share the provider's deadline,
+  cancellation and typed operation errors. Deterministic loopback coverage
+  includes mixed chat/tools/images, Veo completion, file finalization,
+  cancellation, timeout and provider failures.
+
+- **Public SchemaProvider primitive registry (#242).** Added an explicitly
+  injected, provider-scoped C++ `SchemaPrimitiveRegistry` for custom
+  transport, execution-mode, and artifact-parser factories. Built-in names
+  remain automatic; duplicate names reject unless replacement is explicit,
+  providers copy factory ownership at creation, and concurrent use is safe.
+  Schema paths, primitive categories, and missing names are included in
+  creation-time diagnostics. Python registration remains intentionally
+  unsupported, and shared-library loading is documented as a possible linked
+  ABI arrangement rather than an implemented dynamic plugin system.
+- **Credentialless OpenCode global MCP adoption.** Added inspection-only,
+  redacted discovery of user-global local stdio definitions plus explicit
+  pinned/trusted-mutable launch and tool-manifest approvals. Adopted clients
+  use canonical identity checks, replacement environments, bounded local
+  subprocesses, and fail-closed manifest intersection; project/HTTP entries,
+  imported secrets, recursion, and unknown or unselected tools remain denied.
+- **Local authenticated Harness workers.** The opt-in installable stdio MCP host
+  can preflight and delegate read-only worker calls to installed OpenCode,
+  Claude Code, or Codex CLIs using their own saved login. The Provider path
+  remains explicit; no host credential files or OAuth tokens enter NeoGraph.
+  Subprocess trees, output/events, time and usage are bounded and host errors
+  remain distinct from schema failures.
+- **Transport-independent MCP protocol sessions.** HTTP and subprocess stdio
+  now share JSON-RPC correlation, initialization, tool discovery, and tool
+  adaptation while retaining separate transport ownership. Added typed
+  `MCPTransportError` categories for connection, deadline, cancellation,
+  shutdown, HTTP status, and invalid wire responses; JSON-RPC server errors
+  continue to expose `MCPError` codes. stdio sync and async calls now share
+  its session-owned I/O path and support concurrent calls after cancellation.
+- **Experimental owner-scoped active Program starts.** C++ `ProgramRuntime`
+  and Python `LocalProgramHost` can select an admitted immutable activation
+  once for a new run, returning the observed activation alongside a handle
+  pinned to its version; rollback changes future starts only. Graph migration
+  now rejects opaque checkpoint metadata instead of treating unknown
+  node-local state as transferable. Durable cross-store GC and production
+  performance qualification remain separate gates.
+- **Durable Program Core Tool grant identities.** Hosts may admit an exact,
+  owner-scoped Tool grant in SQLite and rebind its gate/controller on each
+  Program operation and reconnect. The runtime also checks the admitted
+  executable-binding fingerprint; revocation survives restart and blocks all
+  attempts using that grant ID. Effect results still require a separate
+  per-call durable Tool broker.
+- **Durable Program Core provider calls.** Hosts can bind an invocation-scoped
+  `SQLiteProgramProviderCallJournal` through the existing Program resolver.
+  It writes a durable marker before built-in Core provider transport, binds
+  exact call slot/request/deployment independently of attempt provenance,
+  stores completions for restart replay, and requires external evidence to
+  reconcile uncertain outcomes without silent re-dispatch.
+- **Durable mediated Tool effect journal.** An invocation-scoped SQLite host
+  broker records the exact Program grant, executable binding, Core task/call
+  slot and rewritten arguments before dispatch, replays verified receipts
+  across restart, and blocks unresolved external outcomes instead of retrying.
+  Program Core grants now require a Tool effect broker; standalone Core and
+  Agent callers can supply an explicit host-owned broker identity.
+- **Shared Graph host conformance.** A2A, ACP, and opt-in gRPC now exercise
+  the same real-engine invocation, cancellation, admission, terminal-result,
+  and nested Store/ToolGate contract. The gRPC suite has a dedicated CI gate.
 - **Performance build configuration.** Added an opt-in
   `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` switch for local GCC/Clang builds,
   plus a warning when a single-config generator omits `CMAKE_BUILD_TYPE` and
@@ -22,6 +126,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies the configured authenticator to ordinary message, stream, task-get,
   and task-cancel RPCs as well as collaboration envelopes. The default remains
   false for legacy compatibility.
+- **Trusted-ingress tenant isolation (#244).** Added immutable `TenantScope`,
+  fail-closed scoped Store/CheckpointStore and Harness namespaces, RAII-safe
+  per-tenant concurrency/queue/token/cost/artifact quotas, and a
+  non-secret `CatalogConfig::materialization_context_identity` cache
+  partition. The existing multi-tenant cookbook now labels topology-sharing
+  measurements separately from production isolation and extrapolation.
 - **Host-owned A2A control-message interception.** `ProgramAgentAdapter` can
   now route an authenticated typed message to a host callback before starting
   `ProgramRuntime`. The callback must preserve task/context identity and its
@@ -34,6 +144,52 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Subgraph recovery boundaries.** Administrative updates preserve interrupted
+  continuation identity; retained children distinguish a new parent call from
+  a same-call resume. Stateless static interrupts reject before effects, and
+  interrupt recovery uses asynchronous checkpoint loading.
+- **Schema callback and streamed-media parity.** Selected custom primitives
+  remain selected with callbacks; Responses/Gemini streams retain artifacts.
+  Veo accepts omitted pending status without accepting wrong status types.
+- **MCP and host-process isolation.** Adopted tools require independent pinned
+  approvals and exact argument values; revocation/schema drift drain retained
+  clients. Hardened subprocesses enforce startup/stderr bounds, handle/FD
+  isolation and descendant cleanup; host output draining is bounded.
+  macOS startup supports Darwin signal macros and reads the inherited
+  environment through its platform accessor before fork.
+  The POSIX close fallback uses the descriptor hard limit rather than a 65536
+  cap, including descriptors retained above a lowered soft limit. Windows
+  inheritance tests observe the original event, not reusable handle numbers.
+- **Clean-runner contract gates.** CI explicitly installs Protobuf
+  development headers and libraries, not only its compiler/runtime packages.
+  Isolated stdio fixtures explicitly approve their discovered Python search path.
+- **Tenant-safe durable Harness records.** Scoped IDs and references round-trip
+  through File/SQLite stores, long File keys use bounded hash filenames, and
+  SQLite retention cannot delete another namespace's records or journals.
+- **Runnable Harness CLI.** Startup policy uses the supported Program child-depth
+  ceiling; a real stdio compile/start/get regression covers the shipped binary.
+- **Cold active Program starts.** A newly created catalog now materializes
+  the already selected persisted version before run pinning, without rereading
+  the activation pointer.
+- **Durable generated-artifact replay.** Provider receipts retain ordered
+  artifact payloads and nested metadata across reopen and reconciliation.
+  Volatile SQLite paths and legacy receipts missing artifact evidence reject
+  explicitly instead of inventing empty output or redispatching.
+- **Ephemeral checkpoint resume safety.** Checkpoints with ephemeral channels
+  now record a lifecycle guard in metadata. Resuming a written ephemeral
+  channel, changing its declaration, or loading an older checkpoint without
+  its guard fails explicitly instead of silently restoring its initial value.
+  Isolated multi-`Send` workers and cache keys now see live ephemeral values,
+  while durable overwrite, append, and custom reducers retain their
+  materialized checkpoint format.
+- **Explicit subgraph persistence modes and nested inspection.** `SubgraphNode`
+  now supports compatibility `Legacy`, fresh durable `PerInvocation`,
+  retained `PerThread`, and fail-closed `Stateless` policies. Stable
+  length-framed namespaces, parent checkpoint invocation identity, nested
+  `GraphEngine::inspect_nested_checkpoint()` lookup, and same-node
+  persistent namespace collision rejection preserve cancellation, Store,
+  ToolGate, and ordered output-delta behavior. SQLite/PostgreSQL reopen
+  coverage is included where the backend is enabled.
 - **Promo dependency security.** Updated the transitive `js-yaml` dependency
   from 4.3.1 to 4.3.2 in `docs/promo/package-lock.json` to fix the empty-merge
   CPU denial of service vulnerability (CVE-2026-84375 / GHSA-2883-xcg3-v3hh).

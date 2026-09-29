@@ -5,6 +5,7 @@
 #include <neograph/hook_outbox.h>
 #include <neograph/hook_runtime.h>
 #include <neograph/program/program.h>
+#include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/store.h>
 #include <neograph/tool_dispatch.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
@@ -22,6 +23,7 @@
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_store.h>
 #include <neograph/program/sqlite_transition_store.h>
+#include <neograph/program/sqlite_core_tool_grant_store.h>
 
 #include <sqlite3.h>
 #endif
@@ -2258,7 +2260,8 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
                                         effect_broker](
         const ProgramCoreToolGrantContext& context) -> std::optional<ProgramCoreToolGrant> {
         if (context.owner_scope != "tenant:runtime" ||
-            context.program_version_id != version_id || context.run_id != "allowed" ||
+            context.program_version_id != version_id ||
+            (context.run_id != "allowed" && context.run_id != "no-broker") ||
             context.operation_id != "root" || context.attempt != 1)
             return std::nullopt;
         ProgramCoreToolGrant grant;
@@ -2268,21 +2271,28 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
         grant.operation_id = std::string(context.operation_id);
         grant.attempt = context.attempt;
         grant.grant_id = "grant-allowed";
+        grant.binding_fingerprint = std::string(context.binding_fingerprint);
         grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {
             co_return neograph::ToolDecision::allow();
         };
         grant.controller = allowed_controller;
-        grant.effect_broker = effect_broker;
+        if (context.run_id == "allowed") grant.effect_broker = effect_broker;
         return grant;
     };
     fixture.runtime = fixture.make_runtime();
+    EXPECT_EQ(invoke("no-broker").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
     EXPECT_EQ(invoke("allowed").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
     EXPECT_EQ(mediated_tool_controller.load(), allowed_controller.get());
     ASSERT_EQ(effect_broker->seen.size(), 1U);
     EXPECT_EQ(effect_broker->seen[0].owner_scope, "tenant:runtime");
     EXPECT_EQ(effect_broker->seen[0].run_id, "allowed");
+    EXPECT_EQ(effect_broker->seen[0].program_version_id, version.id());
+    EXPECT_EQ(effect_broker->seen[0].operation_id, "root");
+    EXPECT_EQ(effect_broker->seen[0].grant_id, "grant-allowed");
+    EXPECT_EQ(effect_broker->seen[0].attempt, 1U);
     EXPECT_FALSE(effect_broker->seen[0].thread_id.empty());
     EXPECT_FALSE(effect_broker->seen[0].task_id.empty());
     EXPECT_EQ(effect_broker->seen[0].call_ordinal, 0U);
@@ -2300,6 +2310,8 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
             stale.operation_id = "a-different-operation";
         if (context.run_id == "stale-attempt") ++stale.attempt;
         stale.grant_id = "grant-stale";
+        stale.binding_fingerprint = context.run_id == "stale-binding"
+            ? "another-binding" : std::string(context.binding_fingerprint);
         stale.gate = [](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {
             co_return neograph::ToolDecision::allow();
@@ -2311,6 +2323,7 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
     EXPECT_EQ(invoke("stale-run").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(invoke("stale-operation").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(invoke("stale-attempt").status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(invoke("stale-binding").status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
 }
 
@@ -2426,11 +2439,13 @@ TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
         grant.operation_id = std::string(context.operation_id);
         grant.attempt = context.attempt;
         grant.grant_id = "grant-before-restart";
+        grant.binding_fingerprint = std::string(context.binding_fingerprint);
         grant.gate = [](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {
             co_return neograph::ToolDecision::allow();
         };
         grant.controller = std::make_shared<neograph::ToolExecutionController>();
+        grant.effect_broker = std::make_shared<ProgramToolEffectProbe>();
         return grant;
     };
     fixture.runtime = fixture.make_runtime();
@@ -2473,6 +2488,158 @@ TEST(ProgramRuntimeTest, ReconnectedCoreToolRequiresReboundGrant) {
     EXPECT_EQ(allowed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(mediated_tool_calls.load(), 1U);
 }
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramRuntimeTest, DurableCoreToolGrantRebindsExactAuthorityAcrossRestart) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = program_document("runtime-mediated-dispatch");
+    document["root"]["definition"]["interrupt_before"] = json::array({"work"});
+    const auto version = fixture.admit_document(std::move(document));
+    const auto binding = capability_binding_receipt_root(
+        version.core_materialization_receipt().capability_bindings);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("neograph-core-tool-grant-" + Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    const auto effect_broker = std::make_shared<ProgramToolEffectProbe>();
+    const auto make_policy = [effect_broker](const ProgramCoreToolGrantRecord& record)
+        -> std::optional<ProgramCoreToolGrant> {
+        ProgramCoreToolGrant authorized;
+        authorized.owner_scope = record.owner_scope;
+        authorized.program_version_id = record.program_version_id;
+        authorized.run_id = record.run_id;
+        authorized.operation_id = record.operation_id;
+        authorized.attempt = record.attempt;
+        authorized.binding_fingerprint = record.binding_fingerprint;
+        authorized.grant_id = record.grant_id;
+        authorized.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+            -> asio::awaitable<neograph::ToolDecision> {
+            co_return neograph::ToolDecision::allow();
+        };
+        authorized.controller = std::make_shared<neograph::ToolExecutionController>();
+        authorized.effect_broker = effect_broker;
+        return authorized;
+    };
+    fixture.core_tool_grant_resolver =
+        make_durable_core_tool_grant_resolver(store, make_policy);
+    fixture.runtime = fixture.make_runtime();
+
+    const auto context = ProgramCoreToolGrantContext{
+        "tenant:runtime", version.id(), "durable-grant-run", "root", 1, binding};
+    const auto record = ProgramCoreToolGrantRecord{
+        std::string(context.owner_scope), std::string(context.program_version_id),
+        std::string(context.run_id), std::string(context.operation_id),
+        context.attempt, binding, "host-grant-1"};
+    ASSERT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::Admitted);
+    EXPECT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::AlreadyPresent);
+    auto conflicting = record;
+    conflicting.grant_id = "substituted-grant";
+    EXPECT_EQ(store->admit(conflicting), ProgramCoreToolGrantAdmission::Conflict);
+    EXPECT_FALSE(store->load(ProgramCoreToolGrantContext{
+        "other-tenant", version.id(), context.run_id, "root", 1, binding}));
+
+    ProgramInvocation request{json::object(), grant(), "trace-durable-tool-grant", {}};
+    request.requested_run_id = std::string(context.run_id);
+    const auto interrupted = fixture.runtime->start(
+        "tenant:runtime", version, std::move(request)).wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+
+    fixture.runtime.reset();
+    fixture.core_tool_grant_resolver = {};
+    store.reset();
+    store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    fixture.core_tool_grant_resolver =
+        make_durable_core_tool_grant_resolver(store, make_policy);
+    fixture.runtime = fixture.make_runtime();
+    const auto reconnected = fixture.runtime->reconnect(
+        "tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(reconnected.status(), ProgramTerminalStatus::Interrupted);
+    // Resume advances the Program attempt; the trusted host explicitly
+    // re-admits its existing authority for that attempt before dispatch.
+    auto next_attempt = record;
+    next_attempt.attempt = 2;
+    ASSERT_EQ(store->admit(next_attempt), ProgramCoreToolGrantAdmission::Admitted);
+    const auto resumed = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json::object(), "trace-durable-tool-resume")).wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 1U);
+    EXPECT_TRUE(store->revoke(context));
+    EXPECT_FALSE(store->load(context));
+    EXPECT_FALSE(store->load(ProgramCoreToolGrantContext{
+        context.owner_scope, context.program_version_id, context.run_id,
+        context.operation_id, 2, context.binding_fingerprint}));
+    EXPECT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::Conflict);
+}
+
+TEST(ProgramRuntimeTest, DurableCoreToolGrantRejectsChangedBindingAndHostPolicy) {
+    mediated_tool_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-mediated-dispatch");
+    const auto binding = capability_binding_receipt_root(
+        version.core_materialization_receipt().capability_bindings);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("neograph-core-tool-grant-negative-" + Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    const ProgramCoreToolGrantRecord record{
+        "tenant:runtime", version.id(), "different-binding", "root", 1,
+        "different-executable-binding", "host-grant-negative"};
+    ASSERT_EQ(store->admit(record), ProgramCoreToolGrantAdmission::Admitted);
+    fixture.core_tool_grant_resolver =
+        make_durable_core_tool_grant_resolver(store,
+            [](const ProgramCoreToolGrantRecord& persisted)
+                -> std::optional<ProgramCoreToolGrant> {
+                ProgramCoreToolGrant unauthorized;
+                unauthorized.owner_scope = persisted.owner_scope;
+                unauthorized.program_version_id = persisted.program_version_id;
+                unauthorized.run_id = persisted.run_id;
+                unauthorized.operation_id = persisted.operation_id;
+                unauthorized.attempt = persisted.attempt;
+                unauthorized.binding_fingerprint = persisted.binding_fingerprint;
+                unauthorized.grant_id = "another-grant";
+                unauthorized.gate = [](neograph::ToolCall, neograph::ToolGateContext)
+                    -> asio::awaitable<neograph::ToolDecision> {
+                    co_return neograph::ToolDecision::allow();
+                };
+                unauthorized.controller =
+                    std::make_shared<neograph::ToolExecutionController>();
+                return unauthorized;
+            });
+    fixture.runtime = fixture.make_runtime();
+    ProgramInvocation request{json::object(), grant(), "trace-wrong-binding", {}};
+    request.requested_run_id = record.run_id;
+    EXPECT_EQ(fixture.runtime->start("tenant:runtime", version, std::move(request))
+                  .wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+    EXPECT_FALSE(store->load(ProgramCoreToolGrantContext{
+        "tenant:runtime", version.id(), record.run_id, "root", 1, binding}));
+    auto policy_mismatch = record;
+    policy_mismatch.run_id = "wrong-host-policy";
+    policy_mismatch.binding_fingerprint = binding;
+    policy_mismatch.grant_id = "recorded-grant";
+    ASSERT_EQ(store->admit(policy_mismatch), ProgramCoreToolGrantAdmission::Admitted);
+    ProgramInvocation next{json::object(), grant(), "trace-wrong-policy", {}};
+    next.requested_run_id = policy_mismatch.run_id;
+    EXPECT_EQ(fixture.runtime->start("tenant:runtime", version, std::move(next))
+                  .wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(mediated_tool_calls.load(), 0U);
+}
+#endif
 
 TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEvents) {
     completed_calls.store(0);
@@ -2799,6 +2966,196 @@ TEST(ProgramRuntimeTest, CanonicalRunInvocationIsRetainedExactlyAndAcceptsRuntim
     EXPECT_EQ(handle.snapshot().invocation(), invocation);
     EXPECT_EQ(handle.snapshot().child_depth(), 0U);
     EXPECT_GT(sink->calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, ActiveStartMaterializesPersistedVersionInColdCatalog) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", version.id(), 0),
+              ProgramActivationResult::Activated);
+    fixture.runtime.reset();
+    fixture.catalog.reset();
+    fixture.engines = std::make_shared<EngineGenerationCache>();
+    fixture.catalog = std::make_shared<ProgramCatalog>(
+        CatalogConfig{fixture.store, fixture.registry, fixture.engines, "program-runtime-test/v1"});
+    fixture.runtime = fixture.make_runtime();
+
+    RunInvocation request;
+    request.owner_scope = "tenant:runtime";
+    request.agent_id = "cold-active";
+    request.budget = grant();
+    request.message_sequence = 1;
+    request.idempotency_key = "cold-active:1";
+    request.correlation_id = "trace-cold-active";
+    request.run_id = "cold-active-run";
+    auto active = fixture.runtime->start_active(request);
+    EXPECT_EQ(active.activation.active_version_id(), version.id());
+    EXPECT_EQ(active.activation.generation(), 1U);
+    EXPECT_EQ(active.handle.snapshot().program_version_id(), version.id());
+    ASSERT_TRUE(active.handle.snapshot().invocation().selected_activation);
+    EXPECT_EQ(active.handle.snapshot().invocation().selected_activation->id(),
+              active.activation.id());
+    EXPECT_EQ(active.handle.wait().status(), ProgramTerminalStatus::Completed);
+}
+
+TEST(ProgramRuntimeTest, ActiveStartPinsAdmittedVersionAcrossRollback) {
+    completed_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto first = fixture.admit("runtime-completed");
+    const auto second = fixture.admit("runtime-followup");
+
+    RunInvocation request;
+    request.owner_scope = "tenant:runtime";
+    request.agent_id = "active-start";
+    request.budget = grant();
+    request.message_sequence = 1;
+    request.idempotency_key = "active-start:1";
+    request.correlation_id = "trace-active-start";
+    request.run_id = "active-start-first";
+    EXPECT_THROW((void)fixture.runtime->start_active(request), ProgramDiagnosticError);
+    EXPECT_FALSE(fixture.journal->load("tenant:runtime", request.run_id));
+    request.program_version_id = first.id();
+    EXPECT_THROW((void)fixture.runtime->start_active(request), std::invalid_argument);
+    request.program_version_id.clear();
+
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", first.id(), 0),
+              ProgramActivationResult::Activated);
+    auto original = fixture.runtime->start_active(request);
+    EXPECT_EQ(original.activation.generation(), 1U);
+    EXPECT_EQ(original.activation.active_version_id(), first.id());
+    EXPECT_EQ(original.handle.snapshot().program_version_id(), first.id());
+    ASSERT_TRUE(original.handle.snapshot().invocation().selected_activation);
+    EXPECT_EQ(original.handle.snapshot().invocation().selected_activation->id(),
+              original.activation.id());
+    EXPECT_EQ(RunInvocation::parse(
+                  original.handle.snapshot().invocation().serialize_canonical())
+                  .selected_activation->id(),
+              original.activation.id());
+    auto forged = request;
+    forged.run_id = "active-start-forged";
+    forged.program_version_id = first.id();
+    forged.selected_activation = original.activation;
+    EXPECT_THROW((void)fixture.runtime->start(forged), ProgramDiagnosticError);
+    EXPECT_FALSE(fixture.journal->load("tenant:runtime", forged.run_id));
+
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", second.id(), 1),
+              ProgramActivationResult::Activated);
+    request.run_id = "active-start-second";
+    request.message_sequence = 2;
+    request.idempotency_key = "active-start:2";
+    auto next = fixture.runtime->start_active(request);
+    EXPECT_EQ(next.activation.generation(), 2U);
+    EXPECT_EQ(next.handle.snapshot().program_version_id(), second.id());
+    ASSERT_TRUE(next.handle.snapshot().invocation().selected_activation);
+    EXPECT_EQ(next.handle.snapshot().invocation().selected_activation->id(),
+              next.activation.id());
+
+    ASSERT_EQ(fixture.catalog->rollback("tenant:runtime", first.id(), 2),
+              ProgramActivationResult::Activated);
+    EXPECT_EQ(original.handle.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(original.handle.snapshot().program_version_id(), first.id());
+    EXPECT_EQ(next.handle.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(next.handle.snapshot().program_version_id(), second.id());
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ConcurrentActiveStartSelectsWholeActivationTuples) {
+    completed_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto first = fixture.admit("runtime-completed");
+    const auto second = fixture.admit("runtime-followup");
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", first.id(), 0),
+              ProgramActivationResult::Activated);
+
+    std::barrier gate(2);
+    std::exception_ptr publisher_error;
+    std::thread publisher([&] {
+        try {
+            gate.arrive_and_wait();
+            for (std::uint64_t generation = 1; generation <= 40; ++generation) {
+                const auto& selected = generation % 2 ? second : first;
+                if (fixture.catalog->activate("tenant:runtime", selected.id(), generation) !=
+                    ProgramActivationResult::Activated) {
+                    throw std::runtime_error("activation CAS failed without competing publishers");
+                }
+            }
+        } catch (...) {
+            publisher_error = std::current_exception();
+        }
+    });
+
+    std::vector<ProgramActiveRun> runs;
+    runs.reserve(40);
+    std::exception_ptr admission_error;
+    try {
+        gate.arrive_and_wait();
+        for (int index = 0; index < 40; ++index) {
+            RunInvocation request;
+            request.owner_scope = "tenant:runtime";
+            request.agent_id = "active-race";
+            request.run_id = "active-race-" + std::to_string(index);
+            request.budget = grant();
+            request.message_sequence = static_cast<std::uint64_t>(index + 1);
+            request.idempotency_key = request.run_id;
+            request.correlation_id = request.run_id;
+            runs.push_back(fixture.runtime->start_active(std::move(request)));
+        }
+    } catch (...) {
+        admission_error = std::current_exception();
+    }
+    publisher.join();
+    if (publisher_error) std::rethrow_exception(publisher_error);
+    if (admission_error) std::rethrow_exception(admission_error);
+    for (auto& run : runs) {
+        const auto expected = run.activation.generation() % 2 ? first.id() : second.id();
+        EXPECT_EQ(run.activation.active_version_id(), expected);
+        EXPECT_EQ(run.handle.snapshot().program_version_id(), expected);
+        ASSERT_TRUE(run.handle.snapshot().invocation().selected_activation);
+        EXPECT_EQ(run.handle.snapshot().invocation().selected_activation->id(),
+                  run.activation.id());
+        EXPECT_EQ(run.handle.wait().status(), ProgramTerminalStatus::Completed);
+    }
+    EXPECT_EQ(completed_calls.load() + followup_calls.load(), runs.size());
+}
+
+TEST(ProgramRuntimeTest, ActiveRunGraphForkDropsSourceActivationButRetainsLineage) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto version = fixture.admit("runtime-short-blocking");
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", version.id(), 0),
+              ProgramActivationResult::Activated);
+
+    RunInvocation request;
+    request.owner_scope = "tenant:runtime";
+    request.agent_id = "active-graph-source";
+    request.run_id = "active-graph-source";
+    request.budget = grant();
+    request.message_sequence = 1;
+    request.idempotency_key = request.run_id;
+    request.correlation_id = request.run_id;
+    auto source = fixture.runtime->start_active(request);
+    auto target = fixture.runtime->migrate_graph(
+        source.handle,
+        ProgramGraphMigrationTarget{version.id(), "active-graph-successor", {}});
+    const auto result = target.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.run_id(), "active-graph-successor");
+    EXPECT_FALSE(target.snapshot().invocation().selected_activation);
+    EXPECT_EQ(source.handle.snapshot().invocation().selected_activation->id(),
+              source.activation.id());
+    const auto lineage = fixture.journal->load_run_lineage(
+        "tenant:runtime", source.handle.run_id());
+    ASSERT_TRUE(lineage);
+    EXPECT_EQ(lineage->active_generation(), 2U);
+    EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", request.run_id).wait().id(),
+              result.id());
+    (void)source.handle.wait();
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
 }
 
 TEST(ProgramRuntimeTest, ReconnectTerminalAfterCatalogRecreationIsByteExactAndNonMutating) {

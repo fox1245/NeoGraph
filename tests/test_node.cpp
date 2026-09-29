@@ -196,13 +196,14 @@ TEST(NodeTest, DoesNotPrependSecondSystemMessage) {
 // ── ToolDispatchNode ──
 
 TEST(NodeTest, ToolDispatchExecutes) {
-    auto tool = std::make_unique<MockTool>();
-    Tool* tool_ptr = tool.get();
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<MockTool>());
 
     NodeContext ctx;
-    ctx.tools = {tool_ptr};
+    ctx.tools = ToolSet(std::move(tools));
 
     ToolDispatchNode node("tools", ctx);
+    ctx.tools = ToolSet{};  // The standalone node retains its own tool owner.
 
     // Create state with an assistant message containing tool_calls
     GraphState state;

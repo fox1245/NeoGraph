@@ -315,7 +315,7 @@ std::shared_ptr<GraphEngine> build_provider_engine(
     return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, NodeContext{}));
 }
 
-std::shared_ptr<GraphEngine> build_tool_dispatch_engine(Tool* tool) {
+std::shared_ptr<GraphEngine> build_tool_dispatch_engine(std::shared_ptr<Tool> tool) {
     NodeFactory::instance().register_type("a2a_tool_call_seed",
         [](const std::string&, const neograph::json&, const NodeContext&) {
             return std::make_unique<ToolCallSeedNode>();
@@ -334,7 +334,7 @@ std::shared_ptr<GraphEngine> build_tool_dispatch_engine(Tool* tool) {
         })},
     };
     NodeContext ctx;
-    ctx.tools = {tool};
+    ctx.tools = neograph::ToolSet(std::vector<std::shared_ptr<Tool>>{std::move(tool)});
     return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, ctx));
 }
 
@@ -876,7 +876,7 @@ TEST(A2AServer, CancelReachesCooperativeProviderFixture) {
 TEST(A2AServer, CancelReachesToolDispatchTool) {
     auto probe = std::make_shared<ToolDispatchProbe>();
     auto tool = std::make_shared<CancellableDispatchTool>(probe);
-    A2AServer server(build_tool_dispatch_engine(tool.get()), build_card(0));
+    A2AServer server(build_tool_dispatch_engine(tool), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
     const std::string task_id = "a2a-tool-dispatch-cancel";

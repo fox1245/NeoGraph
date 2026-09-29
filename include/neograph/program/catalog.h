@@ -8,6 +8,7 @@
 #include <neograph/program/admission.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/module.h>
+#include <neograph/program/store.h>
 #include <neograph/tool_set.h>
 
 #include <functional>
@@ -49,7 +50,9 @@ private:
  * Process-local cache of fully linked Core generations.
  *
  * The cache exposes no GraphEngine surface. It may be shared only by Catalogs
- * with the same immutable registry fingerprint and compiler build identity.
+ * with the same immutable registry/compiler identity; materialization context
+ * identity is an additional key so incompatible provider/tool/store bindings
+ * cannot reuse a generation. Context identities are non-secret host labels.
  */
 class NEOGRAPH_PROGRAM_API EngineGenerationCache {
 public:
@@ -99,6 +102,14 @@ struct CatalogConfig {
      * host attestation.
      */
     std::string                            host_identity;
+    /**
+     * Stable, non-secret construction-context identity supplied by trusted
+     * host code. It partitions generation-cache entries when the same
+     * topology is bound to different Provider, ToolSet, policy, Store, or
+     * host registry resources. Credentials and topology JSON MUST NOT be
+     * placed here. Empty retains legacy identity derived from exact receipts.
+     */
+    std::string                            materialization_context_identity;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCatalog {
@@ -140,6 +151,9 @@ public:
                                      std::uint64_t expected_generation);
     std::optional<ProgramActivation>
     activation(std::string_view owner_scope) const;
+    /** Read one coherent activation/version tuple from the durable store. */
+    std::optional<ProgramActivationBinding>
+    active_binding(std::string_view owner_scope) const;
     ProgramRetentionReport collect_retention(
         std::string_view owner_scope,
         const std::vector<std::string>& pinned_version_ids);

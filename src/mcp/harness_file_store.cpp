@@ -1,4 +1,5 @@
 #include <neograph/mcp/harness.h>
+#include "../core/sha256.h"
 
 #include <algorithm>
 #include <atomic>
@@ -49,12 +50,32 @@ struct FileHarnessRecordStore::Impl {
 
     std::filesystem::path path(const char* collection, const std::string& id) const {
         validate_id(id);
-        return root / collection / (id + ".json");
+        auto target = root / collection;
+        // Leave existing short-key paths unchanged. Encoded tenant/content-addressed
+        // keys can exceed filesystem component limits, including the temporary suffix.
+        if (id.size() <= 240) return target / (id + ".json");
+        const auto digest = neograph::detail::sha256_digest(id);
+        constexpr char digits[] = "0123456789abcdef";
+        std::string filename;
+        filename.reserve(64 + 5);
+        for (const auto byte : digest) {
+            filename.push_back(digits[byte >> 4]);
+            filename.push_back(digits[byte & 15]);
+        }
+        filename += ".json";
+        return target / "long-ids" / filename;
     }
 
     void save(const char* collection, const std::string& id, const json& record) {
         const auto target = path(collection, id);
         std::lock_guard lock(mutex);
+        if (id.size() > 240) {
+#ifdef _WIN32
+            std::filesystem::create_directories(extended_windows_path(target.parent_path()));
+#else
+            std::filesystem::create_directories(target.parent_path());
+#endif
+        }
         const auto temporary = std::filesystem::path(
             target.string() + ".tmp." +
             std::to_string(next_temp.fetch_add(1, std::memory_order_relaxed)));

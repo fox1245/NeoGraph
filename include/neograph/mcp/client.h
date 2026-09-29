@@ -9,7 +9,8 @@
  *   - **HTTP** (Streamable HTTP) — remote server, reachable over the network.
  *   - **stdio** — subprocess launched by the client; newline-delimited
  *     JSON-RPC messages exchanged over the child's stdin/stdout. The
- *     subprocess lives as long as any MCPTool produced by the client.
+ *     subprocess lives as long as any MCPTool produced by the client, unless
+ *     MCPClient::shutdown() explicitly revokes the shared session.
  */
 #pragma once
 
@@ -30,35 +31,21 @@ namespace neograph::graph { class CancelToken; }
 namespace neograph::mcp {
 
 namespace detail {
-/// Opaque stdio session. Holds the subprocess pid, pipe fds, read buffer,
-/// and a mutex serialising concurrent rpc_call() calls. Destroying the
-/// session sends SIGTERM to the child and reaps it via waitpid.
-class StdioSession;
-class HttpSession;
-class ClientMetadata;
+class ProtocolSession;
 }
 
 /**
  * @brief Wraps a remote MCP server tool as a local Tool.
  *
- * MCPTool implements the Tool interface by forwarding execute() calls
- * through the owning transport (HTTP or stdio). Created automatically
- * by MCPClient::get_tools().
+ * MCPTool implements the Tool interface through the originating protocol
+ * session, independently of which transport owns the connection.
  */
 class NEOGRAPH_API MCPTool : public AsyncTool {
   public:
-    /// Legacy HTTP-mode constructor. Each execute() opens an ephemeral
-    /// MCPClient against @p server_url. Tools returned by MCPClient::get_tools()
-    /// instead retain the originating HTTP session.
+    /// Direct HTTP constructor. Each execution opens an ephemeral
+    /// protocol session; tools returned by MCPClient::get_tools() instead
+    /// retain their originating protocol session and transport.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    /// stdio-mode constructor. The MCPTool keeps the session alive —
-    /// the subprocess stays up as long as any tool instance holds a
-    /// reference to it.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -86,16 +73,11 @@ class NEOGRAPH_API MCPTool : public AsyncTool {
 
   private:
     friend class MCPClient;
-    MCPTool(std::shared_ptr<detail::HttpSession> session,
-            std::shared_ptr<detail::ClientMetadata> metadata,
-            ToolDefinition definition);
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
+    MCPTool(std::shared_ptr<detail::ProtocolSession> session,
             ToolDefinition definition);
 
-    std::string server_url_;                              ///< Non-empty in HTTP mode.
-    std::shared_ptr<detail::HttpSession> http_session_;   ///< Shared originating HTTP session.
-    std::shared_ptr<detail::ClientMetadata> metadata_;   ///< Shared lifecycle/negotiation state.
-    std::shared_ptr<detail::StdioSession> stdio_session_; ///< Non-null in stdio mode.
+    std::string server_url_; ///< Legacy direct-HTTP constructor only.
+    std::shared_ptr<detail::ProtocolSession> session_;
     ToolDefinition definition_;
 };
 
@@ -130,19 +112,31 @@ class NEOGRAPH_API MCPClient {
     /**
      * @brief Construct a stdio-mode MCP client by spawning a subprocess.
      * @param argv Command + arguments (e.g., {"python", "server.py"}). argv[0]
-     *             is resolved via PATH (execvp). Throws on fork/exec failure.
+     *             is resolved via PATH before fork. Pipe/fork failures throw
+     *             during construction; exec failure surfaces on the first RPC.
      *
-     * The subprocess is terminated (SIGTERM + waitpid) when the last
-     * reference to the underlying session is dropped — this is either the
-     * MCPClient itself or any MCPTool produced by get_tools().
+     * The subprocess tree is terminated when the last reference to the
+     * underlying session is dropped, or when shutdown() is called.
+     * This legacy overload inherits environment, cwd, and stderr.
      */
     explicit MCPClient(std::vector<std::string> argv);
+    /// Hardened local launch with validated replacement environment, cwd,
+    /// bounded stderr capture, startup/request deadlines, and process-tree ownership.
+    explicit MCPClient(StdioClientConfig config);
 
     MCPClient(const MCPClient&) = delete;
     MCPClient& operator=(const MCPClient&) = delete;
     MCPClient(MCPClient&&) = delete;
     MCPClient& operator=(MCPClient&&) = delete;
 
+
+    /// Permanently revoke this client and all tools retaining its session.
+    /// Aborts and drains transport work and terminates the owned subprocess tree,
+    /// independently of shared ownership. Repeated and concurrent calls are safe.
+    /// A call from a transport callback cancels in place without self-joining;
+    /// its current operation unwinds with MCPFailure::shutdown.
+    /// Subsequent requests fail with MCPFailure::shutdown.
+    void shutdown() noexcept;
     /**
      * @brief Initialize the connection and perform the MCP handshake.
      * @param client_name Client identifier sent during handshake (default: "neograph").
@@ -150,9 +144,7 @@ class NEOGRAPH_API MCPClient {
      */
     bool initialize(const std::string& client_name = "neograph");
 
-    /// Async variant of initialize() — runs the handshake + initialized
-    /// notification through rpc_call_async, so a coroutine can set up an
-    /// HTTP client without blocking a worker thread in run_sync.
+    /// Async handshake + initialized notification for either transport.
     asio::awaitable<bool> initialize_async(const std::string& client_name = "neograph");
 
     bool is_initialized() const noexcept;
@@ -193,14 +185,15 @@ class NEOGRAPH_API MCPClient {
         const json& arguments);
 
     /**
-     * @brief Async variant of rpc_call for the HTTP transport.
+     * @brief Send a transport-independent JSON-RPC request asynchronously.
      *
-     * Both transports are coroutine-native. stdio uses a session-owned
-     * io_context and request-id demultiplexer; HTTP awaits async_post.
-     *
+     * Both transports are coroutine-native. stdio owns its process and
+     * correlation reader; HTTP owns its headers and HTTP request lifecycle.
      * @param method JSON-RPC method name.
-     * @param params Method parameters (defaults to empty object).
-     * @return Awaitable resolving to the `result` field of the JSON-RPC response.
+     * @param params Method parameters.
+     * @param deadline Absolute steady-clock deadline (unbounded by default).
+     * @param cancel_token Optional cancellation token for this request.
+     * @return The validated JSON-RPC `result` field.
      */
     asio::awaitable<json> rpc_call_async(
         const std::string& method,
@@ -210,17 +203,7 @@ class NEOGRAPH_API MCPClient {
         std::shared_ptr<graph::CancelToken> cancel_token = {});
 
   private:
-    friend class MCPTool;
-    MCPClient(std::shared_ptr<detail::HttpSession> session,
-              std::shared_ptr<detail::ClientMetadata> metadata);
-
-    /// Sync rpc_call — for stdio it dispatches synchronously; for HTTP
-    /// it routes through `run_sync(rpc_call_async(...))`.
-    json rpc_call(const std::string& method, const json& params = json::object());
-
-    std::shared_ptr<detail::HttpSession> http_session_;
-    std::shared_ptr<detail::StdioSession> stdio_session_;
-    std::shared_ptr<detail::ClientMetadata> metadata_;
+    std::shared_ptr<detail::ProtocolSession> session_;
 };
 
 } // namespace neograph::mcp

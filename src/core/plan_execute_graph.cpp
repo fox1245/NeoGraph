@@ -349,7 +349,7 @@ void ensure_registrations_once() {
             [](const std::string& name, const json& config,
                const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
                 return std::make_unique<ExecutorNode>(
-                    name, ctx.provider, ctx.tools, ctx.model,
+                    name, ctx.provider, ctx.tools.view(), ctx.model,
                     config.value("prompt", std::string{}),
                     config.value("max_iter", 5));
             });
@@ -416,18 +416,15 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
         })}
     };
 
-    std::vector<Tool*> tool_ptrs;
-    tool_ptrs.reserve(tools.size());
-    for (auto& t : tools) tool_ptrs.push_back(t.get());
+    // Factories borrow pointers only from this owned collection.
 
     NodeContext ctx;
     ctx.provider     = std::move(provider);
-    ctx.tools        = std::move(tool_ptrs);
+    ctx.tools        = ToolSet(std::move(tools));
     ctx.model        = model;
     ctx.instructions = std::string{};
 
     auto engine = GraphEngine::compile(definition, ctx);
-    engine->own_tools(std::move(tools));
     return engine;
 }
 

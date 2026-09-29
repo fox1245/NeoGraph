@@ -148,6 +148,19 @@ TEST(GraphRegistryLocalTest, LocalParseReportIgnoresGlobalOnlyNodeSchema) {
     EXPECT_EQ(report.diagnostics.front().json_pointer, "/nodes/work/type");
 }
 
+TEST(GraphRegistryLocalTest, ScopedParseDoesNotReadGlobalUnknownNodeSchema) {
+    NodeFactory::instance().register_type(
+        "core_scoped_global_schema", factory(),
+        json{{"type", "object"}, {"required", json::array({"global_only"})}});
+
+    GraphRegistry scoped;
+    const auto definition = node_definition("core_scoped_global_schema");
+    const auto report = GraphCompiler::parse_report(definition, scoped);
+    EXPECT_FALSE(report.has_errors()) << report.summary();
+    EXPECT_THROW((void)GraphCompiler::compile(definition, NodeContext{}, scoped),
+                 std::runtime_error);
+}
+
 TEST(GraphRegistryLocalTest, LocalValidationIgnoresGlobalOnlyConditionAndNodeMetadata) {
     NodeFactory::instance().register_type("core-global-effects-node", factory(),
                                           json{{"type", "object"}},

@@ -3,7 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <thread>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -115,6 +117,22 @@ private:
     Tool* tool_;
 };
 
+class NamedProbeTool final : public Tool {
+public:
+    NamedProbeTool(std::string value, std::shared_ptr<std::atomic<int>> destroyed)
+        : value_(std::move(value)), destroyed_(std::move(destroyed)) {}
+    ~NamedProbeTool() override { ++*destroyed_; }
+    ChatTool get_definition() const override {
+        return {"named_probe", "Ownership lifetime probe", json::object()};
+    }
+    std::string execute(const json&) override { return value_; }
+    std::string get_name() const override { return "named_probe"; }
+
+private:
+    std::string value_;
+    std::shared_ptr<std::atomic<int>> destroyed_;
+};
+
 class RegistryProbeNode final : public GraphNode {
 public:
     explicit RegistryProbeNode(std::string name) : name_(std::move(name)) {}
@@ -194,29 +212,6 @@ void register_node(const std::string& type, NodeFactoryFn factory) {
 
 }  // namespace
 
-TEST(EngineConfigTest, LegacyCompileDelegatesWithoutBehaviorChange) {
-    register_node("engine_config_echo", [](const std::string&, const json&, const NodeContext&) {
-        return std::make_unique<EchoNode>();
-    });
-
-    const auto  definition = one_node_graph("engine_config_echo");
-    NodeContext context;
-
-    auto legacy = GraphEngine::compile(definition, context);
-
-    EngineConfig config;
-    config.node_context = context;
-    auto configured     = GraphEngine::build(definition, std::move(config));
-
-    RunConfig run;
-    run.input = {{"input", "same"}};
-
-    const auto legacy_result     = legacy->run(run);
-    const auto configured_result = configured->run(run);
-
-    EXPECT_EQ(legacy_result.output, configured_result.output);
-    EXPECT_EQ(legacy_result.execution_trace, configured_result.execution_trace);
-}
 
 TEST(EngineConfigTest, StrictBuildRejectsUnknownKeysWithoutMutatingDefinition) {
     register_node("engine_config_strict",
@@ -302,6 +297,29 @@ TEST(EngineConfigTest, EnablesNodeCacheAtConstructionTime) {
     EXPECT_EQ(engine->run(run).channel<int>("output"), 7);
     EXPECT_EQ(engine->run(run).channel<int>("output"), 7);
     EXPECT_EQ(CountingNode::calls.load(), 1);
+}
+
+TEST(EngineConfigTest, ExplicitExecutionCachePolicyOverridesReusableOptIn) {
+    register_node("engine_config_local_cache",
+                  [](const std::string&, const json&, const NodeContext&) {
+                      return std::make_unique<CountingNode>();
+                  });
+    CountingNode::calls = 0;
+    EngineConfig config;
+    config.cached_nodes.insert("work");
+    config.node_cache_policies.emplace(
+        "work", CacheKeyPolicy{CacheScope::Execution, {}});
+    auto engine = GraphEngine::build(one_node_graph("engine_config_local_cache"),
+                                     std::move(config));
+    RunConfig first;
+    first.thread_id = "cache-first";
+    first.input = {{"input", 7}};
+    RunConfig second;
+    second.thread_id = "cache-second";
+    second.input = first.input;
+    EXPECT_EQ(engine->run(first).channel<int>("output"), 7);
+    EXPECT_EQ(engine->run(second).channel<int>("output"), 7);
+    EXPECT_EQ(CountingNode::calls.load(), 2);
 }
 
 TEST(EngineConfigTest, AppliesNodeCacheCapacityBeforeFirstRun) {
@@ -420,7 +438,7 @@ TEST(EngineResourcesTest, KeepsOwnedToolSetAliveForEngineLifetime) {
             if (context.tools.size() != 1) {
                 throw std::runtime_error("owned ToolSet was not bound to NodeContext");
             }
-            return std::make_unique<ToolProbeNode>(context.tools.front());
+            return std::make_unique<ToolProbeNode>(context.tools.view().front());
         });
 
     std::vector<std::unique_ptr<Tool>> tools;
@@ -440,6 +458,114 @@ TEST(EngineResourcesTest, KeepsOwnedToolSetAliveForEngineLifetime) {
     EXPECT_EQ(OwnedProbeTool::destructions.load(), 1);
 }
 
+TEST(EngineResourcesTest, ContextReassignmentDoesNotReplaceCompiledEngineTools) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "reassigned_tool_probe",
+        [](const std::string&, const json&, const NodeContext& context) {
+            return std::make_unique<ToolProbeNode>(context.tools.view().front());
+        });
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    NodeContext context;
+    std::vector<std::unique_ptr<Tool>> first_tools;
+    first_tools.push_back(std::make_unique<NamedProbeTool>("first", destroyed));
+    context.tools = ToolSet(std::move(first_tools));
+
+    EngineConfig first_config;
+    first_config.node_context = context;
+    EngineResources first_resources;
+    first_resources.registry = registry;
+    auto first = GraphEngine::build(one_node_graph("reassigned_tool_probe"),
+                                    std::move(first_config), std::move(first_resources));
+
+    std::vector<std::unique_ptr<Tool>> second_tools;
+    second_tools.push_back(std::make_unique<NamedProbeTool>("second", destroyed));
+    context.tools = ToolSet(std::move(second_tools));
+    EngineConfig second_config;
+    second_config.node_context = context;
+    EngineResources second_resources;
+    second_resources.registry = registry;
+    auto second = GraphEngine::build(one_node_graph("reassigned_tool_probe"),
+                                     std::move(second_config), std::move(second_resources));
+    context.tools = ToolSet{};
+
+    EXPECT_EQ(destroyed->load(), 0);
+    EXPECT_EQ(first->run(RunConfig{}).channel<std::string>("output"), "first");
+    EXPECT_EQ(second->run(RunConfig{}).channel<std::string>("output"), "second");
+    first.reset();
+    EXPECT_EQ(destroyed->load(), 1);
+    EXPECT_EQ(second->run(RunConfig{}).channel<std::string>("output"), "second");
+    second.reset();
+    EXPECT_EQ(destroyed->load(), 2);
+}
+
+TEST(EngineResourcesTest, DirectCompileAndLinkRetainToolsAfterContextDies) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "linked_tool_probe",
+        [](const std::string&, const json&, const NodeContext& context) {
+            return std::make_unique<ToolProbeNode>(context.tools.view().front());
+        });
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    CompiledGraph compiled;
+    {
+        NodeContext temporary;
+        std::vector<std::unique_ptr<Tool>> tools;
+        tools.push_back(std::make_unique<NamedProbeTool>("linked", destroyed));
+        temporary.tools = ToolSet(std::move(tools));
+        compiled = GraphCompiler::compile(one_node_graph("linked_tool_probe"),
+                                          temporary, *registry);
+    }
+    EXPECT_EQ(destroyed->load(), 0);
+    EngineResources resources;
+    resources.registry = registry;
+    auto engine = GraphEngine::link(std::move(compiled), EngineConfig{},
+                                    std::move(resources));
+    EXPECT_EQ(engine->run(RunConfig{}).channel<std::string>("output"), "linked");
+    engine.reset();
+    EXPECT_EQ(destroyed->load(), 1);
+}
+
+TEST(EngineResourcesTest, ScopedToolSetCannotAdoptUnownedPointer) {
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> owned;
+    owned.push_back(std::make_unique<NamedProbeTool>("selected", destroyed));
+    ToolSet full(std::move(owned));
+    auto* original = full.view().front();
+    NamedProbeTool unrelated("unowned", destroyed);
+
+    EXPECT_THROW((void)full.select({&unrelated}), std::invalid_argument);
+    auto selected = full.select({original});
+    full = ToolSet{};
+    EXPECT_EQ(selected.view().front()->execute(json::object()), "selected");
+    EXPECT_EQ(destroyed->load(), 0);
+    selected = ToolSet{};
+    EXPECT_EQ(destroyed->load(), 1);
+}
+
+TEST(EngineResourcesTest, ScopedToolSetCannotWidenItsOwnSelection) {
+    auto destroyed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> owned;
+    owned.push_back(std::make_unique<NamedProbeTool>("allowed", destroyed));
+    owned.push_back(std::make_unique<NamedProbeTool>("denied", destroyed));
+    ToolSet full(std::move(owned));
+    const auto tools = full.view();
+    const auto scoped = full.select({tools[0]});
+
+    EXPECT_THROW((void)scoped.select({tools[1]}), std::invalid_argument);
+    EXPECT_THROW((void)scoped.select({tools[0], tools[1]}), std::invalid_argument);
+    EXPECT_EQ(scoped.select({tools[0]}).view().front(), tools[0]);
+    EXPECT_TRUE(scoped.select({}).empty());
+}
+
+TEST(EngineResourcesTest, RejectsNullOwnedToolsBeforeNodeConstruction) {
+    std::vector<std::unique_ptr<Tool>> unique;
+    unique.push_back(nullptr);
+    EXPECT_THROW((void)ToolSet(std::move(unique)), std::invalid_argument);
+    std::vector<std::shared_ptr<Tool>> shared{nullptr};
+    EXPECT_THROW((void)ToolSet(std::move(shared)), std::invalid_argument);
+}
+
 TEST(EngineResourcesTest, IsolatesNodeReducerAndConditionRegistrationsPerEngine) {
     EngineResources first_resources;
     first_resources.registry = make_registry(0, 1, "one");
@@ -455,10 +581,120 @@ TEST(EngineResourcesTest, IsolatesNodeReducerAndConditionRegistrationsPerEngine)
     EXPECT_THROW((void)GraphEngine::build(registry_graph(), EngineConfig{}), std::runtime_error);
 }
 
-TEST(EngineResourcesTest, RejectsAmbiguousOwnedAndRawToolBindings) {
-    EngineConfig   config;
-    OwnedProbeTool raw_tool;
-    config.node_context.tools = {&raw_tool};
+TEST(EngineResourcesTest, SnapshotFreezesRegistrationAcrossMutationAndOwnerLifetime) {
+    auto registry = make_registry(0, 1, "one");
+    EngineResources first_resources;
+    first_resources.registry = registry;
+    auto first = GraphEngine::build(registry_graph(), EngineConfig{}, std::move(first_resources));
+
+    registry->register_type("engine_local_node",
+                            [](const std::string& name, const json&, const NodeContext&) {
+                                return std::make_unique<RegistryProbeNode>(
+                                    name == "one" ? "eleven" : name);
+                            });
+    registry->register_reducer("engine_local_reducer",
+                               [](const json& current, const json& incoming) {
+                                   return current.get<int>() + incoming.get<int>() + 10;
+                               });
+    registry->register_condition("engine_local_condition",
+                                 [](const GraphState&) { return std::string("one"); });
+    EngineResources second_resources;
+    second_resources.registry = registry;
+    auto second = GraphEngine::build(registry_graph(), EngineConfig{}, std::move(second_resources));
+    registry.reset();
+
+    RunConfig run;
+    EXPECT_EQ(first->run(run).channel<std::string>("output"), "one");
+    EXPECT_EQ(second->run(run).channel<std::string>("output"), "eleven");
+    EXPECT_EQ(first->run(run).channel<std::string>("output"), "one");
+}
+
+TEST(EngineResourcesTest, BuiltinSubgraphResolvesNestedNodesInParentRegistry) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "engine_nested_local_node",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<RegistryProbeNode>("one");
+        });
+    json inner = one_node_graph("engine_nested_local_node");
+    json outer = one_node_graph("subgraph");
+    outer["nodes"]["work"]["definition"] = inner;
+    EngineResources resources;
+    resources.registry = registry;
+    auto engine = GraphEngine::build(outer, EngineConfig{}, std::move(resources));
+    registry.reset();
+    EXPECT_EQ(engine->run(RunConfig{}).channel<std::string>("output"), "one");
+}
+
+TEST(EngineResourcesTest, ConcurrentRegistrationSnapshotsKeepFactoryAndSchemaTogether) {
+    GraphRegistry registry;
+    registry.register_type(
+        "engine_mutating_node",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<RegistryProbeNode>("one");
+        },
+        json{{"type", "object"}, {"description", "one"}});
+
+    std::thread writer([&] {
+        for (int i = 0; i < 100; ++i) {
+            const std::string label = i % 2 == 0 ? "eleven" : "one";
+            registry.register_type(
+                "engine_mutating_node",
+                [label](const std::string&, const json&, const NodeContext&) {
+                    return std::make_unique<RegistryProbeNode>(label);
+                },
+                json{{"type", "object"}, {"description", label}});
+        }
+    });
+    for (int i = 0; i < 100; ++i) {
+        auto snapshot = registry.snapshot();
+        auto node = snapshot->create("engine_mutating_node", "work", json::object(), NodeContext{});
+        EXPECT_EQ(snapshot->config_schema("engine_mutating_node")["description"],
+                  node->get_name());
+    }
+    writer.join();
+}
+
+TEST(EngineResourcesTest, ScopedPaletteExcludesGlobalCustomEntriesUnlessOptedIn) {
+    ReducerRegistry::instance().register_reducer(
+        "engine_global_palette_reducer",
+        [](const json&, const json& incoming) { return incoming; });
+    GraphRegistry scoped;
+    scoped.register_reducer("engine_scoped_palette_reducer",
+                            [](const json&, const json& incoming) { return incoming; });
+    scoped.register_type(
+        "llm_call",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<RegistryProbeNode>(name);
+        },
+        json{{"type", "object"}, {"description", "scoped override"}});
+    scoped.register_condition("has_tool_calls",
+                              [](const GraphState&) { return std::string("custom"); });
+    const auto palette = scoped.export_effective_schema();
+    EXPECT_EQ(palette["node_types"]["llm_call"]["description"], "scoped override");
+    EXPECT_FALSE(palette["node_effects"].contains("llm_call"));
+    EXPECT_FALSE(palette["condition_specs"].contains("has_tool_calls"));
+    const auto names = palette["reducers"].get<std::vector<std::string>>();
+    EXPECT_NE(std::find(names.begin(), names.end(), "overwrite"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "engine_scoped_palette_reducer"),
+              names.end());
+    EXPECT_EQ(std::find(names.begin(), names.end(), "engine_global_palette_reducer"),
+              names.end());
+    EXPECT_THROW((void)scoped.reducer("engine_global_palette_reducer"), std::runtime_error);
+    GraphRegistry legacy(GraphRegistry::Fallback::GlobalFallback);
+    EXPECT_NO_THROW((void)legacy.reducer("engine_global_palette_reducer"));
+    const auto legacy_palette = legacy.export_effective_schema();
+    const auto legacy_names = legacy_palette["reducers"].get<std::vector<std::string>>();
+    EXPECT_NE(std::find(legacy_names.begin(), legacy_names.end(),
+                        "engine_global_palette_reducer"), legacy_names.end());
+}
+
+
+TEST(EngineResourcesTest, RejectsAmbiguousOwnedToolBindings) {
+    EngineConfig config;
+    std::vector<std::unique_ptr<Tool>> context_tools;
+    context_tools.push_back(std::make_unique<OwnedProbeTool>());
+    config.node_context.tools = ToolSet(std::move(context_tools));
 
     std::vector<std::unique_ptr<Tool>> tools;
     tools.push_back(std::make_unique<OwnedProbeTool>());

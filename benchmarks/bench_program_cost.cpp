@@ -105,9 +105,10 @@ Options options(int argc, char** argv) {
     if (o.iterations == 0 || o.commands == 0 || o.commands > 32 || o.residents == 0 ||
         o.residents > 256 || o.payload > 65536)
         throw std::invalid_argument("invalid iterations, commands, residents, or payload bound");
-    if (o.case_id != "lifecycle" && o.case_id != "direct" && o.case_id != "generator" &&
+    if (o.case_id != "lifecycle" && o.case_id != "active" &&
+        o.case_id != "direct" && o.case_id != "generator" &&
         o.case_id != "resident")
-        throw std::invalid_argument("case must be lifecycle, direct, generator, or resident");
+        throw std::invalid_argument("case must be lifecycle, active, direct, generator, or resident");
     if (o.mode != "javascript" && o.mode != "cpp")
         throw std::invalid_argument("mode must be javascript or cpp");
     if (o.mode == "cpp" && o.commands != 1)
@@ -313,6 +314,13 @@ json lifecycle(const Options& o) {
     const auto version =
         catalog->admit(bundle, ProgramAdmission{"program-cost", profile, policy, {}});
     cold["admit_us"] = us(t);
+    if (o.case_id == "active") {
+        t = Clock::now();
+        if (catalog->activate("program-cost", version.id(), 0) !=
+            ProgramActivationResult::Activated)
+            throw std::runtime_error("Program activation CAS did not publish");
+        cold["activate_us"] = us(t);
+    }
     t                = Clock::now();
     ProgramRuntime runtime({catalog, stores.checkpoints, {}, stores.transitions, 1});
     cold["runtime_create_us"] = us(t);
@@ -324,10 +332,28 @@ json lifecycle(const Options& o) {
     for (std::size_t i = 0; i < o.warmup + o.iterations; ++i) {
         if (i == o.warmup) before = resident_bytes();
         const auto              events = std::make_shared<Events>();
-        const ProgramInvocation invocation{input, budget, "program-cost-" + std::to_string(i),
-                                           events};
         const auto              begin   = Events::now();
-        auto                    handle  = runtime.start("program-cost", version, invocation);
+        auto handle = [&] {
+            if (o.case_id != "active") {
+                return runtime.start("program-cost", version,
+                                     ProgramInvocation{input, budget,
+                                                       "program-cost-" + std::to_string(i),
+                                                       events});
+            }
+            neograph::program::RunInvocation request;
+            request.owner_scope = "program-cost";
+            request.agent_id = "program-cost-active";
+            request.run_id = "program-cost-" + std::to_string(i);
+            request.budget = budget;
+            request.input = input;
+            request.message_sequence = i + 1;
+            request.idempotency_key = request.run_id;
+            request.correlation_id = request.run_id;
+            auto selected = runtime.start_active(std::move(request), events);
+            if (selected.activation.active_version_id() != version.id())
+                throw std::runtime_error("Program run selected an unexpected activation");
+            return std::move(selected.handle);
+        }();
         const auto              started = Events::now();
         const auto              result  = handle.wait();
         const auto              end     = Events::now();
@@ -447,7 +473,7 @@ int main(int argc, char** argv) {
     try {
         const auto o = options(argc, argv);
         json       result;
-        if (o.case_id == "lifecycle")
+        if (o.case_id == "lifecycle" || o.case_id == "active")
             result = lifecycle(o);
         else if (o.case_id == "direct")
             result = direct(o);

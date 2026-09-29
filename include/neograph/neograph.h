@@ -51,3 +51,4 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
+#include <neograph/tenant.h>

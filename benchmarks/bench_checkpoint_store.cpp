@@ -16,8 +16,10 @@
 // Usage:
 //   ./bench_checkpoint_store [--threads N] [--iters M] [--channels K]
 //                            [--payload BYTES] [--backends LIST]
-//                            [--pg-url URL] [--sqlite-path PATH]
+//                            [--history-steps N]  (0 disables growing-history mode)
 //
+// Default SQLite database uses a uniquely named temporary file removed on
+// exit. An explicit --sqlite-path must not exist and remains after the run.
 // Default: 8 threads × 200 iters × 6 channels × 256 byte payload.
 // Backends default to "memory,sqlite,postgres" if PG URL is set, else
 // "memory,sqlite".
@@ -33,11 +35,13 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -52,10 +56,11 @@ struct Config {
     int  threads          = 8;
     int  iters_per_thread = 200;
     int  channels         = 6;
+    int history_steps    = 0;
     int  payload_bytes    = 256;
     std::string backends  = "auto";      // resolved to memory,sqlite[,postgres]
     std::string pg_url;
-    std::string sqlite_path = "/tmp/neograph_bench.db";
+    std::string sqlite_path;
     // 0 = use library default (8). Exposed for apples-to-apples
     // comparisons against per-thread LangGraph setups where LG opens
     // as many PG backends as it has threads.
@@ -72,6 +77,7 @@ Config parse_args(int argc, char** argv) {
         else if (a == "--iters")       c.iters_per_thread = std::stoi(next());
         else if (a == "--channels")    c.channels         = std::stoi(next());
         else if (a == "--payload")     c.payload_bytes    = std::stoi(next());
+        else if (a == "--history-steps") c.history_steps = std::stoi(next());
         else if (a == "--backends")    c.backends         = next();
         else if (a == "--pg-url")      c.pg_url           = next();
         else if (a == "--sqlite-path") c.sqlite_path      = next();
@@ -206,6 +212,63 @@ void clean_threads(CheckpointStore& store, const Config& cfg) {
     }
 }
 
+// Growing append-history workload. Measures the logical checkpoint bytes
+// passed to the store; each checkpoint is a full materialized snapshot,
+// so reconstruction depth remains one until a delta-backed format exists.
+void run_history(const std::string& name, CheckpointStore& store,
+                 const Config& cfg) {
+    json history = json::array();
+    std::vector<double> save_us, load_us;
+    std::size_t logical_bytes = 0;
+    save_us.reserve(cfg.history_steps);
+    load_us.reserve(cfg.history_steps);
+    const std::string thread = "bench-history-" + name;
+    for (int i = 0; i < cfg.history_steps; ++i) {
+        history.push_back(json{{"role", "user"},
+                               {"content", make_payload(cfg.payload_bytes, i)}});
+        Checkpoint cp;
+        cp.id = Checkpoint::generate_id();
+        cp.thread_id = thread;
+        cp.step = i;
+        cp.timestamp = i * 1000 + 1;
+        cp.next_nodes = {"__end__"};
+        cp.interrupt_phase = CheckpointPhase::Completed;
+        cp.channel_values["global_version"] = static_cast<std::uint64_t>(i + 1);
+        cp.channel_values["channels"]["messages"] =
+            json{{"value", history}, {"version", static_cast<std::uint64_t>(i + 1)}};
+        logical_bytes += cp.channel_values.dump().size();
+        auto start = clk::now();
+        store.save(cp);
+        save_us.push_back(std::chrono::duration<double, std::micro>(clk::now() - start).count());
+        start = clk::now();
+        auto loaded = store.load_latest(thread);
+        load_us.push_back(std::chrono::duration<double, std::micro>(clk::now() - start).count());
+        if (!loaded ||
+            loaded->channel_values["channels"]["messages"]["value"] != history)
+            throw std::runtime_error("history checkpoint reconstruction mismatch");
+    }
+    std::cout << "# history backend=" << name << " steps=" << cfg.history_steps
+              << " payload_bytes=" << cfg.payload_bytes
+              << " logical_checkpoint_bytes=" << logical_bytes
+              << " save_p50_us=" << percentile(save_us, 0.5)
+              << " save_p95_us=" << percentile(save_us, 0.95)
+              << " load_p50_us=" << percentile(load_us, 0.5)
+              << " load_p95_us=" << percentile(load_us, 0.95)
+              << " reconstruction_depth=1\n";
+    if (name == "sqlite") {
+        const auto file_bytes = [](const std::string& path) {
+            std::error_code error;
+            const auto size = std::filesystem::file_size(path, error);
+            return error ? std::uintmax_t{0} : size;
+        };
+        std::cout << "# history sqlite_file_bytes="
+                  << file_bytes(cfg.sqlite_path)
+                  << " sqlite_wal_bytes="
+                  << file_bytes(cfg.sqlite_path + "-wal") << '\n';
+    }
+    store.delete_thread(thread);
+}
+
 void print_header(const Config& c) {
     std::cout << "# bench_checkpoint_store"
               << " threads=" << c.threads
@@ -245,6 +308,20 @@ bool wants(const std::string& list, const std::string& backend) {
 
 } // namespace
 
+struct TemporarySqliteDatabase {
+    TemporarySqliteDatabase(const std::string& path, bool remove_on_exit)
+        : path(path), remove_on_exit(remove_on_exit) {}
+    ~TemporarySqliteDatabase() {
+        if (!remove_on_exit) return;
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        std::filesystem::remove(path + "-wal", ignored);
+        std::filesystem::remove(path + "-shm", ignored);
+    }
+    const std::string& path;
+    bool remove_on_exit;
+};
+
 int main(int argc, char** argv) {
     Config cfg = parse_args(argc, argv);
     print_header(cfg);
@@ -259,16 +336,30 @@ int main(int argc, char** argv) {
 
         auto r = run_one("memory", store, cfg);
         print_row(r);
+        if (cfg.history_steps > 0) {
+            clean_threads(store, cfg);
+            run_history("memory", store, cfg);
+        }
     }
 
     if (wants(cfg.backends, "sqlite")) {
-        // Wipe stale file from a previous run.
-        std::remove(cfg.sqlite_path.c_str());
-        std::remove((cfg.sqlite_path + "-wal").c_str());
-        std::remove((cfg.sqlite_path + "-shm").c_str());
+        const bool temporary = cfg.sqlite_path.empty();
+        if (temporary) {
+            cfg.sqlite_path = (std::filesystem::temp_directory_path() /
+                ("neograph-bench-" + Checkpoint::generate_id() + ".db")).string();
+        } else if (std::filesystem::exists(cfg.sqlite_path) ||
+                   std::filesystem::exists(cfg.sqlite_path + "-wal") ||
+                   std::filesystem::exists(cfg.sqlite_path + "-shm")) {
+            throw std::runtime_error("refusing to overwrite an existing benchmark database");
+        }
+        TemporarySqliteDatabase cleanup(cfg.sqlite_path, temporary);
         SqliteCheckpointStore store(cfg.sqlite_path);
         auto r = run_one("sqlite", store, cfg);
         print_row(r);
+        if (cfg.history_steps > 0) {
+            clean_threads(store, cfg);
+            run_history("sqlite", store, cfg);
+        }
     }
 
 #ifdef NEOGRAPH_HAVE_POSTGRES
@@ -282,6 +373,10 @@ int main(int argc, char** argv) {
             // Drop and recreate so the bench starts clean.
             store.drop_schema();
             auto r = run_one("postgres", store, cfg);
+            if (cfg.history_steps > 0) {
+                clean_threads(store, cfg);
+                run_history("postgres", store, cfg);
+            }
             print_row(r);
         }
     }

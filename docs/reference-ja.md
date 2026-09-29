@@ -605,16 +605,18 @@ struct ConditionalEdge {
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // 所有する固定ツール集合
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-新しいエンジンでは、ポインターを個別に管理する代わりに `EngineResources` 経由で `ToolSet` を移動することを推奨します。
-`GraphEngine::build()` は対応する非所有ビューを `NodeContext` に結び付け、
-エンジンの寿命中はすべてのツールを生存させます。
+`NodeContext::tools` に `ToolSet(std::move(tools))` を設定するか、コンテキストが空の場合に
+`EngineResources::tools` へ渡します。`GraphCompiler::compile()` とリンク済みエンジンは
+同じツールを共有所有し、コンテキストの再代入では既存のエンジンを変更しません。
+ファクトリーは `ctx.tools.view()` で一時的にポインターを参照できます。
+Python および MCP ツールにも同じコンパイル時の所有権規則が適用されます。
 ### GraphEvent
 ストリーミングによるグラフ実行中に発行されるイベントです。
 ```cpp
@@ -1191,7 +1193,7 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+    // ツールはコンパイル前に NodeContext または EngineResources へ渡す
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1381,13 +1383,8 @@ std::string fork(const std::string& source_thread_id,
 | `new_thread_id` | `std::string` | 新しいスレッド識別子 |
 | `checkpoint_id` | `std::string` | 任意。特定のチェックポイントから fork (デフォルト: 最新) |
 **戻り値:** 新しく fork した状態のチェックポイント ID。
-#### `own_tools`
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-ツールの所有権をエンジンへ移します。エンジンはツールを保持し、すべての `NodeContext.tools` 参照について
-生ポインターをエンジンの寿命中有効に保ちます。
+ツールは `NodeContext::tools` または `EngineResources::tools` でコンパイル前に所有されます。
+コンパイル後の所有権移譲はありません。
 #### `set_checkpoint_store`
 ```cpp
 void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
@@ -2456,25 +2453,18 @@ set_path(data, "metadata.version", 2);
 Model Context Protocol (MCP) クライアント実装です。MCP サーバーに接続し、利用可能なツールを検出して、
 利用できるトランスポートは 2 つです:
 - **HTTP** — `MCPClient("http://host:port")`。検出されたツールは、元の Streamable HTTP セッションを保持します。
-- **stdio** — `MCPClient({"python", "server.py"})`。クライアントはサブプロセスを `fork` + `execvp` し、双方向パイプを接続して、
+- **stdio** — `MCPClient({"python", "server.py"})`。クライアントは `fork` の前に `PATH` を解決し、子プロセスで `execve` して双方向パイプを接続します。
   子プロセスの stdin/stdout 上で通信します。サブプロセスは、
   生成元の `MCPClient` またはいずれかの `MCPTool` が生存する間だけ存在します。
   破棄時には SIGTERM を送り、`waitpid` で回収します (約 500 ms 後に SIGKILL へフォールバック)。
 ### MCPTool
-単一の MCP サーバーツールをローカル `Tool` 実装としてラップします。トランスポートごとに 1 つずつ、2 つのコンストラクターがあります。
-トランスポートごとに 1 つずつコンストラクターがあり、`MCPClient::get_tools()` が適切なものを選びます。
+単一の MCP サーバーツールをローカル `Tool` 実装としてラップします。検出されたツールは
+トランスポートによらず、元のプロトコルセッションを保持します。
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -2528,7 +2518,7 @@ Round 3 の仕様に整合)、stdio トランスポートは同じバージョ�
 | メソッド | 説明 |
 |--------|-------------|
 | `MCPClient(url)` | HTTP モードのクライアントを構築 |
-| `MCPClient(argv)` | サブプロセスを起動して stdio モードのクライアントを構築。`argv[0]` は `PATH` で解決 (execvp)。fork/exec 失敗時は例外。安全対策 (Round 3 強化) のため Windows の `.bat` / `.cmd` は拒否 |
+| `MCPClient(argv)` | サブプロセスを起動して stdio モードのクライアントを構築。`argv[0]` は fork 前に `PATH` で解決し、exec 失敗は最初の RPC で接続エラーになります。安全対策のため Windows の `.bat` / `.cmd` は拒否 |
 | `initialize(client_name)` | MCP 初期化ハンドシェイクを 1 回実行。再呼び出しは冪等で、プロトコル/トランスポート失敗時は例外 |
 | `get_initialize_result()` | ネゴシエートしたプロトコル、機能、サーバー情報、指示、未加工の結果を返す |
 | `list_tools(cursor)` | カーソルを不透明な値として扱い、1 ページを取得 |
@@ -2546,10 +2536,10 @@ auto tools = client.get_tools();
 
 **stdio の使用方法:**
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

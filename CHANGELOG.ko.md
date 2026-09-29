@@ -12,6 +12,17 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **소유자 범위의 실험적 활성 Program 시작.** C++ `ProgramRuntime`와 Python
+  `LocalProgramHost`는 새 실행에서 승인된 불변 활성화를 한 번만 선택하고,
+  선택한 활성화와 해당 버전에 고정된 핸들을 함께 반환합니다. 롤백은 이후
+  시작되는 실행에만 영향을 줍니다. 그래프 마이그레이션은 알 수 없는 노드 로컬
+  상태를 이전할 수 있다고 간주하지 않고 불투명한 체크포인트 메타데이터를
+  거부합니다. 저장소 간 영속 GC와 프로덕션 성능 검증은 별도의 관문입니다.
+- **Program Core Tool grant의 영속 식별자.** 호스트는 소유자 범위의 정확한
+  Tool grant를 SQLite에 승인하고 Program 작업 및 재연결마다 gate/controller를
+  다시 결합할 수 있습니다. 런타임은 승인된 실행 바인딩 fingerprint도 검사하며,
+  철회는 재시작 후에도 유지되어 해당 grant ID의 모든 시도를 차단합니다.
+  효과 결과는 별도의 호출별 영속 Tool broker가 필요합니다.
 - **성능 빌드 구성.** 로컬 GCC/Clang 빌드에서 사용할 수 있는
   `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` 선택 옵션과, 단일 구성 생성기에서
   `CMAKE_BUILD_TYPE`이 비어 Release 최적화 플래그가 빠질 때 경고하는 기능을
@@ -32,6 +43,35 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
+  보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
+  Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트
+  로드를 사용합니다.
+- **Schema callback과 스트리밍 미디어.** Callback 사용 시에도 선택한 custom
+  primitive를 유지하고 Responses/Gemini stream의 artifact를 보존합니다.
+  Veo의 pending 상태 생략은 허용하되 잘못된 상태 타입은 거부합니다.
+- **MCP와 호스트 프로세스 격리.** 채택한 도구는 독립적인 고정 승인과 정확한
+  인수 값이 필요하며, 철회·schema 변경은 참조가 남은 client도 종료합니다.
+  시작·stderr 한도, handle/FD 격리, 자손 종료와 출력 읽기 한도를 적용합니다.
+  macOS에서는 Darwin 시그널 매크로를 지원하고 fork 전에 플랫폼 API로
+  상속 환경을 가져옵니다.
+  POSIX close 대체 경로는 65536 상한 대신 descriptor 하드 리밋을 사용하여
+  소프트 리밋을 낮추기 전에 열린 고번호 FD도 닫습니다. Windows 상속 검증은
+  재사용 가능한 핸들 번호 대신 부모의 원래 이벤트 상태를 확인합니다.
+- **깨끗한 러너의 계약 검증.** CI가 Protobuf 컴파일러·런타임뿐 아니라
+  개발용 헤더와 라이브러리도 명시적으로 설치합니다.
+  격리 stdio fixture는 Python 검색에 사용한 경로를 명시적으로 승인합니다.
+- **테넌트 안전 영속 Harness 기록.** File/SQLite에서 범위 ID와 참조가 왕복하며,
+  긴 File 키는 고정 길이 hash 파일명을 사용합니다. SQLite 보존 정책은 다른
+  namespace의 기록이나 journal을 삭제하지 않습니다.
+- **실행 가능한 Harness CLI.** 시작 정책이 Program의 지원 자식 깊이 상한을
+  사용하며, 실제 stdio compile/start/get 회귀 검증으로 배포 binary를 확인합니다.
+- **새 카탈로그의 활성 Program 시작.** 실행을 버전에 고정하기 전에 이미
+  선택한 영속 버전을 복원하며, 활성화 포인터를 다시 읽지 않습니다.
+- **생성 artifact의 영속 재생.** Provider receipt는 재개방과 결과 조정 후에도
+  artifact 순서, payload, 중첩 metadata를 보존합니다. 휘발성 SQLite 경로와
+  artifact 증거가 없는 구형 receipt는 빈 결과를 만들어 내거나 재호출하지 않고
+  명시적으로 거부합니다.
 - **홍보 영상 의존성 보안.** `docs/promo/package-lock.json`의 간접 의존성
   `js-yaml`을 4.3.1에서 4.3.2로 갱신해 빈 객체 병합으로 CPU를 고갈시키는
   서비스 거부 취약점(CVE-2026-84375 / GHSA-2883-xcg3-v3hh)을 수정했습니다.

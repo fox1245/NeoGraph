@@ -279,10 +279,11 @@ TEST(SubgraphContext, ParentToolGateCannotBeWeakenedByNestedEngine) {
     std::atomic<int> tool_calls{0};
     std::atomic<int> parent_gate_calls{0};
     std::atomic<int> child_gate_calls{0};
-    SpyTool tool(&tool_calls);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SpyTool>(&tool_calls));
 
     NodeContext leaf_context;
-    leaf_context.tools = {&tool};
+    leaf_context.tools = ToolSet(std::move(tools));
     auto leaf = std::shared_ptr<GraphEngine>(
         GraphEngine::compile(
             add_messages_channel(one_node_graph("leaf", "tool_dispatch", "tool")),
@@ -330,10 +331,11 @@ TEST(SubgraphContext, ParentToolGateCannotBeWeakenedByNestedEngine) {
 TEST(SubgraphContext, NestedToolGatesApplyRewritesInParentThenChildOrder) {
     std::atomic<int> tool_calls{0};
     json observed_args;
-    SpyTool tool(&tool_calls, &observed_args);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SpyTool>(&tool_calls, &observed_args));
 
     NodeContext leaf_context;
-    leaf_context.tools = {&tool};
+    leaf_context.tools = ToolSet(std::move(tools));
     auto leaf = std::shared_ptr<GraphEngine>(
         GraphEngine::compile(
             add_messages_channel(one_node_graph("leaf", "tool_dispatch", "tool")),
@@ -389,7 +391,8 @@ TEST(SubgraphContext, ParentResumeResumesInterruptedGrandchild) {
     std::atomic<int> tool_calls{0};
     std::atomic<int> gate_calls{0};
     std::atomic<int> seed_calls{0};
-    SpyTool tool(&tool_calls);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SpyTool>(&tool_calls));
 
     NodeFactory::instance().register_type(
         "subgraph_context_resume_seed_196",
@@ -398,7 +401,7 @@ TEST(SubgraphContext, ParentResumeResumesInterruptedGrandchild) {
         });
 
     NodeContext leaf_context;
-    leaf_context.tools = {&tool};
+    leaf_context.tools = ToolSet(std::move(tools));
     auto leaf = std::shared_ptr<GraphEngine>(
         GraphEngine::compile(
             seed_then_tool_graph("leaf", "subgraph_context_resume_seed_196"),

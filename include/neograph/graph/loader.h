@@ -1,20 +1,17 @@
 /**
  * @file graph/loader.h
- * @brief Singleton registries for custom reducers, conditions, and node types.
+ * @brief Legacy process-global registries for graph executables.
  *
- * These registries are used during graph compilation (GraphEngine::compile)
- * to resolve JSON-defined reducer names, condition names, and node type names
- * into their corresponding functions and factories.
- *
- * Built-in entries are registered automatically. Users can add custom entries
- * before compiling a graph.
+ * Built-in entries are registered automatically. New engines can use an
+ * isolated GraphRegistry via EngineResources; these singleton APIs remain a
+ * process-wide convenience for legacy calls and explicit GlobalFallback.
  */
 #pragma once
 
 #include <neograph/api.h>
 #include <neograph/graph/types.h>
+#include <mutex>
 #include <unordered_map>
-#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -36,23 +33,12 @@ class GraphNode;
  *     });
  * @endcode
  */
-/// @note Process-wide singleton.
+/// @note Legacy process-global convenience API.
 ///
-/// `ReducerRegistry`, `ConditionRegistry`, and `NodeFactory` are global
-/// state shared across every GraphEngine in the process. This is fine
-/// for most embeddings (a single host process compiling its graphs
-/// once), but it has caveats:
-///   - Two embedders coexisting in the same process can't register
-///     conflicting reducer/condition/node-type names without stepping
-///     on each other.
-///   - Test isolation: the registries persist across test cases, so
-///     a node-type registered in one test is visible in subsequent
-///     tests; tests must use unique type names or deregister.
-///   - Pybind users: state survives pytest-case boundaries.
-///
-/// New code that needs isolation can register an EngineResources
-/// `GraphRegistry`; entries there take precedence and this singleton remains
-/// the built-in/default fallback layer.
+/// ReducerRegistry, ConditionRegistry, and NodeFactory synchronize concurrent
+/// registration and lookup. Engines capture a registry snapshot at construction.
+/// Use an isolated GraphRegistry for separate engines: built-ins resolve by
+/// default, while singleton custom entries require explicit GlobalFallback.
 class NEOGRAPH_API ReducerRegistry {
 public:
     /// @brief Get the singleton instance.
@@ -84,6 +70,8 @@ public:
     std::vector<std::string> names() const;
 
 private:
+    friend class GraphRegistry;
+    mutable std::mutex mutex_;
     ReducerRegistry();
     std::unordered_map<std::string, ReducerFn> registry_;
 };
@@ -167,6 +155,8 @@ public:
     std::vector<std::string> names() const;
 
 private:
+    friend class GraphRegistry;
+    mutable std::mutex mutex_;
     ConditionRegistry();
     std::unordered_map<std::string, ConditionFn> registry_;
     std::unordered_map<std::string, ConditionSpec> specs_;
@@ -325,6 +315,8 @@ public:
     json export_schema() const;
 
 private:
+    friend class GraphRegistry;
+    mutable std::mutex mutex_;
     NodeFactory();
     std::unordered_map<std::string, NodeFactoryFn> registry_;
     std::unordered_map<std::string, json> schemas_;

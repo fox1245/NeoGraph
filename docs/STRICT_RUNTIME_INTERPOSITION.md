@@ -59,6 +59,40 @@ records `ReconciliationRequired` rather than retrying. SQLite schema v3 stores
 outcomes separately and validates that each outcome still binds the exact
 admitted dispatch receipt after restart.
 
+## Program Core provider calls (separate from standalone Strict Runtime)
+
+When Program uses built-in Core LLM nodes, the host can set
+`RuntimeConfig::core_provider_call_resolver` and
+`require_core_provider_call_broker = true`. For each exact
+`ProgramCoreProviderCallContext`, return
+`SQLiteProgramProviderCallJournal::bind(context, deployment_identity)` from
+`<neograph/program/sqlite_provider_call_broker.h>`; link `neograph::program_sqlite`.
+The deployment identity must be a host-owned SHA-256 identity of the actual
+provider route, model deployment and authority (including credential version);
+the broker does not discover these from a `Provider` object. Rebind the same
+durable database on restart/reconnect.
+
+The journal keys each call by owner, immutable Program version, run, operation,
+Core thread/task/node and built-in call ordinal, **not** request content or
+Program attempt. It commits the marker with SQLite FULL synchronization before
+transport. The marker means transport *may* have occurred, not that the provider
+received it or that the effect happened exactly once. A successful completion
+is stored for exact-bound replay; an exception or a crash before settlement
+requires external reconciliation and never silently re-dispatches. Use
+`inspect(owner, logical_call_id(context, core_identity))` to check status, then
+`reconcile_success` only with independently verified provider-side evidence.
+Replayed streaming calls return the final completion but do not re-emit chunks.
+Changed request, model, deployment identity or Program scope fails closed.
+Successful receipts retain generated artifacts in order, including their kind,
+MIME type, base64 data, URL, file identity, and nested metadata. Replay and
+`reconcile_success` use that same completion representation. Legacy successful
+receipts without artifact evidence are rejected rather than treated as empty
+artifact output or silently dispatched again. Use a durable filesystem database
+path: empty paths, `:memory:`, and `file:` URI paths are rejected.
+This broker operates on Core's existing ReAct message state, not an assembled
+`ContextEpoch`, and cannot be combined with engine Strict Runtime interposition
+on the same built-in call. Host-authored native Provider calls are outside it.
+
 ## Mandatory Hooks over native, stdio, or HTTP
 
 `MandatoryHookRunner` accepts either the existing native adapter or a

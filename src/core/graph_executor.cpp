@@ -238,7 +238,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     std::string cache_state_hash;
     std::string cache_scope_key;
     if (cache_eligible) {
-        cache_state_hash  = hash_state_for_cache(state.serialize());
+        cache_state_hash  = hash_state_for_cache(state.serialize_runtime());
         const auto policy = node_cache_->policy_for(node_name);
         if (policy.scope == CacheScope::Execution) {
             cache_scope_key = "execution:" + std::to_string(ctx.cache_execution_id);
@@ -788,7 +788,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     // logically immutable across the worker batch (state mutations
     // happen post-join, line ~568 below) so a single snapshot is
     // safe to share.
-    auto state_snapshot      = state.serialize();
+    auto state_snapshot      = state.serialize_runtime();
     auto outer_ex            = co_await asio::this_coro::executor;
     asio::any_io_executor ex = fan_out_pool_ ? asio::any_io_executor(fan_out_pool_->get_executor())
                                              : asio::any_io_executor(outer_ex);
@@ -805,7 +805,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
 
         GraphState send_state;
         init_state(send_state);
-        send_state.restore(state_snapshot);
+        send_state.restore_runtime(state_snapshot);
         apply_input(send_state, s.input);
         // v1.0 (9d): the old `run_cancel_token` smuggling channel is
         // gone. Cancel flows through `ctx.cancel_token` instead, which

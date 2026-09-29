@@ -14,10 +14,18 @@
 
 namespace neograph {
 
-/** Stable Core call slot. The host adds its Program, job, and grant scope. */
+/** One host-scoped, stable Core task and assistant-batch call ordinal. */
 struct ToolEffectIdentity {
     std::string owner_scope;
     std::string run_id;
+    /// Exact Program grant authority. Standalone Core/Agent hosts provide their
+    /// own durable grant_id; provenance is not derived from model call IDs.
+    std::string program_version_id;
+    std::string operation_id;
+    std::string grant_id;
+    /// Retry provenance only: advancing an attempt does not change the slot.
+    std::uint64_t attempt = 0;
+    std::string binding_fingerprint;
     std::string thread_id;
     std::string task_id;
     /// Index in the gated assistant Tool batch, independent of worker order.

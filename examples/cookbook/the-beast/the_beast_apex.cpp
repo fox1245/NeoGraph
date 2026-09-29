@@ -121,17 +121,14 @@ int main(int argc, char** argv) {
     // bind into the spawned harness.
     auto tools = make_tools();
     json catalog = json::array();
-    std::vector<neograph::Tool*> tool_ptrs;
     for (auto& t : tools) {
         auto def = t->get_definition();
         catalog.push_back({{"name", def.name}, {"description", def.description},
                            {"parameters", def.parameters}});
-        tool_ptrs.push_back(t.get());
     }
 
     ng::NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools = tool_ptrs;   // ← the harness's llm_call/tool_dispatch see these
 
     std::cout << "============ THE BEAST (apex) ============\n"
                  "The model devours a tool catalog and writes a tool-calling\n"
@@ -210,10 +207,8 @@ int main(int argc, char** argv) {
 
     ng::EngineConfig engine_config;
     engine_config.node_context = ctx;
-    engine_config.node_context.tools.clear();
-    ng::EngineResources resources;
-    resources.tools = neograph::ToolSet(std::move(tools));
-    auto engine     = ng::GraphEngine::build(core, std::move(engine_config), std::move(resources));
+    engine_config.node_context.tools = neograph::ToolSet(std::move(tools));
+    auto engine     = ng::GraphEngine::build(core, std::move(engine_config));
 
     ng::RunConfig rc;
     rc.max_steps = 12;                     // bound the ReAct loop

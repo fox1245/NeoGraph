@@ -513,6 +513,24 @@ TEST(GraphMigrationCapsule, RejectsMalformedRuntimeStateAndIntegerOverflow) {
         std::invalid_argument);
 }
 
+TEST(GraphMigrationCapsule, RejectsOpaqueNodeLocalAndEffectMetadata) {
+    const auto capsule = make_capsule();
+    for (const auto& metadata : {
+             json{{"subgraph_journal", json::array({json{{"channel", "value"},
+                                                        {"value", "uncommitted"}}})}},
+             json{{"effect_outcome", "unknown"}}}) {
+        auto stored = json::parse(capsule.serialize_canonical());
+        stored["checkpoint"]["metadata"] = metadata;
+        try {
+            (void)GraphMigrationCapsule::parse(stored.dump());
+            FAIL() << "Opaque checkpoint metadata crossed the migration boundary";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("opaque checkpoint metadata"),
+                      std::string::npos);
+        }
+    }
+}
+
 TEST(ProgramGraphMigrationReceipt, CanonicalRoundTripBindsPlanAndTargetCheckpoint) {
     const auto source = migration_source_fixture();
     const auto target = migration_target_publication(source, "capsule-target", 20);

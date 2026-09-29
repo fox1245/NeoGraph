@@ -49,6 +49,7 @@ Version 1.0 ends this exception by freezing the generation 1 layouts.
 | Any pre-`0.9.0` build to `0.9.0+` | Rebuild all C++ consumers and custom nodes. | `GraphNode` removed eight legacy virtual methods and changed its vtable. |
 | `0.11.1` or earlier to the next release | Rebuild all C++ consumers. | Public layouts changed for bounded runtime/transport state, including `NodeCache`, `EngineConfig`, `CompletionParams`, `Agent`, `RequestOptions`, `SseEventParser`, and provider configuration. `SyncGraphNode` itself is additive and does not change the `GraphNode` vtable. |
 | `0.11.1` or earlier to the release containing bounded `UsageAccumulator` reservations | Rebuild all C++ consumers. | `UsageAccumulator` gained public reservation accounting state and its object layout changed. |
+| Any earlier pre-v1 build to the release containing issue #216 | Rebuild all C++ consumers. | `GraphEngine` gains atomic execution/administration admission state and `EngineConfig` gains per-node cache policies and runtime interposition; exported class/value layouts change, although legacy method signatures remain. |
 | Any `0.x` build to `1.0.0` | Rebuild all C++ consumers. | The supported v1 layouts are frozen and the loader ABI generation changes from 0 to 1. |
 
 Never copy a new shared library over an existing pre-v1 installation without
@@ -62,10 +63,14 @@ same release, and rebuild custom subclasses at every announced boundary.
 - `Provider` keeps its established vtable under the permanent compatibility
   decision. New implementations should derive from `CompletionProvider`; that
   migration does not alter the existing `Provider` layout.
-- The planned `CheckpointStore` async migration must follow this policy.
-  Before v1, any vtable break requires an announced rebuild boundary. After
-  v1, new capability interfaces and adapters must be preferred over changing
-  the stable `CheckpointStore` layout.
+- `CheckpointStore` retains its existing vtable and object layout for the
+  pre-v1 migration. Sync defaults now fail explicitly instead of crossing to
+  async overrides; async defaults offload synchronous overrides. Async-only
+  subclasses must migrate to `AsyncCheckpointStore` and
+  `adapt_async_checkpoint_store()` for a sync facade. New capability interfaces
+  and adapters do not change the legacy vtable or checkpoint wire format.
+  Rebuild custom backends with matching headers at the next announced boundary;
+  do not hot-swap a pre-v1 shared library into an existing process.
 
 ## Verification
 

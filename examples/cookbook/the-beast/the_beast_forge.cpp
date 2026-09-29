@@ -176,15 +176,12 @@ int main(int argc, char** argv) {
     for (auto& t : base_client.get_tools())    owned.push_back(std::move(t));
     for (auto& t : forged_client->get_tools()) owned.push_back(std::move(t));
     json catalog = json::array();
-    std::vector<neograph::Tool*> tool_ptrs;
     for (auto& t : owned) {
         auto d = t->get_definition();
         catalog.push_back({{"name", d.name}, {"description", d.description}, {"parameters", d.parameters}});
-        tool_ptrs.push_back(t.get());
     }
     ng::NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools = tool_ptrs;
 
     // ---------- PHASE 4: AUTHOR the ReAct harness (3 gates + self-repair) ----------
     std::cout << "── AUTHOR · the model writes a ReAct agent over the full catalog ──\n";
@@ -228,10 +225,8 @@ int main(int argc, char** argv) {
     std::cout << "── SPAWN · run the agent it wrote, tools bound ──\n";
     ng::EngineConfig engine_config;
     engine_config.node_context = ctx;
-    engine_config.node_context.tools.clear();
-    ng::EngineResources resources;
-    resources.tools = neograph::ToolSet(std::move(owned));
-    auto engine     = ng::GraphEngine::build(core, std::move(engine_config), std::move(resources));
+    engine_config.node_context.tools = neograph::ToolSet(std::move(owned));
+    auto engine     = ng::GraphEngine::build(core, std::move(engine_config));
     ng::RunConfig rc;
     rc.max_steps = 12;
     rc.input = {{"messages", json::array({{{"role", "user"}, {"content", task}}})}};

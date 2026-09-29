@@ -1174,7 +1174,7 @@ void register_node_types_once() {
                const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
                 int max_iter = config.value("max_iterations", 4);
                 return std::make_unique<ResearcherNode>(
-                    name, ctx.provider, ctx.tools, ctx.model, max_iter);
+                    name, ctx.provider, ctx.tools.view(), ctx.model, max_iter);
             });
 
         nf.register_type("__dr_final_report",
@@ -1207,7 +1207,7 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     NodeContext ctx;
     ctx.provider = std::move(provider);
     ctx.model = cfg.model;
-    for (auto& t : tools) ctx.tools.push_back(t.get());
+    ctx.tools = ToolSet(std::move(tools));
 
     // Channels — common set always present.
     json channels = {
@@ -1287,7 +1287,6 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     };
 
     auto engine = GraphEngine::compile(definition, ctx);
-    engine->own_tools(std::move(tools));
 
     // Fan-out 의도: supervisor 가 동시에 여러 researcher 를 띄움
     // (cfg.max_concurrent_researchers). v1.0 부터 GraphEngine 기본 워커 수가

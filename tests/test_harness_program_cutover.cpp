@@ -2,6 +2,7 @@
 #include <neograph/graph/store.h>
 #include <neograph/harness/contract.h>
 #include <neograph/mcp/harness.h>
+#include <neograph/mcp/harness_host_agent.h>
 #include <neograph/mcp/harness_program_store.h>
 #include <neograph/mcp/server.h>
 #include <neograph/provider.h>
@@ -21,6 +22,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <map>
 #include <mutex>
@@ -29,6 +31,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef __linux__
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -390,6 +396,66 @@ TEST(HarnessProgramCutover, CompileStartGetAndFinalResultUseProgramRuntime) {
     const auto status_uri = result.at("artifacts").at("status").get<std::string>();
     EXPECT_TRUE(status_uri.starts_with("neograph://runs/"));
 }
+
+#ifdef __linux__
+TEST(HarnessProgramCutover, AuthenticatedHostCliRunsCompileStartGetWithoutProviderKey) {
+    struct LocalCli {
+        struct Workspace {
+            std::filesystem::path path;
+            Workspace() {
+                auto pattern = (std::filesystem::temp_directory_path() /
+                                "neograph-harness-host-flow-XXXXXX").string();
+                std::vector<char> bytes(pattern.begin(), pattern.end());
+                bytes.push_back('\0');
+                auto dir = ::mkdtemp(bytes.data());
+                if (!dir) throw std::runtime_error("cannot create host fixture");
+                try { path = dir; }
+                catch (...) { ::rmdir(dir); throw; }
+            }
+            ~Workspace() {
+                std::error_code error;
+                std::filesystem::remove_all(path, error);
+            }
+        } root;
+        std::filesystem::path binary;
+        LocalCli() {
+            binary = root.path / "cli";
+            std::ofstream out(binary);
+            out << "#!/bin/sh\n"
+                   "if [ -n \"${OPENAI_API_KEY:-}${NEOGRAPH_HARNESS_API_KEY:-}${CODEX_API_KEY:-}\" ]; then exit 17; fi\n"
+                   "case \"$1\" in\n"
+                   " --version) printf '2.2.0\\n'; exit 0;;\n"
+                   " auth) printf '1 credentials\\n'; exit 0;;\n"
+                   " models) printf 'openai/test\\n'; exit 0;;\n"
+                   " run) if [ \"$2\" = --help ]; then printf '%s\\n' '--format --model'; exit 0; fi;;\n"
+                   "esac\n"
+                   "printf '%s\\n' "
+                   "'{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"{\\\"status\\\":\\\"ok\\\",\\\"findings\\\":[\\\"grounded\\\"]}\"}}' "
+                   "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":25,\"output\":16}}}'\n";
+            out.close();
+            ::chmod(binary.c_str(), 0700);
+        }
+    } cli;
+    neograph::mcp::HostAgentExecutorConfig agent_config;
+    agent_config.host = "opencode";
+    agent_config.executable = cli.binary.string();
+    agent_config.model = "openai/test";
+    agent_config.workspace = cli.root.path;
+    HarnessFixture fixture(neograph::mcp::make_host_agent_executor(agent_config),
+                           {{"executor", "opencode"}, {"model", agent_config.model}});
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    auto value = request();
+    value["policy"] = {{"read_only", true}};
+    auto compiled = service.compile(value);
+    ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+    auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
+    ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
+    const auto terminal = await_terminal(service, started.at("run_id").get<std::string>());
+    ASSERT_EQ(terminal.at("status"), "completed") << terminal.dump();
+    EXPECT_EQ(terminal.at("result").at("outcome"), "ok");
+    EXPECT_EQ(terminal.at("result").at("valid_workers"), 1);
+}
+#endif
 
 TEST(HarnessProgramCutover, DrainOnlyRetainedArtifactCannotStartNewRun) {
     HarnessFixture fixture;

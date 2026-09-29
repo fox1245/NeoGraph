@@ -30,6 +30,7 @@
 #include <neograph/provider.h>
 #include <neograph/llm/json_path.h>
 #include <neograph/llm/schema_strategy_registry.h>
+#include <neograph/llm/schema_primitive_registry.h>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <cstddef>
@@ -39,22 +40,39 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <map>
 #include <vector>
 
-namespace neograph::async { class ConnPool; class CurlH2Pool; }
+namespace neograph::async {
+class ConnPool;
+class CurlH2Pool;
+struct AsyncEndpoint;
+struct HttpResponse;
+}
 
 namespace neograph::llm {
 
 namespace test_access { class SchemaProviderTestAccess; }  // fwd-decl for friend
+
+class NEOGRAPH_API OperationError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class NEOGRAPH_API OperationTimeoutError : public OperationError {
+public:
+    using OperationError::OperationError;
+};
 
 /**
  * @brief LLM provider that adapts to any API via a JSON schema.
  *
  * The schema describes connection details, request/response formats,
  * tool call conventions, and streaming protocols for a given LLM vendor.
- * Built-in schemas: "openai", "claude", "gemini".
+ * Built-in chat schemas include "openai", "openai_responses", "claude",
+ * and "gemini"; media schemas include "openai_images" and "veo".
  *
  * @code
  * auto provider = SchemaProvider::create({
@@ -70,7 +88,7 @@ class NEOGRAPH_API SchemaProvider : public Provider {
 public:
     /// Configuration for schema-based providers.
     struct Config {
-        std::string schema_path;  ///< Path to schema file, or built-in name ("openai", "claude", "gemini").
+        std::string schema_path;  ///< Path to schema file or built-in schema name.
         std::string api_key;      ///< API key (or empty for env lookup).
         std::string default_model = "gpt-4o-mini"; ///< Default model name.
         int timeout_seconds = 60; ///< HTTP timeout in seconds.
@@ -103,6 +121,12 @@ public:
         std::size_t max_stream_response_bytes = 16u * 1024u * 1024u;
         /// WebSocket handshake, frame, and assembled-message limits.
         async::WsClientOptions websocket_options;
+        /// Explicitly injected C++ factories for schema transport,
+        /// execution-mode, and artifact-parser primitives. The registry is
+        /// copied at provider creation; later mutations are not observed.
+        std::shared_ptr<const SchemaPrimitiveRegistry> primitive_registry;
+        /// Trace metadata copied into every primitive request context.
+        std::map<std::string, std::string> trace_metadata;
     };
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
@@ -153,11 +177,14 @@ public:
     /// Streaming completion (HTTP/SSE httplib path; WS path dispatched
     /// to `complete_stream_ws_responses` when `use_websocket=true` and
     /// the schema is `openai-responses`).
+    /// Custom transport/execution primitives and long-running operations keep
+    /// their single-response contract: completion text is delivered once after
+    /// success, without substituting a built-in streaming network request.
     ///
-    /// **Locking contract for `on_chunk`**: the callback is invoked
-    /// from inside httplib's content callback (HTTP/SSE) or the
-    /// WebSocket recv loop (WS), in BOTH cases with `schema_mutex_`
-    /// NOT held — the lock is taken only during the per-call body-
+    /// **Locking contract for `on_chunk`**: callbacks run outside
+    /// `schema_mutex_`, including buffered extension completions, httplib's
+    /// content callback (HTTP/SSE), and the WebSocket receive loop.
+    /// The lock is taken only during the per-call body-
     /// build + per-call response-parse phases at the start of the
     /// request, then released before the network roundtrip begins.
     /// Parse state passed through `on_chunk` (accumulated `full_content`,
@@ -237,6 +264,8 @@ public:
         int max_tokens_default = -1;
         std::string stream_field;
         json extra_fields;
+        std::string prompt_field; ///< Non-chat envelope field; empty selects messages.
+        json prompt_template; ///< Structured prompt envelope with $PROMPT/$MODEL values.
 
         /// Issue #33: which body paths a schema declares as bindable
         /// per-call via `CompletionParams::extra_fields`. Schema:
@@ -329,6 +358,11 @@ public:
         std::string stop_reason_status_path;
         std::map<std::string, std::string> stop_reason_status_map;
         std::string default_stop_reason = "unknown";
+        struct ArtifactRule {
+            std::string items_path, type_path, type, match_path, kind;
+            std::string mime_type, mime_path, base64_path, url_path, file_id_path, metadata_path;
+        };
+        std::vector<ArtifactRule> artifacts;
     };
 
     struct StreamConfig {
@@ -368,10 +402,10 @@ public:
     // Each Provider::complete() goes through run_sync, which creates a
     // fresh asio::io_context per call. A ConnPool bound to that
     // throw-away executor would survive only one request — defeating
-    // its purpose. So SchemaProvider owns its own long-lived
-    // io_context + worker thread; the pool is bound to that, and
-    // every complete_async dispatches through it. Successive calls to
-    // the same host then amortise TCP connect + TLS handshake.
+    // its purpose. So SchemaProvider owns a long-lived io_context and
+    // worker thread for the default ConnPool path. post_json dispatches
+    // non-streaming calls through that pool or the optional curl pool;
+    // successive calls amortise TCP connect and TLS handshake.
     std::unique_ptr<asio::io_context> http_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> http_work_;
     std::thread http_thread_;
@@ -396,13 +430,19 @@ public:
     std::unique_ptr<asio::io_context> bridge_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> bridge_work_;
     std::thread bridge_thread_;
-    // libcurl-backed HTTP/2 pool with multiplexing. Default transport
-    // for SchemaProvider — passes Cloudflare/anti-bot WAFs (it IS curl)
-    // and gives us native HTTP/2 stream multiplexing for parallel
-    // fan-out workloads.
+    // Optional libcurl-backed HTTP/2 pool (prefer_libcurl=true). post_json
+    // selects this only for non-streaming HTTP; SSE uses httplib and the
+    // Responses WebSocket path owns its native async connection.
     std::unique_ptr<async::CurlH2Pool>  curl_pool_;
 
     // --- Parsed config ---
+    SchemaPrimitiveRegistry primitive_registry_;
+    std::string transport_primitive_name_;
+    std::string execution_primitive_name_;
+    std::string artifact_parser_primitive_name_;
+    SchemaTransportFactory transport_factory_;
+    SchemaExecutionFactory execution_factory_;
+    SchemaArtifactParserFactory artifact_parser_factory_;
     SchemaStrategyRegistry strategy_registry_;
     Config user_config_;
     json schema_;
@@ -417,14 +457,54 @@ public:
     ImageConfig image_;
     ResponseConfig resp_;
     StreamConfig stream_;
+    struct OperationConfig {
+        std::string id_path, done_path, error_path, result_path;
+        std::string poll_endpoint, poll_method = "GET", finalize_endpoint;
+        int poll_interval_ms = 1000;
+        bool absent_status_pending = false;
+    } operation_;
 
     // --- Internal methods ---
     void parse_schema();
 
-    json build_body(const CompletionParams& params) const;
+    json build_body(const CompletionParams& params, bool websocket = false) const;
+    json build_sse_body(const CompletionParams& params) const;
+    json build_ws_body(const CompletionParams& params) const;
     json serialize_messages(const std::vector<ChatMessage>& messages) const;
     json serialize_tools(const std::vector<ChatTool>& tools) const;
     json serialize_single_message(const ChatMessage& msg) const;
+
+    // Per-request value-level streaming decoder state. No sockets or
+    // executors: callers can feed fixture lines independently of transport.
+    struct StreamParseState {
+        struct EventBlock {
+            std::string type, id, name, args;
+            int index = -1;
+        };
+        ChatCompletion completion;
+        SchemaPrimitiveRequestContext primitive_context;
+        std::string full_content;
+        std::map<int, ToolCall> tc_map;
+        std::vector<EventBlock> event_blocks;
+        int event_block_index = -1;
+        int gemini_tc_index = 0;
+        std::string current_event_type;
+        std::string observed_stop_reason;
+        bool terminal_event_seen = false;
+    };
+    bool consume_stream_line(StreamParseState& state, const std::string& line,
+                             const StreamCallback& on_chunk) const;
+    void consume_ws_event(StreamParseState& state, const json& event,
+                          const StreamCallback& on_chunk) const;
+    ChatCompletion finish_stream(StreamParseState& state) const;
+
+    // Owns HTTP/1.1 vs HTTP/2 selection and operation-local cancellation
+    // for both chat completions and schema-described JSON endpoints.
+    asio::awaitable<async::HttpResponse> post_json(
+        async::AsyncEndpoint endpoint, std::string path, std::string body,
+        std::vector<std::pair<std::string, std::string>> headers,
+        int timeout_seconds, std::shared_ptr<graph::CancelToken> cancel_token,
+        const char* cancel_context, bool get = false);
 
     /// WebSocket-mode streaming for OpenAI Responses. Async-native;
     /// `complete_stream` bridges via `neograph::async::run_sync`.
@@ -444,6 +524,12 @@ public:
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;
     std::string parse_stop_reason(const json& resp_json) const;
+    std::vector<GeneratedArtifact> parse_artifacts(
+        const json& response,
+        const SchemaPrimitiveRequestContext* request_context = nullptr) const;
+    std::string operation_endpoint(const std::string& endpoint,
+                                   const std::string& operation_id,
+                                   std::string_view api_key) const;
     std::string parse_stream_stop_reason(const json& event_json) const;
 
     std::string build_endpoint(const std::string& model, bool streaming,
@@ -477,9 +563,45 @@ class SchemaProviderTestAccess {
         return sp.build_body(params);
     }
 
+    static json build_sse_body(const SchemaProvider& sp,
+                               const CompletionParams& params) {
+        return sp.build_sse_body(params);
+    }
+
+    static json build_ws_body(const SchemaProvider& sp,
+                              const CompletionParams& params) {
+        return sp.build_ws_body(params);
+    }
+
     static ChatMessage parse_response(const SchemaProvider& sp,
                                       const json& response) {
         return sp.parse_response(response);
+    }
+
+    static ChatCompletion parse_stream_lines(
+        const SchemaProvider& sp, const std::vector<std::string>& lines,
+        const StreamCallback& on_chunk = {}) {
+        SchemaProvider::StreamParseState state;
+        state.completion.message.role = "assistant";
+        for (const auto& line : lines) {
+            if (!sp.consume_stream_line(state, line, on_chunk)) break;
+        }
+        return sp.finish_stream(state);
+    }
+
+    static ChatCompletion parse_ws_events(
+        const SchemaProvider& sp, const std::vector<json>& events,
+        const StreamCallback& on_chunk = {}) {
+        SchemaProvider::StreamParseState state;
+        state.completion.message.role = "assistant";
+        for (const auto& event : events) {
+            sp.consume_ws_event(state, event, on_chunk);
+            if (state.terminal_event_seen) break;
+        }
+        if (!state.terminal_event_seen) {
+            throw std::runtime_error("openai-responses ws: server closed before response.completed");
+        }
+        return sp.finish_stream(state);
     }
 };
 

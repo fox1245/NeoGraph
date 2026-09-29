@@ -22,7 +22,11 @@ std::string_view to_string(InvocationStatus status) noexcept {
 
 RunInvocation::RunInvocation(std::shared_ptr<GraphEngine> engine,
                              RunInvocationRequest request)
-    : engine_(std::move(engine)), request_(std::move(request)) {
+    : RunInvocation(GraphExecution(std::move(engine)), std::move(request)) {}
+
+RunInvocation::RunInvocation(GraphExecution execution,
+                             RunInvocationRequest request)
+    : execution_(std::move(execution)), request_(std::move(request)) {
     validate_request();
     token_ = request_.config.cancel_token;
     if (!token_) token_ = std::make_shared<CancelToken>();
@@ -36,7 +40,7 @@ RunInvocation::RunInvocation(std::shared_ptr<GraphEngine> engine,
 }
 
 void RunInvocation::validate_request() const {
-    if (!engine_) throw std::invalid_argument("RunInvocation requires a GraphEngine");
+    // GraphExecution's constructor validates its owning engine.
     if (request_.config.thread_id.empty())
         throw std::invalid_argument("RunInvocation requires a non-empty thread_id");
     if (request_.config.max_steps <= 0)
@@ -120,7 +124,7 @@ asio::awaitable<InvocationResult> RunInvocation::run_async() {
         co_return failure("RunInvocation is single-use");
     }
     try {
-        auto result = co_await engine_->run_stream_async(
+        auto result = co_await execution_.run_stream_async(
             request_.config, request_.on_event, request_.metadata,
             request_.resources);
         co_return classify(std::move(result));
@@ -146,7 +150,7 @@ RunInvocation::resume_async(json resume_value) {
         co_return failure("RunInvocation is single-use");
     }
     try {
-        auto result = co_await engine_->resume_async(
+        auto result = co_await execution_.resume_async(
             request_.config, std::move(resume_value), request_.on_event,
             request_.metadata, request_.resources);
         co_return classify(std::move(result));
@@ -175,7 +179,7 @@ RunInvocation::resume_from_async(std::string checkpoint_id,
         co_return failure("RunInvocation is single-use");
     }
     try {
-        auto result = co_await engine_->resume_from_async(
+        auto result = co_await execution_.resume_from_async(
             request_.config, std::move(checkpoint_id), std::move(resume_value),
             request_.on_event, request_.metadata, request_.resources);
         co_return classify(std::move(result));

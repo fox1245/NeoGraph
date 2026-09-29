@@ -102,6 +102,11 @@ void report_validation(const ValidationReport& report, int schema_version) {
         }
     }
 }
+json checkpoint_ephemeral_guard(const json& metadata) {
+    return metadata.is_object() && metadata.contains("_neograph_ephemeral_guard")
+               ? metadata["_neograph_ephemeral_guard"] : json();
+}
+
 } // namespace
 
 // =========================================================================
@@ -131,11 +136,14 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
         if (!config.node_context.tools.empty()) {
             throw std::invalid_argument(
                 "GraphEngine::build received both EngineResources::tools and "
-                "NodeContext::tools; use the owned ToolSet only");
+                "NodeContext::tools; supply one owned ToolSet");
         }
-        config.node_context.tools = resources.tools.view();
+        config.node_context.tools = std::move(resources.tools);
     }
 
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
+    config.node_context.registry = resources.registry;
     const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
     auto topology = GraphCompiler::parse(definition, registry);
 
@@ -178,6 +186,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig co
 std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph   cg,
                                                EngineConfig    config,
                                                EngineResources resources) {
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
     return link_impl(std::move(cg), std::move(config), std::move(resources), true);
 }
 
@@ -200,6 +210,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link(
         throw std::invalid_argument(
             "GraphEngine generation identity must match the compiled graph");
     }
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
     auto engine = link_impl(
         std::move(cg), std::move(config), std::move(resources), true);
     engine->owned_tools_.push_back(
@@ -219,11 +231,14 @@ std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
         if (!config.node_context.tools.empty()) {
             throw std::invalid_argument(
                 "GraphEngine::link received both EngineResources::tools and "
-                "NodeContext::tools; use the owned ToolSet only");
+                "NodeContext::tools; supply one owned ToolSet");
         }
-        config.node_context.tools = resources.tools.view();
+        config.node_context.tools = std::move(resources.tools);
     }
 
+    resources.registry = resources.registry ? resources.registry->snapshot()
+                                            : GraphRegistry::global().snapshot();
+    config.node_context.registry = resources.registry;
     const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
     report_validation(topology.report(), topology.topology().schema_version);
     auto cg = GraphCompiler::link(std::move(topology).release(),
@@ -235,6 +250,12 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
                                                     EngineConfig    config,
                                                     EngineResources resources,
                                                     bool validate) {
+    if (!cg.tools.empty() && !resources.tools.empty()) {
+        throw std::invalid_argument(
+            "GraphEngine::link received tools in both CompiledGraph and "
+            "EngineResources; compiled nodes retain their original ToolSet");
+    }
+
     // Static semantic analysis (issue #75 M2). Strict documents:
     // errors throw, warnings go to stderr. Legacy documents: only
     // errors are surfaced (as stderr warnings — they were silent
@@ -249,6 +270,12 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->name_              = std::move(cg.name);
     engine->channel_defs_      = std::move(cg.channel_defs);
     engine->nodes_             = std::move(cg.nodes);
+    engine->has_stateful_subgraph_ = std::any_of(
+        engine->nodes_.begin(), engine->nodes_.end(), [](const auto& entry) {
+            const auto* child = dynamic_cast<const SubgraphNode*>(entry.second.get());
+            return child && (child->persistence() == SubgraphPersistence::PerInvocation ||
+                             child->persistence() == SubgraphPersistence::PerThread);
+        });
     engine->edges_             = std::move(cg.edges);
     engine->conditional_edges_ = std::move(cg.conditional_edges);
     engine->interrupt_before_  = std::move(cg.interrupt_before);
@@ -265,11 +292,18 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->tool_gate_           = std::move(config.tool_gate);
     engine->tool_execution_controller_ = std::move(config.tool_execution_controller);
     engine->hook_runtime_        = std::move(config.hook_runtime);
-    engine->owned_tools_         = std::move(resources.tools).release();
+    engine->tools_               = cg.tools.empty() ? std::move(resources.tools)
+                                                   : std::move(cg.tools);
     engine->node_cache_.set_max_entries(config.node_cache_max_entries);
     for (const auto& node_name : config.cached_nodes) {
         engine->set_node_cache_enabled(
             node_name, true, CacheKeyPolicy{CacheScope::Reusable, {}});
+    }
+    for (auto& [node_name, policy] : config.node_cache_policies) {
+        engine->set_node_cache_enabled(node_name, true, std::move(policy));
+    }
+    if (config.runtime_interposition) {
+        engine->set_runtime_interposition(std::move(config.runtime_interposition));
     }
 
     // Signal-based dispatch — see Scheduler. A node becomes ready in
@@ -328,19 +362,6 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
 // Configuration helpers
 // =========================================================================
 
-void GraphEngine::own_tools(std::vector<std::unique_ptr<Tool>> tools) {
-    std::unique_ptr<Tool> generation_identity;
-    for (auto& tool : owned_tools_) {
-        if (dynamic_cast<GraphGenerationIdentityCarrier*>(tool.get())) {
-            generation_identity = std::move(tool);
-            break;
-        }
-    }
-    owned_tools_ = std::move(tools);
-    if (generation_identity) {
-        owned_tools_.push_back(std::move(generation_identity));
-    }
-}
 
 const GraphGenerationIdentity* GraphEngine::bound_generation_identity() const noexcept {
     for (const auto& tool : owned_tools_) {
@@ -380,17 +401,10 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
 
 void GraphEngine::set_worker_count(std::size_t n) {
     if (n < 1) n = 1;
-    // Refuse to resize the pool while a run is mid-flight. The old
-    // pool's workers may be holding tasks the executor swap would
-    // drop; safer to make this a hard runtime check than to rely on
-    // the docs. NDEBUG builds keep the throw — debug-only would
-    // hide the same bug in release.
-    if (active_runs_.load(std::memory_order_acquire) != 0) {
-        throw std::logic_error(
-            "GraphEngine::set_worker_count called while a run is in "
-            "flight — resizing the executor would drop tasks queued "
-            "on the old pool. Drain runs before resizing.");
-    }
+    // The same admission gate as state administration closes the old
+    // load-then-swap race: no run may enter until the old pool is joined
+    // and the new executor is installed.
+    AdministrationGuard guard(*this);
     // n == 1 means "no engine-owned thread pool" — fan-out branches
     // dispatch on whichever executor drives the coroutine (single-
     // thread io_context for run_sync, the caller's pool for
@@ -441,6 +455,43 @@ RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
     return default_retry_policy_;
 }
 
+void GraphEngine::enter_execution() {
+    int count = active_runs_.load(std::memory_order_relaxed);
+    for (;;) {
+        if (count < 0) {
+            throw std::logic_error("Cannot execute: engine administration is in progress");
+        }
+        if (active_runs_.compare_exchange_weak(
+                count, count + 1, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) return;
+    }
+}
+
+void GraphEngine::leave_execution() noexcept {
+    active_runs_.fetch_sub(1, std::memory_order_release);
+}
+
+void GraphEngine::enter_administration() const {
+    int idle = 0;
+    if (!active_runs_.compare_exchange_strong(
+            idle, -1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        throw std::logic_error("Cannot administer: engine execution or administration is in progress");
+    }
+}
+
+void GraphEngine::leave_administration() const noexcept {
+    active_runs_.store(0, std::memory_order_release);
+}
+
+GraphEngine::ExecutionGuard::ExecutionGuard(GraphEngine& owner) : engine(owner) {
+    engine.enter_execution();
+}
+GraphEngine::ExecutionGuard::~ExecutionGuard() { engine.leave_execution(); }
+GraphEngine::AdministrationGuard::AdministrationGuard(const GraphEngine& owner) : engine(owner) {
+    engine.enter_administration();
+}
+GraphEngine::AdministrationGuard::~AdministrationGuard() { engine.leave_administration(); }
+
 // =========================================================================
 // get_state / get_state_history / update_state / fork
 // =========================================================================
@@ -478,6 +529,7 @@ std::string GraphAdmin::fork(const std::string& source_thread_id,
 }
 
 std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_) return std::nullopt;
     auto cp_opt = checkpoint_store_->load_latest(thread_id);
     if (!cp_opt) return std::nullopt;
@@ -486,8 +538,65 @@ std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
 
 std::vector<Checkpoint> GraphEngine::get_state_history(
     const std::string& thread_id, int limit) const {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_) return {};
     return checkpoint_store_->list(thread_id, limit);
+}
+
+std::optional<NestedCheckpoint> GraphEngine::inspect_nested_checkpoint(
+    const std::string& root_thread_id,
+    const std::vector<SubgraphPathStep>& path,
+    std::shared_ptr<CheckpointStore> run_checkpoint_store) const {
+    if (path.empty())
+        throw std::invalid_argument("Nested checkpoint lookup requires a graph path");
+    const GraphEngine* engine = this;
+    auto store = run_checkpoint_store ? std::move(run_checkpoint_store) : checkpoint_store_;
+    std::string thread_id = root_thread_id;
+    NestedCheckpoint nested;
+    nested.graph_path.reserve(path.size());
+    for (const auto& step : path) {
+        const auto node = engine->nodes_.find(step.node_name);
+        if (node == engine->nodes_.end())
+            throw std::out_of_range("Unknown subgraph path node: " + step.node_name);
+        const auto* child = dynamic_cast<const SubgraphNode*>(node->second.get());
+        if (!child)
+            throw std::invalid_argument("Graph path node is not a subgraph: " + step.node_name);
+        if (child->persistence() == SubgraphPersistence::Stateless)
+            throw std::invalid_argument("Stateless subgraph has no checkpoint to inspect");
+
+        std::optional<Checkpoint> parent_cp;
+        if (store) {
+            parent_cp = step.parent_checkpoint_id.empty()
+                ? store->load_latest(thread_id)
+                : store->load_by_id(step.parent_checkpoint_id);
+            if (parent_cp && parent_cp->thread_id != thread_id)
+                throw std::invalid_argument("Checkpoint does not belong to the graph path");
+        }
+        std::string graph_invocation_id;
+        if (child->persistence() == SubgraphPersistence::PerInvocation) {
+            if (!parent_cp) return std::nullopt;
+            const auto& metadata = parent_cp->metadata;
+            if (!metadata.is_object() || !metadata.contains("_neograph") ||
+                !metadata["_neograph"].is_object() ||
+                !metadata["_neograph"].contains("subgraph_invocation_id") ||
+                !metadata["_neograph"]["subgraph_invocation_id"].is_string())
+                throw std::runtime_error(
+                    "PerInvocation parent checkpoint lacks graph invocation identity");
+            graph_invocation_id =
+                metadata["_neograph"]["subgraph_invocation_id"].get<std::string>();
+        }
+        thread_id = child->checkpoint_thread_id(
+            thread_id, step.parent_step, step.task_id, graph_invocation_id);
+        engine = &child->child_engine();
+        if (!store) store = engine->checkpoint_store_;
+        nested.graph_path.push_back(step.node_name);
+    }
+    if (!store) return std::nullopt;
+    auto checkpoint = store->load_latest(thread_id);
+    if (!checkpoint) return std::nullopt;
+    nested.thread_id = std::move(thread_id);
+    nested.checkpoint = std::move(*checkpoint);
+    return nested;
 }
 
 void GraphEngine::update_state(const std::string& thread_id,
@@ -511,6 +620,7 @@ void GraphEngine::update_state_writes(
     const std::string& thread_id,
     const std::vector<ChannelWrite>& channel_writes,
     const std::string& as_node) {
+    AdministrationGuard admin_guard(*this);
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot update_state: no checkpoint store configured");
 
@@ -521,14 +631,28 @@ void GraphEngine::update_state_writes(
 
     GraphState state;
     init_state(state);
-    state.restore(cp.channel_values);
+    state.restore_checkpoint(cp.channel_values, checkpoint_ephemeral_guard(cp.metadata));
 
     state.apply_writes(channel_writes);
+    const auto ephemeral_guard = state.ephemeral_checkpoint_guard();
+    if (!ephemeral_guard.is_null()) {
+        for (const auto& [name, written] : ephemeral_guard.items()) {
+            if (written == true)
+                throw std::runtime_error("Cannot update checkpoint with ephemeral channel write: " +
+                                         name);
+        }
+    }
 
     Checkpoint new_cp;
     new_cp.id              = Checkpoint::generate_id();
     new_cp.thread_id       = thread_id;
     new_cp.channel_values  = state.serialize();
+    new_cp.metadata        = cp.metadata;
+    new_cp.metadata["_neograph"]["admin_resume_phase"] = to_string(
+        as_node.empty() ? detail::checkpoint_resume_phase(cp) : CheckpointPhase::Updated);
+    if (!ephemeral_guard.is_null() ||
+        (new_cp.metadata.is_object() && new_cp.metadata.contains("_neograph_ephemeral_guard")))
+        new_cp.metadata["_neograph_ephemeral_guard"] = ephemeral_guard;
     new_cp.parent_id       = cp.id;
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
     new_cp.next_nodes      = cp.next_nodes;
@@ -552,6 +676,7 @@ void GraphEngine::update_state_writes(
 std::string GraphEngine::fork(const std::string& source_thread_id,
                                const std::string& new_thread_id,
                                const std::string& checkpoint_id) {
+    AdministrationGuard guard(*this);
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot fork: no checkpoint store configured");
 
@@ -581,10 +706,11 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     // Copy barrier_state so a fork taken mid-AND-join resumes with the
     // same partial-arrival accumulator as its source.
     forked.barrier_state   = cp_opt->barrier_state;
-    forked.metadata        = {{"forked_from", {
+    forked.metadata        = cp_opt->metadata.is_object() ? cp_opt->metadata : json::object();
+    forked.metadata["forked_from"] = {
         {"thread_id", source_thread_id},
         {"checkpoint_id", cp_opt->id}
-    }}};
+    };
     forked.step            = cp_opt->step;
     forked.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -672,6 +798,7 @@ asio::awaitable<RunResult> GraphEngine::run_async(
     runtime_resources.provider_call_broker =
         std::move(resources.provider_call_broker);
     runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
+    runtime_resources.tool_effect_grant = std::move(resources.tool_effect_grant);
     co_return co_await run_async_with_runtime(
         std::move(config), nullptr, std::move(metadata),
         std::move(runtime_resources));
@@ -776,6 +903,7 @@ GraphEngine::run_stream_async(RunConfig config,
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
     runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
+    runtime_resources.tool_effect_grant = std::move(resources.tool_effect_grant);
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata),
         std::move(runtime_resources));
@@ -804,6 +932,7 @@ asio::awaitable<RunResult> GraphEngine::run_until_safe_point_async(
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
     runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
+    runtime_resources.tool_effect_grant = std::move(resources.tool_effect_grant);
     runtime_resources.safe_point_request = std::move(request);
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata),
@@ -878,6 +1007,7 @@ asio::awaitable<RunResult> GraphEngine::resume_async(
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
     runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
+    runtime_resources.tool_effect_grant = std::move(resources.tool_effect_grant);
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),
         std::move(metadata), std::move(runtime_resources));
@@ -921,6 +1051,7 @@ asio::awaitable<RunResult> GraphEngine::resume_from_async(
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
     runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
+    runtime_resources.tool_effect_grant = std::move(resources.tool_effect_grant);
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),
         std::move(metadata), std::move(runtime_resources),
@@ -957,6 +1088,7 @@ asio::awaitable<RunResult> GraphEngine::resume_from_until_safe_point_async(
     runtime_resources.tool_execution_controller = std::move(resources.tool_execution_controller);
     runtime_resources.provider_call_broker = std::move(resources.provider_call_broker);
     runtime_resources.tool_effect_broker = std::move(resources.tool_effect_broker);
+    runtime_resources.tool_effect_grant = std::move(resources.tool_effect_grant);
     runtime_resources.safe_point_request = std::move(request);
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),
@@ -1032,6 +1164,8 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
             if (request) request->reject();
         }
     } safe_point_close_guard{resources.safe_point_request};
+    // Hold admission across checkpoint lookup and the resumed super-step loop.
+    ExecutionGuard execution_guard(*this);
     auto checkpoint_store = resources.checkpoint_store
         ? *resources.checkpoint_store
         : checkpoint_store_;
@@ -1068,6 +1202,10 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
 
     if (resume_context.next_nodes.size() == 1 &&
         resume_context.next_nodes[0] == std::string(END_NODE)) {
+        GraphState completed_state;
+        init_state(completed_state);
+        completed_state.restore_checkpoint(
+            resume_context.channel_values, checkpoint_ephemeral_guard(resume_context.metadata));
         RunResult result;
         result.output = resume_context.channel_values;
 
@@ -1091,11 +1229,13 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
 asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     RunConfig config,
     const RunContext& parent,
-    GraphStreamCallback cb) {
+    GraphStreamCallback cb,
+    SubgraphPersistence persistence) {
     RunMetadata metadata;
     metadata.deadline            = parent.deadline;
     metadata.trace_id            = parent.trace_id;
     metadata.run_id              = parent.run_id;
+    metadata.owner_scope        = parent.tool_execution_identity.owner_scope;
     metadata.budget_cancel_token = parent.budget_cancel_token;
 
     RuntimeResources resources;
@@ -1111,23 +1251,52 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     if (parent_runtime) {
         resources.provider_call_broker = parent_runtime->provider_call_broker;
         resources.tool_effect_broker = parent_runtime->tool_effect_broker;
+        resources.tool_effect_grant = parent_runtime->tool_effect_grant;
+    }
+    if (persistence == SubgraphPersistence::Stateless) {
+        if (!interrupt_before_.empty() || !interrupt_after_.empty())
+            throw std::runtime_error("Stateless subgraph does not support static interrupts");
+        if (parent_runtime && parent_runtime->is_resume)
+            throw std::runtime_error("Stateless subgraph cannot resume a parent invocation");
+        resources.checkpoint_store = std::shared_ptr<CheckpointStore>{};
     }
     auto journal = std::make_shared<detail::SubgraphWriteJournal>();
+    if (persistence == SubgraphPersistence::PerThread && parent_runtime) {
+        if (parent_runtime->graph_invocation_id.empty())
+            throw std::runtime_error("PerThread subgraph requires a parent invocation identity");
+        journal->parent_call_id = parent_runtime->graph_invocation_id + "/" +
+            std::to_string(parent.step) + "/" + parent_runtime->invocation_id;
+    }
     resources.subgraph_write_journal = journal;
 
-    if (parent_runtime && parent_runtime->is_resume && resources.checkpoint_store) {
+    if (parent_runtime && parent_runtime->is_resume &&
+        resources.checkpoint_store && *resources.checkpoint_store) {
         auto checkpoint = co_await (*resources.checkpoint_store)->load_latest_async(
             config.thread_id);
         if (checkpoint) {
-            detail::restore_subgraph_write_journal(*checkpoint, journal);
-            const json resume_value = parent.resume_value
-                ? *parent.resume_value
-                : json();
-            auto result = co_await resume_async_with_runtime(
-                std::move(config), resume_value, std::move(cb),
-                std::move(metadata), std::move(resources));
-            co_return SubgraphRunResult{
-                std::move(result), std::move(journal->writes)};
+            bool same_call = true;
+            if (persistence == SubgraphPersistence::PerThread) {
+                const auto& stored = checkpoint->metadata;
+                if (!stored.is_object() || !stored.contains("_neograph") ||
+                    !stored["_neograph"].is_object() ||
+                    !stored["_neograph"].contains("subgraph_parent_call_id") ||
+                    !stored["_neograph"]["subgraph_parent_call_id"].is_string() ||
+                    stored["_neograph"]["subgraph_parent_call_id"] == "")
+                    throw std::runtime_error(
+                        "Cannot resume PerThread subgraph without persisted parent call identity");
+                same_call = stored["_neograph"]["subgraph_parent_call_id"] == journal->parent_call_id;
+            }
+            if (same_call) {
+                detail::restore_subgraph_write_journal(*checkpoint, journal);
+                const json resume_value = parent.resume_value
+                    ? *parent.resume_value
+                    : json();
+                auto result = co_await resume_async_with_runtime(
+                    std::move(config), resume_value, std::move(cb),
+                    std::move(metadata), std::move(resources));
+                co_return SubgraphRunResult{
+                    std::move(result), std::move(journal->writes)};
+            }
         }
     }
 
@@ -1161,17 +1330,10 @@ GraphEngine::execute_graph_async(
     const RuntimeResources* resources) {
     const bool is_resume = resume_context.has_value();
 
-    // RAII inc/dec on the inflight-run counter — set_worker_count()
-    // checks this is zero before swapping executors. Designed to run
-    // through coroutine completion, including exception unwinding.
-    struct ActiveRunGuard {
-        std::atomic<int>* counter;
-        ~ActiveRunGuard() {
-            if (counter) counter->fetch_sub(1, std::memory_order_release);
-        }
-    };
-    active_runs_.fetch_add(1, std::memory_order_acq_rel);
-    ActiveRunGuard active_run_guard{&active_runs_};
+    // The RAII guard releases admission after every normal, cancelled, or
+    // exceptional completion; the resume path holds a second count while
+    // loading its checkpoint.
+    ExecutionGuard active_run_guard(*this);
 
     GraphState state;
     init_state(state);
@@ -1261,10 +1423,27 @@ GraphEngine::execute_graph_async(
     ctx.tool_execution_identity.thread_id = config.thread_id;
 
     auto runtime = std::make_shared<detail::RunContextRuntime>();
+    if (has_stateful_subgraph_) {
+        if (is_resume) {
+            const auto& stored = resume_context->metadata;
+            if (!stored.is_object() || !stored.contains("_neograph") ||
+                !stored["_neograph"].is_object() ||
+                !stored["_neograph"].contains("subgraph_invocation_id") ||
+                !stored["_neograph"]["subgraph_invocation_id"].is_string() ||
+                stored["_neograph"]["subgraph_invocation_id"].get<std::string>().empty())
+                throw std::runtime_error(
+                    "Cannot resume stateful subgraph without persisted invocation identity");
+            runtime->graph_invocation_id =
+                stored["_neograph"]["subgraph_invocation_id"].get<std::string>();
+        } else {
+            runtime->graph_invocation_id = Checkpoint::generate_id();
+        }
+    }
     runtime->checkpoint_store = checkpoint_store;
     if (resources) {
         runtime->provider_call_broker = resources->provider_call_broker;
         runtime->tool_effect_broker = resources->tool_effect_broker;
+        runtime->tool_effect_grant = resources->tool_effect_grant;
     }
     if (resources) {
         runtime->subgraph_write_journal = resources->subgraph_write_journal;
@@ -1281,7 +1460,8 @@ GraphEngine::execute_graph_async(
     std::vector<std::string> ready;
     if (is_resume) {
         auto& loaded = *resume_context;
-        state.restore(loaded.channel_values);
+        state.restore_checkpoint(
+            loaded.channel_values, checkpoint_ephemeral_guard(loaded.metadata));
         last_checkpoint_id = loaded.checkpoint_id;
         start_step         = loaded.start_step;
         ready              = std::move(loaded.next_nodes);
@@ -1326,7 +1506,8 @@ GraphEngine::execute_graph_async(
                     throw std::runtime_error(
                         "Checkpoint step exceeds the executable range");
                 }
-                state.restore(cp_opt->channel_values);
+                state.restore_checkpoint(
+                    cp_opt->channel_values, checkpoint_ephemeral_guard(cp_opt->metadata));
                 last_checkpoint_id = cp_opt->id;
                 start_step = static_cast<int>(cp_opt->step + 1);
             }
@@ -1482,7 +1663,7 @@ GraphEngine::execute_graph_async(
             result.execution_trace = std::move(trace);
 
             if (coord.enabled()) {
-                auto cp_opt = coord.store()->load_latest(coord.thread_id());
+                auto cp_opt = co_await coord.store()->load_latest_async(coord.thread_id());
                 if (cp_opt) result.checkpoint_id = cp_opt->id;
             }
             co_return result;

@@ -2,7 +2,8 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/loader.h>
-
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -10,16 +11,23 @@
 namespace neograph::graph {
 
 /**
- * @brief Per-engine registry overlay with process-global fallback.
+ * @brief Engine-owned registry of custom graph callables.
  *
- * Entries registered here take precedence over the legacy singleton
- * registries. Missing entries fall back to ReducerRegistry,
- * ConditionRegistry, and NodeFactory, so built-ins and existing global
- * registrations remain available. Configure a registry before passing it to
- * EngineResources; runtime mutation is intentionally unsupported by contract.
+ * A new registry sees immutable built-ins, but never process-global custom
+ * registrations. GlobalFallback explicitly opts into legacy singleton entries.
+ * Register before build; build takes a snapshot, so later edits cannot change
+ * an existing engine. Individual operations and snapshots are synchronized.
  */
 class NEOGRAPH_API GraphRegistry {
 public:
+    enum class Fallback { BuiltinsOnly, GlobalFallback };
+    explicit GraphRegistry(Fallback fallback = Fallback::BuiltinsOnly);
+    GraphRegistry(GraphRegistry&& other);
+    GraphRegistry& operator=(GraphRegistry&& other);
+    GraphRegistry(const GraphRegistry& other);
+    GraphRegistry& operator=(const GraphRegistry& other);
+    std::shared_ptr<const GraphRegistry> snapshot() const;
+
     static const GraphRegistry& global();
 
     void register_reducer(const std::string& name, ReducerFn fn);
@@ -51,9 +59,9 @@ public:
     json                         local_node_effects(const std::string& type) const;
 
     /** Local-only membership used by sealed admission profiles. */
-    bool contains_reducer(const std::string& name) const noexcept;
-    bool contains_condition(const std::string& name) const noexcept;
-    bool contains_type(const std::string& type) const noexcept;
+    bool contains_reducer(const std::string& name) const;
+    bool contains_condition(const std::string& name) const;
+    bool contains_type(const std::string& type) const;
 
     /**
      * Export only entries owned by this registry.
@@ -62,8 +70,16 @@ public:
      * process-global fallback and is therefore suitable for a sealed palette.
      */
     json export_schema() const;
+    /** Export exactly the names resolvable by this registry (including defaults). */
+    json export_effective_schema() const;
+
 
 private:
+    explicit GraphRegistry(bool builtins);
+    static const GraphRegistry& builtins();
+    mutable std::mutex mutex_;
+    Fallback fallback_ = Fallback::BuiltinsOnly;
+
     std::unordered_map<std::string, ReducerFn>     reducers_;
     std::unordered_map<std::string, ConditionFn>   conditions_;
     std::unordered_map<std::string, ConditionSpec> condition_specs_;

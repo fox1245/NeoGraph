@@ -107,16 +107,29 @@ public:
     uint64_t global_version() const;
 
     /**
-     * @brief Serialize the entire state to JSON (for checkpointing).
-     * @return JSON object containing all channel values and versions.
+     * @brief Serialize checkpointed channel values and versions to JSON.
+     * @return JSON snapshot without ephemeral channel values.
      */
     json serialize() const;
 
     /**
-     * @brief Restore state from a JSON snapshot (for time-travel).
+     * @brief Restore durable channels from a JSON snapshot.
      * @param data JSON object previously produced by serialize().
      */
     void restore(const json& data);
+    /// Isolated in-process Send workers need every live channel, including
+    /// ephemeral values. Never pass this representation to a checkpoint store.
+    json serialize_runtime() const;
+    void restore_runtime(const json& data);
+
+    /// Record which non-checkpointed channels existed at this checkpoint.
+    /// A written ephemeral value cannot be reconstructed on resume.
+    json ephemeral_checkpoint_guard() const;
+
+    /// Reject missing/incompatible guards and lost ephemeral values before
+    /// restoring a durable checkpoint.
+    void restore_checkpoint(const json& data, const json& guard);
+
 
     /**
      * @brief List all channel names in this state.

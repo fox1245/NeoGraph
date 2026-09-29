@@ -324,23 +324,15 @@ void init_graph(py::module_& m) {
 
     py::register_exception_translator(&translate_node_execution_error);
 
-    // ── Topology schema export (issue #56) ───────────────────────────────
-    //
-    // Lets a Python-side tool build (the visual block editor's CI
-    // typically does: `pip install neograph-engine` then dump this to
-    // schema.json) a palette pinned to the exact engine version. The
-    // returned dict is the same document as the C++
-    // NodeFactory::export_schema() / `example_export_schema`:
-    // {neograph_version, $schema, topology, node_types, reducers,
-    // conditions}. Reflects whatever is registered in NodeFactory at
-    // call time, so register custom node types/reducers/conditions
-    // first if you want them in the palette.
+    // A scoped registry exports its effective built-in + local palette;
+    // the no-argument convenience form intentionally retains global behavior.
     m.def("export_schema",
-        []() {
-            return json_to_py(NodeFactory::instance().export_schema());
+        [](std::shared_ptr<GraphRegistry> registry) {
+            return json_to_py(registry ? registry->export_effective_schema()
+                                       : NodeFactory::instance().export_schema());
         },
-        "Return the engine's topology JSON Schema (Draft 2020-12) as a "
-        "dict. Drift-proof palette source for external tooling.");
+        py::arg("registry") = nullptr,
+        "Return the topology schema for the selected registry (or the legacy global palette).");
 
     // ── Async-bridge safe-resolve helpers ────────────────────────────────
     //
@@ -816,7 +808,8 @@ void init_graph(py::module_& m) {
         .def_static("compile",
             [](py::object definition,
                py::object ctx_obj,
-               py::object store_obj) {
+               py::object store_obj,
+               std::shared_ptr<GraphRegistry> registry) {
                 // Take the Python wrapper as py::object (rather than
                 // const NodeContext&) so we can read the `_pytools`
                 // dynamic attr carrying user-defined Python Tool
@@ -825,29 +818,28 @@ void init_graph(py::module_& m) {
                 // accessed via the Python side first.
                 NodeContext ctx = ctx_obj.cast<NodeContext>();
 
-                // Materialize the Python Tools as PyToolOwner-backed
-                // unique_ptrs. After compile(), we transfer ownership
-                // to the engine via own_tools() so the engine keeps
-                // them alive for as long as it lives — and the raw
-                // pointers we stash in ctx.tools below stay valid.
-                std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
+                // Wrap Python, native MCP, and C++ Tool objects into the same
+                // owned ToolSet before factories can retain their pointers.
                 if (py::hasattr(ctx_obj, "_pytools")) {
-                    owned_tools = wrap_python_tools(ctx_obj.attr("_pytools"));
-                    ctx.tools.clear();
-                    ctx.tools.reserve(owned_tools.size());
-                    for (auto& up : owned_tools) {
-                        ctx.tools.push_back(up.get());
-                    }
+                    ctx.tools = neograph::ToolSet(
+                        wrap_python_tools(ctx_obj.attr("_pytools")));
                 }
 
                 auto store = store_obj.is_none()
                     ? std::shared_ptr<CheckpointStore>{}
                     : store_obj.cast<std::shared_ptr<CheckpointStore>>();
                 auto j = py_to_json(definition);
-                // GIL held: compile is fast (just walks the JSON).
-                auto unique = GraphEngine::compile(j, ctx, std::move(store));
-                if (!owned_tools.empty()) {
-                    unique->own_tools(std::move(owned_tools));
+                std::unique_ptr<GraphEngine> unique;
+                if (registry) {
+                    EngineConfig config;
+                    config.node_context = ctx;
+                    config.checkpoint_store = std::move(store);
+                    EngineResources resources;
+                    resources.registry = registry;
+                    unique = GraphEngine::build(j, std::move(config), std::move(resources));
+                } else {
+                    // GIL held: compile is fast (just walks the JSON).
+                    unique = GraphEngine::compile(j, ctx, std::move(store));
                 }
                 auto engine = std::shared_ptr<GraphEngine>(unique.release());
                 py::object result = py::cast(engine);
@@ -857,19 +849,19 @@ void init_graph(py::module_& m) {
             },
             py::arg("definition"),
             py::arg("ctx"),
-             py::arg("store") = py::none(),
+            py::arg("store") = py::none(),
+            py::arg("registry") = nullptr,
             "Compile a graph from a JSON-shaped Python dict.\n\n"
             "Args:\n"
             "    definition: JSON graph definition (nodes, edges, "
             "channels).\n"
             "    ctx: NodeContext providing the LLM provider, tools, "
             "model, system instructions.\n"
-            "    store: Optional CheckpointStore for HITL / resume / "
-            "multi-turn. Same trailing arg as the C++ ``compile(def, "
-            "ctx, store)`` 3-param overload — call as "
-            "``GraphEngine.compile(definition, ctx, store)`` or "
-            "leave default and use ``engine.set_checkpoint_store(...)`` "
-            "afterwards (both shapes equivalent).\n\n"
+            "    store: Optional CheckpointStore for HITL / resume / multi-turn.\n"
+            "    registry: Optional engine-scoped GraphRegistry. If omitted, "
+            "uses the legacy process-global registrations. If supplied, "
+            "its built-ins and local registrations are snapshotted before "
+            "compilation; later mutation cannot affect this engine.\n\n"
             "Raises ``RuntimeError`` on bad shape.")
 
         .def("run",
@@ -1460,6 +1452,41 @@ void init_graph(py::module_& m) {
             "value (typically the human's response in HITL flows).")
 
         .def_property_readonly("name", &GraphEngine::get_graph_name);
+
+    // Scoped registrations retain their own Python callables rather than
+    // resolving a mutable process-global name when the engine runs.
+    py::class_<GraphRegistry, std::shared_ptr<GraphRegistry>>(m, "GraphRegistry")
+        .def(py::init([](bool global_fallback) {
+            return std::make_shared<GraphRegistry>(
+                global_fallback ? GraphRegistry::Fallback::GlobalFallback
+                                : GraphRegistry::Fallback::BuiltinsOnly);
+        }), py::arg("global_fallback") = false)
+        .def("register_type", &register_scoped_python_node,
+             py::arg("type"), py::arg("factory"))
+        .def("register_reducer",
+             [](GraphRegistry& self, const std::string& name, py::function fn) {
+                 auto held = std::shared_ptr<py::function>(
+                     new py::function(std::move(fn)),
+                     [](py::function* p) { py::gil_scoped_acquire g; delete p; });
+                 self.register_reducer(name, [held](const json& current, const json& incoming) {
+                     py::gil_scoped_acquire g;
+                     return py_to_json((*held)(json_to_py(current), json_to_py(incoming)));
+                 });
+             }, py::arg("name"), py::arg("reducer"))
+        .def("register_condition",
+             [](GraphRegistry& self, const std::string& name, py::function fn) {
+                 auto held = std::shared_ptr<py::function>(
+                     new py::function(std::move(fn)),
+                     [](py::function* p) { py::gil_scoped_acquire g; delete p; });
+                 self.register_condition(name, [held](const GraphState& state) {
+                     py::gil_scoped_acquire g;
+                     return (*held)(py::cast(&state, py::return_value_policy::reference))
+                         .cast<std::string>();
+                 });
+             }, py::arg("name"), py::arg("condition"))
+        .def("export_schema", [](const GraphRegistry& self) {
+            return json_to_py(self.export_effective_schema());
+        });
 
     // ── ReducerRegistry / ConditionRegistry — Python registration hooks ──
     //

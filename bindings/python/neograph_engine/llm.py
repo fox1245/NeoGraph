@@ -5,6 +5,12 @@ subclasses of :class:`neograph_engine.Provider` and can be passed straight
 to :class:`neograph_engine.NodeContext`.
 """
 
-from ._neograph import OpenAIProvider, RateLimitedProvider, SchemaProvider
+from ._neograph import (
+    OpenAIProvider, RateLimitedProvider, SchemaProvider,
+    OperationError, OperationTimeoutError,
+)
 
-__all__ = ["OpenAIProvider", "RateLimitedProvider", "SchemaProvider"]
+__all__ = [
+    "OpenAIProvider", "RateLimitedProvider", "SchemaProvider",
+    "OperationError", "OperationTimeoutError",
+]

@@ -294,6 +294,11 @@ target_include_directories(yyjson PUBLIC
 set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(NOT MSVC)
     target_compile_options(yyjson PRIVATE -O2)
+    if(EMSCRIPTEN)
+        # Emscripten 3.1.x does not provide __stack_chk_guard for vendored C
+        # objects; keep the WASM link portable without changing native hardening.
+        target_compile_options(yyjson PRIVATE -fno-stack-protector)
+    endif()
 endif()
 
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
@@ -595,6 +600,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/history.cpp
     src/core/evolution.cpp
     src/core/harness_bench.cpp
+    src/core/tenant.cpp
     src/observability/openinference.cpp
 )
 add_library(neograph_core ${NEOGRAPH_CORE_SOURCES})
@@ -641,8 +647,15 @@ if(NEOGRAPH_BUILD_WASM)
     endif()
     add_executable(neograph_wasm_smoke wasm/smoke.cpp)
     target_link_libraries(neograph_wasm_smoke PRIVATE neograph_core)
-    target_compile_options(neograph_core PRIVATE -O3 -flto -fexceptions -pthread)
-    target_compile_options(neograph_wasm_smoke PRIVATE -O3 -flto -fexceptions -pthread)
+    # Emscripten 3.1.x supports C++20 coroutines but does not expose the
+    # feature-test macro Asio uses to enable awaitable.hpp. Keep the public
+    # header surface consistent with native builds for the WASM smoke target.
+    target_compile_definitions(neograph_core PUBLIC
+        ASIO_HAS_CO_AWAIT=1)
+    target_compile_options(neograph_core PRIVATE
+        -O3 -flto -fexceptions -pthread -fno-stack-protector)
+    target_compile_options(neograph_wasm_smoke PRIVATE
+        -O3 -flto -fexceptions -pthread -fno-stack-protector)
     target_link_options(neograph_wasm_smoke PRIVATE
         -O3 -flto -fexceptions -pthread
         -sALLOW_MEMORY_GROWTH=1
@@ -694,6 +707,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/journal.cpp
         src/program/lineage.cpp
         src/program/run_record.cpp
+        src/program/core_tool_grant_store.cpp
         src/program/transition_store.cpp
         src/program/catalog.cpp
     src/program/runtime.cpp
@@ -725,6 +739,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         add_library(neograph_program_sqlite
             src/program/sqlite_store.cpp
             src/program/sqlite_transition_store.cpp
+            src/program/sqlite_core_tool_grant_store.cpp
+            src/program/sqlite_provider_call_broker.cpp
         )
         target_include_directories(neograph_program_sqlite
             PUBLIC
@@ -879,6 +895,7 @@ if(NEOGRAPH_BUILD_SQLITE)
         src/core/sqlite_evidence_ledger.cpp
         src/core/research_task_board.cpp
         src/core/sqlite_runtime_stores.cpp
+        src/core/sqlite_tool_effect_broker.cpp
     )
 
     target_include_directories(neograph_sqlite
@@ -903,7 +920,10 @@ if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm
         src/llm/openai_provider.cpp
         src/llm/schema_strategy_registry.cpp
+        src/llm/schema_primitive_registry.cpp
         src/llm/schema_provider.cpp
+        src/llm/schema_provider_mapping.cpp
+        src/llm/schema_provider_stream_parser.cpp
         src/llm/rate_limited_provider.cpp
         src/llm/agent.cpp
     )
@@ -986,16 +1006,21 @@ endif()
 if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_harness
         src/mcp/harness.cpp
+        src/mcp/tenant.cpp
         src/mcp/harness_file_store.cpp
         src/mcp/harness_journal.cpp
         src/mcp/harness_provider.cpp
+        src/mcp/harness_host_agent.cpp
         src/mcp/harness_program_translator.cpp
         src/mcp/harness_program_store.cpp
         src/mcp/harness_program_host.cpp
         src/harness/contract.cpp
     )
     if(NEOGRAPH_BUILD_MCP_CLIENT)
-        target_sources(neograph_harness PRIVATE src/mcp/harness_mcp_backend.cpp)
+        target_sources(neograph_harness PRIVATE
+            src/mcp/harness_mcp_backend.cpp
+            src/mcp/adoption.cpp
+        )
     endif()
     if(NEOGRAPH_BUILD_A2A)
         target_sources(neograph_harness PRIVATE src/a2a/harness_backend.cpp)
@@ -1144,10 +1169,8 @@ endif()
 # the build tree, and graph_service.cpp implements the service against
 # neograph_core. Independent of MCP — this is NeoGraph's own gRPC API.
 #
-# NOTE: this path is not exercised in the reference CI environment
-# (no grpc++/protoc there). The OFF-default build is fully verified;
-# the ON build's protoc codegen wiring should be confirmed on the
-# first grpc++-equipped build. See ROADMAP_v1.md.
+# The default CI build leaves this OFF. The separate grpc-graph-contract
+# CI job installs the toolchain and builds/runs the opt-in host suite.
 # ===========================================================================
 if(NEOGRAPH_BUILD_GRPC)
     set(_ng_proto "${PROJECT_SOURCE_DIR}/proto/neograph.proto")
@@ -1511,6 +1534,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             examples/cookbook/multi_tenant_chatbot/server.cpp)
         target_link_libraries(cookbook_multi_tenant_mock PRIVATE
             neograph::core)
+        add_executable(cookbook_multi_tenant_isolated_host
+            examples/cookbook/multi_tenant_chatbot/isolated_host.cpp)
+        target_link_libraries(cookbook_multi_tenant_isolated_host PRIVATE
+            neograph::core)
 
         if(NEOGRAPH_BUILD_LLM)
             add_executable(cookbook_multi_tenant_live
@@ -1823,6 +1850,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # 자리에 인용되는 코드.
         add_executable(example_minimal examples/51_minimal.cpp)
         target_link_libraries(example_minimal PRIVATE neograph::core)
+
+        # Example 65: provider-scoped synthetic transport/execution/artifacts.
+        add_executable(example_schema_primitive_registry
+            examples/65_schema_primitive_registry.cpp)
+        target_link_libraries(example_schema_primitive_registry PRIVATE
+            neograph::core neograph::llm)
 
         # Schema dump tool — prints NodeFactory::export_schema() as JSON.
         # The drift-proof artifact source for external tooling (the

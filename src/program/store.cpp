@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <limits>
 #include <map>
-#include <mutex>
 #include <set>
+#include <mutex>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -137,6 +138,21 @@ InMemoryProgramStore::get_activation(std::string_view owner_scope) const {
     if (found == impl_->activations.end()) return std::nullopt;
     return found->second.value;
 }
+std::optional<ProgramActivationBinding>
+InMemoryProgramStore::get_active_binding(std::string_view owner_scope) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto active = impl_->activations.find(owner_scope);
+    if (active == impl_->activations.end()) return std::nullopt;
+    const auto version = impl_->versions.find(active->second.value.active_version_id());
+    if (version == impl_->versions.end() ||
+        version->second.value.ownership_scope() != owner_scope ||
+        version->second.value.policy_snapshot().fingerprint() !=
+            active->second.value.policy_snapshot_hash()) {
+        throw std::runtime_error("Program activation target is missing or has a mismatched policy");
+    }
+    return ProgramActivationBinding{active->second.value, version->second.value};
+}
 
 ProgramActivationResult InMemoryProgramStore::compare_activate(
     std::string_view owner_scope,
@@ -201,9 +217,13 @@ ProgramRetentionReport InMemoryProgramStore::collect_garbage(
     }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
     const auto active = impl_->activations.find(owner_scope);
-    if (active != impl_->activations.end()) keep.insert(active->second.value.active_version_id());
-
     ProgramRetentionReport report;
+    for (const auto& pinned_id : pinned_version_ids)
+        report.references.push_back({pinned_id, "host_pin"});
+    if (active != impl_->activations.end()) {
+        keep.insert(active->second.value.active_version_id());
+        report.references.push_back({active->second.value.active_version_id(), "active_pointer"});
+    }
     std::set<std::string, std::less<>> bundles_to_check;
     for (auto it = impl_->versions.begin(); it != impl_->versions.end();) {
         if (it->second.value.ownership_scope() == owner_scope && !keep.contains(it->first)) {
@@ -223,6 +243,11 @@ ProgramRetentionReport InMemoryProgramStore::collect_garbage(
             }
         if (!referenced && impl_->bundles.erase(bundle_id) != 0) ++report.bundles_removed;
     }
+    std::sort(report.references.begin(), report.references.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.version_id, lhs.reason) <
+                         std::tie(rhs.version_id, rhs.reason);
+              });
     return report;
 }
 

@@ -383,10 +383,9 @@ public:
 | `invoke(params, on_chunk)` | Callback-selected compatibility entry point used by existing engine code. |
 | `get_name()` | Human-readable provider identifier (only pure virtual). |
 
-**Override-at-least-one-side contract**: each `(sync, async)` pair
-defaults to the other; overriding neither yields infinite mutual
-recursion at call time. Same shape as `CheckpointStore`'s sync↔async
-bridge below.
+**Provider override-at-least-one-side contract**: each `(sync, async)`
+pair defaults to the other; a subclass overriding neither recurses.
+Checkpoint storage uses explicit non-recursive adapters instead.
 
 These methods have no planned removal and no deprecation warnings. Compatibility
 and security fixes continue to apply; new capabilities may be exposed only through
@@ -735,17 +734,24 @@ LLM provider, tools, and configuration.
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // Owned fixed collection of available tools
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-For new engines, prefer moving a `ToolSet` through `EngineResources` instead
-of managing the pointees separately. `GraphEngine::build()` binds the
-corresponding non-owning view into `NodeContext` and keeps every tool alive for
-the engine's lifetime.
+Construct `ToolSet(std::move(unique_tools))` for a standalone Core context, or
+pass it in `EngineResources::tools` when `NodeContext::tools` is empty. A
+`ToolSet` can also adopt `std::vector<std::shared_ptr<Tool>>` for shared host
+tools. Copies retain the same pointees: context reassignment cannot change a
+previously compiled graph. `GraphCompiler::compile()` retains the collection
+until `GraphEngine::link()` takes it; `GraphEngine::build()` does both steps.
+Built-in `LLMCallNode` and `ToolDispatchNode` also retain this collection
+when used without a `GraphEngine`. Factories may call `ctx.tools.view()` for
+temporary raw lookup; only the owned collection survives dispatch. This has
+no per-call ownership work. Supplying nonempty tools in both context and
+resources is rejected.
 
 ### GraphEvent
 
@@ -1069,7 +1075,8 @@ public:
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
                  std::map<std::string, std::string> input_map = {},
-                 std::map<std::string, std::string> output_map = {});
+                 std::map<std::string, std::string> output_map = {},
+                 SubgraphPersistence persistence = SubgraphPersistence::Legacy);
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
@@ -1081,6 +1088,7 @@ public:
 | `subgraph` | `std::shared_ptr<GraphEngine>` | The compiled child graph engine |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` mapping. Read from parent, write to child input |
 | `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` mapping. Rename and forward child-produced write deltas to the parent |
+| `persistence` | `SubgraphPersistence` | `Legacy` (compatible), `PerInvocation`, `PerThread`, or `Stateless`; JSON topology nodes use the lower-case `persistence` string |
 
 If the maps are empty, channels are mapped by name (identity mapping).
 
@@ -1091,6 +1099,35 @@ child's final serialized state as a new reducer input. Consequently inherited
 append/custom values are not applied twice. Output mapping does not infer
 snapshot replacement; a child must emit `ChannelWrite::Mode::Overwrite` when it
 intends to replace the mapped parent value.
+#### Child persistence and inspection
+
+| Mode | Child checkpoint namespace | Start/resume | Store precedence |
+|------|----------------------------|--------------|------------------|
+| `Legacy` (default) | Length-framed parent thread, node, parent step, task ID (`subgraph/...`) | Historical behavior: a fresh parent starts a fresh child; parent resume loads the matching child snapshot | Parent run's checkpoint backend if present; otherwise child's configured backend |
+| `PerInvocation` | `subgraph/run/` plus parent thread, node, persisted parent graph-invocation UUID, step, and task ID | A new parent run gets a fresh namespace; parent resume restores the UUID and the child write journal | Parent, then child |
+| `PerThread` | `subgraph/thread/` plus parent thread and node | Fresh calls seed child state from the previous checkpoint before applying new input; parent resume resumes a matching child snapshot; overlapping calls on the same compiled node/namespace fail rather than race | Parent, then child |
+| `Stateless` | None | Child checkpoints are disabled even if the child has a backend. Interrupt/resume is unsupported and rejected; Store, cancellation, and ToolGate still propagate | No checkpoint backend; parent Store then child Store |
+
+Explicit stateful modes require a nonempty parent thread ID. `Legacy` retains
+the exact pre-#238 namespace and checkpoint wire format, including the existing
+empty-thread behavior. `PerInvocation` records `_neograph.subgraph_invocation_id`
+in parent checkpoint metadata; old checkpoints without it cannot resume after
+an opt-in policy change. `PerThread` is a shared namespace: a host sharing the
+same durable backend between *different* engines/processes must also coordinate
+their admission; the node-local guard only covers one compiled node. Avoid
+switching an existing thread between policies without an explicit migration.
+
+Use `GraphEngine::inspect_nested_checkpoint(root_thread, path[, run_store])`
+to traverse child and grandchild checkpoints. Each `SubgraphPathStep` supplies
+the child node name, parent super-step, stable Core task ID (`s0:child` or a
+Send task ID), and optionally the exact parent checkpoint ID to pin an older
+invocation. The result contains `graph_path`, child `thread_id`, and the
+complete `Checkpoint` (including serialized channel values and checkpoint ID).
+A checkpoint ID from a different thread or a stateless path is rejected.
+Pass the same run-scoped checkpoint store used by `RunResources` when it
+overrode the engine's backend. The public
+`SubgraphNode::checkpoint_thread_id()` reconstructs one segment's namespace.
+
 
 #### Runtime-context propagation
 
@@ -1140,11 +1177,26 @@ struct EngineResources {
 };
 ```
 
-`ToolSet` is a move-only owner for a fixed tool collection. `GraphRegistry` is
-a per-engine reducer, condition, and node-factory overlay; names absent from the
-overlay fall back to the existing process-global registries. Configure both
-before passing them to `build()` or `link()`. Runtime mutation is intentionally
-not part of the local-registry contract.
+`ToolSet` owns a fixed tool collection. A new `GraphRegistry` accepts
+engine-specific reducer, condition, and node registrations and resolves built-ins
+without setup. It **does not** inherit process-global custom registrations.
+`GraphEngine::build` / `link` copy a synchronized registry snapshot before
+compiling and running; registering again on the original changes only engines
+built afterwards. The engine owns its snapshot, so the original registry may be
+destroyed. Callables themselves must remain thread-safe when shared by
+concurrent runs.
+
+For migration, existing `GraphEngine::compile`, no-registry `build`, and
+`NodeFactory` / `ReducerRegistry` / `ConditionRegistry` singleton registration
+remain supported. To opt a particular registry into the legacy custom-name
+fallback, construct `GraphRegistry{GraphRegistry::Fallback::GlobalFallback}`.
+Its global entries are captured at engine construction; avoid this policy for
+tenant or test isolation. `GraphCompiler::compile_local` and sealed Program
+registries remain exact local-only resolvers (no built-in fallback).
+
+Legacy Python singleton callbacks still look up their names in module-global
+dictionaries at invocation, so replacing such a name can change existing
+legacy engines. Use scoped Python registries for deterministic callbacks.
 
 ### RunConfig
 
@@ -1171,6 +1223,12 @@ struct RunConfig {
 | `cancel_token` | `std::shared_ptr<CancelToken>` | `nullptr` | Cooperative cancel handle. Engine wraps this into a `RunContext` and threads it to every node's `run(NodeInput)` call as `in.ctx.cancel_token` |
 | `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | Optional token accumulator. The engine creates one when omitted and exposes the active accumulator as `in.ctx.usage` |
 | `resume_if_exists` | `bool` | `false` | If `true` and a checkpoint exists for `thread_id`, seed from it before applying `input` (multi-turn chat shape) |
+
+**Known checkpoint limitation:** fresh non-resuming runs that reuse an existing
+thread can collide with channel-version blob keys in `InMemoryCheckpointStore`
+and subsequently restore stale values. This is a pre-existing fresh-run defect,
+not fixed by the subgraph persistence changes. Use a new thread ID for a fresh
+history, or `resume_if_exists=true` for an intentional continuing-thread turn.
 
 ### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
@@ -1407,7 +1465,6 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1636,14 +1693,8 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
-#### `own_tools`
-
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-Transfers tool ownership to the engine. The engine stores them and keeps raw pointers
-valid for the lifetime of all `NodeContext.tools` references.
+Tool ownership is established before compilation via `NodeContext::tools` or
+`EngineResources::tools`; there is no post-compilation ownership transfer.
 
 #### `set_checkpoint_store`
 
@@ -2034,23 +2085,26 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 
 ### CheckpointStore
 
-Abstract interface for checkpoint persistence. Implement this to store checkpoints
-in a database, file system, or any other backend.
-
-> **Writing a custom store?** New implementations should implement the smallest
-> applicable capability: `CheckpointStoreCore`, optionally
-> `AsyncCheckpointStore` and/or `PendingWritesCheckpointStore`, then pass it
-> through `adapt_checkpoint_store()`. The existing `CheckpointStore` interface
-> remains the compatibility contract. Its async defaults invoke the sync methods;
-> a sync-only backend therefore remains valid, but its async calls are blocking.
-> See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
+The legacy ABI-compatible persistence facade. New sync-only backends derive
+`CheckpointStoreCore` (five pure operations) and call
+`adapt_checkpoint_store()`; native async backends derive
+`AsyncCheckpointStore` (five pure coroutine operations) and call
+`adapt_async_checkpoint_store()`. Both adapters expose `CheckpointStore`
+to existing GraphEngine, protocol hosts, gRPC checkpoint users, and Python
+binding entry points. Async engine operations call the canonical async peers;
+sync-only backends are offloaded to a bounded pool, while native async
+operations run on the caller's executor. The legacy synchronous defaults
+throw on missing capabilities rather than recursing. Durable pending writes
+are an independent optional `PendingWritesCheckpointStore` capability; without
+it, resume replays the full super-step. The persisted schema is unchanged.
+See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
 
 ```cpp
 class CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
-    // ── Sync core (5 virtuals, non-pure with bridge defaults) ──────
+    // ── Sync facade (5 virtuals; missing operation throws) ──────
     virtual void save(const Checkpoint& cp);
     virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
     virtual std::optional<Checkpoint> load_by_id(const std::string& id);
@@ -2058,7 +2112,7 @@ public:
                                            int limit = 100);
     virtual void delete_thread(const std::string& thread_id);
 
-    // ── Async peers (5 virtuals, default co_return the sync call) ──
+    // ── Async peers (5 virtuals; sync-only operations offload) ──
     virtual asio::awaitable<void> save_async(const Checkpoint& cp);
     virtual asio::awaitable<std::optional<Checkpoint>>
         load_latest_async(const std::string& thread_id);
@@ -2226,10 +2280,11 @@ public:
 **Header:** `<neograph/graph/loader.h>`
 **Namespace:** `neograph::graph`
 
-Legacy singleton registries for reducers, conditions, and node types. These
-remain the process-global fallback for JSON-driven graph construction. New
-code can pass a `GraphRegistry` through `EngineResources`; its local entries
-take precedence while missing names continue to resolve here.
+`ReducerRegistry`, `ConditionRegistry`, and `NodeFactory` are synchronized
+legacy process-wide convenience APIs. New engines should register on
+`GraphRegistry` and pass it through `EngineResources`: built-ins resolve by
+default, but custom process-global names require explicit `GlobalFallback`.
+Legacy no-registry calls still recognize the singleton registrations.
 
 ### ReducerRegistry
 
@@ -2347,13 +2402,20 @@ visual block editor (NeoGraph Studio, a private companion repo,
 issue #56) — can generate its palette from the engine and never drift
 out of sync.
 
-**Three access paths, one document:**
+**Export the registry used for compilation:**
 
 | From | How |
 |------|-----|
-| C++ | `neograph::graph::NodeFactory::instance().export_schema()` → `json` |
-| CLI | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
-| Python | `neograph_engine.export_schema()` → `dict` |
+| C++ scoped | `registry.export_effective_schema()` (built-ins plus scoped names); `registry.export_schema()` remains exact local-only for sealed Program palettes |
+| C++ legacy | `NodeFactory::instance().export_schema()` |
+| CLI legacy | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
+| Python scoped | `ng.export_schema(registry)` or `registry.export_schema()` |
+| Python legacy | `ng.export_schema()` |
+
+Python: register on `ng.GraphRegistry()` with `register_type`,
+`register_reducer`, or `register_condition`; pass it as
+`ng.GraphEngine.compile(definition, context, registry=registry)`. Re-registering
+the same symbolic name on a different registry never changes the first engine.
 
 **Document shape:**
 
@@ -2724,12 +2786,13 @@ public:
         std::string base_url_override;  // Overrides schema's connection.base_url
         bool        use_websocket = false;  // OpenAI Responses /v1/responses WS mode
         bool        prefer_libcurl = false; // Switch HTTP transport to libcurl HTTP/2
+        std::shared_ptr<const SchemaPrimitiveRegistry> primitive_registry;
+        std::map<std::string, std::string> trace_metadata;
     };
 
     static std::unique_ptr<SchemaProvider> create(const Config& config);
-    static std::shared_ptr<Provider>       create_shared(const Config& config);
 
-    ChatCompletion complete(const CompletionParams& params) override;
+    // Synchronous complete() is inherited from Provider.
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) override;
     asio::awaitable<json> request_json_async(
@@ -2753,6 +2816,8 @@ public:
 | `base_url_override` | `std::string` | `""` | If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints. |
 | `use_websocket` | `bool` | `false` | Drive `complete_stream` over `wss://` instead of HTTP/SSE. Currently supported only for the `"openai_responses"` schema (matches OpenAI's WebSocket mode at /v1/responses). |
 | `prefer_libcurl` | `bool` | `false` | Switch the non-streaming HTTP transport to libcurl (HTTP/2 + multiplexing + Cloudflare-friendly fingerprint). Build-time gated on `NEOGRAPH_USE_LIBCURL`. |
+| `primitive_registry` | `std::shared_ptr<const SchemaPrimitiveRegistry>` | empty | Provider-scoped transport, execution, and artifact-parser factories, snapshotted at creation. |
+| `trace_metadata` | `std::map<std::string, std::string>` | empty | Metadata copied into each primitive request context. |
 
 **Built-in schemas:**
 
@@ -2760,8 +2825,21 @@ public:
 |------|-----|-------|
 | `"openai"` | OpenAI | Same behavior as `OpenAIProvider` |
 | `"claude"` | Anthropic Claude | Uses SSE event-based streaming |
-| `"gemini"` | Google Gemini | Uses function declarations format |
+| `"gemini"` | Google Gemini | Chat, tools and inline generated image parts |
+| `"openai_responses"` | OpenAI Responses | Chat, SSE/tools and `image_generation_call.result` |
+| `"openai_images"` | OpenAI Images | Prompt request; `data[]` base64 or URL images |
+| `"veo"` | Gemini Veo | Prompt request; submit/poll video operation |
 | `"openrouter_decisions"` | OpenRouter Typesafe/Jev | Raw JSON `POST /api/alpha/decisions`; use `request_json()` rather than Chat Completions |
+
+Generated artifacts are retained by non-streaming calls and by Responses SSE/WS
+terminal events and Gemini inline-data stream parts. Custom artifact parsers
+receive the operation's request context; parser errors propagate rather than
+being mistaken for malformed wire frames.
+
+Long-running schemas may set `operation.absent_status` to `"pending"` when a
+missing status field means an accepted or still-running operation. The default
+is `"error"`; an explicit null or wrong-type status is still invalid. Bundled
+Veo opts into `"pending"` for name-only submissions and incomplete polls.
 
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
@@ -2783,6 +2861,61 @@ auto custom = neograph::llm::SchemaProvider::create({
     .default_model = "my-model-v1"
 });
 ```
+
+### Schema primitive registry (C++ only)
+
+Applications that need a transport, execution mode, or artifact representation
+not covered by the reviewed built-ins can inject a
+`SchemaPrimitiveRegistry` through `Config::primitive_registry`. The registry is
+copied during `SchemaProvider::create`; it is not process-global, and later
+registration does not affect an existing provider. Names are unique per
+category: duplicate registration rejects, while `replace_*` (or the explicit
+`SchemaPrimitiveRegistration::Replace` policy) is required for replacement.
+Factories are owned by the copied registry, so capture shared state explicitly
+and keep the registry alive while creating providers. Provider calls can run
+concurrently; factories receive an operation-owned context containing the
+normalized endpoint, body, headers, cancellation token, deadline, and trace
+metadata.
+
+```cpp
+#include <neograph/llm/schema_primitive_registry.h>
+
+auto registry = std::make_shared<neograph::llm::SchemaPrimitiveRegistry>();
+registry->register_transport(
+    "synthetic_echo",
+    [](neograph::llm::SchemaPrimitiveRequestContext request)
+        -> asio::awaitable<neograph::async::HttpResponse> {
+        neograph::async::HttpResponse response;
+        response.status = 200;
+        response.body = R"({"choices":[{"message":{"role":"assistant",
+            "content":"synthetic"}}]})";
+        co_return response;
+    });
+auto provider = neograph::llm::SchemaProvider::create({
+    .schema_path = "synthetic_schema.json",
+    .primitive_registry = registry
+});
+```
+
+JSON selects these factories declaratively with
+`connection.transport`, `execution.mode`, and
+`response.artifact_parser`. Every referenced name is resolved during provider
+creation; an unknown name reports its schema path, category, and missing name.
+The executable contract remains typed C++ callbacks, not scripting JSON.
+
+Custom transport/execution factories expose a complete-response contract.
+Supplying `on_chunk` or using a streaming entrypoint does not replace them with
+the built-in network transport: completed nonempty text is delivered once after
+successful execution. This is buffered completion, not incremental streaming.
+Built-in SSE and WebSocket transports retain their actual streaming behavior.
+
+The extension surface is intentionally C++ only today. Python can consume
+providers and typed artifacts but cannot register foreign callbacks; this avoids
+keeping Python objects across provider worker threads. An optional shared
+library can provide the same C++ factories when compiled against a compatible
+NeoGraph ABI, but dynamic loading, symbol discovery, and ABI version
+negotiation are not implemented. A plugin must therefore be linked explicitly
+and obey the host's compiler/standard-library and NeoGraph ABI.
 
 **Raw JSON endpoints:** `SchemaProvider` can also use a schema's connection and
 authentication contract without forcing the response through `ChatCompletion`.
@@ -2813,6 +2946,94 @@ const neograph::json result = decisions->request_json({
 `request_json_async()` accepts an optional `CancelToken` and returns the decoded
 JSON response. The method does not infer topology changes or grant authority;
 callers must validate Jev's `answers` against their own bounded selector policy.
+
+**Generated media and operations (#241).** `CompletionParams::prompt` selects a
+schema-defined prompt envelope (and must not be combined with chat messages or
+tools). `request.prompt_field` stamps a top-level/dot-path string (Images);
+`request.prompt_template` is a JSON object with typed `$PROMPT` and `$MODEL`
+substitutions (Veo's `instances[]`). Schemas may also allow specific
+`request.per_call_fields`, including generation options. Chat envelopes are
+unchanged.
+
+`response.artifacts` is an array of independent mappings. Each declares
+`items_path` (JSON dot path to an array), `kind` (`image`, `video`, `file`),
+optionally `type_path`/`type` to select typed items or `match_path` to select
+items containing a field, and one or more `base64_path`, `url_path`,
+`file_id_path`. `mime_type` supplies a default; `mime_path` overrides it when
+present; `metadata_path` preserves provider metadata as JSON. All payloads are
+returned unmodified, in order, as `ChatCompletion::artifacts` with fields
+`kind`, `mime_type`, `base64_data`, `url`, `file_id`, `metadata`. A URL is a
+provider reference, **not downloaded or implicitly authenticated**. The
+Python `ChatCompletion.artifacts` list contains `GeneratedArtifact` objects
+with the same properties. Empty artifact arrays are valid for Responses text
+or tool replies; a successful operation configured to return artifacts must
+produce at least one. JSON payloads are not decoded into bytes by the provider.
+
+`operation` supplies `id_path`, boolean `done_path`, optional `error_path`,
+`poll_endpoint` with `$OPERATION`, `poll_method` (`GET` or `POST`), positive
+`poll_interval_ms`, optional `finalize_endpoint` (GET JSON) and
+`result_path`. Submission uses `connection.endpoint`; polling/finalization
+reuse its authentication and loopback/TLS policy. `result_path` extracts the
+terminal JSON before applying `response.artifacts`. The same call to
+`complete`/`complete_async` drives the full lifecycle; the per-call positive
+`timeout_seconds` (or provider default) bounds it, and a
+`CompletionParams::cancel_token` aborts HTTP and inter-poll waits.
+Invalid/missing status, missing result or invalid artifact payload raises
+`OperationError`; deadline expiry raises `OperationTimeoutError`; caller
+cancellation raises `graph::CancelledException`. Python exposes the first
+two in `neograph_engine.llm`. Unknown operation IDs fail closed; the provider
+does not automatically download a URL or chase provider redirects.
+
+**Integration classes:** APIs using existing chat, prompt, artifact and
+submit/poll/finalize JSON shapes are JSON-only integrations (see
+`schemas/openai_images.json`, `schemas/veo.json` and the post-poll-finalize
+fixture `tests/fixtures/media_finalize.json`). New wire transports, response
+framing, non-JSON binary downloads, or state machines not representable with
+these primitives need a reviewed reusable core strategy, not provider-name
+branches or arbitrary schema-executed code. Application-registered uncommon
+typed primitives are tracked in #242; no registration hook is implied here.
+
+**Opt-in live validation** (runs only when you explicitly set
+`NEOGRAPH_LIVE_MEDIA=1` and the corresponding API key; API keys must stay in
+your environment, never in a schema, test, command history or commit):
+
+```bash
+NEOGRAPH_LIVE_MEDIA=1 python - <<'PY'
+import os
+from neograph_engine import CompletionParams
+from neograph_engine.llm import SchemaProvider
+if os.getenv("NEOGRAPH_LIVE_MEDIA") != "1" or not os.getenv("OPENAI_API_KEY"):
+    raise SystemExit("Set NEOGRAPH_LIVE_MEDIA=1 and OPENAI_API_KEY first")
+for schema, model in (("openai_images", "gpt-image-1"),
+                      ("openai_responses", "gpt-4.1")):
+    p = CompletionParams()
+    p.model = model
+    if schema == "openai_images":
+        p.prompt = "A small blue square"
+    else:
+        from neograph_engine import ChatMessage
+        p.messages = [ChatMessage("user", "Generate a small blue square image")]
+    result = SchemaProvider(schema_path=schema).complete(p)
+    print(schema, [(a.kind, a.mime_type, bool(a.base64_data), bool(a.url))
+                   for a in result.artifacts])
+PY
+
+NEOGRAPH_LIVE_MEDIA=1 python - <<'PY'
+import os
+from neograph_engine import CompletionParams
+from neograph_engine.llm import SchemaProvider
+if os.getenv("NEOGRAPH_LIVE_MEDIA") != "1" or not os.getenv("GEMINI_API_KEY"):
+    raise SystemExit("Set NEOGRAPH_LIVE_MEDIA=1 and GEMINI_API_KEY first")
+p = CompletionParams()
+p.prompt = "A blue kite drifting over a hill"
+p.timeout_seconds = 300
+result = SchemaProvider(schema_path="veo",
+                        default_model="veo-3.0-generate-preview",
+                        timeout_seconds=300).complete(p)
+print([(a.mime_type, a.url, a.file_id) for a in result.artifacts])
+PY
+```
+
 
 **Internal strategy enums** (documented for custom schema authors):
 
@@ -2956,29 +3177,23 @@ Two transports are available:
 - **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
   originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
   protocol version, timeout, and custom headers.
-- **stdio** — `MCPClient({"python", "server.py"})`. The client `fork`+`execvp`s the
-  subprocess, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
+- **stdio** — `MCPClient({"python", "server.py"})`. The client resolves `PATH`
+  before `fork`, executes the subprocess with `execve`, wires bidirectional
+  pipes, and exchanges newline-delimited JSON-RPC
   over the child's stdin/stdout. The subprocess lives as long as the
   `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
   reaps via `waitpid` (SIGKILL fallback after ~500 ms).
 
 ### MCPTool
 
-Wraps a single MCP server tool as a local `Tool` implementation. Two
-constructors, one per transport; `MCPClient::get_tools()` picks the right one.
+Wraps a single MCP server tool as a local `Tool` implementation. Discovered
+tools retain their originating protocol session, regardless of transport.
 
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -3037,10 +3252,32 @@ Round 3 spec alignment); stdio transport carries the same version
 in the `initialize` payload. Servers running older protocol
 versions may reject these requests — pin server-side or upgrade.
 
+**Session and transport ownership:** Both constructors create the same protocol
+session. It owns JSON-RPC ids, response validation, initialization (including
+the initialized notification), pagination, and tool-result adaptation. The HTTP
+transport alone owns endpoint URLs, headers, negotiated `Mcp-Session-Id`, and
+request timeout; the stdio transport alone owns the subprocess, pipes, reader,
+and response-id demultiplexer. Both advertise concurrent requests, cancellation,
+and deadlines to the session. A discovered tool retains its protocol session,
+so it remains usable after the `MCPClient` is destroyed; the subprocess is
+terminated and reaped when the last client/tool reference is released.
+
+`rpc_call_async(method, params, deadline, cancel_token)` supports an optional
+absolute steady-clock deadline and `graph::CancelToken`. Cancellation and
+deadlines stop waiting for that call without closing the shared stdio process or
+interfering with sibling responses. HTTP additionally applies
+`MCPClientConfig::request_timeout` per request. Non-HTTP transport or wire
+failures throw `MCPTransportError`, a `std::runtime_error` subclass exposing
+`failure()` (`connection`, `timeout`, `cancelled`, `shutdown`, `http_status`, or
+`protocol`). HTTP status failures expose `http_status()` (zero otherwise).
+Valid JSON-RPC error responses remain `MCPError` with the server's `code()`
+and `data()`. Neither class identifies a tool-level `isError` result; use
+`call_tool_result()` to inspect that outcome.
+
 | Method | Description |
 |--------|-------------|
 | `MCPClient(url)` | Construct an HTTP-mode client |
-| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
+| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved through `PATH` before fork; failed exec surfaces as a connection error on first RPC. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
 | `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
 | `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
 | `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
@@ -3061,10 +3298,10 @@ auto tools = client.get_tools();
 **stdio usage:**
 
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

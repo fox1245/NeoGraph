@@ -6,6 +6,7 @@
 #include <limits>
 #include <mutex>
 #include <set>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -343,6 +344,31 @@ PostgreSQLProgramStore::get_activation(std::string_view owner_scope) const {
     if (activation) verify_activation_target(impl_->connection, *activation);
     return activation;
 }
+std::optional<ProgramActivationBinding>
+PostgreSQLProgramStore::get_active_binding(std::string_view owner_scope) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    Transaction transaction(impl_->connection);
+    const auto active = load_activation(impl_->connection, owner_scope);
+    if (!active) {
+        transaction.commit();
+        return std::nullopt;
+    }
+    const auto bytes = select_bytes(
+        impl_->connection,
+        "SELECT canonical_bytes FROM neograph_program_versions WHERE id = $1",
+        {active->active_version_id()});
+    if (!bytes) {
+        throw std::runtime_error("PostgreSQL Program activation references a missing version");
+    }
+    const auto version = ProgramVersion::parse(*bytes);
+    if (version.ownership_scope() != owner_scope ||
+        version.policy_snapshot().fingerprint() != active->policy_snapshot_hash()) {
+        throw std::runtime_error("PostgreSQL Program activation target is not owner/policy bound");
+    }
+    transaction.commit();
+    return ProgramActivationBinding{*active, version};
+}
 
 ProgramActivationResult PostgreSQLProgramStore::compare_activate(
     std::string_view owner_scope,
@@ -462,9 +488,13 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
             throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
     }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
+    ProgramRetentionReport report;
+    for (const auto& pinned_id : pinned_version_ids)
+        report.references.push_back({pinned_id, "host_pin"});
     if (const auto active = load_activation(impl_->connection, owner_scope)) {
         verify_activation_target(impl_->connection, *active);
         keep.insert(active->active_version_id());
+        report.references.push_back({active->active_version_id(), "active_pointer"});
     }
 
     auto result = exec_params(
@@ -495,7 +525,6 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
         }
     }
 
-    ProgramRetentionReport report;
     for (const auto& id : remove) {
         const auto deleted = exec_params(
             impl_->connection, "DELETE FROM neograph_program_versions WHERE id = $1", {id});
@@ -509,6 +538,11 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
             {bundle_id});
         report.bundles_removed += result_count(bundle);
     }
+    std::sort(report.references.begin(), report.references.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.version_id, lhs.reason) <
+                         std::tie(rhs.version_id, rhs.reason);
+              });
     transaction.commit();
     return report;
 }

@@ -158,11 +158,11 @@ struct PendingWrite {
 };
 
 /**
- * @brief Mandatory synchronous checkpoint persistence capability.
+ * @brief Mandatory synchronous operations for a sync-only backend.
  *
- * New backends may implement this small, recursion-free contract and pass it
- * through adapt_checkpoint_store(). The legacy CheckpointStore remains
- * unchanged for existing backends and consumers.
+ * Adapt this pure contract with adapt_checkpoint_store() to offload blocking
+ * I/O outside the engine executor. The legacy CheckpointStore remains an ABI
+ * compatibility facade for existing backends and consumers.
  */
 class NEOGRAPH_API CheckpointStoreCore {
 public:
@@ -177,7 +177,10 @@ public:
 };
 
 /**
- * @brief Optional coroutine-native checkpoint capability.
+ * @brief Canonical coroutine contract for a native async backend.
+ *
+ * Implement all five operations and pass it through
+ * adapt_async_checkpoint_store() for synchronous administration.
  */
 class NEOGRAPH_API AsyncCheckpointStore {
 public:
@@ -252,24 +255,21 @@ public:
  *
  * @see InMemoryCheckpointStore for a reference implementation.
  */
-/// @note Backend authors: this legacy interface remains intentionally unchanged
-///       for ABI compatibility. New backends should implement the mandatory
-///       CheckpointStoreCore and optional AsyncCheckpointStore /
-///       PendingWritesCheckpointStore capabilities, then call
-///       adapt_checkpoint_store(). Existing subclasses should continue to
-///       override at least one of each sync/async pair to avoid the historical
-///       crossover defaults recursing when neither side is implemented.
+/// @note This legacy interface is retained through the pre-v1 ABI window.
+///       New sync backends implement CheckpointStoreCore and call
+///       adapt_checkpoint_store(); native async backends implement
+///       AsyncCheckpointStore and call adapt_async_checkpoint_store().
+///       Legacy sync defaults fail explicitly, while async defaults offload
+///       sync operations. No sync default calls its async peer.
 class NEOGRAPH_API CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
     // ── Sync API ────────────────────────────────────────────────────────
     //
-    // Stage 3 / Semester 3.1: each pair has a crossover default. Sync
-    // calls use `neograph::async::run_sync`; async calls that must invoke a
-    // legacy synchronous implementation offload it to a bounded process-wide
-    // pool and resume on the caller's executor. Subclasses may override
-    // either side. Overriding neither fails closed with std::logic_error.
+    // Legacy sync facade. Override sync operations or explicitly adapt a
+    // native AsyncCheckpointStore. Missing sync operations fail explicitly;
+    // async defaults offload sync-only backends to a bounded worker pool.
 
     /**
      * @brief Save a checkpoint.
@@ -400,6 +400,14 @@ public:
  */
 NEOGRAPH_API std::shared_ptr<CheckpointStore>
 adapt_checkpoint_store(std::shared_ptr<CheckpointStoreCore> core);
+
+/** Explicit sync facade for an async-native backend. The adapter retains the
+ * backend and forwards engine async operations without a blocking worker;
+ * synchronous administration drives them via run_sync. Pending-write storage
+ * is optional via PendingWritesCheckpointStore.
+ */
+NEOGRAPH_API std::shared_ptr<CheckpointStore>
+adapt_async_checkpoint_store(std::shared_ptr<AsyncCheckpointStore> backend);
 
 /**
  * @brief In-memory checkpoint store for testing and single-process use.

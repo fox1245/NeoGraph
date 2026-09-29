@@ -130,6 +130,9 @@ struct HarnessRetentionPolicy {
     std::size_t              max_runs      = std::numeric_limits<std::size_t>::max();
     std::vector<std::string> protected_artifact_ids;
     std::vector<std::string> protected_run_ids;
+    /// Restrict both counts and deletion candidates to this exact byte prefix.
+    /// Empty selects the entire store; scoped adapters supply their private namespace.
+    std::string namespace_prefix;
 };
 
 /** Records removed by one atomic record-store cleanup pass. */
@@ -142,6 +145,7 @@ struct HarnessRetentionResult {
 class NEOGRAPH_HARNESS_API HarnessRetentionStore {
 public:
     virtual ~HarnessRetentionStore()                                                      = default;
+    /// Namespace filtering, reference checks and deletion must share one transaction.
     virtual HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) = 0;
 };
 

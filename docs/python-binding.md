@@ -38,6 +38,17 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
+### Tool ownership at compile time
+
+Pass Python `Tool` instances, native C++ tools, and `MCPClient.get_tools()`
+results together as `ng.NodeContext(tools=[...])`. Compilation snapshots this
+list into an owned native `ToolSet` **before** constructing graph nodes. The
+compiled engine retains the exact tools across `run()` and `resume()` even
+after you replace the context's `tools` list or drop external references.
+Changing the list later only affects a subsequent compile. Native MCP tools
+keep their asynchronous execution path; there is no post-compile transfer or
+per-dispatch ownership allocation.
+
 ## Core API parity
 
 Python exposes the C++ execution abilities rather than a separate Python scheduler:

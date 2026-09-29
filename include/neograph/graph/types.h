@@ -11,6 +11,7 @@
 #include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
+#include <neograph/tool_set.h>
 #include <neograph/types.h>
 
 #include <cstddef>
@@ -78,7 +79,7 @@ enum class ChannelRetentionPolicy : std::uint8_t {
  */
 enum class ChannelPersistencePolicy : std::uint8_t {
     Checkpoint, ///< Include value and version in checkpoints.
-    Ephemeral,   ///< Keep in-memory only; restore leaves the initial value.
+    Ephemeral,   ///< Omit value; checkpoint resume rejects written ephemeral state.
 };
 
 struct ChannelLifecyclePolicy {
@@ -374,6 +375,8 @@ struct ConditionalEdge {
 /// Reserved route key selected when an open/unspecified condition returns no
 /// exact match. Omitting it makes an unknown label a runtime error.
 constexpr const char* DEFAULT_ROUTE = "default";
+class GraphRegistry;
+
 
 /**
  * @brief Dependency injection context passed to nodes during construction.
@@ -383,16 +386,11 @@ constexpr const char* DEFAULT_ROUTE = "default";
  */
 struct NodeContext {
     std::shared_ptr<Provider> provider;    ///< LLM provider for making completions.
-    /// Non-owning tool pointers consumed by node factories at compile()
-    /// time. **Lifetime contract**: the pointees must outlive the
-    /// GraphEngine. New code should pass an owned ToolSet through
-    /// EngineResources; compatibility code can call
-    /// `engine.own_tools(std::move(unique_ptr_vec))` after compile, or keep the
-    /// owning unique_ptrs alive in the caller's scope for at least as long as
-    /// the engine. Constructing NodeContext from a
-    /// throwaway unique_ptr collection that goes out of scope before
-    /// `engine->run()` returns leaves these pointers dangling and is UB.
-    std::vector<Tool*>        tools;
+    /// Owned tool collection, shared cheaply across copies of this context,
+    /// the compiled graph, and the linked engine. Assignment replaces the
+    /// context's selection without invalidating earlier compiled engines.
+    /// Factories may use tools.view() for temporary raw-pointer lookup.
+    ToolSet                   tools;
     std::string               model;       ///< Model name override (empty = use provider default).
     std::string               instructions; ///< System prompt / instructions for the LLM.
     json                      extra_config; ///< Additional configuration (node-type specific).
@@ -402,6 +400,8 @@ struct NodeContext {
     /// Identity metadata for an admitted Provider requirement. Brokered
     /// Program factories receive this without the executable Provider pointer.
     std::string              provider_name;
+    /// Construction-only registry snapshot inherited by built-in subgraphs.
+    std::shared_ptr<const GraphRegistry> registry;
 };
 
 /**

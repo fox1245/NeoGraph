@@ -21,12 +21,8 @@ void init_state(py::module_& m) {
 
     // ── NodeContext ──────────────────────────────────────────────────────
     //
-    // py::dynamic_attr() lets the Python wrapper carry attributes that
-    // aren't in the C++ struct — specifically `_pytools`, the list of
-    // Python Tool instances. The Python `NodeContext` subclass (in
-    // neograph_engine/__init__.py) sets `_pytools` in its __init__,
-    // and GraphEngine.compile() reads it back to materialize the
-    // PyToolOwner unique_ptrs that the engine takes ownership of.
+    // Python's wrapper stores replaceable `_pytools`; compile snapshots them
+    // into an owned ToolSet before constructing nodes.
     py::class_<NodeContext>(m, "NodeContext", py::dynamic_attr(),
         "Dependency-injection container for graph nodes: provider, "
         "tools, model, system instructions, plus an extra_config dict "
@@ -38,11 +34,9 @@ void init_state(py::module_& m) {
                          py::object extra_config) {
             NodeContext ctx;
             ctx.provider = std::move(provider);
-            // NodeContext stores raw Tool* (engine owns the unique_ptrs
-            // separately). Commit 1 doesn't expose tool ownership transfer
-            // from Python yet — keep tools empty here, add a setter once
-            // the trampoline lands in commit 2.
-            (void)tools;
+            // Native Tool values passed directly to the bound constructor
+            // receive the same owned trampoline contract as Python tools.
+            ctx.tools = neograph::ToolSet(wrap_python_tools(py::cast(tools)));
             ctx.model = model;
             ctx.instructions = instructions;
             ctx.extra_config = py_to_json(extra_config);

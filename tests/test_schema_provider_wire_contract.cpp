@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 using neograph::ChatMessage;
 using neograph::ChatTool;
@@ -306,4 +307,124 @@ TEST(SchemaProviderWireContract, RemoteVisionUrlUsesDeclaredRepresentation) {
                 *provider, params_with_image(remote_url)),
             std::invalid_argument);
     }
+}
+
+TEST(SchemaProviderWireContract, StreamingRequestShapesAreNetworkFree) {
+    CompletionParams params;
+    params.model = "gpt-4o";
+    params.messages.push_back(ChatMessage{.role = "user", .content = "hello"});
+    const auto openai = provider_for("openai");
+    ASSERT_NE(openai, nullptr);
+    const auto chat = SchemaProviderTestAccess::build_body(*openai, params);
+    const auto sse = SchemaProviderTestAccess::build_sse_body(*openai, params);
+    EXPECT_FALSE(chat.contains("stream"));
+    EXPECT_FALSE(chat.contains("stream_options"));
+    EXPECT_EQ(sse.at("stream"), true);
+    EXPECT_EQ(sse.at("stream_options").at("include_usage"), true);
+    EXPECT_EQ(sse.at("temperature"), chat.at("temperature"));
+
+    const auto gemini = provider_for("gemini");
+    ASSERT_NE(gemini, nullptr);
+    const auto gemini_sse = SchemaProviderTestAccess::build_sse_body(*gemini, params);
+    EXPECT_FALSE(gemini_sse.contains("stream_options"));
+
+    const auto responses = provider_for("openai_responses");
+    ASSERT_NE(responses, nullptr);
+    const auto ws = SchemaProviderTestAccess::build_ws_body(*responses, params);
+    EXPECT_EQ(ws.at("type"), "response.create");
+    EXPECT_FALSE(ws.contains("temperature"));
+    EXPECT_FALSE(ws.contains("stream"));
+    EXPECT_FALSE(ws.contains("background"));
+    EXPECT_EQ(ws.at("input").at(0).at("content"), "hello");
+}
+
+TEST(SchemaProviderWireContract, OfflineSseDataDecodingPreservesUsageReasoningAndToolDeltas) {
+    auto provider = provider_for("openai");
+    ASSERT_NE(provider, nullptr);
+    std::vector<std::string> chunks;
+    const auto result = SchemaProviderTestAccess::parse_stream_lines(
+        *provider, {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\",\"reasoning_content\":\"private \",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null}]}",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" world\",\"reasoning_content\":\"thought\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Seoul\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}",
+            "data: [DONE]",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" ignored\"}}]}"
+        }, [&](const std::string& chunk) { chunks.push_back(chunk); });
+    EXPECT_EQ(chunks, (std::vector<std::string>{"Hello", " world"}));
+    EXPECT_EQ(result.message.content, "Hello world");
+    EXPECT_EQ(result.message.reasoning, "private thought");
+    ASSERT_EQ(result.message.tool_calls.size(), 1U);
+    EXPECT_EQ(result.message.tool_calls[0].id, "call_1");
+    EXPECT_EQ(result.message.tool_calls[0].name, "weather");
+    EXPECT_EQ(json::parse(result.message.tool_calls[0].arguments).at("city"), "Seoul");
+    EXPECT_EQ(result.usage.prompt_tokens, 11);
+    EXPECT_EQ(result.usage.total_tokens, 14);
+    EXPECT_EQ(result.stop_reason, "tool_use");
+}
+
+TEST(SchemaProviderWireContract, OfflineClaudeAndGeminiSseFixtures) {
+    auto claude = provider_for("claude");
+    ASSERT_NE(claude, nullptr);
+    std::string emitted;
+    const auto claude_result = SchemaProviderTestAccess::parse_stream_lines(
+        *claude, {
+            "event: message_start",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}",
+            "event: content_block_start",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"weather\"}}",
+            "event: content_block_delta",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Seoul\\\"}\"}}",
+            "event: content_block_stop",
+            "data: {\"type\":\"content_block_stop\"}",
+            "event: message_delta",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":4}}",
+            "event: message_stop",
+            "data: {\"type\":\"message_stop\"}"
+        }, [&](const std::string& token) { emitted += token; });
+    EXPECT_TRUE(emitted.empty());
+    ASSERT_EQ(claude_result.message.tool_calls.size(), 1U);
+    EXPECT_EQ(claude_result.message.tool_calls[0].id, "toolu_1");
+    EXPECT_EQ(json::parse(claude_result.message.tool_calls[0].arguments).at("city"), "Seoul");
+    EXPECT_EQ(claude_result.usage.prompt_tokens, 9);
+    EXPECT_EQ(claude_result.usage.completion_tokens, 4);
+    EXPECT_EQ(claude_result.stop_reason, "tool_use");
+
+    auto gemini = provider_for("gemini");
+    ASSERT_NE(gemini, nullptr);
+    const auto gemini_result = SchemaProviderTestAccess::parse_stream_lines(
+        *gemini, {
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"},{\"functionCall\":{\"name\":\"weather\",\"args\":{\"city\":\"Seoul\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":2,\"totalTokenCount\":9}}"
+        }, [&](const std::string& token) { emitted += token; });
+    EXPECT_EQ(emitted, "Hi");
+    EXPECT_EQ(gemini_result.message.content, "Hi");
+    ASSERT_EQ(gemini_result.message.tool_calls.size(), 1U);
+    EXPECT_EQ(gemini_result.message.tool_calls[0].name, "weather");
+    EXPECT_EQ(gemini_result.usage.total_tokens, 9);
+    EXPECT_EQ(gemini_result.stop_reason, "end_turn");
+}
+
+TEST(SchemaProviderWireContract, OfflineWebSocketEventsStopAtDoneAndRejectErrors) {
+    auto provider = provider_for("openai_responses");
+    ASSERT_NE(provider, nullptr);
+    std::vector<std::string> tokens;
+    const auto result = SchemaProviderTestAccess::parse_ws_events(
+        *provider, {
+            {{"type", "response.output_item.added"},
+             {"item", {{"type", "function_call"}, {"call_id", "call_ws"}, {"name", "weather"}}}},
+            {{"type", "response.function_call_arguments.delta"}, {"delta", R"({"city":)"}},
+            {{"type", "response.function_call_arguments.delta"}, {"delta", R"("Seoul"})"}},
+            {{"type", "response.output_item.done"}},
+            {{"type", "response.completed"},
+             {"response", {{"usage", {{"input_tokens", 8}, {"output_tokens", 3}, {"total_tokens", 11}}}}}},
+            {{"type", "error"}, {"message", "must not be reached"}}
+        }, [&](const std::string& token) { tokens.push_back(token); });
+    EXPECT_TRUE(tokens.empty());
+    ASSERT_EQ(result.message.tool_calls.size(), 1U);
+    EXPECT_EQ(result.message.tool_calls[0].id, "call_ws");
+    EXPECT_EQ(json::parse(result.message.tool_calls[0].arguments).at("city"), "Seoul");
+    EXPECT_EQ(result.usage.total_tokens, 11);
+    EXPECT_EQ(result.stop_reason, "tool_use");
+    EXPECT_THROW(SchemaProviderTestAccess::parse_ws_events(
+        *provider, {{{"type", "error"}, {"message", "rejected"}}}),
+        std::runtime_error);
 }

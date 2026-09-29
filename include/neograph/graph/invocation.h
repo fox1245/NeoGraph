@@ -9,7 +9,7 @@
 #pragma once
 
 #include <neograph/api.h>
-#include <neograph/graph/engine.h>
+#include <neograph/graph/execution.h>
 
 #include <asio/awaitable.hpp>
 
@@ -76,8 +76,9 @@ struct InvocationResult {
  */
 class NEOGRAPH_API RunInvocation final {
 public:
-    RunInvocation(std::shared_ptr<GraphEngine> engine,
-                  RunInvocationRequest request);
+    RunInvocation(GraphExecution execution, RunInvocationRequest request);
+    /// Compatibility constructor; new hosts retain GraphExecution instead.
+    RunInvocation(std::shared_ptr<GraphEngine> engine, RunInvocationRequest request);
 
     RunInvocation(const RunInvocation&) = delete;
     RunInvocation& operator=(const RunInvocation&) = delete;
@@ -101,7 +102,7 @@ public:
         std::string checkpoint_id, json resume_value = {});
 
 private:
-    std::shared_ptr<GraphEngine> engine_;
+    GraphExecution execution_;
     RunInvocationRequest request_;
     std::shared_ptr<CancelToken> token_;
     std::atomic_bool started_{false};

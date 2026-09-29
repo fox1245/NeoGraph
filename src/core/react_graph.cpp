@@ -30,21 +30,15 @@ std::unique_ptr<GraphEngine> create_react_graph(
         })}
     };
 
-    // Build NodeContext
-    std::vector<Tool*> tool_ptrs;
-    tool_ptrs.reserve(tools.size());
-    for (auto& t : tools) {
-        tool_ptrs.push_back(t.get());
-    }
+    // Share one owned collection between context, compiled graph and engine.
 
     NodeContext ctx;
     ctx.provider     = std::move(provider);
-    ctx.tools        = std::move(tool_ptrs);
+    ctx.tools        = ToolSet(std::move(tools));
     ctx.model        = model;
     ctx.instructions = instructions;
 
     auto engine = GraphEngine::compile(definition, ctx);
-    engine->own_tools(std::move(tools));
     return engine;
 }
 

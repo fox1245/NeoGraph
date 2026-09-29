@@ -21,8 +21,12 @@ class GraphEngine;
  * @brief State inspection and mutation separated from graph execution calls.
  *
  * GraphAdmin borrows a GraphEngine and must not outlive it. The corresponding
- * GraphEngine methods remain supported and are the implementation boundary, so
- * this facade adds no state to GraphEngine and changes no existing behavior.
+ * GraphEngine methods remain as compatibility entry points; both use the same
+ * exclusive admission policy: reject operations during any in-flight execution
+ * (even for a different thread_id), and reject execution during administration.
+ * Drain and await the execution before retrying; no administrative checkpoint
+ * will be published after a rejected operation. Different engines sharing a
+ * checkpoint store still need host-level coordination.
  */
 class NEOGRAPH_API GraphAdmin {
 public:

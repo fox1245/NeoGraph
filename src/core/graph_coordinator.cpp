@@ -3,6 +3,7 @@
 #include <neograph/hook_runtime.h>
 
 #include "channel_write_codec.h"
+#include "run_context_runtime.h"
 
 #include <chrono>
 #include <limits>
@@ -84,14 +85,25 @@ inline int64_t now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+json with_ephemeral_guard(json metadata, const GraphState& state) {
+    const auto guard = state.ephemeral_checkpoint_guard();
+    if (guard.is_null()) return metadata;
+    if (metadata.is_null()) metadata = json::object();
+    if (!metadata.is_object() || metadata.contains("_neograph_ephemeral_guard"))
+        throw std::runtime_error("Checkpoint metadata conflicts with ephemeral channel guard");
+    metadata["_neograph_ephemeral_guard"] = guard;
+    return metadata;
+}
+
 int resume_start_step(const Checkpoint& checkpoint) {
     if (checkpoint.step < 0) {
         throw std::runtime_error("Checkpoint step must not be negative");
     }
+    const auto phase = detail::checkpoint_resume_phase(checkpoint);
     const bool advances =
-        checkpoint.interrupt_phase == CheckpointPhase::After ||
-        checkpoint.interrupt_phase == CheckpointPhase::Completed ||
-        checkpoint.interrupt_phase == CheckpointPhase::Updated;
+        phase == CheckpointPhase::After ||
+        phase == CheckpointPhase::Completed ||
+        phase == CheckpointPhase::Updated;
     const auto maximum = static_cast<std::int64_t>(
         std::numeric_limits<int>::max());
     if (checkpoint.step >= maximum) {
@@ -123,7 +135,7 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
     std::unordered_map<std::string, NodeResult> results;
     Checkpoint current = checkpoint;
     const bool node_interrupt_resume =
-        checkpoint.interrupt_phase == CheckpointPhase::NodeInterrupt;
+        detail::checkpoint_resume_phase(checkpoint) == CheckpointPhase::NodeInterrupt;
     // Pending rows under a NodeInterrupt checkpoint's ancestors can only
     // belong to the paused super-step. Ordinary Completed checkpoints keep
     // their historical behavior: replay every row under the selected ID.
@@ -141,7 +153,7 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
             if (node_interrupt_resume && pw.step != checkpoint.step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw));
         }
-        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+        if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
         if (current.parent_id == current.id) {
             throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
@@ -152,7 +164,7 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
             parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
             throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
         }
-        if (parent->interrupt_phase == CheckpointPhase::NodeInterrupt &&
+        if (detail::checkpoint_resume_phase(*parent) == CheckpointPhase::NodeInterrupt &&
             parent->step != checkpoint.step) {
             throw std::runtime_error("NodeInterrupt ancestry crosses super-step boundaries");
         }
@@ -166,7 +178,7 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
     std::unordered_map<std::string, NodeResult> results;
     std::unordered_set<std::string> visited;
     const bool node_interrupt_resume =
-        checkpoint.interrupt_phase == CheckpointPhase::NodeInterrupt;
+        detail::checkpoint_resume_phase(checkpoint) == CheckpointPhase::NodeInterrupt;
     const auto selected_step = checkpoint.step;
     // Preserve Completed-checkpoint replay semantics; only inherited rows
     // for a NodeInterrupt resume are scoped to the selected super-step.
@@ -185,7 +197,7 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
             if (node_interrupt_resume && pw.step != selected_step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw));
         }
-        if (current.interrupt_phase != CheckpointPhase::NodeInterrupt ||
+        if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
         if (current.parent_id == current.id) {
             throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
@@ -196,7 +208,7 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
             parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
             throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
         }
-        if (parent->interrupt_phase == CheckpointPhase::NodeInterrupt &&
+        if (detail::checkpoint_resume_phase(*parent) == CheckpointPhase::NodeInterrupt &&
             parent->step != selected_step) {
             throw std::runtime_error("NodeInterrupt ancestry crosses super-step boundaries");
         }
@@ -257,6 +269,7 @@ std::string CheckpointCoordinator::save_super_step(const GraphState&            
     cp.id              = Checkpoint::generate_id();
     cp.thread_id       = thread_id_;
     cp.channel_values  = state.serialize();
+    cp.metadata        = with_ephemeral_guard(json(), state);
     cp.parent_id       = parent_id;
     cp.current_node    = current_node;
     cp.next_nodes      = next_nodes;
@@ -279,7 +292,8 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
-    ctx.phase          = cp_opt->interrupt_phase;
+    ctx.metadata       = cp_opt->metadata;
+    ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 
@@ -288,8 +302,8 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     //     step ran, so resume re-enters AT cp.step.
     //   After / Completed      → cp was saved *after* the step's work
     //     finished, so resume starts at the NEXT step.
-    //   Updated                → treated like Completed for step
-    //     advancement (update_state substitutes for a committed step).
+    //   Updated                → keeps the original continuation phase;
+    //     explicit as_node updates still substitute for a committed step.
     ctx.start_step = resume_start_step(*cp_opt);
 
     // Rehydrate in-flight super-step writes so the engine can replay
@@ -363,7 +377,7 @@ asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
     cp.next_nodes      = next_nodes;
     cp.interrupt_phase = phase;
     cp.barrier_state   = barrier_state;
-    cp.metadata        = metadata;
+    cp.metadata        = with_ephemeral_guard(metadata, state);
     cp.step            = step;
     cp.timestamp       = now_ms();
 
@@ -395,7 +409,7 @@ asio::awaitable<Checkpoint> CheckpointCoordinator::commit_super_step_async(
     checkpoint.next_nodes      = next_nodes;
     checkpoint.interrupt_phase = CheckpointPhase::Completed;
     checkpoint.barrier_state   = barrier_state;
-    checkpoint.metadata        = metadata;
+    checkpoint.metadata        = with_ephemeral_guard(metadata, state);
     checkpoint.step            = step;
     checkpoint.timestamp       = now_ms();
 
@@ -433,7 +447,8 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
-    ctx.phase          = cp_opt->interrupt_phase;
+    ctx.metadata       = cp_opt->metadata;
+    ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 
@@ -465,7 +480,8 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
-    ctx.phase          = cp_opt->interrupt_phase;
+    ctx.metadata       = cp_opt->metadata;
+    ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 

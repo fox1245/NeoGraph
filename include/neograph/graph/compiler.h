@@ -66,7 +66,7 @@ struct ChannelDef {
     /// Retention is applied after reducer combination.
     ChannelRetentionPolicy   retention = ChannelRetentionPolicy::Unbounded;
     std::uint64_t             retention_limit = 0;
-    /// Ephemeral channels are omitted from checkpoint snapshots.
+    /// Ephemeral values are omitted; checkpoint metadata guards resume.
     ChannelPersistencePolicy persistence = ChannelPersistencePolicy::Checkpoint;
 };
 
@@ -127,6 +127,8 @@ struct NEOGRAPH_API RoundTripReport {
 struct CompiledGraph {
     std::string                                       name;
     std::vector<ChannelDef>                           channel_defs;
+    /// Retains tools referenced by the compiled node instances until link().
+    ToolSet                                         tools;
     std::map<std::string, std::unique_ptr<GraphNode>> nodes;
     std::vector<Edge>                                 edges;
     std::vector<ConditionalEdge>                      conditional_edges;

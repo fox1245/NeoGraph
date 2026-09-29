@@ -100,15 +100,28 @@ struct EngineConfig {
 
     /// Global NodeCache entry bound. Zero preserves unbounded behavior.
     std::size_t node_cache_max_entries = 0;
+
+    /// Explicit per-node cache policy. Unlike cached_nodes, this may opt
+    /// into execution-local caching or a reusable context partition.
+    /// Entries here take precedence over cached_nodes for the same node.
+    std::map<std::string, CacheKeyPolicy> node_cache_policies;
+
+    /// Controlled provider dispatch for built-in LLMCallNode instances.
+    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition;
 };
 
 /**
  * @brief Owned construction resources layered beside EngineConfig.
  *
- * Kept as a sibling type so the already-public EngineConfig and NodeContext
- * layouts remain unchanged. Empty resources preserve the legacy raw-tool and
- * process-global registry behavior. Move this value into build() or link();
- * ToolSet ownership transfers to the resulting engine.
+ * Kept as a sibling type so ToolSet ownership and registry selection stay
+ * separate from execution policy and NodeContext's borrowed input. Empty
+ * resources preserve the legacy raw-tool and process-global registry behavior.
+ * Supplying a GraphRegistry selects its built-in + engine-local palette instead;
+ * this registry is snapshotted before compilation, so later registration cannot
+ * affect the resulting engine. The ToolSet is selected when NodeContext::tools
+ * is empty; supplying both nonempty collections is ambiguous and rejected.
+ * ToolSet ownership transfers to the resulting engine, and the compiled graph
+ * and engine retain ownership independently of these temporary resources.
  */
 struct EngineResources {
     ToolSet                              tools;
@@ -136,6 +149,24 @@ struct RunResources {
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
     /// Host broker for mediated Tool effects in this invocation and subgraphs.
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
+    /// Exact grant identity attached to this invocation's mediated Tool calls.
+    ToolEffectGrantIdentity tool_effect_grant;
+};
+
+/// One edge in a nested checkpoint lookup. Task IDs are the engine's stable
+/// static/Send invocation IDs (for example, "s0:child").
+struct SubgraphPathStep {
+    std::string node_name;
+    int parent_step = 0;
+    std::string task_id;
+    /// Pin a historical parent checkpoint rather than its latest checkpoint.
+    std::string parent_checkpoint_id;
+};
+
+struct NestedCheckpoint {
+    std::vector<std::string> graph_path;
+    std::string thread_id;
+    Checkpoint checkpoint;
 };
 
 /**
@@ -397,24 +428,18 @@ struct RunResult {
  * `std::async`, a thread pool, or your existing event loop's worker.
  *
  * Caveats:
- * - Mutator APIs (`set_retry_policy`, `set_node_retry_policy`,
- *   `set_checkpoint_store`, `set_store`, `own_tools`) must be called
- *   before any concurrent `run()` — they are configuration, not runtime.
- * - Concurrent `run()` calls sharing the **same** `thread_id` do not
- *   crash but produce unspecified checkpoint interleaving (last-
- *   writer-wins on `save_checkpoint`, last-saver visible to subsequent
- *   `load_latest`); serialize per-thread access yourself if you need
- *   deterministic semantics. Same caveat applies across **multiple
- *   engines** sharing one `CheckpointStore` for the same `thread_id`
- *   — e.g. evolving-agent patterns that tear an engine down and
- *   recompile while a straggler `run_async` is still in flight: the
- *   store guarantees each individual checkpoint op is atomic, not that
- *   they sequence in any particular order. Likewise, `update_state` /
- *   `get_state` / `fork` overlapping a live `run_async` on the same
- *   `thread_id` race against the engine's own writes; if you need
- *   "no straggler may overwrite my admin op", cancel the straggler
- *   via `RunConfig::cancel_token` first and `co_await` its completion
- *   before issuing the admin call.
+ * - Configuration setters (`set_*`, `own_tools`) are construction-time only:
+ *   call them before publishing the engine to any execution or admin thread.
+ * - On this engine, administration (state/history reads, update, fork)
+ *   and execution are mutually exclusive. An admin operation rejects with
+ *   `std::logic_error` while any run/resume is in flight; a run/resume rejects
+ *   while administration is in progress. This conservative engine-wide
+ *   policy prevents same-thread checkpoint races without a mutex on each
+ *   super-step. Drain/cancel and await a run before retrying administration.
+ * - Concurrent executions on the **same** `thread_id` still produce
+ *   unspecified checkpoint interleaving. Different engines using the
+ *   same CheckpointStore are outside this engine's admission boundary;
+ *   serialize those at the host.
  * - Custom `GraphNode` subclasses must be stateless or self-synchronized.
  *   Node instances are owned by the engine and shared across all runs.
  * - User-provided `CheckpointStore` / `Store` / `Provider` / `Tool`
@@ -466,9 +491,8 @@ public:
     /**
      * @brief Link with owned tools and a per-engine registry overlay.
      *
-     * For directly compiled graphs, the caller must have used tools.view() in
-     * the NodeContext and the same registry in GraphCompiler::compile(). The
-     * canonical build() overload performs both bindings automatically.
+     * Directly compiled graphs already retain their NodeContext ToolSet.
+     * The canonical build() overload also binds the registry automatically.
      */
     static std::unique_ptr<GraphEngine> link(CompiledGraph   graph,
                                              EngineConfig    config,
@@ -507,10 +531,10 @@ public:
     static std::unique_ptr<GraphEngine> build(const json& definition, EngineConfig config);
 
     /**
-     * @brief Build with exact tool ownership and a local-first registry.
+     * @brief Build with owned tools and a local-first registry.
      *
-     * resources.tools replaces NodeContext::tools with pointers to the owned
-     * collection. Supplying both forms is rejected as ambiguous.
+     * resources.tools is selected when NodeContext::tools is empty.
+     * Supplying both nonempty ToolSets is rejected as ambiguous.
      */
     static std::unique_ptr<GraphEngine> build(const json&     definition,
                                                EngineConfig    config,
@@ -749,6 +773,15 @@ public:
     std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                               int limit = 100) const;
 
+    /// Inspect a descendant's checkpoint by graph path and exact node invocation.
+    /// Pass the run-scoped root store if it overrode the engine's configured store.
+    /// Returns nullopt for an absent checkpoint; rejects stateless paths and
+    /// mismatched checkpoint IDs instead of reading another thread's state.
+    std::optional<NestedCheckpoint> inspect_nested_checkpoint(
+        const std::string& root_thread_id,
+        const std::vector<SubgraphPathStep>& path,
+        std::shared_ptr<CheckpointStore> run_checkpoint_store = {}) const;
+
     /**
      * @brief Update the state for a thread by applying channel writes.
      *
@@ -790,15 +823,6 @@ public:
 
     // ── Configuration ──
 
-    /**
-     * @brief Transfer tool ownership to the engine.
-     *
-     * The engine takes ownership of the tools and keeps them alive for
-     * the duration of the engine's lifetime.
-     *
-     * @param tools Vector of tool unique_ptrs to transfer.
-     */
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
 
     /**
      * @brief Set the checkpoint persistence store.
@@ -987,6 +1011,7 @@ private:
         std::shared_ptr<ToolExecutionController> tool_execution_controller;
         std::shared_ptr<ProviderCallBroker> provider_call_broker;
         std::shared_ptr<ToolEffectBroker> tool_effect_broker;
+        ToolEffectGrantIdentity tool_effect_grant;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };
@@ -1013,6 +1038,26 @@ private:
     /// Retained so every built-in consumer shares one controller lifetime and
     /// subsequent assignment can repropagate the exact same instance.
     std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
+    // Admission state: -1 = exclusive administration; >=0 = active executions.
+    // No heap allocation or lock on the execution fast path.
+    void enter_execution();
+    void leave_execution() noexcept;
+    void enter_administration() const;
+    void leave_administration() const noexcept;
+    struct ExecutionGuard {
+        explicit ExecutionGuard(GraphEngine& engine);
+        ExecutionGuard(const ExecutionGuard&) = delete;
+        ExecutionGuard& operator=(const ExecutionGuard&) = delete;
+        ~ExecutionGuard();
+        GraphEngine& engine;
+    };
+    struct AdministrationGuard {
+        explicit AdministrationGuard(const GraphEngine& engine);
+        AdministrationGuard(const AdministrationGuard&) = delete;
+        AdministrationGuard& operator=(const AdministrationGuard&) = delete;
+        ~AdministrationGuard();
+        const GraphEngine& engine;
+    };
 
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;
@@ -1042,7 +1087,8 @@ private:
     asio::awaitable<SubgraphRunResult> run_subgraph_async(
         RunConfig config,
         const RunContext& parent,
-        GraphStreamCallback cb);
+        GraphStreamCallback cb,
+        SubgraphPersistence persistence);
 
     /// Super-step loop (coroutine). Owns: state init, interrupt
     /// gates, resume load, super-step commit, routing via Scheduler.
@@ -1067,7 +1113,12 @@ private:
     /// by init_state() to construct GraphState channels.
     std::vector<ChannelDef> channel_defs_;
 
+    ToolSet                             tools_;
+    /// Host-generation identity carrier, separate from executable tools.
+    std::vector<std::unique_ptr<Tool>> owned_tools_;
     std::map<std::string, std::unique_ptr<GraphNode>> nodes_;
+    /// Opt-in stateful children need stable parent identity across resumes.
+    bool has_stateful_subgraph_ = false;
     std::vector<Edge>            edges_;
     std::vector<ConditionalEdge> conditional_edges_;
 
@@ -1088,7 +1139,6 @@ private:
 
     std::shared_ptr<CheckpointStore> checkpoint_store_;
     std::shared_ptr<Store>           store_;
-    std::vector<std::unique_ptr<Tool>> owned_tools_;
 
     // Retry policies
     RetryPolicy default_retry_policy_;
@@ -1109,12 +1159,12 @@ private:
     NodeCache node_cache_;
     std::atomic<std::uint64_t> next_cache_execution_id_{1};
 
-    /// Inflight-run counter. Incremented at the top of
-    /// execute_graph_async and decremented at coroutine completion
-    /// via an RAII guard. set_worker_count() asserts this is zero
-    /// before swapping the executor — resizing the pool while a run
-    /// is mid-flight would drop tasks deferred onto the old pool.
-    std::atomic<int> active_runs_{0};
+    /// Execution/admin admission: administration rejects while any execution
+    /// is in flight (including a resume checkpoint load), and execution
+    /// rejects while an administration call is active. This conservative
+    /// engine-wide policy also excludes same-thread races; distinct engines
+    /// sharing one checkpoint store still require host-level coordination.
+    mutable std::atomic<int> active_runs_{0};
 };
 
 } // namespace neograph::graph

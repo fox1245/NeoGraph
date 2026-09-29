@@ -732,17 +732,18 @@ LLM provider, tools, and configuration.
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // Owned fixed collection of tools
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-For new engines, prefer moving a `ToolSet` through `EngineResources` instead
-of managing the pointees separately. `GraphEngine::build()` binds the
-corresponding non-owning view into `NodeContext` and keeps every tool alive for
-the engine's lifetime.
+Set `NodeContext::tools = ToolSet(std::move(tools))`, or supply
+`EngineResources::tools` when the context has no tools. Compilation and the
+engine share ownership of the exact collection; reassigning the context cannot
+invalidate an earlier engine. Factories may use `ctx.tools.view()` for temporary
+raw lookup. Python and MCP tools use the same compile-time ownership contract.
 
 ### GraphEvent
 
@@ -1402,7 +1403,7 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+    // Bind tools through NodeContext or EngineResources before compilation.
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1630,14 +1631,8 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
-#### `own_tools`
-
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-Transfers tool ownership to the engine. The engine stores them and keeps raw pointers
-valid for the lifetime of all `NodeContext.tools` references.
+Tool ownership is established in `NodeContext::tools` or
+`EngineResources::tools` before compilation. There is no post-compile transfer.
 
 #### `set_checkpoint_store`
 
@@ -2951,29 +2946,22 @@ Two transports are available:
 - **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
   originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
   protocol version, timeout, and custom headers.
-- **stdio** — `MCPClient({"python", "server.py"})`. The client `fork`+`execvp`s the
-  subprocess, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
+- **stdio** — `MCPClient({"python", "server.py"})`. The client resolves `PATH`
+  before `fork`, executes with `execve`, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
   over the child's stdin/stdout. The subprocess lives as long as the
   `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
   reaps via `waitpid` (SIGKILL fallback after ~500 ms).
 
 ### MCPTool
 
-Wraps a single MCP server tool as a local `Tool` implementation. Two
-constructors, one per transport; `MCPClient::get_tools()` picks the right one.
+Wraps a single MCP server tool as a local `Tool` implementation. Discovered
+tools retain their originating protocol session, regardless of transport.
 
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -3035,7 +3023,7 @@ versions may reject these requests — pin server-side or upgrade.
 | Method | Description |
 |--------|-------------|
 | `MCPClient(url)` | Construct an HTTP-mode client |
-| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
+| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved through `PATH` before fork; failed exec surfaces as a connection error on first RPC. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
 | `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
 | `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
 | `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
@@ -3056,10 +3044,10 @@ auto tools = client.get_tools();
 **stdio usage:**
 
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

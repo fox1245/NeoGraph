@@ -106,6 +106,7 @@ from ._neograph import (
     ToolCall,
     ChatTool,
     ChatCompletion,
+    GeneratedArtifact,
 
     # Runtime context and controlled provider boundary
     RuntimeTrustClass,
@@ -173,10 +174,11 @@ from ._neograph import (
     NodeFactory,
     ReducerRegistry,
     ConditionRegistry,
+    GraphRegistry,
 
     # Topology schema export (issue #56) — drift-proof palette source
-    # for external tooling (the visual block editor). Reflects whatever
-    # is registered in NodeFactory at call time.
+    # without an argument this reflects the legacy process-global palette;
+    # pass a GraphRegistry to export the selected built-in + scoped palette.
     export_schema,
 
     # Engine
@@ -222,6 +224,8 @@ try:
         ProgramVersion,
         ProgramResult,
         ProgramHandle,
+        ProgramActivation,
+        ProgramActivationResult,
         LocalProgramHost,
         javascript_authoring_capability_manifest,
     )
@@ -392,13 +396,10 @@ class AsyncTool(Tool):
 class NodeContext(_CppNodeContext):
     """Engine context — provider, tools, model, instructions.
 
-    Subclasses the C++ ``_CppNodeContext`` binding. The C++ struct
-    has a ``vector<Tool*>`` for tools, but we can't populate it from
-    Python directly (raw-pointer ownership doesn't translate). Instead,
-    the Python-side ``tools`` list lives in a ``_pytools`` dynamic
-    attribute, and ``GraphEngine.compile()`` reads it back to wrap each
-    Python Tool in a C++ trampoline (``PyToolOwner``) and transfer
-    ownership to the engine.
+    Python ``tools`` live in the ``_pytools`` attribute; the compile binding
+    wraps them into an owned C++ ``ToolSet`` before constructing nodes. The
+    compiled engine retains the same tool objects independently of subsequent
+    Python context reassignment or list mutation.
     """
 
     def __init__(self, provider=None, tools=None,
@@ -413,9 +414,17 @@ class NodeContext(_CppNodeContext):
             extra_config=extra_config or {},
         )
         self.provider = provider
-        # Stash the Python tool list on the wrapper. compile() reads
-        # it via py::hasattr / py::object.attr("_pytools").
+        # compile() snapshots this replaceable Python list into a ToolSet.
         self._pytools = list(tools or [])
+
+    @property
+    def tools(self):
+        """Mutable Python tool list; compilation snapshots its current entries."""
+        return self._pytools
+
+    @tools.setter
+    def tools(self, value):
+        self._pytools = list(value or [])
 
 
 class RateLimitError(RuntimeError):
@@ -617,6 +626,7 @@ __all__ = [
     "ToolCall",
     "ChatTool",
     "ChatCompletion",
+    "GeneratedArtifact",
     "RuntimeTrustClass",
     "ContextArtifactKind",
     "ContextPlacement",
@@ -709,6 +719,7 @@ __all__ = [
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",
+    "GraphRegistry",
     "export_schema",
     "node",
     "GraphEngine",
@@ -756,6 +767,8 @@ if _HAVE_PROGRAM:
         "ProgramVersion",
         "ProgramResult",
         "ProgramHandle",
+        "ProgramActivation",
+        "ProgramActivationResult",
         "LocalProgramHost",
         "javascript_authoring_capability_manifest",
     ])

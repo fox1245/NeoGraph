@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 #include <neograph/graph/postgres_checkpoint.h>
+#include <neograph/graph/state.h>
 #include <libpq-fe.h>
 
 #include <asio/co_spawn.hpp>
@@ -631,6 +632,29 @@ TEST_F(PostgresCheckpointTest, SaveAndLoadLatestRoundTrip) {
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 42);
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["version"].get<uint64_t>(), 1u);
     EXPECT_EQ(loaded->channel_values["channels"]["msg"]["value"].get<std::string>(), "hi");
+}
+
+TEST_F(PostgresCheckpointTest, EphemeralResumeGuardSurvivesSaveAndLoad) {
+    const ChannelLifecyclePolicy ephemeral{
+        ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
+    GraphState resumed;
+    resumed.init_channel("scratch", ReducerType::OVERWRITE, nullptr, "initial", ephemeral);
+    auto cp = make_state_cp("t", 0, {{"durable", {42, 1}}});
+    cp.metadata = {{"_neograph_ephemeral_guard", {{"scratch", false}}}};
+    store->save(cp);
+    auto safe = store->load_latest("t");
+    ASSERT_TRUE(safe);
+    EXPECT_NO_THROW(resumed.restore_checkpoint(
+        safe->channel_values, safe->metadata["_neograph_ephemeral_guard"]));
+
+    cp = make_state_cp("t", 1, {{"durable", {43, 2}}});
+    cp.metadata = {{"_neograph_ephemeral_guard", {{"scratch", true}}}};
+    store->save(cp);
+    auto unsafe = store->load_latest("t");
+    ASSERT_TRUE(unsafe);
+    EXPECT_THROW(resumed.restore_checkpoint(
+        unsafe->channel_values, unsafe->metadata["_neograph_ephemeral_guard"]),
+        std::runtime_error);
 }
 
 TEST_F(PostgresCheckpointTest, LoadByIdReturnsCheckpoint) {

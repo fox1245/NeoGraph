@@ -63,6 +63,7 @@ struct ResumeContext {
 
     std::string checkpoint_id;
     json channel_values;         ///< Serialized GraphState at cp time.
+    json metadata;               ///< Checkpoint metadata including lifecycle guard.
     int start_step = 0;          ///< Phase-adjusted step to re-enter at.
     CheckpointPhase phase = CheckpointPhase::Completed;
     std::vector<std::string> next_nodes;

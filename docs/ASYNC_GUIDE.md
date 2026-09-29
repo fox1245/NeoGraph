@@ -41,8 +41,8 @@ path.
 
 ## 2. The crossover-default pattern
 
-Every remaining sync/async pair on Provider and persistence abstractions is connected by a
-pair of default implementations that bridge each direction:
+`Provider` retains its legacy sync/async crossover defaults. Checkpoint
+storage no longer uses this pattern; see §9.4 for its explicit adapters.
 
 ```cpp
 class Provider {
@@ -59,10 +59,8 @@ class Provider {
 };
 ```
 
-**Contract: override at least one of the two.** If you override
-neither, calling either method infinitely recurses between the two
-defaults until the stack overflows. Documented; no runtime guard
-(would slow every call on every implementor).
+**Provider contract: override at least one of the two.** This warning
+does not apply to checkpoint storage, whose missing operations fail explicitly.
 
 ### Which side to override
 
@@ -74,13 +72,12 @@ defaults until the stack overflows. Documented; no runtime guard
 
 ### Why not a single unified API?
 
-Collapsing every public abstraction into async would
-force every existing Tool and every
-CheckpointStore subclass to acknowledge the async machinery —
-including cases where it buys nothing (a tool that adds two
-numbers). The crossover pair remains the zero-migration-cost path for
-those abstractions. `GraphNode` was intentionally collapsed to one
-coroutine override in v1.0.
+Collapsing every public abstraction into async would force existing Tool and
+checkpoint-store implementations to be rewritten. A legacy checkpoint backend
+can keep its sync operations; the default async methods offload them to a
+bounded worker pool. A new native async backend implements
+`AsyncCheckpointStore` and explicitly wraps it with
+`adapt_async_checkpoint_store()` for synchronous administration.
 
 ---
 
@@ -285,13 +282,13 @@ The obsolete double-execution fallback no longer exists.
 
 ### 4.5 MCP stdio single-session concurrency
 
-`StdioSession::rpc_call_async` serialises concurrent calls via
-`std::mutex`. Two coroutines calling the **same** session on the
-**same single-threaded** `io_context` will deadlock — the second
-coroutine's `lock_guard` blocks the worker the first needs to
-drive its I/O completions. Typical usage (one logical caller per
-session, async fan-out across *different* sessions) is unaffected.
-An awaitable-mutex version is tracked as future work.
+One stdio transport owns its `io_context`, subprocess pipes, write semaphore,
+and response-id reader. Sibling `rpc_call_async` calls on the **same** session
+share only the frame-write lock; reads overlap and the reader routes each
+response to its waiting request by JSON-RPC id. They can originate from
+different caller executors, including successive `run_sync` graph runs.
+Cancelling or timing out one request removes its waiter without closing the
+transport or misrouting a late response to another request.
 
 ---
 
@@ -451,8 +448,8 @@ interfaces retain separate sync/async peers for compatibility.
 |---|---|---|
 | Any custom `GraphNode` | `run(NodeInput)` | `get_name()` is the only other required virtual |
 | New custom LLM backend | inherit `CompletionProvider`, override `do_invoke()` | all existing `Provider` entry points are final adapters |
-| Custom `CheckpointStore`, async-capable backend | all eight `*_async` peers | sync peers bridge via `run_sync` |
-| Custom `CheckpointStore`, sync-only backend | all eight sync peers | async peers bridge via `run_sync` |
+| Native async checkpoint backend | derive `AsyncCheckpointStore`, implement five mandatory async operations; call `adapt_async_checkpoint_store()` | explicit `run_sync` admin facade; no legacy sync override |
+| Sync-only checkpoint backend | derive `CheckpointStoreCore`, implement five mandatory sync operations; call `adapt_checkpoint_store()` | async calls offload to bounded workers |
 | Custom sync `Tool` | inherit `Tool`, override `execute()` | — |
 | Custom async `Tool` | inherit `AsyncTool`, override `execute_async()` | sync `execute()` is `final`, bridges |
 
@@ -489,25 +486,33 @@ the old entry points, but new capabilities may be explicit-request-only.
 
 ### 9.4 `CheckpointStore`
 
-Eight sync methods, eight async peers, matched 1:1. The shipping
-stores (`InMemoryCheckpointStore`, `SqliteCheckpointStore`,
-`PostgresCheckpointStore`) all implement the async side and let
-sync bridge through the base-class default.
+Five mandatory save/load/list/delete operations form the engine's async
+checkpoint contract. `AsyncCheckpointStore` requires all five async
+overrides; `CheckpointStoreCore` requires the synchronous equivalents.
+`adapt_async_checkpoint_store()` supplies synchronous administrative methods
+for a native async backend, and `adapt_checkpoint_store()` offloads a
+sync-only backend to the bounded blocking pool. In-memory storage executes
+in-process mutex-protected operations on the caller; SQLite uses blocking
+workers; PostgreSQL provides native async operations.
 
-- **Async-capable backend** (libpq non-blocking, async MongoDB
-  driver, etc.): override all eight `*_async` peers. The sync-call
-  path pays one `run_sync` per invocation — fine for `get_state` /
-  `update_state` admin calls, not on a hot loop (but the engine
-  never calls sync checkpoint methods; only user tooling does).
-- **Blocking-only backend** (old file I/O, some ODBC wrappers):
-  override the eight sync methods. Async callers block the
-  coroutine thread through `run_sync` on each call, which is
-  usually acceptable because checkpoint writes are infrequent
-  relative to node dispatch.
-- **Don't mix**: if you override `save()` but leave `save_async()` at
-  the default, the async peer bridges BACK to sync through the
-  base-class default — correct, but loses the async I/O benefit. Go
-  all-sync or all-async per interface.
+The pre-v1 `CheckpointStore` vtable remains for existing binary consumers.
+Its synchronous defaults now throw `std::logic_error` instead of calling
+their async peer; its async defaults offload synchronous overrides. Subclasses
+must override every required synchronous operation, or migrate to an explicit
+adapter. An async-only legacy subclass must implement `AsyncCheckpointStore`
+and call `adapt_async_checkpoint_store()`; a synchronous call on the old
+subclass no longer silently drives a coroutine. Missing mandatory operations
+fail at compilation for new capability backends and explicitly at runtime for
+legacy subclasses; neither can enter mutual recursion.
+
+Pending-write durability is separate: derive `PendingWritesCheckpointStore`
+only if `put_writes` is durable on return and can be replayed and cleared.
+Without it, the adapter deliberately falls back to full super-step replay.
+Do not mistake a no-op pending-write method for an effect-deduplication
+guarantee. Python checkpoint subclasses implement the legacy synchronous
+methods; wrap external async-native backends on the C++ side. gRPC checkpoints
+and protocol hosts continue to use the engine's async methods and the same
+store adapters; no wire-format or persisted-schema migration occurs.
 
 ### 9.5 `MCPClient`
 

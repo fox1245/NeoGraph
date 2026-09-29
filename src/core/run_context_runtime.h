@@ -12,6 +12,7 @@ namespace neograph::graph::detail {
 
 struct SubgraphWriteJournal {
     std::vector<ChannelWrite> writes;
+    std::string parent_call_id;
 };
 
 // Execution-only state deliberately lives outside the public RunContext ABI.
@@ -20,8 +21,11 @@ struct RunContextRuntime {
     std::shared_ptr<CheckpointStore> checkpoint_store;
     std::shared_ptr<SubgraphWriteJournal> subgraph_write_journal;
     std::string invocation_id;
+    /// Persisted when this graph directly owns an opt-in stateful child.
+    std::string graph_invocation_id;
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
+    ToolEffectGrantIdentity tool_effect_grant;
     bool is_resume = false;
 };
 
@@ -34,6 +38,7 @@ void append_applied_writes(const RunContext& context,
                            const std::vector<ChannelWrite>& writes);
 
 json checkpoint_metadata_for(const RunContext& context);
+CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint);
 
 void restore_subgraph_write_journal(
     const Checkpoint& checkpoint,

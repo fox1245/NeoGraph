@@ -12,6 +12,18 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **所有者スコープの実験的なアクティブ Program 起動。** C++ の
+  `ProgramRuntime` と Python の `LocalProgramHost` は、新規実行時に
+  承認済みの不変なアクティベーションを一度だけ選択し、選択した記録と
+  そのバージョンに固定されたハンドルを返します。ロールバックは以後の
+  起動にのみ影響します。グラフ移行では、未知のノードローカル状態を
+  移せるとみなさず、不透明なチェックポイントメタデータを拒否します。
+  ストア間の永続 GC と本番向け性能検証は別途必要です。
+- **Program Core Tool grant の永続 ID。** ホストは所有者スコープ内の
+  正確な Tool grant を SQLite に承認し、Program 操作と再接続のたびに
+  gate/controller を再結合できます。ランタイムは承認された実行バインディング
+  fingerprint も確認し、取消は再起動後も有効で同じ grant ID の全試行を
+  拒否します。効果の結果には別途、呼び出し単位の永続 Tool broker が必要です。
 - **パフォーマンスビルド構成。** ローカルの GCC/Clang ビルド向けに
   `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` オプションを追加し、単一構成
   ジェネレーターで `CMAKE_BUILD_TYPE` が空のため Release 最適化フラグが
@@ -33,6 +45,35 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
+  保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
+  静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。
+- **Schema callback とストリーミングメディア。** Callback でも選択した custom
+  primitive を保持し、Responses/Gemini stream の artifact を保存します。
+  Veo の pending 状態省略は許可しますが、不正な状態型は拒否します。
+- **MCP とホストプロセスの分離。** 採用したツールには独立した固定承認と正確な
+  引数値が必要です。取消・schema 変更は参照が残る client も終了し、起動・stderr
+  上限、handle/FD 分離、子孫終了、出力読込上限を適用します。
+  macOS では Darwin のシグナルマクロに対応し、fork 前にプラットフォームの
+  アクセサーから継承環境を取得します。
+  POSIX の close 代替経路は 65536 の上限ではなく descriptor の hard limit
+  を使い、soft limit を下げる前に開いた高番号 FD も閉じます。Windows の
+  継承検証は再利用可能な handle 番号ではなく、親の元の event 状態を確認します。
+- **クリーンな runner での契約検証。** CI は Protobuf の compiler/runtime
+  だけでなく、開発用ヘッダーとライブラリも明示的にインストールします。
+  分離 stdio fixture は Python の検出に使った検索パスを明示的に承認します。
+- **テナント安全な永続 Harness 記録。** File/SQLite でスコープ ID と参照を
+  往復し、長い File キーには固定長 hash ファイル名を使います。SQLite 保持処理
+  は別 namespace の記録や journal を削除しません。
+- **実行可能な Harness CLI。** 起動ポリシーが Program の対応する子の深さ上限を
+  使い、実際の stdio compile/start/get 回帰検証で配布 binary を確認します。
+- **新しいカタログからのアクティブ Program 起動。** 実行をバージョンに固定する
+  前に、選択済みの永続バージョンを復元し、アクティベーションポインタを再読込
+  しないようにしました。
+- **生成 artifact の永続再生。** Provider receipt は再オープンと結果調整後も
+  artifact の順序、payload、入れ子の metadata を保持します。揮発性 SQLite
+  パスと artifact の証拠がない旧 receipt は、空の結果を捏造したり再送したり
+  せず、明示的に拒否します。
 - **プロモ動画の依存関係のセキュリティ。** `docs/promo/package-lock.json` の
   間接依存 `js-yaml` を 4.3.1 から 4.3.2 に更新し、空のマッピングの
   マージで CPU を消費するサービス拒否脆弱性

@@ -176,18 +176,18 @@ against source, tests, and current documents.
 | #189 WASM smoke sources | **Partial.** Missing Core sources, behavior checks, and corrected default-worker documentation landed. | Rebuild with Emscripten, run the Node/browser smoke, retain evidence, then close. | Docs/Release / P0 |
 | #190 dr_compare workers | **Partial.** Code and docs use worker count 4. | Run mock once; run one low-cost live-provider sample only when a key is available, then close with call metadata. | Performance / P0 |
 | #192 Provider dispatch | **Closed (superseded).** ABI-safe `CompletionProvider::do_invoke` replaced the proposed `Provider::invoke` cutover. | Keep the old Provider vtable; require new implementations to use CompletionProvider. | Core/Release / P0 |
-| #193 checkpoint dispatch | **Partial.** New capability interfaces remove recursion for compliant backends, but legacy defaults still mutually recurse and sync-only stores still block async executors. | Add a nonblocking sync-store adapter, migrate internal callers, and retain regression tests for zero-override and sync-only implementations before closing. | State/Core / P1-P2 |
+| #193 checkpoint dispatch | **Implemented; integration validation pending.** Legacy sync defaults fail explicitly, native async stores have a sync facade, and sync-only storage runs off the engine executor. Focused adapter/engine tests and a real native-async GraphEngine smoke passed. | Preserve `CheckpointStore` vtable through the pre-v1 ABI window; migrate async-only subclasses to the explicit adapter and include PostgreSQL, SQLite, gRPC, Python, and packaged-consumer gates in the integration run. | State/Core / P1-P2 |
 | #214 `RunInvocation` | **Partial.** `program::RunInvocation` is canonical at the Program runtime boundary and is used by Harness and the Program-backed A2A adapter. Legacy GraphEngine A2A construction, ACP, and gRPC have not been rebased. | Keep legacy routes explicit; migrate each remaining protocol through the owned invocation and prove lifecycle parity before removing its compatibility path. | Protocol / P2-P8 |
 | #215 invocation contracts | **Partial.** Program/A2A and Harness regression suites cover canonical identity, cancellation, events, recovery, and terminal projection. ACP/gRPC parity is still absent. | Add a parameterized protocol suite only when each remaining adapter has a Program route; do not count legacy GraphEngine tests as Program conformance. | Protocol / P2-P8 |
-| #216 engine surfaces | **Partial.** Complete config and `GraphAdmin` exist, but execution-only dependency and admin concurrency policy do not. | Keep Core construction/run/admin responsibilities explicit; make adapters depend on a narrow invocation capability. | Core / P1-P2 |
-| #217 tool ownership | **Partial.** `ToolSet` is safe; legacy `NodeContext::tools` can still dangle. | Make owned `ToolSet`/sealed Program capability imports standard; remove the raw transfer path at the v1 rebuild boundary. | Core/Program / P1 |
+| #216 engine surfaces | **Implemented, performance comparison pending.** A2A/ACP/gRPC now retain `GraphExecution`, `GraphAdmin`/legacy state calls use exclusive execution admission, and the method/lifetime inventory is in `V1_ARCHITECTURE.md`. | Execute the documented paired parent-vs-change `bench_neograph` median protocol on the same machine before claiming the fast-path no-regression gate; gRPC compilation additionally needs grpc++/protoc. | Core / P1-P2 |
+| #217 tool ownership | **Implemented.** `NodeContext::tools` owns a copyable `ToolSet`; compiled graphs and linked engines retain its pointees, and Program narrows owned subsets for trusted factories. Python and MCP use the same compile-time boundary. | Keep post-compile tool transfer removed; enforce exact Program capability scope. | Core/Program / P1 |
 | #218 scoped registries | **Partial.** Local overlays and isolation tests exist; global fallback remains. | Freeze immutable registry snapshots and remove ambient fallback for strict Core/Program admission. Migrate Python registration deliberately. | Core/Program / P1 |
 | #219 MCP transport split | **Partial.** Internal sessions exist, but protocol/tool code still branches on HTTP vs stdio. | Add one MCP transport capability with owned cancellation, timeout, shutdown, and error translation. | Protocol / P6 |
 | #220 SchemaProvider split | **Partial.** Request mapping has a test seam; parsing, transport, pools, and callback ownership remain coupled. | Extract value-level parsers, then transport strategy; preserve the Provider-facing contract. | Extension/Protocol / P6 |
 | #230 Galaxy A34 benchmark | **Closed (completed record).** Async-off CMake target guards, one-source-tree reproduction instructions, explicit machine/compiler metadata, and repeated-median result output now exist. | Retain the measurement as device-specific evidence; do not promote it to a universal performance gate. | Performance/Release / P0 |
 | #231 adaptive fan-out/token path | **Pending.** Only a fixed no-op 5-way benchmark exists. | Keep as a measurement program. Add width × body cost × worker and token batching/crossover tests before changing defaults. | Core/Performance / independent lane |
 | #237 channel lifecycle | **Partial.** Reducers, full snapshots, SQLite deduplication, and pending writes exist; combine/retention/checkpoint policy is not explicit. | Define separate channel combine, retention, and persistence policies; resolve executor/validator order wording and measure long histories. | Core/State / P1-P3 |
-| #238 subgraph persistence | **Partial.** Per-invocation derived identity and context inheritance exist; mode and nested inspection do not. | Add explicit stateless/per-invocation/per-thread modes, stable graph paths, nested inspection, and concurrency rules after #237. | Core/Program / P3 |
+| #238 subgraph persistence | **Implemented.** Compatibility `Legacy`, explicit `PerInvocation`/`PerThread`/`Stateless` modes, stable namespaces, nested checkpoint inspection, and same-node persistent namespace collision rejection are covered by in-memory and SQLite tests; PostgreSQL coverage is gated by `NEOGRAPH_TEST_POSTGRES_URL`. | Keep migration fail-closed when changing policy for an existing thread; coordinate `PerThread` namespaces across processes. | Core/Program / P3 |
 | #239 typed C++ state schema | **Pending.** `ChannelKey<T>` is only a typed name over JSON. | Design one typed descriptor/builder lowering to the existing `ValidatedTopology`; no second engine and no template-for-template Python copy. | Core/Program / P1 |
 | #241 generated media/LRO | **Pending.** Current result/parser handles text and tool calls, not provider-neutral artifacts or long-running operations. | Define `Artifact`, request envelope, one-shot/stream/LRO modes, and bounded cancellable polling; bind to Python because graph lifecycle integration is unique. | Extension / P6 |
 | #242 SchemaProvider registry | **Pending.** Strategies are private enums/switches. | Follow #241 with explicit-injection primitive registry; defer Python callback registration until a real partial-extension use case exists. | Extension / P6 |
@@ -282,7 +282,7 @@ headers; move files later in small mechanical commits.
 | `GraphEngine::build/build_strict` | unchanged Core standard path | Keep and freeze after v1 conformance. |
 | `GraphEngine::compile` | `build` or ProgramCompiler | Deprecate during pre-v1, remove only at announced rebuild boundary if all callers migrate. |
 | post-build engine setters | complete `EngineConfig`/`EngineResources` | Migrate callers, make runtime immutable, then remove compatibility setters. |
-| `NodeContext::tools` raw pointers | owned `ToolSet` in Core; sealed capability references in Program | No borrowed transfer in standard v1 path. |
+| `NodeContext::tools` owned `ToolSet` | owned `ToolSet` in Core; sealed capability references in Program | Bind before compile, never transfer raw pointers afterward. |
 | local registry + global fallback | immutable explicit registry snapshot | Strict Core/Program misses fail closed. Legacy loose Core mode may remain only if clearly named and isolated. |
 | Harness DSL/Core request | `ProgramSource` frontend | Preserve source coordinates and stable diagnostics. |
 | Harness admission profile | `program::AdmissionProfile` | Move semantic ownership out of MCP. |
@@ -320,6 +320,29 @@ An adapter is not migrated merely because it compiles. Its supported lifecycle,
 terminal states, diagnostics, cancellation, streaming, checkpoint/resume, and
 owner-scope behavior must pass the shared contract suite plus protocol-specific
 wire tests.
+
+#### Graph-host conformance gate (issue #215)
+
+Every new host exposing a Core graph must implement `tests/graph_host_contract.h`'s
+`Host` adapter against its **real public request, cancel, and shutdown APIs** and
+register `check_contract` as a CTest target. The minimum gate asserts mapped
+session identity and input at the running node; in-flight cancellation reaching
+the node, a cooperative provider, and a mediated contextual tool (the negative
+adapter must demonstrably fail); ordered node/host terminal events;
+distinct completion, interrupt, max-steps, error, and cancel results; nested
+Store lookup and denied ToolGate dispatch; admission rejection without a node
+start; and shutdown that drains or cancels in-flight work. The deterministic
+fixture does not use a live model or external service. A2A, ACP, and gRPC
+implement the same suite in `tests/test_graph_host_*_contract.cpp`; encoding,
+decoding, and protocol-specific interaction stay in their existing suites.
+
+The gRPC target exists only with `NEOGRAPH_BUILD_GRPC=ON`: the CI
+`grpc-graph-contract` job installs grpc++ and protoc and builds/runs that
+target explicitly. An ordinary default-OFF build **does not** run gRPC
+conformance and must not be cited as evidence for it. This is the legacy
+Core graph-host boundary; it does not substitute for the separate Program
+runtime conformance gate above.
+
 
 
 ### Remote collaboration contract

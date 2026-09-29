@@ -719,16 +719,17 @@ struct ConditionalEdge {
 ```cpp
 struct NodeContext {
     std::shared_ptr<Provider> provider;   // LLM provider
-    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    ToolSet                  tools;      // 持有的固定工具集合
     std::string               model;      // Model override (empty = provider default)
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-对于新的引擎，优先通过 `EngineResources` 移动 `ToolSet`，而非分别管理
-所指向的对象。`GraphEngine::build()` 将对应的非持有视图绑定到
-`NodeContext`，并在引擎的生命周期内保持每个工具存活。
+将 `ToolSet(std::move(tools))` 赋给 `NodeContext::tools`，或者在上下文工具为空时
+通过 `EngineResources::tools` 提供。编译结果及引擎共同持有同一批工具；
+重新赋值上下文不会改变已有引擎。工厂可用 `ctx.tools.view()` 临时查找指针。
+Python 和 MCP 工具遵守相同的编译期所有权规则。
 
 ### GraphEvent
 
@@ -1372,7 +1373,7 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+    // 在编译前通过 NodeContext 或 EngineResources 绑定工具。
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1593,14 +1594,8 @@ std::string fork(const std::string& source_thread_id,
 
 **返回：** 新分叉状态的检查点 ID。
 
-#### `own_tools`
-
-```cpp
-void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-```
-
-将工具所有权转移给引擎。引擎存储它们并保持原始指针对所有
-`NodeContext.tools` 引用的生命周期有效。
+工具在编译前由 `NodeContext::tools` 或 `EngineResources::tools` 持有；
+不再存在编译之后的所有权转移。
 
 #### `set_checkpoint_store`
 
@@ -2846,28 +2841,21 @@ Model Context Protocol（MCP）客户端实现。它连接 MCP 服务器、发�
 
 - **HTTP** — `MCPClient("http://host:port")`. 已发现的工具会保留其来源 Streamable HTTP 会话，包括 `Mcp-Session-Id`、协商的
   协议版本、超时设置和自定义头。
-- **stdio** — `MCPClient({"python", "server.py"})`. 客户端对
-  子进程执行 `fork`+`execvp`，连接双向管道，并通过子进程 stdin/stdout 交换换行分隔的
+- **stdio** — `MCPClient({"python", "server.py"})`。客户端在 `fork` 前解析 `PATH`，
+  子进程通过 `execve` 启动，并连接双向管道以通过 stdin/stdout 交换换行分隔的
   JSON-RPC。只要 `MCPClient` 或其生成的任意 `MCPTool` 存在，子进程就会持续运行；
   析构时发送 SIGTERM，并通过 `waitpid` 回收（约 500 ms 后回退到 SIGKILL）。
 
 ### MCPTool
 
-将单个 MCP 服务器工具包装为本地 `Tool` 实现。每种传输方式各有一个
-构造函数；`MCPClient::get_tools()` 会选择正确的构造函数。
+将单个 MCP 服务器工具包装为本地 `Tool` 实现。已发现的工具会保留其来源
+协议会话，与传输方式无关。
 
 ```cpp
 class MCPTool : public AsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
-            const std::string& name,
-            const std::string& description,
-            const json& input_schema);
-
-    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
-    // session, keeping it alive as long as any tool is reachable.
-    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -2928,7 +2916,7 @@ public:
 | 方法 | 描述 |
 |--------|-------------|
 | `MCPClient(url)` | 构造 HTTP 模式客户端 |
-| `MCPClient(argv)` | 生成子进程并构造 stdio 模式客户端。 `argv[0]` 通过 `PATH`（execvp）解析。fork/exec 失败时抛出异常。为安全起见拒绝 Windows `.bat`/`.cmd`（Round 3 加固） |
+| `MCPClient(argv)` | 生成子进程并构造 stdio 模式客户端。`argv[0]` 在 fork 前通过 `PATH` 解析；exec 失败将在首次 RPC 中表现为连接错误。为安全起见拒绝 Windows `.bat`/`.cmd` |
 | `initialize(client_name)` | 执行一次 MCP 初始化握手。重复调用幂等；协议或传输失败会抛出异常 |
 | `get_initialize_result()` | 返回协商后的协议、能力、服务器信息、说明和原始结果 |
 | `list_tools(cursor)` | 获取一页结果，并将游标视为不透明值 |
@@ -2949,10 +2937,10 @@ auto tools = client.get_tools();
 **stdio 用法：**
 
 ```cpp
-// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+// argv[0] is resolved through PATH before fork; inherited fds close before execve.
 neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
-auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
+auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
 
 ---

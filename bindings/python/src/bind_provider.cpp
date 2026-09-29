@@ -283,7 +283,24 @@ void init_provider(py::module_& m) {
         .def_readwrite("tools",       &neograph::CompletionParams::tools)
         .def_readwrite("temperature", &neograph::CompletionParams::temperature)
         .def_readwrite("max_tokens",  &neograph::CompletionParams::max_tokens)
-        .def_readwrite("timeout_seconds", &neograph::CompletionParams::timeout_seconds);
+        .def_readwrite("timeout_seconds", &neograph::CompletionParams::timeout_seconds)
+        .def_readwrite("prompt", &neograph::CompletionParams::prompt);
+
+    py::class_<neograph::GeneratedArtifact>(m, "GeneratedArtifact",
+        "Generated image/video/file with an encoded payload, URL or file handle.")
+        .def(py::init<>())
+        .def_readwrite("kind", &neograph::GeneratedArtifact::kind)
+        .def_readwrite("mime_type", &neograph::GeneratedArtifact::mime_type)
+        .def_readwrite("base64_data", &neograph::GeneratedArtifact::base64_data)
+        .def_readwrite("url", &neograph::GeneratedArtifact::url)
+        .def_readwrite("file_id", &neograph::GeneratedArtifact::file_id)
+        .def_property("metadata",
+            [](const neograph::GeneratedArtifact& artifact) {
+                return json_to_py(artifact.metadata);
+            },
+            [](neograph::GeneratedArtifact& artifact, py::object value) {
+                artifact.metadata = py_to_json(value);
+            });
 
     // ── ChatCompletion + Usage ───────────────────────────────────────────
     py::class_<neograph::ChatCompletion> chat_completion(m, "ChatCompletion",
@@ -292,6 +309,7 @@ void init_provider(py::module_& m) {
         .def(py::init<>())
         .def_readwrite("message", &neograph::ChatCompletion::message)
         .def_readwrite("stop_reason", &neograph::ChatCompletion::stop_reason)
+        .def_readwrite("artifacts", &neograph::ChatCompletion::artifacts)
         .def_readwrite("usage",   &neograph::ChatCompletion::usage);
 
     py::class_<neograph::ChatCompletion::Usage>(chat_completion, "Usage",
@@ -417,6 +435,10 @@ void init_provider(py::module_& m) {
         "NodeContext.tools.");
 
 #ifdef NEOGRAPH_PYBIND_HAS_LLM
+    auto operation_error = py::register_exception<neograph::llm::OperationError>(
+        m, "OperationError");
+    py::register_exception<neograph::llm::OperationTimeoutError>(
+        m, "OperationTimeoutError", operation_error.ptr());
     // ── OpenAIProvider ───────────────────────────────────────────────────
     py::class_<neograph::llm::RateLimitedProvider, neograph::Provider,
                std::shared_ptr<neograph::llm::RateLimitedProvider>>(
@@ -495,7 +517,8 @@ void init_provider(py::module_& m) {
     py::class_<neograph::llm::SchemaProvider, neograph::Provider,
                std::shared_ptr<neograph::llm::SchemaProvider>>(m, "SchemaProvider",
         "Schema-driven multi-vendor provider. Built-in schemas: "
-        "\"openai\", \"openai-responses\", \"claude\", \"gemini\". "
+        "\"openai\", \"openai_responses\", \"openai_images\", \"claude\", "
+        "\"gemini\", \"veo\". "
         "Pass a file path to use a custom schema.")
         .def(py::init([](const std::string& schema_path,
                          const std::string& api_key,

@@ -87,6 +87,15 @@
     "tool_call_name_field": "name",
     "tool_call_args_field": "arguments",
     "tool_call_args_is_string": true,
+    "artifacts": [{
+      "items_path": "output",
+      "type_path": "type",
+      "type": "image_generation_call",
+      "kind": "image",
+      "mime_type": "image/png",
+      "base64_path": "result",
+      "metadata_path": "id"
+    }],
     "usage_path": "usage",
     "prompt_tokens_field": "input_tokens",
     "completion_tokens_field": "output_tokens",

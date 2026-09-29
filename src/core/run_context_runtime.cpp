@@ -16,6 +16,7 @@ std::unordered_map<const RunContext*, std::shared_ptr<const RunContextRuntime>> 
 constexpr const char* kMetadataNamespace = "_neograph";
 constexpr const char* kJournalVersion = "subgraph_write_journal_version";
 constexpr const char* kJournal = "subgraph_write_journal";
+constexpr const char* kGraphInvocation = "subgraph_invocation_id";
 
 }  // namespace
 
@@ -44,14 +45,33 @@ void append_applied_writes(const RunContext& context,
     journal.insert(journal.end(), writes.begin(), writes.end());
 }
 
+CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint) {
+    if (checkpoint.interrupt_phase != CheckpointPhase::Updated)
+        return checkpoint.interrupt_phase;
+    const auto& metadata = checkpoint.metadata;
+    if (!metadata.is_object() || !metadata.contains("_neograph") ||
+        !metadata["_neograph"].is_object() ||
+        !metadata["_neograph"].contains("admin_resume_phase"))
+        return checkpoint.interrupt_phase;
+    return parse_checkpoint_phase(
+        metadata["_neograph"]["admin_resume_phase"].get<std::string>());
+}
+
 json checkpoint_metadata_for(const RunContext& context) {
     auto runtime = runtime_for(context);
-    if (!runtime || !runtime->subgraph_write_journal) return json();
+    if (!runtime || !runtime->checkpoint_store) return json();
 
     json metadata;
-    metadata[kMetadataNamespace][kJournalVersion] = 1;
-    metadata[kMetadataNamespace][kJournal] =
-        serialize_channel_writes(runtime->subgraph_write_journal->writes);
+    if (!runtime->graph_invocation_id.empty())
+        metadata[kMetadataNamespace][kGraphInvocation] = runtime->graph_invocation_id;
+    if (runtime->subgraph_write_journal) {
+        metadata[kMetadataNamespace][kJournalVersion] = 1;
+        metadata[kMetadataNamespace][kJournal] =
+            serialize_channel_writes(runtime->subgraph_write_journal->writes);
+        if (!runtime->subgraph_write_journal->parent_call_id.empty())
+            metadata[kMetadataNamespace]["subgraph_parent_call_id"] =
+                runtime->subgraph_write_journal->parent_call_id;
+    }
     return metadata;
 }
 
@@ -116,6 +136,7 @@ ToolExecutionContext make_tool_execution_context(const RunContext& ctx) {
     if (const auto runtime = detail::runtime_for(ctx)) {
         execution.effect_broker = runtime->tool_effect_broker;
         execution.effect_task_id = runtime->invocation_id;
+        execution.effect_grant = runtime->tool_effect_grant;
     }
     return execution;
 }

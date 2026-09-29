@@ -6,6 +6,7 @@ add_executable(neograph_tests
     test_engine_config.cpp
     test_checkpoint.cpp
     test_store.cpp
+    test_tenant.cpp
     test_node.cpp
     test_node_header.cpp
     test_loader.cpp
@@ -16,6 +17,7 @@ add_executable(neograph_tests
     test_usage_accounting.cpp
     test_subgraph_context.cpp
     test_subgraph_output_deltas.cpp
+    test_subgraph_persistence.cpp
     test_plan_execute_graph.cpp
     test_signal_dispatch.cpp
     test_multi_node_resume.cpp
@@ -56,7 +58,9 @@ add_executable(neograph_tests
     test_incremental_checkpoint.cpp
     test_deep_research_human_review.cpp
     test_async_conn_pool.cpp
+    test_schema_provider_primitives.cpp
     test_schema_provider_wire_contract.cpp
+    test_schema_provider_media.cpp
     test_async_http_errors.cpp
     test_async_sse_parser.cpp
     test_async_ws_codec.cpp
@@ -195,6 +199,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
     endif()
     if(TARGET neograph_program_sqlite)
+        target_sources(neograph_program_tests PRIVATE test_program_provider_journal.cpp)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         )
@@ -263,6 +268,10 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
         neograph::mcp
         GTest::gtest_main
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(neograph_mcp_stdio_fd_fallback test_mcp_stdio_fd_fallback.cpp)
+        target_link_libraries(neograph_mcp_stdio_fd_fallback PRIVATE neograph::mcp)
+    endif()
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
@@ -272,8 +281,9 @@ endif()
 if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
         test_harness_contract.cpp
+        test_harness_host_agent.cpp
+        test_mcp_adoption.cpp
     )
-    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
     if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
         target_sources(neograph_tests PRIVATE
             test_harness_program_translator.cpp
@@ -282,7 +292,10 @@ if(TARGET neograph_harness)
     endif()
 endif()
 if(TARGET neograph_mcp_sqlite)
-    target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
+    target_sources(neograph_tests PRIVATE
+        test_harness_program_store.cpp
+        test_harness_tenant_persistence.cpp
+    )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTING)
 
     add_executable(neograph_harness_program_store_tests
@@ -324,6 +337,14 @@ if(NEOGRAPH_BUILD_A2A)
     )
     add_test(NAME neograph.a2a_collaboration
              COMMAND neograph_a2a_collaboration_tests)
+    add_executable(neograph_a2a_graph_contract_tests
+        test_graph_host_a2a_contract.cpp)
+    target_compile_definitions(neograph_a2a_graph_contract_tests PRIVATE
+        NEOGRAPH_A2A_TESTING)
+    target_link_libraries(neograph_a2a_graph_contract_tests PRIVATE
+        neograph::a2a GTest::gtest_main)
+    add_test(NAME neograph.a2a_graph_contract
+             COMMAND neograph_a2a_graph_contract_tests)
 endif()
 
 # The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote
@@ -369,6 +390,22 @@ if(NEOGRAPH_BUILD_ACP)
         neograph::acp
         GTest::gtest_main
     )
+
+    add_executable(neograph_acp_graph_contract_tests
+        test_graph_host_acp_contract.cpp)
+    target_link_libraries(neograph_acp_graph_contract_tests PRIVATE
+        neograph::acp GTest::gtest_main)
+    add_test(NAME neograph.acp_graph_contract
+             COMMAND neograph_acp_graph_contract_tests)
+endif()
+
+if(NEOGRAPH_BUILD_GRPC)
+    add_executable(neograph_grpc_graph_contract_tests
+        test_graph_host_grpc_contract.cpp)
+    target_link_libraries(neograph_grpc_graph_contract_tests PRIVATE
+        neograph::grpc GTest::gtest_main)
+    add_test(NAME neograph.grpc_graph_contract
+             COMMAND neograph_grpc_graph_contract_tests)
 endif()
 
 # Smoke tests for the async::async_get helper added with the A2A client
@@ -534,6 +571,11 @@ if(NEOGRAPH_BUILD_SQLITE)
         GTest::gtest_main
     )
     gtest_discover_tests(neograph_sqlite_runtime_store_tests)
+    if(TARGET neograph::llm)
+        target_link_libraries(neograph_sqlite_runtime_store_tests PRIVATE neograph::llm)
+        target_compile_definitions(neograph_sqlite_runtime_store_tests PRIVATE NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM)
+        target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM)
+    endif()
 endif()
 
 add_executable(neograph_runtime_turn_tests
@@ -622,6 +664,15 @@ if(TARGET neograph_quickjs_c_smoke)
     add_test(NAME QuickJS.CEmbeddingSmoke COMMAND neograph_quickjs_c_smoke)
     set_tests_properties(QuickJS.CEmbeddingSmoke PROPERTIES LABELS "quickjs;abi")
 endif()
+if(TARGET neograph_mcp_stdio_fd_fallback)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME MCPStdioFallback.ClosesHighDescriptors
+            COMMAND neograph_mcp_stdio_fd_fallback ${Python3_EXECUTABLE})
+        set_tests_properties(MCPStdioFallback.ClosesHighDescriptors PROPERTIES
+            TIMEOUT 30 SKIP_RETURN_CODE 77 LABELS "mcp;isolation")
+    endif()
+endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
     gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
 endif()
@@ -643,6 +694,23 @@ if(TARGET cookbook_program_chatbot AND NEOGRAPH_BUILD_SQLITE)
         set_tests_properties(ProgramChatbot.SQLite PROPERTIES
             TIMEOUT 240 LABELS "program;example;integration"
             ENVIRONMENT "NEOGRAPH_CHAT_POSTGRES_URL=")
+    endif()
+endif()
+
+if(TARGET neograph_harness_mcp)
+    set(NEOGRAPH_HARNESS_CLI_TEST_TARGET neograph_harness_mcp)
+elseif(TARGET example_harness_mcp_server)
+    set(NEOGRAPH_HARNESS_CLI_TEST_TARGET example_harness_mcp_server)
+endif()
+if(NEOGRAPH_HARNESS_CLI_TEST_TARGET)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME HarnessCLI.CompileStartGet
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_harness_cli.py
+                $<TARGET_FILE:${NEOGRAPH_HARNESS_CLI_TEST_TARGET}>)
+        set_tests_properties(HarnessCLI.CompileStartGet PROPERTIES
+            TIMEOUT 60 LABELS "program;cli;integration")
     endif()
 endif()
 
@@ -671,12 +739,10 @@ if(NEOGRAPH_BUILD_POSTGRES)
     # SetUp/TearDown — running them in parallel collides on DDL. Mark
     # them with a RESOURCE_LOCK so ctest serializes only this group
     # while the other ~200 tests still run concurrently.
-    # ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres joins the
-    # locked group: it talks to the same database, and the Postgres suite's
-    # drop_schema() will wipe its tables mid-run otherwise. Observed exactly
-    # that — green standalone, red under `ctest -j8`.
+    # Channel-write and subgraph persistence cases use the same checkpoint
+    # tables; the Postgres suite's drop_schema() must not race those fixtures.
     set(NEOGRAPH_PG_LOCKED_TESTS
-        "PostgresCheckpointTest.*:ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres")
+        "PostgresCheckpointTest.*:ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres:SubgraphPersistence.PostgreSQL*")
     gtest_discover_tests(neograph_tests
         TEST_FILTER "${NEOGRAPH_PG_LOCKED_TESTS}"
         PROPERTIES RESOURCE_LOCK postgres_test_db

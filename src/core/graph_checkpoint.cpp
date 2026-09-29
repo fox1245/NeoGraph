@@ -10,7 +10,6 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
-#include <array>
 #include <exception>
 #include <iomanip>
 #include <memory>
@@ -27,42 +26,6 @@
 namespace neograph::graph {
 
 namespace {
-enum class LegacyBridgeOperation : std::uint8_t {
-    Save = 0,
-    LoadLatest,
-    LoadById,
-    List,
-    DeleteThread,
-    PutWrites,
-    GetWrites,
-    ClearWrites,
-};
-
-thread_local std::array<bool, 8> legacy_bridge_active{};
-
-class LegacyBridgeGuard {
-public:
-    explicit LegacyBridgeGuard(LegacyBridgeOperation operation)
-        : active_(legacy_bridge_active[static_cast<std::size_t>(operation)]) {
-        if (active_) {
-            throw std::logic_error(
-                "CheckpointStore must override at least one side of each sync/async pair");
-        }
-        active_ = true;
-    }
-
-    ~LegacyBridgeGuard() { active_ = false; }
-
-private:
-    bool& active_;
-};
-
-void reject_recursive_bridge(LegacyBridgeOperation operation) {
-    if (legacy_bridge_active[static_cast<std::size_t>(operation)]) {
-        throw std::logic_error(
-            "CheckpointStore must override at least one side of each sync/async pair");
-    }
-}
 
 asio::thread_pool& blocking_checkpoint_pool() {
     // A process-lifetime bounded pool prevents legacy synchronous stores from
@@ -111,7 +74,7 @@ bool is_exact_in_memory_store(const InMemoryCheckpointStore& store) {
 }
 
 template <typename Fn>
-asio::awaitable<void> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operation) {
+asio::awaitable<void> run_blocking_checkpoint(Fn fn) {
     struct Result {
         std::exception_ptr error;
     };
@@ -121,15 +84,14 @@ asio::awaitable<void> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation opera
     auto caller_work = asio::make_work_guard(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
-        [fn = std::move(fn), result, caller_executor, operation](auto handler) mutable {
+        [fn = std::move(fn), result, caller_executor](auto handler) mutable {
             using Handler = std::decay_t<decltype(handler)>;
             auto completion = std::make_shared<Handler>(std::move(handler));
             asio::post(
                 blocking_checkpoint_pool().get_executor(),
                 [fn = std::move(fn), result, completion = std::move(completion),
-                 caller_executor, operation]() mutable {
+                 caller_executor]() mutable {
                     try {
-                        LegacyBridgeGuard guard(operation);
                         fn();
                     } catch (...) {
                         result->error = std::current_exception();
@@ -145,7 +107,7 @@ asio::awaitable<void> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation opera
 }
 
 template <typename T, typename Fn>
-asio::awaitable<T> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operation) {
+asio::awaitable<T> run_blocking_checkpoint(Fn fn) {
     struct Result {
         std::optional<T> value;
         std::exception_ptr error;
@@ -156,15 +118,14 @@ asio::awaitable<T> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operatio
     auto caller_work = asio::make_work_guard(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
-        [fn = std::move(fn), result, caller_executor, operation](auto handler) mutable {
+        [fn = std::move(fn), result, caller_executor](auto handler) mutable {
             using Handler = std::decay_t<decltype(handler)>;
             auto completion = std::make_shared<Handler>(std::move(handler));
             asio::post(
                 blocking_checkpoint_pool().get_executor(),
                 [fn = std::move(fn), result, completion = std::move(completion),
-                 caller_executor, operation]() mutable {
+                 caller_executor]() mutable {
                     try {
-                        LegacyBridgeGuard guard(operation);
                         result->value.emplace(fn());
                     } catch (...) {
                         result->error = std::current_exception();
@@ -188,19 +149,29 @@ public:
         : core_(std::move(core)),
           async_(std::dynamic_pointer_cast<AsyncCheckpointStore>(core_)),
           pending_(std::dynamic_pointer_cast<PendingWritesCheckpointStore>(core_)) {}
+    explicit CapabilityCheckpointStore(std::shared_ptr<AsyncCheckpointStore> async)
+        : async_(std::move(async)),
+          pending_(std::dynamic_pointer_cast<PendingWritesCheckpointStore>(async_)) {}
 
-    void save(const Checkpoint& cp) override { core_->save(cp); }
+    void save(const Checkpoint& cp) override {
+        if (core_) core_->save(cp);
+        else neograph::async::run_sync(async_->save_async(cp));
+    }
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override {
-        return core_->load_latest(thread_id);
+        return core_ ? core_->load_latest(thread_id)
+                     : neograph::async::run_sync(async_->load_latest_async(thread_id));
     }
     std::optional<Checkpoint> load_by_id(const std::string& id) override {
-        return core_->load_by_id(id);
+        return core_ ? core_->load_by_id(id)
+                     : neograph::async::run_sync(async_->load_by_id_async(id));
     }
     std::vector<Checkpoint> list(const std::string& thread_id, int limit) override {
-        return core_->list(thread_id, limit);
+        return core_ ? core_->list(thread_id, limit)
+                     : neograph::async::run_sync(async_->list_async(thread_id, limit));
     }
     void delete_thread(const std::string& thread_id) override {
-        core_->delete_thread(thread_id);
+        if (core_) core_->delete_thread(thread_id);
+        else neograph::async::run_sync(async_->delete_thread_async(thread_id));
     }
 
     asio::awaitable<void> save_async(const Checkpoint& cp) override {
@@ -209,8 +180,7 @@ public:
         } else {
             auto core = core_;
             co_await run_blocking_checkpoint(
-                [core = std::move(core), cp] { core->save(cp); },
-                LegacyBridgeOperation::Save);
+                [core = std::move(core), cp] { core->save(cp); });
         }
     }
     asio::awaitable<std::optional<Checkpoint>>
@@ -218,24 +188,21 @@ public:
         if (async_) co_return co_await async_->load_latest_async(thread_id);
         auto core = core_;
         co_return co_await run_blocking_checkpoint<std::optional<Checkpoint>>(
-            [core = std::move(core), thread_id] { return core->load_latest(thread_id); },
-            LegacyBridgeOperation::LoadLatest);
+            [core = std::move(core), thread_id] { return core->load_latest(thread_id); });
     }
     asio::awaitable<std::optional<Checkpoint>>
     load_by_id_async(const std::string& id) override {
         if (async_) co_return co_await async_->load_by_id_async(id);
         auto core = core_;
         co_return co_await run_blocking_checkpoint<std::optional<Checkpoint>>(
-            [core = std::move(core), id] { return core->load_by_id(id); },
-            LegacyBridgeOperation::LoadById);
+            [core = std::move(core), id] { return core->load_by_id(id); });
     }
     asio::awaitable<std::vector<Checkpoint>>
     list_async(const std::string& thread_id, int limit) override {
         if (async_) co_return co_await async_->list_async(thread_id, limit);
         auto core = core_;
         co_return co_await run_blocking_checkpoint<std::vector<Checkpoint>>(
-            [core = std::move(core), thread_id, limit] { return core->list(thread_id, limit); },
-            LegacyBridgeOperation::List);
+            [core = std::move(core), thread_id, limit] { return core->list(thread_id, limit); });
     }
     asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
         if (async_) {
@@ -243,8 +210,7 @@ public:
         } else {
             auto core = core_;
             co_await run_blocking_checkpoint(
-                [core = std::move(core), thread_id] { core->delete_thread(thread_id); },
-                LegacyBridgeOperation::DeleteThread);
+                [core = std::move(core), thread_id] { core->delete_thread(thread_id); });
         }
     }
 
@@ -282,69 +248,65 @@ adapt_checkpoint_store(std::shared_ptr<CheckpointStoreCore> core) {
     }
     return std::make_shared<CapabilityCheckpointStore>(std::move(core));
 }
+std::shared_ptr<CheckpointStore>
+adapt_async_checkpoint_store(std::shared_ptr<AsyncCheckpointStore> backend) {
+    if (!backend)
+        throw std::invalid_argument("adapt_async_checkpoint_store requires a backend");
+    return std::make_shared<CapabilityCheckpointStore>(std::move(backend));
+}
+
 
 // =========================================================================
-// CheckpointStore — sync ↔ async crossover defaults (Sem 3.1)
+// CheckpointStore — explicit legacy sync errors; async offloads sync backends
 // =========================================================================
-//
-// Each pair below is the same shape as Provider::complete /
-// complete_async: the sync method bridges to the async peer through
-// run_sync, the async peer co_returns the sync call. Subclasses
-// override one side and inherit the other.
+// Async-native backends must opt in through adapt_async_checkpoint_store().
+// The base sync facade never calls an async method, so an omitted backend
+// operation reports a capability error instead of recursing.
 
-void CheckpointStore::save(const Checkpoint& cp) {
-    reject_recursive_bridge(LegacyBridgeOperation::Save);
-    neograph::async::run_sync(save_async(cp));
+void CheckpointStore::save(const Checkpoint&) {
+    throw std::logic_error("CheckpointStore::save requires a synchronous backend");
 }
 asio::awaitable<void> CheckpointStore::save_async(const Checkpoint& cp) {
-    co_await run_blocking_checkpoint(
-        [this, cp] { save(cp); }, LegacyBridgeOperation::Save);
+    co_await run_blocking_checkpoint([this, cp] { save(cp); });
 }
 
 std::optional<Checkpoint>
-CheckpointStore::load_latest(const std::string& thread_id) {
-    reject_recursive_bridge(LegacyBridgeOperation::LoadLatest);
-    return neograph::async::run_sync(load_latest_async(thread_id));
+CheckpointStore::load_latest(const std::string&) {
+    throw std::logic_error("CheckpointStore::load_latest requires a synchronous backend");
 }
 asio::awaitable<std::optional<Checkpoint>>
 CheckpointStore::load_latest_async(const std::string& thread_id) {
     co_return co_await run_blocking_checkpoint<std::optional<Checkpoint>>(
-        [this, thread_id] { return load_latest(thread_id); },
-        LegacyBridgeOperation::LoadLatest);
+        [this, thread_id] { return load_latest(thread_id); });
 }
 
 std::optional<Checkpoint>
-CheckpointStore::load_by_id(const std::string& id) {
-    reject_recursive_bridge(LegacyBridgeOperation::LoadById);
-    return neograph::async::run_sync(load_by_id_async(id));
+CheckpointStore::load_by_id(const std::string&) {
+    throw std::logic_error("CheckpointStore::load_by_id requires a synchronous backend");
 }
 asio::awaitable<std::optional<Checkpoint>>
 CheckpointStore::load_by_id_async(const std::string& id) {
     co_return co_await run_blocking_checkpoint<std::optional<Checkpoint>>(
-        [this, id] { return load_by_id(id); }, LegacyBridgeOperation::LoadById);
+        [this, id] { return load_by_id(id); });
 }
 
 std::vector<Checkpoint>
-CheckpointStore::list(const std::string& thread_id, int limit) {
-    reject_recursive_bridge(LegacyBridgeOperation::List);
-    return neograph::async::run_sync(list_async(thread_id, limit));
+CheckpointStore::list(const std::string&, int) {
+    throw std::logic_error("CheckpointStore::list requires a synchronous backend");
 }
 asio::awaitable<std::vector<Checkpoint>>
 CheckpointStore::list_async(const std::string& thread_id, int limit) {
     co_return co_await run_blocking_checkpoint<std::vector<Checkpoint>>(
-        [this, thread_id, limit] { return list(thread_id, limit); },
-        LegacyBridgeOperation::List);
+        [this, thread_id, limit] { return list(thread_id, limit); });
 }
 
-void CheckpointStore::delete_thread(const std::string& thread_id) {
-    reject_recursive_bridge(LegacyBridgeOperation::DeleteThread);
-    neograph::async::run_sync(delete_thread_async(thread_id));
+void CheckpointStore::delete_thread(const std::string&) {
+    throw std::logic_error("CheckpointStore::delete_thread requires a synchronous backend");
 }
 asio::awaitable<void>
 CheckpointStore::delete_thread_async(const std::string& thread_id) {
     co_await run_blocking_checkpoint(
-        [this, thread_id] { delete_thread(thread_id); },
-        LegacyBridgeOperation::DeleteThread);
+        [this, thread_id] { delete_thread(thread_id); });
 }
 
 asio::awaitable<void> CheckpointStore::put_writes_async(
@@ -354,8 +316,7 @@ asio::awaitable<void> CheckpointStore::put_writes_async(
     co_await run_blocking_checkpoint(
         [this, thread_id, parent_checkpoint_id, write] {
             put_writes(thread_id, parent_checkpoint_id, write);
-        },
-        LegacyBridgeOperation::PutWrites);
+        });
 }
 asio::awaitable<std::vector<PendingWrite>> CheckpointStore::get_writes_async(
     const std::string& thread_id,
@@ -363,8 +324,7 @@ asio::awaitable<std::vector<PendingWrite>> CheckpointStore::get_writes_async(
     co_return co_await run_blocking_checkpoint<std::vector<PendingWrite>>(
         [this, thread_id, parent_checkpoint_id] {
             return get_writes(thread_id, parent_checkpoint_id);
-        },
-        LegacyBridgeOperation::GetWrites);
+        });
 }
 asio::awaitable<void> CheckpointStore::clear_writes_async(
     const std::string& thread_id,
@@ -372,8 +332,7 @@ asio::awaitable<void> CheckpointStore::clear_writes_async(
     co_await run_blocking_checkpoint(
         [this, thread_id, parent_checkpoint_id] {
             clear_writes(thread_id, parent_checkpoint_id);
-        },
-        LegacyBridgeOperation::ClearWrites);
+        });
 }
 
 // =========================================================================
