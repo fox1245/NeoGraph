@@ -268,6 +268,10 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
         neograph::mcp
         GTest::gtest_main
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(neograph_mcp_stdio_fd_fallback test_mcp_stdio_fd_fallback.cpp)
+        target_link_libraries(neograph_mcp_stdio_fd_fallback PRIVATE neograph::mcp)
+    endif()
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
@@ -659,6 +663,15 @@ endif()
 if(TARGET neograph_quickjs_c_smoke)
     add_test(NAME QuickJS.CEmbeddingSmoke COMMAND neograph_quickjs_c_smoke)
     set_tests_properties(QuickJS.CEmbeddingSmoke PROPERTIES LABELS "quickjs;abi")
+endif()
+if(TARGET neograph_mcp_stdio_fd_fallback)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME MCPStdioFallback.ClosesHighDescriptors
+            COMMAND neograph_mcp_stdio_fd_fallback ${Python3_EXECUTABLE})
+        set_tests_properties(MCPStdioFallback.ClosesHighDescriptors PROPERTIES
+            TIMEOUT 30 SKIP_RETURN_CODE 77 LABELS "mcp;isolation")
+    endif()
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
     gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)

@@ -548,7 +548,8 @@ TEST(MCPStdioAsync, HardenedSpawnDoesNotInheritUnrelatedWindowsHandles) {
     config.argv.push_back("");
     mcp::MCPClient client(std::move(config));
     auto result = client.call_tool("probe", json::object());
-    EXPECT_FALSE(result.at("inheritedHandle").get<bool>());
+    // A numeric handle can be reused in the child; observe the original object.
+    EXPECT_EQ(WaitForSingleObject(event, 0), WAIT_TIMEOUT);
     EXPECT_EQ(result.at("argv"),
               json::array({"space and trailing slash\\", "backslash\\\"quote", ""}));
 }

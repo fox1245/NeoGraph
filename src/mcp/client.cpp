@@ -33,6 +33,7 @@
 #  include <fcntl.h>
 #  include <pthread.h>
 #  include <signal.h>
+#  include <sys/resource.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #  if defined(__linux__)
@@ -817,8 +818,16 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         for (auto& item : child_environment) child_envp.push_back(item.data());
         child_envp.push_back(nullptr);
     }
-    long max_fd = ::sysconf(_SC_OPEN_MAX);
-    if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
+    struct rlimit descriptor_limit {};
+    if (::getrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0)
+        throw std::system_error(errno, std::generic_category(), "getrlimit()");
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    if (descriptor_limit.rlim_max == RLIM_INFINITY && open_max <= 0)
+        throw std::runtime_error("MCP descriptor limit is unavailable");
+    const auto max_fd = std::min<rlim_t>(
+        descriptor_limit.rlim_max == RLIM_INFINITY
+            ? static_cast<rlim_t>(open_max) : descriptor_limit.rlim_max,
+        static_cast<rlim_t>(std::numeric_limits<int>::max()));
 
     int in_pipe[2]  = {-1, -1};  // parent writes → child stdin
     int out_pipe[2] = {-1, -1};  // child stdout → parent reads
@@ -871,7 +880,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
 #if defined(__linux__) && defined(SYS_close_range)
         if (::syscall(SYS_close_range, 3u, ~0u, 0u) != 0) {
 #endif
-            for (int fd = 3; fd < max_fd; ++fd) ::close(fd);
+            for (rlim_t fd = 3; fd < max_fd; ++fd) ::close(static_cast<int>(fd));
 #if defined(__linux__) && defined(SYS_close_range)
         }
 #endif

@@ -54,13 +54,10 @@ for line in sys.stdin:
         time.sleep(2)
         result = {"content": []}
     else:
-        inherited = False
         if os.name == "nt" and len(sys.argv) > 2:
-            flags = ctypes.c_ulong()
-            inherited = bool(ctypes.windll.kernel32.GetHandleInformation(
-                ctypes.c_void_p(int(sys.argv[2])), ctypes.byref(flags)))
+            ctypes.windll.kernel32.SetEvent(ctypes.c_void_p(int(sys.argv[2])))
         result = {"content": [], "cwd": os.getcwd(), "environment": dict(os.environ),
-                  "inheritedHandle": inherited, "argv": sys.argv[3:]}
+                  "argv": sys.argv[3:]}
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
     if mode == "tree" and method == "tools/call":
         os._exit(0)

@@ -56,6 +56,9 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   上限、handle/FD 分離、子孫終了、出力読込上限を適用します。
   macOS では Darwin のシグナルマクロに対応し、fork 前にプラットフォームの
   アクセサーから継承環境を取得します。
+  POSIX の close 代替経路は 65536 の上限ではなく descriptor の hard limit
+  を使い、soft limit を下げる前に開いた高番号 FD も閉じます。Windows の
+  継承検証は再利用可能な handle 番号ではなく、親の元の event 状態を確認します。
 - **クリーンな runner での契約検証。** CI は Protobuf の compiler/runtime
   だけでなく、開発用ヘッダーとライブラリも明示的にインストールします。
   分離 stdio fixture は Python の検出に使った検索パスを明示的に承認します。

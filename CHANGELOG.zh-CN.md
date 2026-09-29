@@ -50,6 +50,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   schema 变化会终止仍被引用的 client。加固启动与 stderr 限额、handle/FD
   隔离、后代清理及输出读取上限。
   macOS 启动支持 Darwin 信号宏，并在 fork 前通过平台访问器读取继承环境。
+  POSIX close 回退使用 descriptor 硬限制而非 65536 上限，也会关闭降低软限制前
+  已打开的高编号 FD。Windows 继承测试检查父进程原始 event 的状态，
+  不再把可复用的 handle 数值当作对象身份。
 - **干净 runner 上的契约检查。** CI 显式安装 Protobuf 开发头文件与库，
   而不只是编译器和运行时包。
   隔离 stdio fixture 显式批准用于发现 Python 的搜索路径。

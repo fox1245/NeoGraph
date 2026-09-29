@@ -157,6 +157,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolation and descendant cleanup; host output draining is bounded.
   macOS startup supports Darwin signal macros and reads the inherited
   environment through its platform accessor before fork.
+  The POSIX close fallback uses the descriptor hard limit rather than a 65536
+  cap, including descriptors retained above a lowered soft limit. Windows
+  inheritance tests observe the original event, not reusable handle numbers.
 - **Clean-runner contract gates.** CI explicitly installs Protobuf
   development headers and libraries, not only its compiler/runtime packages.
   Isolated stdio fixtures explicitly approve their discovered Python search path.
