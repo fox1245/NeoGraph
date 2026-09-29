@@ -38,6 +38,9 @@
 #  if defined(__linux__)
 #    include <sys/syscall.h>
 #  endif
+#  if defined(__APPLE__)
+#    include <crt_externs.h>
+#  endif
 #endif
 
 #include <atomic>
@@ -249,8 +252,8 @@ private:
         thread_ = std::thread([this] {
 #ifndef _WIN32
             sigset_t mask;
-            ::sigemptyset(&mask);
-            ::sigaddset(&mask, SIGPIPE);
+            sigemptyset(&mask);
+            sigaddset(&mask, SIGPIPE);
             ::pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 #endif
             io.run();
@@ -836,6 +839,15 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         throw std::system_error(error, std::generic_category(), "pipe()");
     }
 
+    char* const* environment = child_envp.data();
+    if (!config.replace_environment) {
+#if defined(__APPLE__)
+        environment = *_NSGetEnviron();
+#else
+        environment = ::environ;
+#endif
+    }
+
     pid_t pid = ::fork();
     if (pid < 0) {
         const int error = errno;
@@ -863,7 +875,6 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
 #if defined(__linux__) && defined(SYS_close_range)
         }
 #endif
-        char* const* environment = config.replace_environment ? child_envp.data() : ::environ;
         for (const auto& candidate : candidates) {
             ::execve(candidate.c_str(), cargv.data(), environment);
             const int error = errno;

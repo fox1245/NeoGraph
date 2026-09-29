@@ -155,6 +155,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   approvals and exact argument values; revocation/schema drift drain retained
   clients. Hardened subprocesses enforce startup/stderr bounds, handle/FD
   isolation and descendant cleanup; host output draining is bounded.
+  macOS startup supports Darwin signal macros and reads the inherited
+  environment through its platform accessor before fork.
 - **Tenant-safe durable Harness records.** Scoped IDs and references round-trip
   through File/SQLite stores, long File keys use bounded hash filenames, and
   SQLite retention cannot delete another namespace's records or journals.
