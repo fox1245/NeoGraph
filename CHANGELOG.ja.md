@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=70f3157b6b36dfed727dd997306c2ca398daeaa10b899667f1cb6fdf1d77ee9b -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,13 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **Deep Research が途中で切れた completion を完成した報告として扱わなくなった。**
+  `create_deep_research_graph` は `max_tokens` で切れた空の completion（隠れた推論に出力
+  予算をすべて使った推論モデル）を成功応答として扱い、`example_deep_research` は空の
+  最終報告のまま終了コード 0 で終わっていました（実行 3/3）。LLM 呼び出しは空の
+  `max_tokens` 切断を出力予算を倍にして再試行し（最大 2 回、上限 16384 トークン）、空の
+  最終報告はエラー、一部だけ切れた報告は `Incomplete` と表示されます。
+  `DeepResearchTruncation.*` が予算の段階を検証します。
 - **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
   保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
   静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。

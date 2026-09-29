@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=70f3157b6b36dfed727dd997306c2ca398daeaa10b899667f1cb6fdf1d77ee9b -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,13 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **Deep Research가 잘린 completion을 완성된 보고서로 보고하지 않음.**
+  `create_deep_research_graph`는 `max_tokens`에서 잘린 빈 completion(숨은 추론에 출력
+  예산을 모두 쓴 추론 모델)을 성공 응답으로 취급하여 `example_deep_research`가 빈 최종
+  보고서와 함께 종료 코드 0으로 끝났습니다(실제 실행 3/3). 이제 LLM 호출은 빈
+  `max_tokens` 절단을 출력 예산을 두 배로 늘려 재시도하며(최대 2회, 상한 16384 토큰),
+  빈 최종 보고서는 오류, 일부만 잘린 보고서는 `Incomplete`로 표시됩니다.
+  `DeepResearchTruncation.*`가 예산 단계를 검증합니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

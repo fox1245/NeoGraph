@@ -144,6 +144,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Deep Research no longer reports a truncated completion as a finished report.**
+  `create_deep_research_graph` treated an empty completion cut off at
+  `max_tokens` (a reasoning model that spent its whole output budget on hidden
+  reasoning) as a successful answer, so `example_deep_research` exited 0 with an
+  empty final report (3 of 3 live runs). Its LLM calls now retry an empty
+  `max_tokens` truncation with a doubled output budget (two retries, capped at
+  16384 tokens); an empty final report is an error and a partially truncated
+  one is marked `Incomplete`. `DeepResearchTruncation.*` cover the budget ladder.
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and
