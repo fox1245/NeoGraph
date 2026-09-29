@@ -186,7 +186,10 @@ int main(int argc, char** argv) {
                           << task_state_to_string(ev.status_update->status.state)
                           << (ev.status_update->final ? " (final)" : "") << "\n";
             } else if (ev.type == StreamEvent::Type::Task) {
-                std::cout << "    [event " << events_seen << "] terminal task\n";
+                std::cout << "    [event " << events_seen << "] task snapshot ("
+                          << (ev.task ? task_state_to_string(ev.task->status.state)
+                                      : std::string("?"))
+                          << ")\n";
             }
             return true;
         });

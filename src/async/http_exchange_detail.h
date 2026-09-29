@@ -957,8 +957,25 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
             co_await read_close_delimited_stream(stream, buf, on_chunk, opts);
             co_return r;
         }
-        throw std::runtime_error(
-            "async_post_stream: response must be Transfer-Encoding: chunked");
+        // Fixed-length body: a non-streaming reply to a streaming request,
+        // typically a small JSON error document. Deliver it like a chunk so
+        // the caller sees status + body (documented in http_client.h).
+        const std::size_t body_size = *parsed.content_length;
+        if (exceeds_limit(body_size, opts.max_response_body_bytes)) {
+            throw_message_size("async_post_stream: response body limit");
+        }
+        if (buf.size() > body_size) {
+            throw std::runtime_error(
+                "async_post_stream: surplus bytes after fixed response body");
+        }
+        co_await buffer_exactly(stream, buf, body_size);
+        if (body_size > 0) {
+            std::string payload(body_size, '\0');
+            std::copy_n(asio::buffers_begin(buf.data()), body_size, payload.begin());
+            buf.consume(body_size);
+            on_chunk(payload);
+        }
+        co_return r;
     }
 
     std::size_t body_bytes = 0;

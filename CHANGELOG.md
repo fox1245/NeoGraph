@@ -144,6 +144,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **A2A client speaks the A2A 1.0 wire format (interop with a2a-sdk >= 1.0).**
+  `example_a2a_client` completed discovery against the shipped Python A2A
+  server (`27_a2a_server.py`, a2a-sdk 1.1.5) but `message/send` failed with
+  `-32602 Invalid params`: the client always emitted the 0.3 body (`kind`
+  discriminators, `user`/`agent` roles, `kind`-tagged Parts), tried slash-form
+  methods first, and its PascalCase fallback re-sent that same 0.3 body — which
+  a 1.0 server (protobuf `ParseDict`) rejects; the `A2A-Version: 1.0` header a
+  1.0 server requires was never sent either. `A2AClient` now selects a
+  `WireDialect` from the AgentCard (`supportedInterfaces[]` `protocolBinding` /
+  `protocolVersion` / `tenant`, else 0.3 `protocolVersion` / `preferredTransport`
+  / `additionalInterfaces`) and emits the matching form: 1.0 uses
+  `SendMessage` / `SendStreamingMessage` / `GetTask` / `CancelTask`, the
+  `A2A-Version: 1.0` header, `ROLE_*` / `TASK_STATE_*` enums, flat Parts
+  (`text` / `raw` / `url` / `data`, `filename`, `mediaType`) and no `kind`;
+  0.3 is byte-for-byte what it was. Responses are decoded tolerantly in both
+  forms (`{"task"}` / `{"message"}` wrappers, `statusUpdate` /
+  `artifactUpdate` stream frames without `final`); a 1.0 stream is assembled into
+  the returned `Task`. Without a fetched card the client still probes
+  (0.3, then a correctly shaped 1.0 request on `-32601`) and remembers the
+  result. A card with no JSONRPC interface at protocol 1.x/0.x fails with a
+  clear "no compatible interface" error instead of a server-side `-32602`.
+  Streaming also reads CRLF/`: comment`/multi-line SSE (sse-starlette) and
+  reports non-SSE JSON-RPC error replies instead of returning an empty Task.
+  `A2AServer` answers by `A2A-Version` (empty = 0.3, `1.x` = protobuf-JSON
+  `{"task"}` results, an opening Task then `statusUpdate` / `artifactUpdate`
+  stream, `-32009` for other versions) and its card now also lists
+  `supportedInterfaces` (1.0, 0.3). New: `WireDialect`, `to_json(..., dialect)`,
+  `task_from_result`, `AgentInterface` / `AgentCard::supported_interfaces`,
+  `A2ARpcError`, `A2AClient::wire_dialect()`. Removed:
+  `A2AClient::rpc_call_with_fallback` (one body could never fit both
+  generations); `rpc_call*` gained an optional dialect argument.
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and

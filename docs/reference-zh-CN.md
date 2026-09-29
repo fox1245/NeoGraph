@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=ac6da0875abb642e5c86cafebaac1da8e5b05f5e1eb9d4744d7ca17ad7f4d690 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3313,11 +3313,14 @@ int main() {
 
 **头文件：** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
 基于 Streamable HTTP 的 JSON-RPC 2.0。`A2AClient` 调用远程
-agent（`message/send`、`tasks/get`、`tasks/cancel`、AgentCard
-发现、`message/stream` SSE）；服务器端通过
-`GraphAgentAdapter` 将 NeoGraph `GraphEngine` 适配为 A2A 端点。支持
-`v0.3` / `v1` 双版本方法名分发，参见提交 `bc675a1`。流式传输使用
-`SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
+agent（发送、获取、取消、AgentCard 发现、流式 SSE）；服务器端通过
+`GraphAgentAdapter` 将 NeoGraph `GraphEngine` 适配为 A2A 端点。支持两代线路格式
+（`WireDialect`）：A2A 1.0 protobuf-JSON（`SendMessage`、`A2A-Version: 1.0`、
+`ROLE_*` / `TASK_STATE_*`、无 `kind` 的扁平 Part）与 0.3（`message/send`、`kind` 判别字段）。
+客户端根据 AgentCard（`supportedInterfaces` 的绑定/版本，否则 `protocolVersion`）选择方言，
+未获取卡片时先以 0.3 再以 1.0 探测；卡片没有 JSONRPC 1.x/0.x 兼容绑定时抛出明确的
+“no compatible interface” 错误；服务器按 `A2A-Version` 应答，并在卡片中同时声明两个版本。
+流式传输使用 `SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
 将 A2A 调用嵌入为图节点。
 
 **公共头文件：** [`include/neograph/a2a/`](../include/neograph/a2a/)。

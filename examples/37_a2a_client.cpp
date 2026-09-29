@@ -43,6 +43,12 @@ void print_card(const AgentCard& c) {
               << "  capabilities.streaming: " << (c.streaming ? "yes" : "no") << "\n"
               << "  skills:               " << c.skill_names.size() << "\n";
     for (auto& s : c.skill_names) std::cout << "    - " << s << "\n";
+    std::cout << "  interfaces:           " << c.supported_interfaces.size() << "\n";
+    for (auto& i : c.supported_interfaces) {
+        std::cout << "    - " << i.protocol_binding << " "
+                  << (i.protocol_version.empty() ? "?" : i.protocol_version)
+                  << " @ " << i.url << "\n";
+    }
 }
 
 }  // namespace
@@ -80,6 +86,9 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "\n=== Response ===\n"
+              << "  wire:      "
+              << (client->wire_dialect() == WireDialect::V1_0 ? "A2A 1.0" : "A2A 0.3")
+              << "\n"
               << "  taskId:    " << task.id           << "\n"
               << "  contextId: " << task.context_id   << "\n"
               << "  state:     " << task_state_to_string(task.status.state) << "\n";

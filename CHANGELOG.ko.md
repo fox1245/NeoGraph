@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=258b381a052245ca3ecc60c371d697c3ce1bccd20a090ac54251e6f578f50457 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,18 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **A2A 클라이언트가 A2A 1.0 와이어 형식을 사용합니다 (a2a-sdk 1.0 이상과 상호운용).**
+  `example_a2a_client`는 기본 제공 Python A2A 서버(`27_a2a_server.py`, a2a-sdk 1.1.5)에서
+  디스커버리는 성공했지만 `message/send`가 `-32602 Invalid params`로 실패했습니다.
+  클라이언트가 항상 0.3 본문(`kind`, 소문자 role)을 보내고 PascalCase 폴백도 같은
+  본문을 재전송했으며 `A2A-Version: 1.0` 헤더도 보내지 않았기 때문입니다.
+  이제 `A2AClient`는 AgentCard(`supportedInterfaces`, 없으면 0.3 `protocolVersion`)에서
+  `WireDialect`를 선택해 1.0(`SendMessage`, `A2A-Version: 1.0`, `ROLE_*`/`TASK_STATE_*`,
+  `kind` 없는 평탄한 Part) 또는 기존 0.3 형식으로 요청하고 두 형식의 응답·스트림을 모두
+  해석합니다. 카드가 없으면 0.3 후 `-32601`에서 올바른 1.0 요청으로 프로브하며, 호환
+  인터페이스가 없으면 명확한 오류를 던집니다. `A2AServer`도 `A2A-Version`에 따라 1.0으로
+  응답하고 카드에 `supportedInterfaces`를 게시합니다. `A2AClient::rpc_call_with_fallback`은
+  제거되었습니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

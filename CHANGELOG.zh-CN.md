@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=258b381a052245ca3ecc60c371d697c3ce1bccd20a090ac54251e6f578f50457 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,16 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **A2A 客户端支持 A2A 1.0 线路格式(与 a2a-sdk 1.0 及以上互通)。**
+  `example_a2a_client` 对随附的 Python A2A 服务器(`27_a2a_server.py`,a2a-sdk 1.1.5)
+  发现成功,但 `message/send` 以 `-32602 Invalid params` 失败:客户端始终发送 0.3 请求体
+  (`kind`、小写 role),PascalCase 回退重发同一请求体,且从未发送 `A2A-Version: 1.0` 头。
+  现在 `A2AClient` 根据 AgentCard(`supportedInterfaces`,否则 0.3 的 `protocolVersion`)选择
+  `WireDialect`,发送 1.0(`SendMessage`、`A2A-Version: 1.0`、`ROLE_*`/`TASK_STATE_*`、
+  无 `kind` 的扁平 Part)或原有 0.3 格式,并兼容解析两种响应与流。未获取卡片时先以 0.3 探测,
+  在 `-32601` 时改发格式正确的 1.0 请求;没有兼容接口时给出明确错误。`A2AServer` 也按
+  `A2A-Version` 以 1.0 应答,并在卡片中发布 `supportedInterfaces`。
+  `A2AClient::rpc_call_with_fallback` 已移除。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

@@ -3666,13 +3666,18 @@ pointer to that canonical source-level reference.
 
 **Header:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
 JSON-RPC 2.0 over Streamable HTTP. `A2AClient` calls a remote
-agent (`message/send`, `tasks/get`, `tasks/cancel`, AgentCard
-discovery, `message/stream` SSE); the server side adapts a
-NeoGraph `GraphEngine` into an A2A endpoint via
-`GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
-see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
-and httplib chunked (server). Caller node embeds an A2A call as
-a graph node.
+agent (send, get, cancel, AgentCard discovery, streaming SSE); the
+server side adapts a NeoGraph `GraphEngine` into an A2A endpoint via
+`GraphAgentAdapter`. Two wire generations are spoken (`WireDialect`):
+A2A 1.0 protobuf-JSON (`SendMessage`, `A2A-Version: 1.0`, `ROLE_*` /
+`TASK_STATE_*`, flat Parts, no `kind`) and 0.3 (`message/send`, `kind`
+discriminators). The client selects the dialect from the AgentCard
+(`supportedInterfaces` protocol binding/version, else `protocolVersion`),
+probes 0.3-then-1.0 when no card was fetched, and throws a clear
+"no compatible interface" error when the card offers no JSONRPC 1.x/0.x
+binding; the server answers per `A2A-Version` and advertises both
+versions in its card. Streaming uses `SseFrameSplitter` (client) and
+httplib chunked (server). Caller node embeds an A2A call as a graph node.
 
 **Public headers:** [`include/neograph/a2a/`](../include/neograph/a2a/).
 
