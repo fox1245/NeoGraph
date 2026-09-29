@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=ac6da0875abb642e5c86cafebaac1da8e5b05f5e1eb9d4744d7ca17ad7f4d690 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2879,10 +2879,15 @@ int main() {
 ### `neograph::a2a` — Agent-to-Agent プロトコル
 **ヘッダー:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
 Streamable HTTP 上の JSON-RPC 2.0 です。`A2AClient` はリモートエージェントに
-(`message/send`、`tasks/get`、`tasks/cancel`、AgentCard の検出、`message/stream` SSE) を呼び出します。
+(送信、取得、キャンセル、AgentCard の検出、ストリーミング SSE) を呼び出します。
 サーバー側は `GraphAgentAdapter` を通じて NeoGraph の `GraphEngine` を A2A エンドポイントへ適応させます。
-`v0.3` / `v1` のメソッド名を二重にディスパッチします。
-commit `bc675a1` を参照してください。ストリーミングには (client 側) `SseFrameSplitter` と
+2 つのワイヤ世代 (`WireDialect`) を扱います: A2A 1.0 の protobuf-JSON (`SendMessage`、
+`A2A-Version: 1.0`、`ROLE_*` / `TASK_STATE_*`、`kind` のないフラットな Part) と
+0.3 (`message/send`、`kind` 識別子) です。クライアントは AgentCard (`supportedInterfaces` の
+バインディング/バージョン、なければ `protocolVersion`) から方言を選び、カード未取得時は
+0.3 → 1.0 の順にプローブし、JSONRPC 1.x/0.x の互換バインディングがなければ明確な
+「no compatible interface」エラーを投げます。サーバーは `A2A-Version` に応じて応答し、カードに
+両バージョンを掲載します。ストリーミングには (client 側) `SseFrameSplitter` と
 (server 側) httplib chunked を使います。caller node は A2A 呼び出しをグラフノードとして組み込みます。
 
 **公開ヘッダー:** [`include/neograph/a2a/`](../include/neograph/a2a/)。

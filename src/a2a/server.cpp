@@ -227,6 +227,18 @@ bool is_terminal(TaskState state) {
         || state == TaskState::AuthRequired;
 }
 
+/// `A2A-Version` header -> response dialect. Empty = 0.3 (spec §3.6.2);
+/// only the Major.Minor prefix matters, patch is ignored.
+std::optional<WireDialect> dialect_for_version_header(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.empty()) return WireDialect::V0_3;
+    auto major = v.substr(0, v.find('.'));
+    if (major == "1") return WireDialect::V1_0;
+    if (major == "0") return WireDialect::V0_3;
+    return std::nullopt;
+}
+
 neograph::json jsonrpc_error(int code, std::string msg, const neograph::json& id) {
     neograph::json env;
     env["jsonrpc"] = "2.0";
@@ -367,16 +379,16 @@ struct A2AServer::Impl {
 #endif
 
     void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);
-    void handle_message_send(const httplib::Request& req,
+    void handle_message_send(WireDialect dialect, const httplib::Request& req,
                              const neograph::json& params, const neograph::json& id,
                              httplib::Response& res);
-    void handle_message_stream(const httplib::Request& req,
+    void handle_message_stream(WireDialect dialect, const httplib::Request& req,
                                const neograph::json& params, const neograph::json& id,
                                httplib::Response& res);
-    void handle_tasks_get(const httplib::Request& req,
+    void handle_tasks_get(WireDialect dialect, const httplib::Request& req,
                           const neograph::json& params, const neograph::json& id,
                           httplib::Response& res);
-    void handle_tasks_cancel(const httplib::Request& req,
+    void handle_tasks_cancel(WireDialect dialect, const httplib::Request& req,
                              const neograph::json& params, const neograph::json& id,
                              httplib::Response& res);
 };
@@ -391,9 +403,24 @@ void test::A2AServerTestAccess::set_max_inflight_runs(
 
 void A2AServer::Impl::register_routes() {
     svr.Get("/.well-known/agent-card.json",
-            [this](const httplib::Request&, httplib::Response& res) {
+            [this](const httplib::Request& req, httplib::Response& res) {
                 neograph::json j;
                 to_json(j, card);
+                // Advertise both wire generations this server answers
+                // (1.0 preferred) unless the card already declares its
+                // own interfaces. Legacy 0.3 readers ignore the field.
+                if (card.raw.is_null() && card.supported_interfaces.empty()) {
+                    std::string url = card.url;
+                    if (url.empty()) {
+                        auto host = req.get_header_value("Host");
+                        if (!host.empty()) url = "http://" + host + "/";
+                    }
+                    j["supportedInterfaces"] = neograph::json::array({
+                        {{"url", url}, {"protocolBinding", "JSONRPC"},
+                         {"protocolVersion", "1.0"}},
+                        {{"url", url}, {"protocolBinding", "JSONRPC"},
+                         {"protocolVersion", "0.3"}}});
+                }
                 res.status = 200;
                 res.set_content(j.dump(), "application/json");
             });
@@ -432,14 +459,30 @@ void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
         return;
     }
 
+    // A2A-Version selects the wire generation of the *response* (spec
+    // §3.6.2): empty means 0.3, `1.x` the protobuf-JSON form. Both method
+    // spellings are accepted with either version.
+    const auto version = req.get_header_value("A2A-Version");
+    const auto dialect = dialect_for_version_header(version);
+    if (!dialect) {
+        res.status = 200;
+        res.set_content(
+            jsonrpc_error(-32009,
+                          "A2A version '" + version + "' is not supported; "
+                          "this server speaks 0.3 and 1.0",
+                          id).dump(),
+            "application/json");
+        return;
+    }
+
     if (method == "message/send" || method == "SendMessage") {
-        handle_message_send(req, params, id, res);
+        handle_message_send(*dialect, req, params, id, res);
     } else if (method == "message/stream" || method == "SendStreamingMessage") {
-        handle_message_stream(req, params, id, res);
+        handle_message_stream(*dialect, req, params, id, res);
     } else if (method == "tasks/get" || method == "GetTask") {
-        handle_tasks_get(req, params, id, res);
+        handle_tasks_get(*dialect, req, params, id, res);
     } else if (method == "tasks/cancel" || method == "CancelTask") {
-        handle_tasks_cancel(req, params, id, res);
+        handle_tasks_cancel(*dialect, req, params, id, res);
     } else {
         res.status = 200;
         res.set_content(jsonrpc_error(-32601, "Method not found", id).dump(),
@@ -823,7 +866,8 @@ Task A2AServer::Impl::run_program(
 }
 #endif
 
-void A2AServer::Impl::handle_message_send(const httplib::Request& req,
+void A2AServer::Impl::handle_message_send(WireDialect dialect,
+                                          const httplib::Request& req,
                                           const neograph::json& params,
                                           const neograph::json& id,
                                           httplib::Response& res) {
@@ -852,13 +896,16 @@ void A2AServer::Impl::handle_message_send(const httplib::Request& req,
 #endif
 
     neograph::json tj;
-    to_json(tj, task);
+    to_json(tj, task, dialect);
+    // 1.0 SendMessageResponse is a oneof wrapper; 0.3 returns the bare Task.
+    if (dialect == WireDialect::V1_0) tj = neograph::json{{"task", std::move(tj)}};
     res.status = 200;
     res.set_content(jsonrpc_result(std::move(tj), id).dump(),
                     "application/json");
 }
 
-void A2AServer::Impl::handle_message_stream(const httplib::Request& req,
+void A2AServer::Impl::handle_message_stream(WireDialect dialect,
+                                            const httplib::Request& req,
                                             const neograph::json& params,
                                             const neograph::json& id,
                                             httplib::Response& res) {
@@ -894,18 +941,45 @@ void A2AServer::Impl::handle_message_stream(const httplib::Request& req,
     // server.
     res.set_chunked_content_provider(
         "text/event-stream",
-        [self, inbound, task_id, context_id, rpc_id
+        [self, inbound, task_id, context_id, rpc_id, dialect
 #ifdef NEOGRAPH_A2A_PROGRAM
          , authenticated_peer
 #endif
         ](size_t /*offset*/, httplib::DataSink& sink) {
 
-            auto emit = [&](const TaskStatusUpdateEvent& ev) {
-                neograph::json env_json;
-                to_json(env_json, ev);
-                auto env = jsonrpc_result(std::move(env_json), rpc_id);
+            auto write_frame = [&](neograph::json result) {
+                auto env = jsonrpc_result(std::move(result), rpc_id);
                 std::string frame = "data: " + env.dump() + "\n\n";
                 sink.write(frame.data(), frame.size());
+            };
+
+            // 1.0 streams (spec §3.1.2) open with the Task, carry status /
+            // artifact updates, and close on the terminal state — there is
+            // no `final` flag and no trailing Task. The terminal status is
+            // therefore held back until the artifacts (only known once the
+            // run has finished) have been emitted.
+            std::optional<TaskStatusUpdateEvent> held_terminal;
+            if (dialect == WireDialect::V1_0) {
+                Task opening;
+                opening.id         = task_id;
+                opening.context_id = context_id;
+                opening.status.state = TaskState::Submitted;
+                neograph::json tj;
+                to_json(tj, opening, dialect);
+                write_frame(neograph::json{{"task", std::move(tj)}});
+            }
+
+            auto emit = [&](const TaskStatusUpdateEvent& ev) {
+                if (dialect == WireDialect::V1_0 && ev.final) {
+                    held_terminal = ev;
+                    return;
+                }
+                neograph::json env_json;
+                to_json(env_json, ev, dialect);
+                if (dialect == WireDialect::V1_0) {
+                    env_json = neograph::json{{"statusUpdate", std::move(env_json)}};
+                }
+                write_frame(std::move(env_json));
             };
 
             try {
@@ -917,11 +991,33 @@ void A2AServer::Impl::handle_message_stream(const httplib::Request& req,
 #else
                 auto task = self->run_graph(inbound, task_id, context_id, emit);
 #endif
-                neograph::json tj;
-                to_json(tj, task);
-                auto env = jsonrpc_result(std::move(tj), rpc_id);
-                std::string frame = "data: " + env.dump() + "\n\n";
-                sink.write(frame.data(), frame.size());
+                if (dialect == WireDialect::V1_0) {
+                    for (const auto& artifact : task.artifacts) {
+                        TaskArtifactUpdateEvent ae;
+                        ae.task_id    = task.id;
+                        ae.context_id = task.context_id;
+                        ae.artifact   = artifact;
+                        ae.last_chunk = true;
+                        neograph::json aj;
+                        to_json(aj, ae, dialect);
+                        write_frame(neograph::json{{"artifactUpdate", std::move(aj)}});
+                    }
+                    TaskStatusUpdateEvent terminal;
+                    if (held_terminal) {
+                        terminal = *held_terminal;
+                    } else {
+                        terminal.task_id    = task.id;
+                        terminal.context_id = task.context_id;
+                        terminal.status     = task.status;
+                    }
+                    neograph::json sj;
+                    to_json(sj, terminal, dialect);
+                    write_frame(neograph::json{{"statusUpdate", std::move(sj)}});
+                } else {
+                    neograph::json tj;
+                    to_json(tj, task);
+                    write_frame(std::move(tj));
+                }
             } catch (...) {
                 // run_graph already wraps exceptions as Failed; fall through.
             }
@@ -930,7 +1026,8 @@ void A2AServer::Impl::handle_message_stream(const httplib::Request& req,
         });
 }
 
-void A2AServer::Impl::handle_tasks_get(const httplib::Request& req,
+void A2AServer::Impl::handle_tasks_get(WireDialect dialect,
+                                       const httplib::Request& req,
                                        const neograph::json& params,
                                        const neograph::json& id,
                                        httplib::Response& res) {
@@ -1042,13 +1139,14 @@ void A2AServer::Impl::handle_tasks_get(const httplib::Request& req,
                         t.history.begin() + (t.history.size() - hl));
     }
     neograph::json tj;
-    to_json(tj, t);
+    to_json(tj, t, dialect);
     res.status = 200;
     res.set_content(jsonrpc_result(std::move(tj), id).dump(),
                     "application/json");
 }
 
-void A2AServer::Impl::handle_tasks_cancel(const httplib::Request& req,
+void A2AServer::Impl::handle_tasks_cancel(WireDialect dialect,
+                                          const httplib::Request& req,
                                           const neograph::json& params,
                                           const neograph::json& id,
                                           httplib::Response& res) {
@@ -1130,7 +1228,7 @@ void A2AServer::Impl::handle_tasks_cancel(const httplib::Request& req,
     }
 #endif
     neograph::json tj;
-    to_json(tj, t);
+    to_json(tj, t, dialect);
     res.status = 200;
     res.set_content(jsonrpc_result(std::move(tj), id).dump(),
                     "application/json");
