@@ -2276,6 +2276,26 @@ if(NEOGRAPH_BUILD_TESTS)
             LABELS "quickstart;p8"
             PASS_REGULAR_EXPRESSION "1")
     endif()
+    if(TARGET example_evolution)
+        # Tracked seed/task fixtures exercise the documented file mode; the
+        # demo `pnoop` node type is registered in every mode.
+        add_test(NAME Example.Evolution.Smoke COMMAND example_evolution --smoke)
+        add_test(NAME Example.Evolution.Files
+                 COMMAND example_evolution
+                         ${CMAKE_CURRENT_SOURCE_DIR}/examples/54_evolution_seed.json
+                         ${CMAKE_CURRENT_SOURCE_DIR}/examples/54_evolution_task.json)
+        set_tests_properties(Example.Evolution.Smoke Example.Evolution.Files PROPERTIES
+            LABELS "examples"
+            PASS_REGULAR_EXPRESSION "\"compile_passed\": [1-9]")
+    endif()
+    if(TARGET example_state_management)
+        # The forked thread must really execute (fork of a paused checkpoint)
+        # and answer the edited question, not end with it unanswered.
+        add_test(NAME Example.StateManagement COMMAND example_state_management)
+        set_tests_properties(Example.StateManagement PROPERTIES
+            LABELS "examples"
+            PASS_REGULAR_EXPRESSION "Forked thread execution trace: reviewer .*Tokyo is the capital of Japan")
+    endif()
 endif()
 
 # Fuzz targets — libFuzzer-driven, Clang only. Separate flag so

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=de07ba725013673d1412ef7eb61d6291af3ba20f49634a5a467721f446fef116 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,19 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **fork 示例在 fork 出的线程上真正执行，并记录 fork/resume 约定。**
+  `examples/08_state_management.cpp` 之前 fork 的是已完成线程的终止检查点，因此
+  `resume()` 没有执行任何节点，“Tokyo”问题一直没有回答。现在它 fork 运行在 `reviewer`
+  之前暂停的检查点，并打印真实的助手回答。`GraphEngine::fork()` 以及 reference/concepts
+  文档现明确：fork 只复制一个检查点，`resume()` 从其待执行节点继续（终止检查点没有待执行节点）。
+  `Example.StateManagement` 与 `ForkResumeSemantics.*` 覆盖两种情况。
+- **`example_evolution` 文件模式。** 演示用的 `pnoop` 节点类型现在在所有模式下注册，
+  因此文档中的 `./example_evolution seed.json task.json` 可直接使用受跟踪的
+  `examples/54_evolution_seed.json` 与 `54_evolution_task.json`（此前报
+  `compile failed: Unknown node type: 'pnoop'`）。seed 可使用内置类型或 `pnoop`；
+  其他自定义节点类型须由宿主程序注册。`Example.Evolution.*` 运行两种模式。
+- **`example_plan_executor` 摘要。** 最后一行现在报告计算得出的被重放 executor 调用数（4），
+  而不是固定的“1”。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

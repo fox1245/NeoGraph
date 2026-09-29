@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=3d95cddd2a9d9ff0c7b8028968a5bfab4c44b404af3eff0115f8edfb25a7f1cc -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=98376bd657cf83e768e69b6d7be99185f5fdf5d30c05ba7e282b179c720ef6af -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -395,7 +395,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### 시간 여행
 
-`engine.fork(thread_id, from_checkpoint_id)`는 과거 체크포인트에서 시작하는 새 스레드를 반환합니다. "다르게 답했다면 어땠을까" 분기 탐색에 유용합니다.
+`engine.fork(thread_id, from_checkpoint_id)`는 과거 체크포인트에서 시작하는 새 스레드를 반환합니다. "다르게 답했다면 어땠을까" 분기 탐색에 유용합니다. fork는 정확히 하나의 체크포인트를 복사하고 `resume()`은 그 체크포인트의 대기 노드부터 이어서 실행하므로, 대기 노드가 남아 있는 체크포인트(예: `interrupt_before`로 실행이 멈춘 지점)를 fork하세요. 완료된 스레드의 종료 체크포인트에는 실행할 것이 없습니다.
 
 ---
 

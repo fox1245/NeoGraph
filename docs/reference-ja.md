@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=07827de538dbbb663658766016cc6078442c533258c74cc23d11c6cdef6218d8 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -1383,6 +1383,7 @@ std::string fork(const std::string& source_thread_id,
 | `new_thread_id` | `std::string` | 新しいスレッド識別子 |
 | `checkpoint_id` | `std::string` | 任意。特定のチェックポイントから fork (デフォルト: 最新) |
 **戻り値:** 新しく fork した状態のチェックポイント ID。
+fork はちょうど 1 つのチェックポイントをコピーし、新しいスレッドでの `resume()` はそのチェックポイントの保留中ノードから続行します。完了済みスレッドの最新チェックポイントは終端 (保留ノードなし) のため、それを fork して `resume()` を呼んでも何も実行されません。分岐して再実行するには、保留ノードが残っている以前のチェックポイント (例: `interrupt_before` で実行が停止したもので、`get_state_history()` で取得できます) の `checkpoint_id` を渡し、fork に `update_state()` を適用してから `resume()` してください。`examples/08_state_management.cpp` がこの流れを示しています。
 ツールは `NodeContext::tools` または `EngineResources::tools` でコンパイル前に所有されます。
 コンパイル後の所有権移譲はありません。
 #### `set_checkpoint_store`

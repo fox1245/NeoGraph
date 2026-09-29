@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=07827de538dbbb663658766016cc6078442c533258c74cc23d11c6cdef6218d8 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1593,6 +1593,9 @@ std::string fork(const std::string& source_thread_id,
 | `checkpoint_id` | `std::string` | 可选：从特定检查点分叉（默认：最新） |
 
 **返回：** 新分叉状态的检查点 ID。
+
+fork 只复制一个检查点，新线程上的 `resume()` 从该检查点的待执行节点继续。已完成线程的最新检查点是终止状态（没有待执行节点），因此对其 fork 后调用 `resume()` 不会执行任何节点。若要分叉并重新执行，请传入仍有待执行节点的较早检查点的 `checkpoint_id`（例如 `interrupt_before` 暂停运行时的检查点，可通过 `get_state_history()` 找到），对 fork 应用 `update_state()`，然后 `resume()`。`examples/08_state_management.cpp` 演示了这一流程。
+
 
 工具在编译前由 `NodeContext::tools` 或 `EngineResources::tools` 持有；
 不再存在编译之后的所有权转移。

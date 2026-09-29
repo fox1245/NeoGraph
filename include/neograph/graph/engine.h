@@ -812,6 +812,12 @@ public:
      * Copies the specified checkpoint (or the latest) to a new thread ID,
      * enabling branching execution paths.
      *
+     * The fork is one checkpoint, and ``resume(new_thread_id)`` continues from
+     * that checkpoint's ``next_nodes``. The latest checkpoint of a completed
+     * thread is terminal, so forking it (``checkpoint_id`` empty) and resuming
+     * executes nothing. To branch and re-execute, pass the id of an earlier
+     * checkpoint that still has pending nodes (see ``get_state_history()``).
+     *
      * @param source_thread_id Thread to fork from.
      * @param new_thread_id Thread ID for the new fork.
      * @param checkpoint_id Specific checkpoint to fork from (empty = latest).

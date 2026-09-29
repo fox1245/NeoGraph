@@ -235,6 +235,10 @@ int main() {
         std::cout << "\n";
     }
 
-    std::cout << "\n✓ Plan & Executor completed with 1 expensive call saved.\n\n";
+    // Phase 1 ran all 5 sub-topics; phase 2 re-ran only the failed one, so the
+    // other 4 expensive calls were replayed from pending writes.
+    const int replayed = 5 - (g_exec_count.load() - 5);
+    std::cout << "\n✓ Plan & Executor completed with " << replayed
+              << " expensive calls saved.\n\n";
     return 0;
 }

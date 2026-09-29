@@ -1693,6 +1693,16 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
+A fork is a copy of exactly one checkpoint, and `resume()` on the new thread
+continues from that checkpoint's pending nodes. The latest checkpoint of a
+completed thread is terminal (no pending nodes), so forking it and calling
+`resume()` executes nothing. To branch and re-execute, pass the `checkpoint_id`
+of an earlier checkpoint that still has pending nodes (for example the one where
+an `interrupt_before` paused the run, found via `get_state_history()`), apply
+`update_state()` to the fork, then `resume()` it. `examples/08_state_management.cpp`
+shows this flow.
+
+
 Tool ownership is established before compilation via `NodeContext::tools` or
 `EngineResources::tools`; there is no post-compilation ownership transfer.
 

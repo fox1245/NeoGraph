@@ -144,6 +144,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Fork example executes on the forked thread; documented fork/resume contract.**
+  `examples/08_state_management.cpp` forked the terminal checkpoint of a
+  completed thread, so `resume()` ran no node and the "Tokyo" question stayed
+  unanswered. It now forks the checkpoint where the run paused before
+  `reviewer` and prints the real assistant answer. `GraphEngine::fork()` and
+  the reference/concepts docs now state that a fork copies one checkpoint and
+  `resume()` continues from its pending nodes (a terminal checkpoint has none).
+  `Example.StateManagement` and `ForkResumeSemantics.*` cover both cases.
+- **`example_evolution` file mode.** The demo `pnoop` node type is now
+  registered in every mode, so the documented `./example_evolution seed.json
+  task.json` works with the tracked `examples/54_evolution_seed.json` and
+  `54_evolution_task.json` (previously `compile failed: Unknown node type:
+  'pnoop'`). Seeds may use built-in types or `pnoop`; other custom node types
+  must be registered by the host program. `Example.Evolution.*` run both modes.
+- **`example_plan_executor` summary.** The closing line now reports the
+  computed number of replayed executor calls (4) instead of a fixed "1".
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and
