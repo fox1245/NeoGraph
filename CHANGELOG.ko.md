@@ -82,6 +82,20 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   `max_tokens` 절단을 출력 예산을 두 배로 늘려 재시도하며(최대 2회, 상한 16384 토큰),
   빈 최종 보고서는 오류, 일부만 잘린 보고서는 `Incomplete`로 표시됩니다.
   `DeepResearchTruncation.*`가 예산 단계를 검증합니다.
+- **내장 스키마가 호출별 추론 강도를 지원.** `openai_responses`는 `reasoning.effort`,
+  `openai`는 `reasoning_effort`를 `request.per_call_fields`에 선언하므로
+  `CompletionParams::extra_fields`로 `SchemaProvider`를 통해 추론 모델의 숨은 추론을
+  제한할 수 있습니다(이전에는 해당 키가 조용히 버려졌습니다).
+  `SchemaBuiltinReasoningKnob.*`가 검증합니다.
+- **느린 추론 모델 경로의 예제를 견고하게 개선.** `~deepseek/deepseek-v4-flash-latest`
+  경로는 가끔 끝없이 추론하여(관측: 추론 토큰 4096개, 130초 초과, 보이는 텍스트 없음)
+  여러 예제가 기본 60초 타임아웃에 걸리거나 빈 응답으로 중단되었습니다.
+  `examples/16_tree_of_thoughts.cpp`(타임아웃 300초, 8192토큰 상한과 재시도),
+  `examples/28_corrective_rag.cpp`(180초. 쿼리 재작성은 낮은 추론 강도, 512토큰이며
+  결과가 비면 원래 질문으로 대체), `the_beast_forge`, `server_multi`,
+  `server_live_llm`(더 긴 타임아웃. forge는 낮은 강도와 예산 2배 재시도 1회도 사용).
+  실제 측정: 기본 강도에서는 forge 작성 호출 5회 중 4회가 텍스트 없이 끝났고,
+  `reasoning_effort: low`에서는 8/8이 약 25초에 응답했습니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

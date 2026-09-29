@@ -69,7 +69,19 @@ static std::string ask(std::shared_ptr<neograph::Provider> prov,
     p.messages = convo;
     p.temperature = 0.2f;
     p.max_tokens = max_tokens;
-    return prov->complete(p).message.content;
+    // With default effort this route often spends the entire budget on hidden
+    // reasoning and returns no text (finish_reason=length: 4 of 5 live calls);
+    // low effort answered 8 of 8 in ~25 s.
+    p.extra_fields = json{{"reasoning_effort", "low"}};
+    auto reply = prov->complete(p);
+    // A reasoning model can spend the whole output budget on hidden reasoning
+    // and return no text (stop reason max_tokens). Retry once with twice the
+    // budget instead of handing the caller an empty reply.
+    if (reply.message.content.empty() && reply.stop_reason == "max_tokens") {
+        p.max_tokens = max_tokens * 2;
+        reply = prov->complete(p);
+    }
+    return reply.message.content;
 }
 
 static json extract_json(const std::string& t) {
@@ -102,6 +114,9 @@ int main(int argc, char** argv) {
     auto provider = neograph::llm::OpenAIProvider::create_shared(
         {.api_key = key, .base_url = "https://openrouter.ai/api",
          .default_model = "~deepseek/deepseek-v4-flash-latest",
+         // Reasoning-model calls on this route routinely exceed the 60 s default
+         // (a 4-8k-token authoring reply takes 2-4 minutes).
+         .timeout_seconds = 300,
          .provider_routing = {{"zdr", true}}});
 
     // Task deliberately needs a capability the stock server lacks (string

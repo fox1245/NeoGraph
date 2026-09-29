@@ -205,6 +205,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `max_tokens` truncation with a doubled output budget (two retries, capped at
   16384 tokens); an empty final report is an error and a partially truncated
   one is marked `Incomplete`. `DeepResearchTruncation.*` cover the budget ladder.
+- **Built-in schemas accept per-call reasoning effort.** `openai_responses`
+  declares `reasoning.effort` and `openai` declares `reasoning_effort` in
+  `request.per_call_fields`, so `CompletionParams::extra_fields` can cap a
+  reasoning model's hidden reasoning through `SchemaProvider` (the key used to
+  be silently dropped). `SchemaBuiltinReasoningKnob.*` cover it.
+- **Examples on slow reasoning-model routes are made robust.** The
+  `~deepseek/deepseek-v4-flash-latest` route occasionally reasons without bound
+  (observed: 4096 reasoning tokens, over 130 s, no visible text), which made
+  several examples time out at the 60 s default or abort on empty replies.
+  `examples/16_tree_of_thoughts.cpp` (300 s timeout, 8192-token bound with a
+  retry), `examples/28_corrective_rag.cpp` (180 s; the query rewrite uses low
+  reasoning effort, 512 tokens and falls back to the original question),
+  `the_beast_forge`, `server_multi` and `server_live_llm` (longer timeouts; forge
+  also uses low effort and one doubled-budget retry). Live evidence: with the
+  default effort 4 of 5 forge authoring calls returned no text; with
+  `reasoning_effort: low` 8 of 8 answered in about 25 s.
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and

@@ -44,9 +44,20 @@ static ChatCompletion ask(Provider& p,
     CompletionParams params;
     params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = temperature;
+    // This is a reasoning puzzle: the model legitimately reasons for
+    // thousands of tokens (a 2048-token cap, or effort=low, left every expand
+    // call without visible text), and occasionally reasons without bound
+    // (observed: >130 s, no visible text). Allow a generous budget but bound
+    // the worst case, and retry the rare call that spent it all thinking.
+    params.max_tokens = 8192;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user",   user});
-    return p.complete(params);
+    ChatCompletion reply = p.complete(params);
+    for (int retry = 0; retry < 2 && reply.message.content.empty() &&
+                        reply.stop_reason == "max_tokens"; ++retry) {
+        reply = p.complete(params);
+    }
+    return reply;
 }
 
 // Ask the LLM to propose N continuations of `current_state`.
@@ -143,6 +154,11 @@ int main() {
     cfg.base_url_override = "https://openrouter.ai/api";
     cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
+    // The default 60 s HTTP timeout is shorter than one reasoning-model
+    // Responses call here (observed 29-130 s), so the first expand would
+    // fail with "async_post: timeout". 300 s covers the 8192-token budget
+    // below at the slowest observed generation speed.
+    cfg.timeout_seconds = 300;
     auto provider = llm::SchemaProvider::create(cfg);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
