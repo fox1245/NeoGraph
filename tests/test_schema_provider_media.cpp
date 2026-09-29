@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <neograph/llm/schema_provider.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/async/run_sync.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -26,6 +27,8 @@ struct MediaServer {
     std::atomic<bool> unsafe_id{false};
     std::atomic<bool> missing_result{false};
     std::atomic<bool> http_error{false};
+    std::atomic<bool> omit_pending_status{false};
+    std::atomic<bool> wrong_status_type{false};
     std::atomic<bool> saw_veo_envelope{false};
     std::atomic<bool> saw_images_envelope{false};
     std::atomic<bool> saw_responses_envelope{false};
@@ -49,6 +52,10 @@ struct MediaServer {
                 !body.contains("messages") && !body.contains("temperature");
             if (submit_error) {
                 res.set_content(R"({"error":{"code":7,"message":"submit denied"}})", "application/json");
+            } else if (omit_pending_status) {
+                res.set_content(R"({"name":"models/veo-test/operations/op-7"})", "application/json");
+            } else if (wrong_status_type) {
+                res.set_content(R"({"name":"models/veo-test/operations/op-7","done":"false"})", "application/json");
             } else {
                 res.set_content(unsafe_id ? R"({"name":"../danger","done":false})" :
                     R"({"name":"models/veo-test/operations/op-7","done":false})", "application/json");
@@ -62,6 +69,10 @@ struct MediaServer {
                 res.set_content("upstream error", "text/plain");
             } else if (fail) {
                 res.set_content(R"({"done":true,"error":{"code":7,"message":"permission denied"}})", "application/json");
+            } else if (omit_pending_status && polls == 1) {
+                res.set_content(R"({"name":"models/veo-test/operations/op-7"})", "application/json");
+            } else if (wrong_status_type) {
+                res.set_content(R"({"done":null})", "application/json");
             } else if (never_done) {
                 res.set_content(R"({"done":false})", "application/json");
             } else if (missing_result) {
@@ -250,4 +261,91 @@ TEST(SchemaProviderMedia, GeminiInlineImageAndTextRemainVisible) {
     ASSERT_EQ(result.artifacts.size(), 1u);
     EXPECT_EQ(result.artifacts[0].mime_type, "image/jpeg");
     EXPECT_EQ(result.artifacts[0].base64_data, "SlBFRw==");
+}
+
+TEST(SchemaProviderMedia, VeoAbsentStatusRemainsPendingOnSubmitAndPoll) {
+    MediaServer server;
+    server.omit_pending_status = true;
+    auto p = provider(server, "veo");
+    const auto result = p->complete(prompt_params());
+    EXPECT_EQ(server.polls, 2);
+    ASSERT_EQ(result.artifacts.size(), 1u);
+    EXPECT_EQ(result.artifacts[0].file_id, "file-7");
+}
+
+TEST(SchemaProviderMedia, VeoRejectsWrongStatusTypesOnSubmitAndPoll) {
+    MediaServer server;
+    server.wrong_status_type = true;
+    auto p = provider(server, "veo");
+    EXPECT_THROW(p->complete(prompt_params()), llm::OperationError);
+    EXPECT_EQ(server.polls, 0);
+    server.omit_pending_status = true;
+    EXPECT_THROW(p->complete(prompt_params()), llm::OperationError);
+    EXPECT_EQ(server.polls, 2);
+}
+
+TEST(SchemaProviderMedia, ResponsesStreamPreservesTerminalArtifactsOnce) {
+    MediaServer server;
+    server.server.Post("/stream/v1/responses", [](const httplib::Request&, httplib::Response& res) {
+        const std::string events =
+            "event: response.output_item.added\ndata: {\"item\":{\"type\":\"message\",\"id\":\"msg-1\"}}\n\n"
+            "event: response.output_text.delta\ndata: {\"delta\":\"ready\"}\n\n"
+            "event: response.output_item.done\ndata: {\"item\":{\"type\":\"image_generation_call\",\"id\":\"img-7\",\"result\":\"UE5H\"}}\n\n"
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"image_generation_call\",\"id\":\"img-7\",\"result\":\"UE5H\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7}}}\n\n";
+        res.set_chunked_content_provider("text/event-stream",
+            [events](size_t, httplib::DataSink& sink) {
+                sink.write(events.data(), events.size());
+                sink.done();
+                return true;
+            });
+    });
+    llm::SchemaProvider::Config config;
+    config.schema_path = "openai_responses";
+    config.api_key = "test-key";
+    config.base_url_override = server.url() + "/stream";
+    config.timeout_seconds = 2;
+    config.allow_insecure_loopback = true;
+    auto p = llm::SchemaProvider::create(config);
+    CompletionParams params;
+    params.messages.push_back({"user", "Draw"});
+    std::string chunks;
+    const auto result = async::run_sync(p->invoke(params,
+        [&](const std::string& chunk) { chunks += chunk; }));
+    EXPECT_EQ(chunks, "ready");
+    EXPECT_EQ(result.message.content, chunks);
+    EXPECT_EQ(result.usage.total_tokens, 7);
+    ASSERT_EQ(result.artifacts.size(), 1u);
+    EXPECT_EQ(result.artifacts[0].base64_data, "UE5H");
+    EXPECT_EQ(result.artifacts[0].metadata, "img-7");
+}
+
+TEST(SchemaProviderMedia, GeminiStreamPreservesArtifactsFromEachPart) {
+    MediaServer server;
+    server.server.Post("/v1beta/models/veo-test:streamGenerateContent",
+        [](const httplib::Request&, httplib::Response& res) {
+            const std::string events =
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"first\"},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"UE5H\"}}]}}]}\n\n"
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"second\"},{\"inlineData\":{\"mimeType\":\"image/jpeg\",\"data\":\"SlBFRw==\"}},{\"functionCall\":{\"name\":\"save\",\"args\":{\"id\":2}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n\n";
+            res.set_chunked_content_provider("text/event-stream",
+                [events](size_t, httplib::DataSink& sink) {
+                    sink.write(events.data(), events.size());
+                    sink.done();
+                    return true;
+                });
+        });
+    auto p = provider(server, "gemini");
+    CompletionParams params;
+    params.messages.push_back({"user", "Draw"});
+    std::string chunks;
+    const auto result = p->complete_stream(params,
+        [&](const std::string& chunk) { chunks += chunk; });
+    EXPECT_EQ(chunks, "firstsecond");
+    EXPECT_EQ(result.message.content, chunks);
+    EXPECT_EQ(result.usage.total_tokens, 7);
+    ASSERT_EQ(result.message.tool_calls.size(), 1u);
+    EXPECT_EQ(result.message.tool_calls[0].name, "save");
+    ASSERT_EQ(result.artifacts.size(), 2u);
+    EXPECT_EQ(result.artifacts[0].base64_data, "UE5H");
+    EXPECT_EQ(result.artifacts[1].base64_data, "SlBFRw==");
+    EXPECT_EQ(result.artifacts[1].mime_type, "image/jpeg");
 }

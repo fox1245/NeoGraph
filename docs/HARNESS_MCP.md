@@ -308,35 +308,61 @@ stores, and never starts a server. HTTP entries, disabled entries, imported
 environment or file references, unsupported fields, shell executors, and
 recursive NeoGraph entries are rejected.
 
-Adoption requires explicit no-credential `argv` attestation, a separate launch
-identity approval, and a selected-tool/schema capability manifest. `pinned`
-records bind source content, canonical cwd, executable identity, argv, tool
-schemas, and policy version; `trusted_mutable` is an explicit, visibly labeled
-alternative and does not claim executable immutability. Status records contain
-only hashes and names, never command arguments, raw configuration, stderr, or
-credentials. Harness authority is the intersection of the worker declaration,
-adopted manifest, static Harness policy, and process boundary; MCP annotations
-cannot expand it, and unknown/unselected/list-changed tools are denied.
+Adoption requires explicit no-credential `argv` attestation, an independently
+approved launch record, and a selected-tool/schema capability manifest. `pinned`
+records bind source content, canonical cwd, executable/interpreter identity,
+argv, and any identifiable script/package. Unverifiable launch forms require an
+explicit `trusted_mutable` approval; they are never silently downgraded.
+Discovery does not approve the bytes it has just inspected.
+
+Each tool manifest must use `argument_policy: "exact-arguments-v1"` with
+`argument_predicate: {"allowed_arguments": [<complete approved argument objects>]}`.
+Comparison covers argument values, including resources, not just schema shape.
+Generic `read-only` or SQL/path labels are rejected: they do not prove that
+arbitrary input is safe. Harness authority remains the intersection of the worker
+declaration, adopted manifest, static policy, and process boundary. MCP annotations
+cannot expand it.
+
+Before constructing a host or provider worker, call
+`HardenedMcpClientRegistry::configure_harness(host_config, provider_config)`.
+This installs immutable namespaced tool metadata and approved executors together;
+`tool_catalog()` supplies the matching request metadata. Revocation and schema
+drift fence retained executors and explicitly shut down the shared client, even
+when another owner still holds a reference. Schema refresh and tool dispatch honor
+the caller's deadline and cancellation token.
 
 The adopted client uses an absolute executable, canonical cwd, replacement
-allowlist environment, bounded protocol frames, and process-group shutdown.
-Credential-bearing modes (`secret_injected`, `host_brokered`), remote HTTP MCP,
-and arbitrary shell/CLI execution remain unsupported.
-The installable example can wire this registry into the Harness capability
-executor without copying MCP configuration:
+allowlist environment, bounded protocol frames/stderr, and process-tree shutdown.
+Windows launches use an inherited-handle allowlist and a kill-on-close Job Object.
+Status records contain hashes and names, not argv, raw configuration, stderr, or
+credentials. Credential-bearing modes (`secret_injected`, `host_brokered`),
+remote HTTP MCP, and arbitrary shell/CLI execution remain unsupported.
+
+The installable example supports adoption with the provider worker executor only.
+It consumes a separately reviewed JSON approval, never auto-consent environment
+flags:
 
 ```bash
 export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
-export NEOGRAPH_HARNESS_MCP_SERVER=github
-export NEOGRAPH_HARNESS_MCP_TOOL=issue_read
-export NEOGRAPH_HARNESS_MCP_SCHEMA_HASH=sha256:...   # approved tools/list digest
-export NEOGRAPH_HARNESS_MCP_ARGV_ATTESTED=1
+export NEOGRAPH_HARNESS_MCP_APPROVAL="$(cat approved-mcp.json)"
 neograph-harness-mcp --executor provider
 ```
 
-Use `NEOGRAPH_HARNESS_MCP_TRUST=trusted_mutable` only for an explicit mutable
-approval. `--host-status` with the source configured prints discovery-only
-redacted records and never starts a downstream server.
+The approval object has `launch` and `tools` members matching `McpLaunchApproval`
+and `McpToolApproval`. `launch` contains `trust_mode`, the explicit
+`argv_no_credentials_attested` boolean, `source_path`, `source_content_hash`,
+`cwd`, `executable`, `executable_identity`, `argv_hash`, `interpreter_identity`,
+and `package_identity`. The host-side `make_mcp_launch_approval()` helper computes
+these identities for review. `tools` contains `server_name`, `launch_identity`
+(the approved launch's `executable_identity`), `selected_tools`, `schema_hashes`,
+`manifest`, and `policy_version`. Hash normalized
+`ToolDefinition::from_json(definition).to_json()` values with
+`mcp_tool_schema_hash()` when recording schema approval.
+
+An explicit source override must still name the documented user-global file;
+project paths cannot masquerade as global configuration. `--host-status` with
+the source configured prints discovery-only redacted records before credential
+checks and never starts a downstream server.
 
 Durable host-brokered calls require both record and checkpoint persistence.
 The example enables both with one explicit directory:
@@ -529,6 +555,15 @@ Security defaults are transport-level and do not couple authentication to
   graph runtime itself.
 - Request payload, HTTP worker, queue, session, and response-wait limits are
   bounded by `MCPHttpServerConfig`.
+
+`neograph::mcp::ScopedHarnessStore` maps public IDs and schema-owned record/journal
+references into a reversible tenant namespace; opaque request, result, and event
+payloads are not rewritten. File and SQLite stores accept these private IDs.
+Overlong File keys use fixed-length hash filenames without changing short-key
+paths. SQLite retention limits both counts and deletion candidates to the selected
+namespace within one transaction, preserving other tenants and protected source
+references. This storage boundary does not replace the authenticated scope or
+the application's provider/tool/quota policy.
 
 For any non-loopback deployment, terminate TLS at a trusted reverse proxy and
 use its OAuth/OIDC validation or an equivalent `bearer_authorizer`. Forward the

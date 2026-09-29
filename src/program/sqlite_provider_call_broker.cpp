@@ -74,7 +74,14 @@ std::string hash(std::string_view purpose, const json& value) {
 json completion_json(const ChatCompletion& completion) {
     json message;
     to_json(message, completion.message);
-    return {{"message", std::move(message)}, {"stop_reason", completion.stop_reason},
+    json artifacts = json::array();
+    for (const auto& artifact : completion.artifacts) {
+        artifacts.push_back({{"kind", artifact.kind}, {"mime_type", artifact.mime_type},
+                             {"base64_data", artifact.base64_data}, {"url", artifact.url},
+                             {"file_id", artifact.file_id}, {"metadata", artifact.metadata}});
+    }
+    return {{"message", std::move(message)}, {"artifacts", std::move(artifacts)},
+            {"stop_reason", completion.stop_reason},
             {"usage", {{"prompt_tokens", completion.usage.prompt_tokens},
                        {"completion_tokens", completion.usage.completion_tokens},
                        {"total_tokens", completion.usage.total_tokens},
@@ -83,8 +90,25 @@ json completion_json(const ChatCompletion& completion) {
 }
 ChatCompletion parse_completion(std::string_view canonical) {
     auto value = detail::parse_json_strict(canonical);
+    // Legacy receipts omitted media entirely, so absence cannot prove an empty
+    // artifact result. Fail closed rather than inventing a successful replay.
+    if (!value.contains("artifacts"))
+        throw std::runtime_error(
+            "Legacy Program provider completion lacks artifact evidence; replay unavailable");
+    if (!value.at("artifacts").is_array())
+        throw std::runtime_error("Corrupt Program provider completion artifacts");
     ChatCompletion completion;
     from_json(value.at("message"), completion.message);
+    completion.artifacts.reserve(value.at("artifacts").size());
+    for (const auto& artifact : value.at("artifacts")) {
+        completion.artifacts.push_back({
+            artifact.at("kind").get<std::string>(),
+            artifact.at("mime_type").get<std::string>(),
+            artifact.at("base64_data").get<std::string>(),
+            artifact.at("url").get<std::string>(),
+            artifact.at("file_id").get<std::string>(),
+            artifact.at("metadata")});
+    }
     completion.stop_reason = value.at("stop_reason").get<std::string>();
     const auto& usage = value.at("usage");
     completion.usage.prompt_tokens = usage.at("prompt_tokens").get<int>();
@@ -134,7 +158,9 @@ void validate_context(const ProgramCoreProviderCallContext& context) {
 
 struct SQLiteProgramProviderCallJournal::Impl {
     explicit Impl(const std::string& path) {
-        if (path.empty()) throw std::invalid_argument("Program provider journal needs a database path");
+        if (path.empty() || path == ":memory:" || path.starts_with("file:"))
+            throw std::invalid_argument(
+                "Program provider journal requires a durable filesystem path");
         if (sqlite3_open_v2(path.c_str(), &db,
                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
                             nullptr) != SQLITE_OK) {

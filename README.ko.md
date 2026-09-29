@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=6ba467cfa403c387e0a433c35a7d0002d1579850b8820d50544b399c8cadb239 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=b55194bbadc8c3c1d7ad7d1de6c96629aaeb960f4cc4b5c5f66d33ac710ec351 -->
 <p align="center">
 <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -68,6 +68,7 @@ cmake --build build --parallel
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON
@@ -76,6 +77,37 @@ cmake --build build-program --parallel
 ```
 
 [examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp) 및 [QuickJS 작성 경계](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)를 참조하십시오.
+
+### 성능 빌드
+
+Ninja와 Unix Makefiles 같은 단일 구성 생성기는 `CMAKE_BUILD_TYPE`이 비어
+있으면 최적화 수준을 선택하지 않습니다. NeoGraph는 이 구성을 경고합니다.
+GCC/Clang에서는 QuickJS와 NeoGraph가 Release의 `-O3 -DNDEBUG` 플래그 없이
+컴파일되기 때문입니다.
+
+GCC 또는 Clang에서 로컬 호스트 전용 성능 빌드를 수행하려면:
+
+```bash
+cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
+cmake --build build-performance --parallel
+```
+
+`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON`은 최적화 구성에
+`-march=native -mtune=native`를 추가합니다. 로컬 처리량은 좋아지지만
+아티팩트가 비이식적이므로 배포용 바이너리에서는 끄십시오. Release 하드닝은
+기본으로 활성화됩니다.
+
+GCC/Clang에서 최종 Release 프로파일은 QuickJS에 C11, NeoGraph에 C++20,
+`-O3 -DNDEBUG`를 사용합니다. 기본 하드닝은
+`-D_GLIBCXX_ASSERTIONS`, `-fstack-protector-strong`,
+`-fcf-protection=full`, Linux의 `-D_FORTIFY_SOURCE=2` 및
+RELRO/NOW 링크를 포함합니다. LTO와 호스트 전용 튜닝은 기본으로 켜지지
+않습니다.
 
 <a id="two-runtime-layers"></a>
 ## 두 가지 런타임 계층
@@ -178,6 +210,8 @@ cmake -S . -B build-core \
 |---|---|
 | `NEOGRAPH_BUILD_PROGRAM` | 내구성 있는 Program 값, 카탈로그, 런타임, 계보 및 마이그레이션 |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program 작성 및 생성기 명령 |
+| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 최적화 구성에서 비이식적인 호스트 전용 명령어 튜닝을 선택적으로 활성화 |
+| `NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG` | 단일 구성 빌드에서 `CMAKE_BUILD_TYPE`이 없어 Release 최적화 플래그를 놓칠 때 경고 |
 | `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python 확장 |
 | `NEOGRAPH_BUILD_SQLITE` | SQLite 체크포인트, 컨텍스트, Hook 및 공급자 영수증 저장소 |
 | `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL 체크포인트 및 Program 영속성 구성 요소 |

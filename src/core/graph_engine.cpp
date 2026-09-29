@@ -270,10 +270,11 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->name_              = std::move(cg.name);
     engine->channel_defs_      = std::move(cg.channel_defs);
     engine->nodes_             = std::move(cg.nodes);
-    engine->has_per_invocation_subgraph_ = std::any_of(
+    engine->has_stateful_subgraph_ = std::any_of(
         engine->nodes_.begin(), engine->nodes_.end(), [](const auto& entry) {
             const auto* child = dynamic_cast<const SubgraphNode*>(entry.second.get());
-            return child && child->persistence() == SubgraphPersistence::PerInvocation;
+            return child && (child->persistence() == SubgraphPersistence::PerInvocation ||
+                             child->persistence() == SubgraphPersistence::PerThread);
         });
     engine->edges_             = std::move(cg.edges);
     engine->conditional_edges_ = std::move(cg.conditional_edges);
@@ -646,7 +647,11 @@ void GraphEngine::update_state_writes(
     new_cp.id              = Checkpoint::generate_id();
     new_cp.thread_id       = thread_id;
     new_cp.channel_values  = state.serialize();
-    if (!ephemeral_guard.is_null())
+    new_cp.metadata        = cp.metadata;
+    new_cp.metadata["_neograph"]["admin_resume_phase"] = to_string(
+        as_node.empty() ? detail::checkpoint_resume_phase(cp) : CheckpointPhase::Updated);
+    if (!ephemeral_guard.is_null() ||
+        (new_cp.metadata.is_object() && new_cp.metadata.contains("_neograph_ephemeral_guard")))
         new_cp.metadata["_neograph_ephemeral_guard"] = ephemeral_guard;
     new_cp.parent_id       = cp.id;
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
@@ -1249,11 +1254,19 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
         resources.tool_effect_grant = parent_runtime->tool_effect_grant;
     }
     if (persistence == SubgraphPersistence::Stateless) {
+        if (!interrupt_before_.empty() || !interrupt_after_.empty())
+            throw std::runtime_error("Stateless subgraph does not support static interrupts");
         if (parent_runtime && parent_runtime->is_resume)
             throw std::runtime_error("Stateless subgraph cannot resume a parent invocation");
         resources.checkpoint_store = std::shared_ptr<CheckpointStore>{};
     }
     auto journal = std::make_shared<detail::SubgraphWriteJournal>();
+    if (persistence == SubgraphPersistence::PerThread && parent_runtime) {
+        if (parent_runtime->graph_invocation_id.empty())
+            throw std::runtime_error("PerThread subgraph requires a parent invocation identity");
+        journal->parent_call_id = parent_runtime->graph_invocation_id + "/" +
+            std::to_string(parent.step) + "/" + parent_runtime->invocation_id;
+    }
     resources.subgraph_write_journal = journal;
 
     if (parent_runtime && parent_runtime->is_resume &&
@@ -1261,15 +1274,29 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
         auto checkpoint = co_await (*resources.checkpoint_store)->load_latest_async(
             config.thread_id);
         if (checkpoint) {
-            detail::restore_subgraph_write_journal(*checkpoint, journal);
-            const json resume_value = parent.resume_value
-                ? *parent.resume_value
-                : json();
-            auto result = co_await resume_async_with_runtime(
-                std::move(config), resume_value, std::move(cb),
-                std::move(metadata), std::move(resources));
-            co_return SubgraphRunResult{
-                std::move(result), std::move(journal->writes)};
+            bool same_call = true;
+            if (persistence == SubgraphPersistence::PerThread) {
+                const auto& stored = checkpoint->metadata;
+                if (!stored.is_object() || !stored.contains("_neograph") ||
+                    !stored["_neograph"].is_object() ||
+                    !stored["_neograph"].contains("subgraph_parent_call_id") ||
+                    !stored["_neograph"]["subgraph_parent_call_id"].is_string() ||
+                    stored["_neograph"]["subgraph_parent_call_id"] == "")
+                    throw std::runtime_error(
+                        "Cannot resume PerThread subgraph without persisted parent call identity");
+                same_call = stored["_neograph"]["subgraph_parent_call_id"] == journal->parent_call_id;
+            }
+            if (same_call) {
+                detail::restore_subgraph_write_journal(*checkpoint, journal);
+                const json resume_value = parent.resume_value
+                    ? *parent.resume_value
+                    : json();
+                auto result = co_await resume_async_with_runtime(
+                    std::move(config), resume_value, std::move(cb),
+                    std::move(metadata), std::move(resources));
+                co_return SubgraphRunResult{
+                    std::move(result), std::move(journal->writes)};
+            }
         }
     }
 
@@ -1396,7 +1423,7 @@ GraphEngine::execute_graph_async(
     ctx.tool_execution_identity.thread_id = config.thread_id;
 
     auto runtime = std::make_shared<detail::RunContextRuntime>();
-    if (has_per_invocation_subgraph_) {
+    if (has_stateful_subgraph_) {
         if (is_resume) {
             const auto& stored = resume_context->metadata;
             if (!stored.is_object() || !stored.contains("_neograph") ||
@@ -1405,7 +1432,7 @@ GraphEngine::execute_graph_async(
                 !stored["_neograph"]["subgraph_invocation_id"].is_string() ||
                 stored["_neograph"]["subgraph_invocation_id"].get<std::string>().empty())
                 throw std::runtime_error(
-                    "Cannot resume PerInvocation subgraph without persisted invocation identity");
+                    "Cannot resume stateful subgraph without persisted invocation identity");
             runtime->graph_invocation_id =
                 stored["_neograph"]["subgraph_invocation_id"].get<std::string>();
         } else {
@@ -1636,7 +1663,7 @@ GraphEngine::execute_graph_async(
             result.execution_trace = std::move(trace);
 
             if (coord.enabled()) {
-                auto cp_opt = coord.store()->load_latest(coord.thread_id());
+                auto cp_opt = co_await coord.store()->load_latest_async(coord.thread_id());
                 if (cp_opt) result.checkpoint_id = cp_opt->id;
             }
             co_return result;

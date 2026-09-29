@@ -88,12 +88,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shutdown, HTTP status, and invalid wire responses; JSON-RPC server errors
   continue to expose `MCPError` codes. stdio sync and async calls now share
   its session-owned I/O path and support concurrent calls after cancellation.
-- **Local authenticated Harness workers.** The opt-in installable stdio MCP host
-  can preflight and delegate read-only worker calls to installed OpenCode,
-  Claude Code, or Codex CLIs using their own saved login. The Provider path
-  remains explicit; no host credential files or OAuth tokens enter NeoGraph.
-  Subprocess trees, output/events, time and usage are bounded and host errors
-  remain distinct from schema failures.
 - **Experimental owner-scoped active Program starts.** C++ `ProgramRuntime`
   and Python `LocalProgramHost` can select an admitted immutable activation
   once for a new run, returning the observed activation alongside a handle
@@ -122,6 +116,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Shared Graph host conformance.** A2A, ACP, and opt-in gRPC now exercise
   the same real-engine invocation, cancellation, admission, terminal-result,
   and nested Store/ToolGate contract. The gRPC suite has a dedicated CI gate.
+- **Performance build configuration.** Added an opt-in
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` switch for local GCC/Clang builds,
+  plus a warning when a single-config generator omits `CMAKE_BUILD_TYPE` and
+  would silently miss Release optimization flags. Release hardening remains
+  enabled by default.
 - **Strict authentication for Program-backed A2A services.** Program A2A
   constructors now accept an opt-in `require_authenticated_requests` flag that
   applies the configured authenticator to ordinary message, stream, task-get,
@@ -145,6 +144,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Subgraph recovery boundaries.** Administrative updates preserve interrupted
+  continuation identity; retained children distinguish a new parent call from
+  a same-call resume. Stateless static interrupts reject before effects, and
+  interrupt recovery uses asynchronous checkpoint loading.
+- **Schema callback and streamed-media parity.** Selected custom primitives
+  remain selected with callbacks; Responses/Gemini streams retain artifacts.
+  Veo accepts omitted pending status without accepting wrong status types.
+- **MCP and host-process isolation.** Adopted tools require independent pinned
+  approvals and exact argument values; revocation/schema drift drain retained
+  clients. Hardened subprocesses enforce startup/stderr bounds, handle/FD
+  isolation and descendant cleanup; host output draining is bounded.
+- **Tenant-safe durable Harness records.** Scoped IDs and references round-trip
+  through File/SQLite stores, long File keys use bounded hash filenames, and
+  SQLite retention cannot delete another namespace's records or journals.
+- **Runnable Harness CLI.** Startup policy uses the supported Program child-depth
+  ceiling; a real stdio compile/start/get regression covers the shipped binary.
+- **Cold active Program starts.** A newly created catalog now materializes
+  the already selected persisted version before run pinning, without rereading
+  the activation pointer.
+- **Durable generated-artifact replay.** Provider receipts retain ordered
+  artifact payloads and nested metadata across reopen and reconciliation.
+  Volatile SQLite paths and legacy receipts missing artifact evidence reject
+  explicitly instead of inventing empty output or redispatching.
 - **Ephemeral checkpoint resume safety.** Checkpoints with ephemeral channels
   now record a lifecycle guard in metadata. Resuming a written ephemeral
   channel, changing its declaration, or loading an older checkpoint without
@@ -160,6 +182,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   persistent namespace collision rejection preserve cancellation, Store,
   ToolGate, and ordered output-delta behavior. SQLite/PostgreSQL reopen
   coverage is included where the backend is enabled.
+- **Promo dependency security.** Updated the transitive `js-yaml` dependency
+  from 4.3.1 to 4.3.2 in `docs/promo/package-lock.json` to fix the empty-merge
+  CPU denial of service vulnerability (CVE-2026-84375 / GHSA-2883-xcg3-v3hh).
+- **TSan CI RSS gate.** Skip the native-only RSS bound under GCC and Clang
+  ThreadSanitizer, whose shadow memory and runtime bookkeeping can exceed
+  the native threshold. Keep the 200-run concurrent stress test enabled under
+  sanitizers and the unchanged 10 MiB RSS bound in non-sanitizer builds.
 
 ## [0.12.1] - 2026-08-23
 

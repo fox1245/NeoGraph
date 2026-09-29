@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/neograph.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -191,6 +192,31 @@ public:
     }
     std::optional<Checkpoint> saved;
     std::thread::id last_thread;
+};
+
+class InterruptProgressStore final : public InMemoryCheckpointStore {
+public:
+    asio::io_context* io = nullptr;
+    std::atomic<bool> progress{false};
+    bool progressed_during_load = false;
+    std::optional<Checkpoint> load_latest(const std::string& thread) override {
+        asio::post(*io, [this] { progress.store(true, std::memory_order_release); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!progress.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        progressed_during_load = progress.load(std::memory_order_acquire);
+        return InMemoryCheckpointStore::load_latest(thread);
+    }
+};
+
+class InterruptProgressNode final : public GraphNode {
+public:
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        throw NodeInterrupt("approval");
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return "work"; }
 };
 
 } // namespace
@@ -417,4 +443,35 @@ TEST(CheckpointCapabilities, NativeAsyncBackendProvidesExplicitSyncFacade) {
 
 TEST(CheckpointCapabilities, AsyncAdapterRejectsNullBackend) {
     EXPECT_THROW((void)adapt_async_checkpoint_store(nullptr), std::invalid_argument);
+}
+
+TEST(CheckpointAsyncDefault, NodeInterruptLatestLoadAllowsExecutorProgress) {
+    using neograph::json;
+    NodeFactory::instance().register_type("interrupt_progress_regression",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<InterruptProgressNode>();
+        });
+    auto store = std::make_shared<InterruptProgressStore>();
+    asio::io_context io;
+    store->io = &io;
+    json definition = {
+        {"name", "interrupt_progress"},
+        {"channels", {{"value", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"work", {{"type", "interrupt_progress_regression"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "work"}},
+                               {{"from", "work"}, {"to", "__end__"}}})}};
+    auto engine = GraphEngine::compile(definition, NodeContext{}, store);
+    RunConfig config;
+    config.thread_id = "interrupt-progress";
+    std::optional<RunResult> result;
+    std::exception_ptr error;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        result = co_await engine->run_async(config);
+    }, [&](std::exception_ptr caught) { error = caught; });
+    io.run();
+    if (error) std::rethrow_exception(error);
+    ASSERT_TRUE(result);
+    EXPECT_TRUE(result->interrupted);
+    EXPECT_FALSE(result->checkpoint_id.empty());
+    EXPECT_TRUE(store->progressed_during_load);
 }

@@ -25,6 +25,8 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <array>
 #include <atomic>
@@ -736,7 +738,7 @@ TEST(MCPClientAsync, ConcurrentHttpRequestsReturnTheirOwnCorrelationIds) {
     }
 }
 
-TEST(MCPClientAsync, DiscoveredToolRetainsHttpSessionAfterClientShutdown) {
+TEST(MCPClientAsync, DiscoveredToolRetainsHttpSessionAfterClientDestruction) {
     std::atomic<int> tool_requests{0};
     httplib::Server svr;
     svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
@@ -792,4 +794,61 @@ TEST(MCPClientAsync, InvalidToolPageIsAProtocolFailure) {
     } catch (const mcp::MCPTransportError& e) {
         EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
     }
+}
+
+TEST(MCPClientAsync, ShutdownDrainsHttpFromTheCallerExecutor) {
+    httplib::Server svr;
+    std::atomic<bool> entered{false};
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        entered.store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        auto request = json::parse(req.body);
+        res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                             {"result", {{"completed", true}}}}.dump(), "application/json");
+    });
+    ServerGuard server(svr);
+    ASSERT_TRUE(svr.is_running());
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+    asio::io_context io;
+    std::optional<mcp::MCPFailure> failure;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try { co_await client.rpc_call_async("blocked"); }
+        catch (const mcp::MCPTransportError& error) { failure = error.failure(); }
+    }, asio::detached);
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!entered.load() && std::chrono::steady_clock::now() < deadline) {
+            asio::steady_timer timer(io);
+            timer.expires_after(std::chrono::milliseconds(2));
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        EXPECT_TRUE(entered.load());
+        const auto started = std::chrono::steady_clock::now();
+        client.shutdown();
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(300));
+    }, asio::detached);
+    io.run();
+    EXPECT_EQ(failure, mcp::MCPFailure::shutdown);
+    EXPECT_THROW(async::run_sync(client.rpc_call_async("after-shutdown")),
+                 mcp::MCPTransportError);
+}
+
+TEST(MCPClientAsync, ShutdownFromTransportCallbackDoesNotSelfJoinOrSend) {
+    MockMcpServer server;
+    mcp::MCPClient* current = nullptr;
+    mcp::MCPClientConfig config;
+    config.header_provider = [&] {
+        current->shutdown();
+        return mcp::HeaderList{};
+    };
+    mcp::MCPClient client(server.url(), std::move(config));
+    current = &client;
+    try {
+        async::run_sync(client.rpc_call_async("must-not-send"));
+        FAIL() << "transport callback shutdown did not close admission";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+    client.shutdown();
+    EXPECT_EQ(server.request_count.load(), 0);
 }

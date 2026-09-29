@@ -4964,13 +4964,19 @@ ProgramActiveRun ProgramRuntime::start_active(
                                  "No admitted Program activation exists for this owner");
     }
     const auto& activation = binding->activation;
-    const auto& resolved = binding->version;
-    invocation.program_version_id = resolved.id();
+    // Materialize the version from the observed activation, not a newer active
+    // pointer that may have won a concurrent activation CAS.
+    const auto resolved = impl_->config.catalog->resolve_version(
+        invocation.owner_scope, binding->version.id());
+    if (!resolved) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    invocation.program_version_id = resolved->id();
     invocation.selected_activation = activation;
     invocation.validate();
     const auto owner_scope = invocation.owner_scope;
     auto handle = start_resolved(
-        owner_scope, resolved,
+        owner_scope, *resolved,
         runtime_projection(std::move(invocation), std::move(events)), true);
     return ProgramActiveRun{activation, std::move(handle)};
 }

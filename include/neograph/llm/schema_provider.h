@@ -177,11 +177,14 @@ public:
     /// Streaming completion (HTTP/SSE httplib path; WS path dispatched
     /// to `complete_stream_ws_responses` when `use_websocket=true` and
     /// the schema is `openai-responses`).
+    /// Custom transport/execution primitives and long-running operations keep
+    /// their single-response contract: completion text is delivered once after
+    /// success, without substituting a built-in streaming network request.
     ///
-    /// **Locking contract for `on_chunk`**: the callback is invoked
-    /// from inside httplib's content callback (HTTP/SSE) or the
-    /// WebSocket recv loop (WS), in BOTH cases with `schema_mutex_`
-    /// NOT held — the lock is taken only during the per-call body-
+    /// **Locking contract for `on_chunk`**: callbacks run outside
+    /// `schema_mutex_`, including buffered extension completions, httplib's
+    /// content callback (HTTP/SSE), and the WebSocket receive loop.
+    /// The lock is taken only during the per-call body-
     /// build + per-call response-parse phases at the start of the
     /// request, then released before the network roundtrip begins.
     /// Parse state passed through `on_chunk` (accumulated `full_content`,
@@ -458,6 +461,7 @@ public:
         std::string id_path, done_path, error_path, result_path;
         std::string poll_endpoint, poll_method = "GET", finalize_endpoint;
         int poll_interval_ms = 1000;
+        bool absent_status_pending = false;
     } operation_;
 
     // --- Internal methods ---
@@ -478,6 +482,7 @@ public:
             int index = -1;
         };
         ChatCompletion completion;
+        SchemaPrimitiveRequestContext primitive_context;
         std::string full_content;
         std::map<int, ToolCall> tc_map;
         std::vector<EventBlock> event_blocks;

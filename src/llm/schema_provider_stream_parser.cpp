@@ -9,6 +9,8 @@ namespace neograph::llm {
 bool SchemaProvider::consume_stream_line(StreamParseState& state,
                                          const std::string& line,
                                          const StreamCallback& on_chunk) const {
+    if (state.terminal_event_seen) return false;
+    std::optional<json> artifact_response;
     auto& completion = state.completion;
     auto& full_content = state.full_content;
     auto& tc_map = state.tc_map;
@@ -79,6 +81,9 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                                 }
                                 tc_map[gemini_tc_index++] = call;
                             }
+                        }
+                        if (artifact_parser_factory_ || !resp_.artifacts.empty()) {
+                            artifact_response = j;
                         }
                     }
                 } else {
@@ -287,20 +292,36 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         j["response"].is_object()) {
                         completion.usage =
                             parse_usage(j["response"]);
+                        if (artifact_parser_factory_ || !resp_.artifacts.empty()) {
+                            artifact_response = j["response"];
+                        }
                     }
                     terminal_event_seen = true;
                 }
             } catch (...) {
                 // Skip malformed
             }
-            if (terminal_event_seen) return false;
         }
     } while (false);
-    return true;
+    // Extension parsers execute outside malformed-wire tolerance: an extension
+    // failure must propagate, not silently turn media into an empty completion.
+    if (artifact_response) {
+        auto artifacts = parse_artifacts(*artifact_response, &state.primitive_context);
+        if (completion.artifacts.empty()) {
+            completion.artifacts = std::move(artifacts);
+        } else {
+            completion.artifacts.reserve(completion.artifacts.size() + artifacts.size());
+            for (auto& artifact : artifacts) {
+                completion.artifacts.push_back(std::move(artifact));
+            }
+        }
+    }
+    return !terminal_event_seen;
 }
 
 void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
                                       const StreamCallback& on_chunk) const {
+    if (state.terminal_event_seen) return;
     auto& completion = state.completion;
     auto& full_content = state.full_content;
     auto& tc_map = state.tc_map;
@@ -408,6 +429,10 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
             // HTTP path so we reuse the usage extractor.
             if (j.contains("response") && j["response"].is_object()) {
                 read_usage_into(j["response"]);
+                if (artifact_parser_factory_ || !resp_.artifacts.empty()) {
+                    completion.artifacts = parse_artifacts(
+                        j["response"], &state.primitive_context);
+                }
             }
             state.terminal_event_seen = true;
         }

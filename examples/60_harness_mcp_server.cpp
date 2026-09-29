@@ -4,6 +4,7 @@
 #include <neograph/mcp/harness_host_agent.h>
 #include <neograph/mcp/harness_mcp_backend.h>
 #include <neograph/mcp/server.h>
+#include <neograph/program/admission.h>
 #ifdef NEOGRAPH_HARNESS_HAVE_HTTP
 #include <neograph/mcp/http_server.h>
 
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -77,18 +79,63 @@ public:
     std::string get_name() const override { return "harness-smoke-review"; }
 };
 
+neograph::mcp::McpAdoptionRequest load_adoption_approval(
+    const std::filesystem::path& path, const neograph::mcp::McpDiscoveryReport& discovered) {
+    if (path.empty() || std::filesystem::file_size(path) > 1024 * 1024)
+        throw std::invalid_argument("MCP requires a bounded independent approval file");
+    std::ifstream input(path);
+    const auto document = neograph::json::parse(input);
+    const auto& launch = document.at("launch");
+    const auto& tools = document.at("tools");
+    neograph::mcp::McpAdoptionRequest request;
+    const auto server = tools.at("server_name").get<std::string>();
+    const auto found = std::find_if(discovered.servers.begin(), discovered.servers.end(),
+        [&](const auto& value) { return value.server_name == server; });
+    if (found == discovered.servers.end()) throw std::invalid_argument("approved MCP server was not discovered");
+    request.server = *found;
+    const auto mode = launch.at("trust_mode").get<std::string>();
+    if (mode != "pinned" && mode != "trusted_mutable") throw std::invalid_argument("unknown MCP trust mode");
+    request.launch.trust_mode = mode == "pinned" ? neograph::mcp::McpTrustMode::pinned
+                                                : neograph::mcp::McpTrustMode::trusted_mutable;
+    request.launch.argv_no_credentials_attested = launch.at("argv_no_credentials_attested").get<bool>();
+    request.launch.source_path = launch.at("source_path").get<std::string>();
+    request.launch.source_content_hash = launch.at("source_content_hash").get<std::string>();
+    request.launch.cwd = launch.at("cwd").get<std::string>();
+    request.launch.executable = launch.at("executable").get<std::string>();
+    request.launch.executable_identity = launch.at("executable_identity").get<std::string>();
+    request.launch.argv_hash = launch.at("argv_hash").get<std::string>();
+    request.launch.interpreter_identity = launch.at("interpreter_identity").get<std::string>();
+    request.launch.package_identity = launch.at("package_identity").get<std::string>();
+    request.tools.server_name = server;
+    request.tools.launch_identity = tools.at("launch_identity").get<std::string>();
+    request.tools.policy_version = tools.at("policy_version").get<std::string>();
+    request.tools.selected_tools = tools.at("selected_tools").get<std::vector<std::string>>();
+    for (auto it = tools.at("schema_hashes").begin(); it != tools.at("schema_hashes").end(); ++it)
+        request.tools.schema_hashes.emplace(it.key(), it.value().get<std::string>());
+    for (const auto& value : tools.at("manifest")) {
+        neograph::mcp::McpCapabilityManifest manifest;
+        manifest.tool = value.at("tool").get<std::string>();
+        manifest.auto_execute = value.at("auto_execute").get<bool>();
+        for (const auto& effect : value.at("effects")) manifest.effects.insert(effect.get<std::string>());
+        manifest.argument_policy = value.at("argument_policy").get<std::string>();
+        manifest.argument_predicate = value.at("argument_predicate");
+        request.tools.manifest.push_back(std::move(manifest));
+    }
+    return request;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (std::getenv("NEOGRAPH_HARNESS_HOST_DEPTH")) {
+        std::cerr << "Nested NeoGraph Harness execution is disabled\n";
+        return 2;
+    }
     const bool smoke_mode = environment("NEOGRAPH_HARNESS_SMOKE") == "1";
     auto executor = environment("NEOGRAPH_HARNESS_EXECUTOR");
     auto host_model = environment("NEOGRAPH_HARNESS_HOST_MODEL");
     auto mcp_source = environment("NEOGRAPH_HARNESS_MCP_SOURCE");
-    auto mcp_server = environment("NEOGRAPH_HARNESS_MCP_SERVER");
-    auto mcp_tool = environment("NEOGRAPH_HARNESS_MCP_TOOL");
-    auto mcp_schema = environment("NEOGRAPH_HARNESS_MCP_SCHEMA_HASH");
-    const auto mcp_attested = environment("NEOGRAPH_HARNESS_MCP_ARGV_ATTESTED") == "1";
-    const auto mcp_trust = environment("NEOGRAPH_HARNESS_MCP_TRUST", "pinned");
+    const auto mcp_approval = environment("NEOGRAPH_HARNESS_MCP_APPROVAL");
     bool status_only = false;
     for (int index = 1; index < argc; ++index) {
         const std::string flag = argv[index];
@@ -110,6 +157,25 @@ int main(int argc, char** argv) {
     if (host_mode && environment("NEOGRAPH_HARNESS_TRANSPORT") == "http") {
         std::cerr << "Host CLI delegation is local stdio only; HTTP needs explicit provider credentials\n";
         return 2;
+    }
+    neograph::mcp::McpDiscoveryReport mcp_discovery;
+    if (!mcp_source.empty() || !mcp_approval.empty()) {
+        if (environment("NEOGRAPH_HARNESS_TRANSPORT") == "http") {
+            std::cerr << "Global MCP adoption is single-user local stdio only\n";
+            return 2;
+        }
+        neograph::mcp::OpenCodeGlobalMcpConfig discovery;
+        discovery.source_path = mcp_source;
+        mcp_discovery = neograph::mcp::OpenCodeGlobalMcpDiscovery::discover(discovery);
+        if (status_only) {
+            for (const auto& server : mcp_discovery.servers)
+                std::cerr << "MCP discovered (not started): " << server.server_name
+                          << " source=" << server.source_id
+                          << " config_hash=" << server.redacted_config_hash << '\n';
+            for (const auto& rejection : mcp_discovery.rejected)
+                std::cerr << "MCP rejected: " << rejection.server_name
+                          << " reason=" << rejection.reason << '\n';
+        }
     }
     neograph::mcp::HostAgentExecutorConfig agent_config;
     if (host_mode) {
@@ -159,51 +225,12 @@ int main(int argc, char** argv) {
 
     neograph::mcp::HarnessServiceConfig harness_config;
     neograph::mcp::HarnessProgramHostConfig host_config;
-    if (host_mode) {
-        host_config.worker_executor = neograph::mcp::make_host_agent_executor(agent_config);
-    } else {
-        neograph::mcp::HarnessProviderExecutorConfig executor_config;
-        executor_config.provider = provider;
-        executor_config.model = provider_config.default_model;
-        host_config.worker_executor =
-            neograph::mcp::make_provider_harness_executor(std::move(executor_config));
-    }
     std::shared_ptr<neograph::mcp::HardenedMcpClientRegistry> adopted_mcp;
-    if (!mcp_source.empty()) {
-        neograph::mcp::OpenCodeGlobalMcpConfig discovery_config;
-        discovery_config.source_path = mcp_source;
-        const auto report = neograph::mcp::OpenCodeGlobalMcpDiscovery::discover(discovery_config);
-        if (status_only) {
-            for (const auto& server : report.servers)
-                std::cerr << "MCP discovered (not started): " << server.server_name
-                          << " source=" << server.source_id
-                          << " config_hash=" << server.redacted_config_hash << '\n';
-            for (const auto& rejection : report.rejected)
-                std::cerr << "MCP rejected: " << rejection.server_name
-                          << " reason=" << rejection.reason << '\n';
-            return 0;
-        }
-        if (mcp_server.empty() || mcp_tool.empty() || mcp_schema.empty() || !mcp_attested)
-            throw std::invalid_argument("MCP adoption requires server, tool, schema hash, and argv attestation");
-        auto found = std::find_if(report.servers.begin(), report.servers.end(),
-                                  [&](const auto& server) { return server.server_name == mcp_server; });
-        if (found == report.servers.end()) throw std::invalid_argument("requested MCP server was not discovered");
-        const auto mode = mcp_trust == "trusted_mutable"
-            ? neograph::mcp::McpTrustMode::trusted_mutable : neograph::mcp::McpTrustMode::pinned;
-        auto launch = neograph::mcp::make_mcp_launch_approval(*found, mode, true);
-        neograph::mcp::McpAdoptionRequest request;
-        request.server = *found;
-        request.launch = launch;
-        request.tools.server_name = mcp_server;
-        request.tools.launch_identity = launch.executable_identity;
-        request.tools.selected_tools = {mcp_tool};
-        request.tools.schema_hashes.emplace(mcp_tool, mcp_schema);
-        request.tools.manifest.push_back({mcp_tool, true, {"data_read"}, "local-read-only", neograph::json::object()});
-        request.tools.policy_version = "mcp-local-v1";
+    if (!mcp_source.empty() || !mcp_approval.empty()) {
+        if (host_mode)
+            throw std::invalid_argument("adopted MCP capability execution requires the provider worker executor");
         adopted_mcp = std::make_shared<neograph::mcp::HardenedMcpClientRegistry>();
-        adopted_mcp->adopt(request);
-        host_config.capability_executor =
-            neograph::mcp::make_mcp_harness_capability_executor_from_registry(adopted_mcp);
+        adopted_mcp->adopt(load_adoption_approval(mcp_approval, mcp_discovery));
     }
     host_config.compiler_build_id = "neograph-harness-example-v1";
     host_config.provider_binding_identity =
@@ -228,11 +255,26 @@ int main(int argc, char** argv) {
         provider_identity.implementation_digest,
         kSupportModuleDigest,
         kToolingModuleDigest};
-    host_config.snapshots.budget_ceiling = {86400000, 100000000, 100000000,
-                                            64, 10000, 1000, 1000, 64, 10000};
+    host_config.snapshots.budget_ceiling = {
+        86400000, 100000000, 100000000, 64, 10000, 1000, 1000,
+        neograph::program::MAX_SUPPORTED_CHILD_DEPTH, 10000};
     host_config.checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
     host_config.state_store = std::make_shared<neograph::graph::InMemoryStore>();
     harness_config.translation_defaults.provider = provider_identity;
+    if (host_mode) {
+        host_config.worker_executor = neograph::mcp::make_host_agent_executor(agent_config);
+    } else {
+        neograph::mcp::HarnessProviderExecutorConfig executor_config;
+        executor_config.provider = provider;
+        executor_config.model = provider_config.default_model;
+        if (adopted_mcp) {
+            adopted_mcp->configure_harness(host_config, executor_config);
+            harness_config.translation_defaults.read_only_effects =
+                host_config.snapshots.allowed_effects;
+        }
+        host_config.worker_executor =
+            neograph::mcp::make_provider_harness_executor(std::move(executor_config));
+    }
 #ifdef NEOGRAPH_HARNESS_HAVE_SQLITE
     if (const auto state_dir = environment("NEOGRAPH_HARNESS_STATE_DIR"); !state_dir.empty()) {
         std::filesystem::create_directories(state_dir);

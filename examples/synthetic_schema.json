@@ -12,6 +12,12 @@
   "tool_definition": {"wrapper": "function"},
   "tool_call_in_message": {"strategy": "tool_calls_array"},
   "tool_result": {"strategy": "flat"},
-  "response": {"strategy": "choices_message", "artifact_parser": "synthetic_artifacts"},
+  "response": {
+    "strategy": "choices_message",
+    "message_path": "choices.0.message",
+    "content_field": "content",
+    "role_field": "role",
+    "artifact_parser": "synthetic_artifacts"
+  },
   "streaming": {"format": "sse_data"}
 }

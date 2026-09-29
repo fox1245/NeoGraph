@@ -18,6 +18,7 @@
   "operation": {
     "id_path": "name",
     "done_path": "done",
+    "absent_status": "pending",
     "error_path": "error",
     "poll_endpoint": "/v1beta/$OPERATION",
     "poll_method": "GET",

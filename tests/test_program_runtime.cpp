@@ -2968,6 +2968,36 @@ TEST(ProgramRuntimeTest, CanonicalRunInvocationIsRetainedExactlyAndAcceptsRuntim
     EXPECT_GT(sink->calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, ActiveStartMaterializesPersistedVersionInColdCatalog) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-completed");
+    ASSERT_EQ(fixture.catalog->activate("tenant:runtime", version.id(), 0),
+              ProgramActivationResult::Activated);
+    fixture.runtime.reset();
+    fixture.catalog.reset();
+    fixture.engines = std::make_shared<EngineGenerationCache>();
+    fixture.catalog = std::make_shared<ProgramCatalog>(
+        CatalogConfig{fixture.store, fixture.registry, fixture.engines, "program-runtime-test/v1"});
+    fixture.runtime = fixture.make_runtime();
+
+    RunInvocation request;
+    request.owner_scope = "tenant:runtime";
+    request.agent_id = "cold-active";
+    request.budget = grant();
+    request.message_sequence = 1;
+    request.idempotency_key = "cold-active:1";
+    request.correlation_id = "trace-cold-active";
+    request.run_id = "cold-active-run";
+    auto active = fixture.runtime->start_active(request);
+    EXPECT_EQ(active.activation.active_version_id(), version.id());
+    EXPECT_EQ(active.activation.generation(), 1U);
+    EXPECT_EQ(active.handle.snapshot().program_version_id(), version.id());
+    ASSERT_TRUE(active.handle.snapshot().invocation().selected_activation);
+    EXPECT_EQ(active.handle.snapshot().invocation().selected_activation->id(),
+              active.activation.id());
+    EXPECT_EQ(active.handle.wait().status(), ProgramTerminalStatus::Completed);
+}
+
 TEST(ProgramRuntimeTest, ActiveStartPinsAdmittedVersionAcrossRollback) {
     completed_calls.store(0);
     followup_calls.store(0);

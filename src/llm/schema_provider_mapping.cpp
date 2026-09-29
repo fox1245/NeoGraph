@@ -324,6 +324,12 @@ void SchemaProvider::parse_schema()
         operation_.poll_method = op.value("poll_method", "GET");
         operation_.finalize_endpoint = op.value("finalize_endpoint", "");
         operation_.poll_interval_ms = op.value("poll_interval_ms", 1000);
+        const auto absent_status = op.value("absent_status", "error");
+        if (absent_status != "error" && absent_status != "pending") {
+            throw std::invalid_argument(
+                "SchemaProvider: operation.absent_status must be error or pending");
+        }
+        operation_.absent_status_pending = absent_status == "pending";
         if (operation_.id_path.empty() || operation_.done_path.empty() ||
             operation_.poll_endpoint.find("$OPERATION") == std::string::npos ||
             (!operation_.finalize_endpoint.empty() &&

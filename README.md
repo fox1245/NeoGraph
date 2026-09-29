@@ -66,6 +66,7 @@ Enable the programmable control plane when needed:
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON
@@ -74,6 +75,36 @@ cmake --build build-program --parallel
 ```
 
 See [examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp) and the [QuickJS authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md).
+
+### Performance build
+
+Single-config generators such as Ninja and Unix Makefiles do not select an
+optimization level when `CMAKE_BUILD_TYPE` is empty. NeoGraph warns about that
+configuration because GCC/Clang then compile QuickJS and NeoGraph without the
+Release `-O3 -DNDEBUG` flags.
+
+For a local, host-specific performance build on GCC or Clang:
+
+```bash
+cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
+cmake --build build-performance --parallel
+```
+
+`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` adds `-march=native -mtune=native`
+to optimized configurations. It improves local throughput but makes the
+artifacts non-portable; keep it off for distributable binaries. Release
+hardening remains enabled by default.
+
+On GCC/Clang, the resulting Release profile uses C11 for QuickJS and C++20
+for NeoGraph, `-O3 -DNDEBUG`, and the default hardening flags
+`-D_GLIBCXX_ASSERTIONS`, `-fstack-protector-strong`,
+`-fcf-protection=full`, and Linux `-D_FORTIFY_SOURCE=2` plus RELRO/NOW
+linking. LTO and host-specific tuning are not enabled by default.
 
 ## Two runtime layers
 
@@ -175,6 +206,8 @@ Important options:
 |---|---|
 | `NEOGRAPH_BUILD_PROGRAM` | Durable Program values, catalog, runtime, lineage and migration |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program authoring and generator commands |
+| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | Opt into non-portable host-specific instruction tuning for optimized configurations |
+| `NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG` | Warn when a single-config build omits `CMAKE_BUILD_TYPE` and would miss Release optimization flags |
 | `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python extension |
 | `NEOGRAPH_BUILD_SQLITE` | SQLite checkpoint, context, Hook and provider-receipt stores |
 | `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL checkpoint and Program persistence components |

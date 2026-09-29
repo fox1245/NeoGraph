@@ -528,6 +528,9 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 throw OperationError("SchemaProvider: operation failed: " + error->dump());
             }
             const auto done = json_path::at_path(resp_json, operation_.done_path);
+            if (!done && resp_json.is_object() && operation_.absent_status_pending) {
+                return false;
+            }
             if (!done || !done->is_boolean()) {
                 throw OperationError("SchemaProvider: missing boolean operation status");
             }
@@ -699,6 +702,9 @@ json SchemaProvider::request_json(const json& body, int timeout_seconds)
 ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                                                const StreamCallback& on_chunk)
 {
+    if (transport_factory_ || execution_factory_ || !operation_.id_path.empty()) {
+        return async::run_sync(complete_stream_async(params, on_chunk));
+    }
     // WebSocket mode dispatch — only the openai-responses schema is
     // supported (that's the one OpenAI's WS endpoint speaks). Other
     // providers fall through to the HTTP/SSE path below.
@@ -770,6 +776,20 @@ ChatCompletion SchemaProvider::complete_stream_http(
 
     StreamParseState state;
     state.completion.message.role = "assistant";
+    if (artifact_parser_factory_) {
+        auto& context = state.primitive_context;
+        context.endpoint = async::split_async_endpoint(conn_.base_url);
+        context.path = endpoint;
+        context.body = body_str;
+        context.headers.assign(headers.begin(), headers.end());
+        context.timeout_seconds = timeout_seconds;
+        if (timeout_seconds > 0) {
+            context.deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(timeout_seconds);
+        }
+        context.cancellation = params.cancel_token;
+        context.trace_metadata = user_config_.trace_metadata;
+    }
     std::string line_buffer;
     bool& terminal_event_seen = state.terminal_event_seen;
 
@@ -829,7 +849,12 @@ ChatCompletion SchemaProvider::complete_stream_http(
                 line_buffer.erase(0, pos + 1);
 
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (!consume_stream_line(state, line, on_chunk)) return false;
+                try {
+                    if (!consume_stream_line(state, line, on_chunk)) return false;
+                } catch (...) {
+                    stream_error = std::current_exception();
+                    return false;
+                }
             }
             if (line_buffer.size() > user_config_.max_stream_line_bytes) {
                 stream_error = std::make_exception_ptr(std::length_error(
@@ -881,6 +906,20 @@ asio::awaitable<ChatCompletion>
 SchemaProvider::complete_stream_async(const CompletionParams& params,
                                       const StreamCallback& on_chunk)
 {
+    // Extension primitives return one complete response, not a stream of wire
+    // events. Preserve that selected execution contract and emit its completed
+    // text once; a callback must never opt into an unrelated network transport.
+    if (transport_factory_ || execution_factory_ || !operation_.id_path.empty()) {
+        auto completion = co_await complete_async(params);
+        if (params.cancel_token) {
+            params.cancel_token->throw_if_cancelled("SchemaProvider callback delivery");
+        }
+        if (on_chunk && !completion.message.content.empty()) {
+            on_chunk(completion.message.content);
+        }
+        co_return completion;
+    }
+
     auto exec = co_await asio::this_coro::executor;
 
     // Native fast path for the WebSocket Responses transport: it's
@@ -1074,6 +1113,24 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
             ws_headers.emplace_back(k, v);
         }
     }
+    StreamParseState state;
+    state.completion.message.role = "assistant";
+    auto dumped = request_body.dump();
+    if (artifact_parser_factory_) {
+        auto& context = state.primitive_context;
+        context.endpoint = endpoint;
+        context.path = endpoint.prefix + "/v1/responses";
+        context.body = dumped;
+        context.headers = ws_headers;
+        context.timeout_seconds = params.timeout_seconds > 0
+            ? params.timeout_seconds : user_config_.timeout_seconds;
+        if (context.timeout_seconds > 0) {
+            context.deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(context.timeout_seconds);
+        }
+        context.cancellation = params.cancel_token;
+        context.trace_metadata = user_config_.trace_metadata;
+    }
 
     auto ex = co_await asio::this_coro::executor;
     auto ws = co_await async::ws_connect(
@@ -1086,15 +1143,11 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
         endpoint.tls,
         user_config_.websocket_options);
 
-    auto dumped = request_body.dump();
     if (std::getenv("NEOGRAPH_WS_DEBUG")) {
         std::cerr << "[WS DEBUG] sending response.create bytes="
                   << dumped.size() << "\n";
     }
     co_await ws->send_text(dumped);
-
-    StreamParseState state;
-    state.completion.message.role = "assistant";
 
     bool ws_debug = std::getenv("NEOGRAPH_WS_DEBUG") != nullptr;
     std::size_t ws_response_bytes = 0;

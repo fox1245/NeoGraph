@@ -36,11 +36,17 @@ struct NEOGRAPH_API MCPClientConfig {
 struct NEOGRAPH_API StdioClientConfig {
     std::vector<std::string> argv;
     std::filesystem::path cwd;
-    /// Replacement environment. An empty list is an intentionally empty env.
+    /// Replacement environment. An empty list is intentionally empty; names
+    /// must be unique (case-insensitively on Windows), nonempty, and contain
+    /// neither '=' nor NUL. Values and argv must not contain NUL.
     std::vector<std::pair<std::string, std::string>> environment;
     bool replace_environment = false;
     std::size_t max_frame_bytes = 16 * 1024 * 1024;
+    /// Cumulative stderr capture budget; exceeding it aborts the process tree.
+    /// Captured bytes are never copied into exception messages or host stderr.
     std::size_t max_stderr_bytes = 64 * 1024;
+    /// Startup covers launch through the initialized notification. Hardened
+    /// timeout/cancellation/protocol failures permanently terminate the session.
     std::chrono::milliseconds startup_timeout{10000};
     std::chrono::milliseconds request_timeout{30000};
 };

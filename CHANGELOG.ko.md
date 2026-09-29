@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=18368b14e7e85d70c14e289cb548abb3a8796f639c31731fe62d1fa6b8d00355 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -23,6 +23,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   다시 결합할 수 있습니다. 런타임은 승인된 실행 바인딩 fingerprint도 검사하며,
   철회는 재시작 후에도 유지되어 해당 grant ID의 모든 시도를 차단합니다.
   효과 결과는 별도의 호출별 영속 Tool broker가 필요합니다.
+- **성능 빌드 구성.** 로컬 GCC/Clang 빌드에서 사용할 수 있는
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` 선택 옵션과, 단일 구성 생성기에서
+  `CMAKE_BUILD_TYPE`이 비어 Release 최적화 플래그가 빠질 때 경고하는 기능을
+  추가했습니다. Release 하드닝은 기본으로 유지됩니다.
 - **Program 기반 A2A 서비스의 엄격 인증.** Program A2A 생성자에 선택적
   `require_authenticated_requests` 플래그를 추가했습니다. 활성화하면 협업
   envelope뿐 아니라 일반 message, stream, task 조회 및 취소 RPC에도 설정된
@@ -37,6 +41,36 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   system message 동작은 유지하면서, 명시적으로 신뢰되지 않은 RAW 또는
   derived context를 receipt에 결합해 전체 Human/AI/Tool 시간순 이력 뒤에
   user data로 전달할 수 있습니다.
+
+### 수정됨
+- **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
+  보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
+  Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트
+  로드를 사용합니다.
+- **Schema callback과 스트리밍 미디어.** Callback 사용 시에도 선택한 custom
+  primitive를 유지하고 Responses/Gemini stream의 artifact를 보존합니다.
+  Veo의 pending 상태 생략은 허용하되 잘못된 상태 타입은 거부합니다.
+- **MCP와 호스트 프로세스 격리.** 채택한 도구는 독립적인 고정 승인과 정확한
+  인수 값이 필요하며, 철회·schema 변경은 참조가 남은 client도 종료합니다.
+  시작·stderr 한도, handle/FD 격리, 자손 종료와 출력 읽기 한도를 적용합니다.
+- **테넌트 안전 영속 Harness 기록.** File/SQLite에서 범위 ID와 참조가 왕복하며,
+  긴 File 키는 고정 길이 hash 파일명을 사용합니다. SQLite 보존 정책은 다른
+  namespace의 기록이나 journal을 삭제하지 않습니다.
+- **실행 가능한 Harness CLI.** 시작 정책이 Program의 지원 자식 깊이 상한을
+  사용하며, 실제 stdio compile/start/get 회귀 검증으로 배포 binary를 확인합니다.
+- **새 카탈로그의 활성 Program 시작.** 실행을 버전에 고정하기 전에 이미
+  선택한 영속 버전을 복원하며, 활성화 포인터를 다시 읽지 않습니다.
+- **생성 artifact의 영속 재생.** Provider receipt는 재개방과 결과 조정 후에도
+  artifact 순서, payload, 중첩 metadata를 보존합니다. 휘발성 SQLite 경로와
+  artifact 증거가 없는 구형 receipt는 빈 결과를 만들어 내거나 재호출하지 않고
+  명시적으로 거부합니다.
+- **홍보 영상 의존성 보안.** `docs/promo/package-lock.json`의 간접 의존성
+  `js-yaml`을 4.3.1에서 4.3.2로 갱신해 빈 객체 병합으로 CPU를 고갈시키는
+  서비스 거부 취약점(CVE-2026-84375 / GHSA-2883-xcg3-v3hh)을 수정했습니다.
+- **TSan CI RSS 검사.** shadow memory와 런타임 관리 비용이 일반 빌드용
+  임계값을 초과할 수 있으므로 GCC/Clang ThreadSanitizer에서는 일반 빌드용
+  RSS 제한 검사를 제외합니다. sanitizer의 200개 동시 실행 stress test와
+  비-sanitizer 빌드의 기존 10 MiB RSS 제한은 유지합니다.
 
 ## [0.12.1] - 2026-08-23
 

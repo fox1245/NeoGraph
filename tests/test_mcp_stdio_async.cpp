@@ -25,7 +25,10 @@
 #include <string>
 #include <cerrno>
 #include <thread>
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -59,6 +62,25 @@ const char* python_cmd() {
 }
 
 bool python3_available() { return python_cmd() != nullptr; }
+
+struct BoundaryDirectory {
+    std::filesystem::path path = std::filesystem::temp_directory_path()
+        / ("neograph-mcp-boundary-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    BoundaryDirectory() { std::filesystem::create_directory(path); }
+    ~BoundaryDirectory() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
+mcp::StdioClientConfig boundary_config(const std::string& mode) {
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(),
+        (fixture_path().parent_path() / "mcp_stdio_boundary.py").string(), mode};
+    config.request_timeout = std::chrono::milliseconds(2000);
+    return config;
+}
 
 } // namespace
 
@@ -413,3 +435,203 @@ TEST(MCPStdioAsync, SpawnClosesInheritedHighFileDescriptor) {
               "fd-closed");
 }
 #endif
+
+TEST(MCPStdioAsync, HardenedStartupUsesStartupRatherThanRequestTimeout) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    auto config = boundary_config("startup");
+    config.startup_timeout = std::chrono::milliseconds(60);
+    mcp::MCPClient client(std::move(config));
+    try {
+        client.initialize();
+        FAIL() << "startup timeout was ignored";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout);
+    }
+    EXPECT_FALSE(client.is_initialized());
+}
+
+TEST(MCPStdioAsync, HardenedStderrOverflowTerminatesSession) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    auto config = boundary_config("stderr");
+    config.max_stderr_bytes = 128;
+    mcp::MCPClient client(std::move(config));
+    EXPECT_THROW(client.initialize(), mcp::MCPTransportError);
+    EXPECT_FALSE(client.is_initialized());
+}
+
+TEST(MCPStdioAsync, HardenedReplacementEnvironmentAndWorkingDirectory) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    constexpr auto key = "NEOGRAPH_MCP_SENTINEL_SECRET";
+    struct RestoreEnvironment {
+        std::optional<std::string> old;
+        RestoreEnvironment() {
+            if (const char* value = std::getenv("NEOGRAPH_MCP_SENTINEL_SECRET")) old = value;
+#ifdef _WIN32
+            _putenv_s("NEOGRAPH_MCP_SENTINEL_SECRET", "must-not-leak");
+#else
+            ::setenv("NEOGRAPH_MCP_SENTINEL_SECRET", "must-not-leak", 1);
+#endif
+        }
+        ~RestoreEnvironment() {
+#ifdef _WIN32
+            _putenv_s("NEOGRAPH_MCP_SENTINEL_SECRET", old ? old->c_str() : "");
+#else
+            if (old) ::setenv("NEOGRAPH_MCP_SENTINEL_SECRET", old->c_str(), 1);
+            else ::unsetenv("NEOGRAPH_MCP_SENTINEL_SECRET");
+#endif
+        }
+    } restore;
+    auto config = boundary_config("report");
+    config.cwd = directory.path;
+    config.replace_environment = true;
+    config.environment = {{"NEOGRAPH_APPROVED_VALUE", "approved"}};
+#ifdef _WIN32
+    if (const char* root = std::getenv("SystemRoot"))
+        config.environment.emplace_back("SystemRoot", root);
+#endif
+    mcp::MCPClient client(std::move(config));
+    auto result = client.call_tool("probe", json::object());
+    EXPECT_TRUE(std::filesystem::equivalent(
+        result.at("cwd").get<std::string>(), directory.path));
+    EXPECT_FALSE(result.at("environment").contains(key));
+    EXPECT_EQ(result.at("environment").value("NEOGRAPH_APPROVED_VALUE", ""), "approved");
+}
+
+TEST(MCPStdioAsync, HardenedRejectsAmbiguousReplacementEnvironment) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    for (const auto& environment : std::vector<mcp::HeaderList>{
+             {{"BAD=KEY", "value"}}, {{"", "value"}},
+             {{"KEY", std::string("value\0hidden", 12)}},
+             {{"KEY", "one"}, {"KEY", "two"}}}) {
+        auto config = boundary_config("report");
+        config.replace_environment = true;
+        config.environment = environment;
+        EXPECT_THROW(mcp::MCPClient{std::move(config)}, std::invalid_argument);
+    }
+}
+
+TEST(MCPStdioAsync, DescendantsAreTerminatedAfterLeaderExits) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto marker = directory.path / "survived";
+    {
+        auto config = boundary_config("tree");
+        config.argv.push_back(marker.string());
+        mcp::MCPClient client(std::move(config));
+        auto result = client.call_tool("probe", json::object());
+        ASSERT_TRUE(result.at("childPid").is_number_integer());
+        // The leader exits immediately after replying. Its child ignores TERM.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    EXPECT_FALSE(std::filesystem::exists(marker));
+}
+
+#ifdef _WIN32
+TEST(MCPStdioAsync, HardenedSpawnDoesNotInheritUnrelatedWindowsHandles) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes), nullptr, TRUE};
+    HANDLE event = CreateEventW(&attributes, TRUE, FALSE, nullptr);
+    ASSERT_NE(event, nullptr);
+    struct CloseEvent {
+        HANDLE value;
+        ~CloseEvent() { CloseHandle(value); }
+    } close{event};
+    auto config = boundary_config("report");
+    config.argv.push_back(std::to_string(reinterpret_cast<std::uintptr_t>(event)));
+    config.argv.push_back("space and trailing slash\\");
+    config.argv.push_back("backslash\\\"quote");
+    config.argv.push_back("");
+    mcp::MCPClient client(std::move(config));
+    auto result = client.call_tool("probe", json::object());
+    EXPECT_FALSE(result.at("inheritedHandle").get<bool>());
+    EXPECT_EQ(result.at("argv"),
+              json::array({"space and trailing slash\\", "backslash\\\"quote", ""}));
+}
+#endif
+
+TEST(MCPStdioAsync, ExplicitShutdownAbortsRetainedCallsAndTools) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    auto config = boundary_config("blocked");
+    const auto entered = directory.path / "entered";
+    config.argv.push_back(entered.string());
+    mcp::MCPClient client(std::move(config));
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    auto pending = std::async(std::launch::async, [&]() -> std::optional<mcp::MCPFailure> {
+        try { client.call_tool("probe", json::object()); }
+        catch (const mcp::MCPTransportError& error) { return error.failure(); }
+        return std::nullopt;
+    });
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!std::filesystem::exists(entered) && std::chrono::steady_clock::now() < ready_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    ASSERT_TRUE(std::filesystem::exists(entered));
+    std::jthread concurrent_shutdown([&] { client.shutdown(); });
+    client.shutdown();
+    concurrent_shutdown.join();
+    EXPECT_EQ(pending.get(), mcp::MCPFailure::shutdown);
+    EXPECT_FALSE(client.is_initialized());
+    auto* retained = dynamic_cast<mcp::MCPTool*>(tools.front().get());
+    ASSERT_NE(retained, nullptr);
+    try {
+        retained->execute_result(json::object());
+        FAIL() << "retained tool dispatched after shutdown";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+    try {
+        client.initialize();
+        FAIL() << "shutdown client reopened";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+}
+
+TEST(MCPStdioAsync, ShutdownBeforeFirstRequestCannotRestartTransport) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    mcp::MCPClient client(boundary_config("report"));
+    client.shutdown();
+    client.shutdown();
+    try {
+        async::run_sync(client.rpc_call_async("tools/list"));
+        FAIL() << "request restarted a shut-down transport";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+}
+
+TEST(MCPStdioAsync, HardenedCancellationDrainsDescendantsAndClosesAdmission) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto marker = directory.path / "survived";
+    const auto ready = std::filesystem::path(marker.string() + ".ready");
+    auto config = boundary_config("tree-blocked");
+    config.argv.push_back(marker.string());
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize());
+    auto cancel = std::make_shared<graph::CancelToken>();
+    auto pending = std::async(std::launch::async, [&]() -> std::optional<mcp::MCPFailure> {
+        try {
+            async::run_sync(client.rpc_call_async("tools/call", json::object(),
+                std::chrono::steady_clock::time_point::max(), cancel));
+        } catch (const mcp::MCPTransportError& error) { return error.failure(); }
+        return std::nullopt;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!std::filesystem::exists(ready) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    ASSERT_TRUE(std::filesystem::exists(ready));
+    cancel->cancel();
+    EXPECT_EQ(pending.get(), mcp::MCPFailure::cancelled);
+    try {
+        client.call_tool("probe", json::object());
+        FAIL() << "cancelled hardened process was reused";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    EXPECT_FALSE(std::filesystem::exists(marker));
+}

@@ -1117,8 +1117,8 @@ private:
     /// Host-generation identity carrier, separate from executable tools.
     std::vector<std::unique_ptr<Tool>> owned_tools_;
     std::map<std::string, std::unique_ptr<GraphNode>> nodes_;
-    /// True only for opt-in per-invocation children; skips UUIDs on legacy runs.
-    bool has_per_invocation_subgraph_ = false;
+    /// Opt-in stateful children need stable parent identity across resumes.
+    bool has_stateful_subgraph_ = false;
     std::vector<Edge>            edges_;
     std::vector<ConditionalEdge> conditional_edges_;
 

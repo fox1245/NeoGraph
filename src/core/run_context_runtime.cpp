@@ -45,6 +45,18 @@ void append_applied_writes(const RunContext& context,
     journal.insert(journal.end(), writes.begin(), writes.end());
 }
 
+CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint) {
+    if (checkpoint.interrupt_phase != CheckpointPhase::Updated)
+        return checkpoint.interrupt_phase;
+    const auto& metadata = checkpoint.metadata;
+    if (!metadata.is_object() || !metadata.contains("_neograph") ||
+        !metadata["_neograph"].is_object() ||
+        !metadata["_neograph"].contains("admin_resume_phase"))
+        return checkpoint.interrupt_phase;
+    return parse_checkpoint_phase(
+        metadata["_neograph"]["admin_resume_phase"].get<std::string>());
+}
+
 json checkpoint_metadata_for(const RunContext& context) {
     auto runtime = runtime_for(context);
     if (!runtime || !runtime->checkpoint_store) return json();
@@ -56,6 +68,9 @@ json checkpoint_metadata_for(const RunContext& context) {
         metadata[kMetadataNamespace][kJournalVersion] = 1;
         metadata[kMetadataNamespace][kJournal] =
             serialize_channel_writes(runtime->subgraph_write_journal->writes);
+        if (!runtime->subgraph_write_journal->parent_call_id.empty())
+            metadata[kMetadataNamespace]["subgraph_parent_call_id"] =
+                runtime->subgraph_write_journal->parent_call_id;
     }
     return metadata;
 }

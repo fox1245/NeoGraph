@@ -11,6 +11,7 @@ from neograph_engine.llm import SchemaProvider
 @contextmanager
 def media_server():
     class Handler(BaseHTTPRequestHandler):
+        polls = 0
         def log_message(self, *_args):
             pass
 
@@ -21,7 +22,7 @@ def media_server():
                 payload = {"data": [{"b64_json": "UE5H", "revised_prompt": "blue kite"}]}
             elif self.path == "/v1beta/models/veo-test:predictLongRunning":
                 assert body == {"instances": [{"prompt": "blue kite"}]}
-                payload = {"name": "models/veo-test/operations/123", "done": False}
+                payload = {"name": "models/veo-test/operations/123"}
             else:
                 self.send_error(404)
                 return
@@ -40,6 +41,9 @@ def media_server():
                 "generatedSamples": [{"video": {"uri": "https://example.invalid/video",
                                                 "mimeType": "video/mp4", "fileId": "file-5",
                                                 "durationSeconds": 9}}]}}}).encode()
+            type(self).polls += 1
+            if type(self).polls == 1:
+                data = json.dumps({"name": "models/veo-test/operations/123"}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))

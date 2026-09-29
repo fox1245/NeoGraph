@@ -141,6 +141,44 @@ std::size_t history_size(const NestedCheckpoint& cp) {
     return cp.checkpoint.channel_values.at("channels").at("history").at("value").size();
 }
 
+class InputHistoryNode final : public GraphNode {
+public:
+    InputHistoryNode(std::string name, std::shared_ptr<std::atomic<int>> calls)
+        : name_(std::move(name)), calls_(std::move(calls)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++*calls_;
+        NodeOutput output;
+        output.writes.push_back({"history", json::array({input.state.get("prompt")})});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+private:
+    std::string name_;
+    std::shared_ptr<std::atomic<int>> calls_;
+};
+
+std::unique_ptr<GraphEngine> interrupt_parent(
+    const std::shared_ptr<CheckpointStore>& store, SubgraphPersistence policy,
+    const std::shared_ptr<std::atomic<int>>& calls,
+    const std::string& child_interrupt = {}, bool parent_interrupt = false) {
+    NodeFactory::instance().register_type("subgraph_input_regression",
+        [calls](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<InputHistoryNode>(name, calls);
+        });
+    auto definition = one_node("interrupt_child", "subgraph_input_regression");
+    if (!child_interrupt.empty()) definition[child_interrupt] = json::array({"child"});
+    auto child = shared_engine(definition);
+    NodeFactory::instance().register_type("subgraph_interrupt_regression",
+        [child, policy](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<SubgraphNode>(
+                name, child, std::map<std::string, std::string>{{"prompt", "prompt"}},
+                std::map<std::string, std::string>{{"history", "history"}}, policy);
+        });
+    auto parent = one_node("interrupt_parent", "subgraph_interrupt_regression");
+    if (parent_interrupt) parent["interrupt_before"] = json::array({"child"});
+    return GraphEngine::compile(parent, NodeContext{}, store);
+}
+
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 struct TempDatabase {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
@@ -200,6 +238,78 @@ TEST(SubgraphPersistence, PerThreadRetainsChannelsAndDefaultLegacyIdentityUnchan
     ASSERT_TRUE(saved);
     EXPECT_EQ(saved->thread_id, "subgraph/13:legacy-thread5:child1:08:s0:child");
     EXPECT_EQ(history_size(*saved), 1u);
+}
+
+TEST(SubgraphPersistence, AdministrativeUpdatePreservesInterruptedInvocation) {
+    for (bool ordered : {false, true}) {
+        auto store = std::make_shared<InMemoryCheckpointStore>();
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        auto engine = interrupt_parent(store, SubgraphPersistence::PerInvocation,
+                                       calls, "interrupt_before");
+        auto config = run_on("admin-invocation");
+        ASSERT_TRUE(engine->run(config).interrupted);
+        auto before = engine->inspect_nested_checkpoint(config.thread_id, {child_path("")});
+        ASSERT_TRUE(before);
+        for (int update = 0; update < 2; ++update) {
+            if (ordered)
+                engine->update_state_writes(config.thread_id, {{"prompt", "admin"}});
+            else
+                engine->update_state(config.thread_id, json{{"prompt", "admin"}});
+        }
+        auto result = engine->resume(config.thread_id);
+        EXPECT_FALSE(result.interrupted);
+        EXPECT_EQ(calls->load(), 1);
+        EXPECT_EQ(result.channel<json>("history"), json::array({"input"}));
+        auto after = engine->inspect_nested_checkpoint(config.thread_id, {child_path("")});
+        ASSERT_TRUE(after);
+        EXPECT_EQ(before->thread_id, after->thread_id);
+    }
+}
+
+TEST(SubgraphPersistence, PerThreadFreshPausedParentExecutesNewChildInput) {
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto engine = interrupt_parent(store, SubgraphPersistence::PerThread, calls, {}, true);
+    auto config = run_on("paused-thread-parent");
+    ASSERT_TRUE(engine->run(config).interrupted);
+    EXPECT_FALSE(engine->resume(config.thread_id).interrupted);
+    auto first = engine->inspect_nested_checkpoint(config.thread_id, {child_path("")});
+    ASSERT_TRUE(first);
+    config.input = {{"prompt", "second"}};
+    config.resume_if_exists = true;
+    ASSERT_TRUE(engine->run(config).interrupted);
+    auto result = engine->resume(config.thread_id);
+    EXPECT_FALSE(result.interrupted);
+    EXPECT_EQ(calls->load(), 2);
+    EXPECT_EQ(result.channel<json>("history"), json::array({"input", "second"}));
+    auto second = engine->inspect_nested_checkpoint(config.thread_id, {child_path("")});
+    ASSERT_TRUE(second);
+    EXPECT_EQ(first->thread_id, second->thread_id);
+    EXPECT_EQ(second->checkpoint.channel_values.at("channels").at("history").at("value"),
+              json::array({"input", "second"}));
+}
+
+TEST(SubgraphPersistence, PerThreadResumesSameInterruptedChildInvocation) {
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto engine = interrupt_parent(store, SubgraphPersistence::PerThread, calls,
+                                   "interrupt_after");
+    auto config = run_on("same-thread-parent");
+    ASSERT_TRUE(engine->run(config).interrupted);
+    auto result = engine->resume(config.thread_id);
+    EXPECT_FALSE(result.interrupted);
+    EXPECT_EQ(calls->load(), 1);
+    EXPECT_EQ(result.channel<json>("history"), json::array({"input"}));
+}
+
+TEST(SubgraphPersistence, StatelessRejectsStaticInterruptBeforeEffects) {
+    for (const auto& phase : {"interrupt_before", "interrupt_after"}) {
+        auto store = std::make_shared<InMemoryCheckpointStore>();
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        auto engine = interrupt_parent(store, SubgraphPersistence::Stateless, calls, phase);
+        EXPECT_THROW(engine->run(run_on("stateless-guard")), std::runtime_error);
+        EXPECT_EQ(calls->load(), 0);
+    }
 }
 
 TEST(SubgraphPersistence, StatelessChildDoesNotCreateAChildCheckpoint) {

@@ -21,7 +21,7 @@ enum class McpCredentialMode { credentialless_stdio };
 enum class McpTrustMode { pinned, trusted_mutable };
 
 struct NEOGRAPH_API OpenCodeGlobalMcpConfig {
-    /// Empty selects $XDG_CONFIG_HOME/opencode/opencode.json or ~/.config/....
+    /// Empty selects the documented global source; explicit paths must name that same file.
     std::filesystem::path source_path;
     std::size_t max_source_bytes = 1024 * 1024;
     bool single_user_local = true;
@@ -64,6 +64,8 @@ struct NEOGRAPH_API McpCapabilityManifest {
     bool auto_execute = false;
     std::set<std::string> effects;
     std::string argument_policy;
+    /// exact-arguments-v1: {"allowed_arguments":[<complete argument object>, ...]}.
+    /// Values are host-approved, not inferred safe from tool annotations or SQL text.
     json argument_predicate = json::object();
 };
 
@@ -130,10 +132,15 @@ public:
     std::vector<McpAdoptionStatus> status() const;
     std::map<std::string, std::shared_ptr<MCPClient>> clients() const;
     HarnessCapabilityExecutor capability_executor() const;
+    /// Immutable namespaced metadata for constructing Harness requests.
+    json tool_catalog() const;
+    /// Install approved metadata/bindings before constructing the host and provider worker.
+    void configure_harness(HarnessProgramHostConfig& host,
+                           HarnessProviderExecutorConfig& provider) const;
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace neograph::mcp

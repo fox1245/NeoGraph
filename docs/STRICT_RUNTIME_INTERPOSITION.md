@@ -83,6 +83,12 @@ requires external reconciliation and never silently re-dispatches. Use
 `reconcile_success` only with independently verified provider-side evidence.
 Replayed streaming calls return the final completion but do not re-emit chunks.
 Changed request, model, deployment identity or Program scope fails closed.
+Successful receipts retain generated artifacts in order, including their kind,
+MIME type, base64 data, URL, file identity, and nested metadata. Replay and
+`reconcile_success` use that same completion representation. Legacy successful
+receipts without artifact evidence are rejected rather than treated as empty
+artifact output or silently dispatched again. Use a durable filesystem database
+path: empty paths, `:memory:`, and `file:` URI paths are rejected.
 This broker operates on Core's existing ReAct message state, not an assembled
 `ContextEpoch`, and cannot be combined with engine Strict Runtime interposition
 on the same built-in call. Host-authored native Provider calls are outside it.

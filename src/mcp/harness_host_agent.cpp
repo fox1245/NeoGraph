@@ -28,6 +28,8 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig) {
 #include <poll.h>
 #include <stdexcept>
 #include <string_view>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -208,6 +210,17 @@ ProcessResult run_process(const std::string& executable, const std::vector<std::
     if (::fcntl(out_read.get(), F_SETFL, O_NONBLOCK) < 0 ||
         ::fcntl(err_read.get(), F_SETFL, O_NONBLOCK) < 0)
         throw std::runtime_error("host capture pipe configuration failed");
+    // Resolve the fallback bound before fork; do not arbitrarily cap high fds.
+    struct rlimit descriptor_limit {};
+    if (::getrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0)
+        throw std::runtime_error("host descriptor limit query failed");
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    if (descriptor_limit.rlim_max == RLIM_INFINITY && open_max <= 0)
+        throw std::runtime_error("host descriptor limit is unavailable");
+    const auto max_fd = std::min<rlim_t>(
+        descriptor_limit.rlim_max == RLIM_INFINITY
+            ? static_cast<rlim_t>(open_max) : descriptor_limit.rlim_max,
+        static_cast<rlim_t>(std::numeric_limits<int>::max()));
     const auto pid = ::fork();
     if (pid < 0) throw std::runtime_error("host fork failed");
     if (pid == 0) {
@@ -216,7 +229,15 @@ ProcessResult run_process(const std::string& executable, const std::vector<std::
         ::dup2(err_write.get(), STDERR_FILENO);
         int null_fd = ::open("/dev/null", O_RDONLY);
         if (null_fd >= 0) { ::dup2(null_fd, STDIN_FILENO); ::close(null_fd); }
-        out_read.reset(); out_write.reset(); err_read.reset(); err_write.reset();
+        // Only mapped stdio may cross the exec boundary, including when unrelated
+        // caller descriptors were opened without FD_CLOEXEC.
+        bool descriptors_closed = false;
+#if defined(SYS_close_range)
+        descriptors_closed = ::syscall(SYS_close_range, 3u, ~0u, 0u) == 0;
+#endif
+        if (!descriptors_closed) {
+            for (rlim_t fd = 3; fd < max_fd; ++fd) ::close(static_cast<int>(fd));
+        }
         if (::chdir(workdir_bytes.c_str()) != 0) _exit(126);
         ::execve(executable.c_str(), argv.data(), envp.data());
         _exit(127);
@@ -243,18 +264,24 @@ ProcessResult run_process(const std::string& executable, const std::vector<std::
         const auto drain = [&](Fd& fd, bool& open, std::string& target) {
             if (!open) return;
             char bytes[4096];
-            for (;;) {
+            // Yield to stderr and the cancellation/deadline checks even when
+            // writers continuously refill this pipe (including repeated EINTR).
+            for (int reads = 0; reads < 16; ++reads) {
                 const auto count = ::read(fd.get(), bytes, sizeof(bytes));
                 if (count > 0) {
                     first_output = true;
                     const auto room = cap > target.size() ? cap - target.size() : 0;
                     target.append(bytes, std::min<std::size_t>(room, static_cast<std::size_t>(count)));
-                    if (static_cast<std::size_t>(count) > room) result.truncated = true;
+                    if (static_cast<std::size_t>(count) > room) {
+                        result.truncated = true;
+                        return;
+                    }
                 } else if (count == 0) { open = false; fd.reset(); break; }
                 else { if (errno == EINTR) continue; if (errno == EAGAIN) break; open = false; fd.reset(); break; }
             }
         };
         drain(out_read, out_open, result.out);
+        if (result.truncated) break;
         drain(err_read, err_open, result.err);
         exited = child.reap();
         if (result.truncated) break;

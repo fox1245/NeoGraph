@@ -1224,6 +1224,12 @@ struct RunConfig {
 | `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | Optional token accumulator. The engine creates one when omitted and exposes the active accumulator as `in.ctx.usage` |
 | `resume_if_exists` | `bool` | `false` | If `true` and a checkpoint exists for `thread_id`, seed from it before applying `input` (multi-turn chat shape) |
 
+**Known checkpoint limitation:** fresh non-resuming runs that reuse an existing
+thread can collide with channel-version blob keys in `InMemoryCheckpointStore`
+and subsequently restore stale values. This is a pre-existing fresh-run defect,
+not fixed by the subgraph persistence changes. Use a new thread ID for a fresh
+history, or `resume_if_exists=true` for an intentional continuing-thread turn.
+
 ### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
 Per-run dispatch metadata threaded by the engine. Constructed from `RunConfig`
@@ -2780,6 +2786,8 @@ public:
         std::string base_url_override;  // Overrides schema's connection.base_url
         bool        use_websocket = false;  // OpenAI Responses /v1/responses WS mode
         bool        prefer_libcurl = false; // Switch HTTP transport to libcurl HTTP/2
+        std::shared_ptr<const SchemaPrimitiveRegistry> primitive_registry;
+        std::map<std::string, std::string> trace_metadata;
     };
 
     static std::unique_ptr<SchemaProvider> create(const Config& config);
@@ -2808,6 +2816,8 @@ public:
 | `base_url_override` | `std::string` | `""` | If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints. |
 | `use_websocket` | `bool` | `false` | Drive `complete_stream` over `wss://` instead of HTTP/SSE. Currently supported only for the `"openai_responses"` schema (matches OpenAI's WebSocket mode at /v1/responses). |
 | `prefer_libcurl` | `bool` | `false` | Switch the non-streaming HTTP transport to libcurl (HTTP/2 + multiplexing + Cloudflare-friendly fingerprint). Build-time gated on `NEOGRAPH_USE_LIBCURL`. |
+| `primitive_registry` | `std::shared_ptr<const SchemaPrimitiveRegistry>` | empty | Provider-scoped transport, execution, and artifact-parser factories, snapshotted at creation. |
+| `trace_metadata` | `std::map<std::string, std::string>` | empty | Metadata copied into each primitive request context. |
 
 **Built-in schemas:**
 
@@ -2820,6 +2830,16 @@ public:
 | `"openai_images"` | OpenAI Images | Prompt request; `data[]` base64 or URL images |
 | `"veo"` | Gemini Veo | Prompt request; submit/poll video operation |
 | `"openrouter_decisions"` | OpenRouter Typesafe/Jev | Raw JSON `POST /api/alpha/decisions`; use `request_json()` rather than Chat Completions |
+
+Generated artifacts are retained by non-streaming calls and by Responses SSE/WS
+terminal events and Gemini inline-data stream parts. Custom artifact parsers
+receive the operation's request context; parser errors propagate rather than
+being mistaken for malformed wire frames.
+
+Long-running schemas may set `operation.absent_status` to `"pending"` when a
+missing status field means an accepted or still-running operation. The default
+is `"error"`; an explicit null or wrong-type status is still invalid. Bundled
+Veo opts into `"pending"` for name-only submissions and incomplete polls.
 
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
@@ -2867,8 +2887,8 @@ registry->register_transport(
         -> asio::awaitable<neograph::async::HttpResponse> {
         neograph::async::HttpResponse response;
         response.status = 200;
-        response.body = R"({\"choices\":[{\"message\":{\"role\":\"assistant\",
-            \"content\":\"synthetic\"}}]})";
+        response.body = R"({"choices":[{"message":{"role":"assistant",
+            "content":"synthetic"}}]})";
         co_return response;
     });
 auto provider = neograph::llm::SchemaProvider::create({
@@ -2882,6 +2902,12 @@ JSON selects these factories declaratively with
 `response.artifact_parser`. Every referenced name is resolved during provider
 creation; an unknown name reports its schema path, category, and missing name.
 The executable contract remains typed C++ callbacks, not scripting JSON.
+
+Custom transport/execution factories expose a complete-response contract.
+Supplying `on_chunk` or using a streaming entrypoint does not replace them with
+the built-in network transport: completed nonempty text is delivered once after
+successful execution. This is buffered completion, not incremental streaming.
+Built-in SSE and WebSocket transports retain their actual streaming behavior.
 
 The extension surface is intentionally C++ only today. Python can consume
 providers and typed artifacts but cannot register foreign callbacks; this avoids

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=18368b14e7e85d70c14e289cb548abb3a8796f639c31731fe62d1fa6b8d00355 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -24,6 +24,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   gate/controller を再結合できます。ランタイムは承認された実行バインディング
   fingerprint も確認し、取消は再起動後も有効で同じ grant ID の全試行を
   拒否します。効果の結果には別途、呼び出し単位の永続 Tool broker が必要です。
+- **パフォーマンスビルド構成。** ローカルの GCC/Clang ビルド向けに
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` オプションを追加し、単一構成
+  ジェネレーターで `CMAKE_BUILD_TYPE` が空のため Release 最適化フラグが
+  付かない場合に警告するようにしました。Release のハードニングは既定で
+  有効です。
 - **Program ベース A2A サービスの厳格認証。** Program A2A コンストラクタに
   オプトインの `require_authenticated_requests` を追加しました。有効時は
   collaboration envelope だけでなく通常の message、stream、task 取得・取消
@@ -38,6 +43,38 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   system message 動作は維持しつつ、明示的に信頼されていない RAW または
   derived context を receipt に結び付け、完全な Human/AI/Tool 時系列履歴の
   後に user data として渡せます。
+
+### 修正
+- **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
+  保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
+  静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。
+- **Schema callback とストリーミングメディア。** Callback でも選択した custom
+  primitive を保持し、Responses/Gemini stream の artifact を保存します。
+  Veo の pending 状態省略は許可しますが、不正な状態型は拒否します。
+- **MCP とホストプロセスの分離。** 採用したツールには独立した固定承認と正確な
+  引数値が必要です。取消・schema 変更は参照が残る client も終了し、起動・stderr
+  上限、handle/FD 分離、子孫終了、出力読込上限を適用します。
+- **テナント安全な永続 Harness 記録。** File/SQLite でスコープ ID と参照を
+  往復し、長い File キーには固定長 hash ファイル名を使います。SQLite 保持処理
+  は別 namespace の記録や journal を削除しません。
+- **実行可能な Harness CLI。** 起動ポリシーが Program の対応する子の深さ上限を
+  使い、実際の stdio compile/start/get 回帰検証で配布 binary を確認します。
+- **新しいカタログからのアクティブ Program 起動。** 実行をバージョンに固定する
+  前に、選択済みの永続バージョンを復元し、アクティベーションポインタを再読込
+  しないようにしました。
+- **生成 artifact の永続再生。** Provider receipt は再オープンと結果調整後も
+  artifact の順序、payload、入れ子の metadata を保持します。揮発性 SQLite
+  パスと artifact の証拠がない旧 receipt は、空の結果を捏造したり再送したり
+  せず、明示的に拒否します。
+- **プロモ動画の依存関係のセキュリティ。** `docs/promo/package-lock.json` の
+  間接依存 `js-yaml` を 4.3.1 から 4.3.2 に更新し、空のマッピングの
+  マージで CPU を消費するサービス拒否脆弱性
+  (CVE-2026-84375 / GHSA-2883-xcg3-v3hh) を修正しました。
+- **TSan CI の RSS 検査。** shadow memory とランタイムの管理コストが
+  通常ビルド用の閾値を超えることがあるため、GCC/Clang ThreadSanitizer
+  では通常ビルド用の RSS 上限検査をスキップします。sanitizer での
+  200 並行実行 stress test と、非 sanitizer ビルドの既存の 10 MiB RSS
+  上限は維持します。
 
 ## [0.12.1] - 2026-08-23
 

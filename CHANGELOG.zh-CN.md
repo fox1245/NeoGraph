@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=18368b14e7e85d70c14e289cb548abb3a8796f639c31731fe62d1fa6b8d00355 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -22,6 +22,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
   gate/controller。运行时还校验已批准的可执行绑定 fingerprint；撤销在重启后
   仍然有效，并阻止该 grant ID 的所有尝试。效果结果仍需单独的逐调用持久
   Tool broker。
+- **性能构建配置。** 新增面向本机 GCC/Clang 构建的可选
+  `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` 开关；当单配置生成器未设置
+  `CMAKE_BUILD_TYPE`、因而遗漏 Release 优化标志时发出警告。Release 加固
+  默认保持启用。
 - **Program 驱动 A2A 服务的严格认证。** Program A2A 构造函数新增可选的
   `require_authenticated_requests` 标志。启用后，除协作 envelope 外，普通
   message、stream、task 查询和取消 RPC 也必须通过已配置的 authenticator。
@@ -34,6 +38,34 @@ NeoGraph 的所有显著变更均记录在本文件中。
   `ContextPlacement::AfterHistory`。现有 artifact kind 的 system message
   行为保持不变，同时可以将显式不受信任的 RAW 或 derived context 绑定到
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
+
+### 修复
+- **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
+  父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
+  异步检查点读取。
+- **Schema callback 与流式媒体。** 使用 callback 时仍保留选定的 custom
+  primitive，并保留 Responses/Gemini stream 的 artifact。Veo 允许省略 pending
+  状态字段，但仍拒绝错误的状态类型。
+- **MCP 与宿主进程隔离。** 采用的工具需要独立固定审批和精确参数值；撤销或
+  schema 变化会终止仍被引用的 client。加固启动与 stderr 限额、handle/FD
+  隔离、后代清理及输出读取上限。
+- **租户安全的持久 Harness 记录。** File/SQLite 中的作用域 ID 和引用可往返，
+  长 File 键使用固定长度 hash 文件名。SQLite 保留策略不会删除其他 namespace
+  的记录或 journal。
+- **可运行的 Harness CLI。** 启动策略使用 Program 支持的子深度上限，真实 stdio
+  compile/start/get 回归验证覆盖交付的 binary。
+- **新目录中的活动 Program 启动。** 在固定运行版本之前恢复已选定的持久版本，
+  不再重新读取激活指针。
+- **生成 artifact 的持久重放。** Provider receipt 在重新打开和结果核对后仍
+  保留 artifact 顺序、payload 和嵌套 metadata。易失性 SQLite 路径以及缺少
+  artifact 证据的旧 receipt 会被明确拒绝，不会伪造空结果或重新发送调用。
+- **宣传视频依赖安全。** 将 `docs/promo/package-lock.json` 中的间接依赖
+  `js-yaml` 从 4.3.1 更新至 4.3.2，修复通过合并空映射耗尽 CPU 的
+  拒绝服务漏洞（CVE-2026-84375 / GHSA-2883-xcg3-v3hh）。
+- **TSan CI RSS 检查。** 由于 shadow memory 和运行时管理开销可能超过
+  普通构建的阈值，在 GCC/Clang ThreadSanitizer 下跳过仅适用于普通构建的
+  RSS 上限检查。保留 sanitizer 下的 200 路并发 stress test，以及非
+  sanitizer 构建中原有的 10 MiB RSS 上限。
 
 ## [0.12.1] - 2026-08-23
 

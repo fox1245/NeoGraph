@@ -9,7 +9,8 @@
  *   - **HTTP** (Streamable HTTP) — remote server, reachable over the network.
  *   - **stdio** — subprocess launched by the client; newline-delimited
  *     JSON-RPC messages exchanged over the child's stdin/stdout. The
- *     subprocess lives as long as any MCPTool produced by the client.
+ *     subprocess lives as long as any MCPTool produced by the client, unless
+ *     MCPClient::shutdown() explicitly revokes the shared session.
  */
 #pragma once
 
@@ -114,12 +115,13 @@ class NEOGRAPH_API MCPClient {
      *             is resolved via PATH before fork. Pipe/fork failures throw
      *             during construction; exec failure surfaces on the first RPC.
      *
-     * The subprocess is terminated (SIGTERM + waitpid) when the last
-     * reference to the underlying session is dropped — this is either the
-     * MCPClient itself or any MCPTool produced by get_tools().
+     * The subprocess tree is terminated when the last reference to the
+     * underlying session is dropped, or when shutdown() is called.
+     * This legacy overload inherits environment, cwd, and stderr.
      */
     explicit MCPClient(std::vector<std::string> argv);
-    /// Hardened local subprocess constructor with an explicit cwd and replacement environment.
+    /// Hardened local launch with validated replacement environment, cwd,
+    /// bounded stderr capture, startup/request deadlines, and process-tree ownership.
     explicit MCPClient(StdioClientConfig config);
 
     MCPClient(const MCPClient&) = delete;
@@ -127,6 +129,14 @@ class NEOGRAPH_API MCPClient {
     MCPClient(MCPClient&&) = delete;
     MCPClient& operator=(MCPClient&&) = delete;
 
+
+    /// Permanently revoke this client and all tools retaining its session.
+    /// Aborts and drains transport work and terminates the owned subprocess tree,
+    /// independently of shared ownership. Repeated and concurrent calls are safe.
+    /// A call from a transport callback cancels in place without self-joining;
+    /// its current operation unwinds with MCPFailure::shutdown.
+    /// Subsequent requests fail with MCPFailure::shutdown.
+    void shutdown() noexcept;
     /**
      * @brief Initialize the connection and perform the MCP handshake.
      * @param client_name Client identifier sent during handshake (default: "neograph").

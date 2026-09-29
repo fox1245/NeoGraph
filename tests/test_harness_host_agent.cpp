@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <future>
 #include <optional>
@@ -104,6 +105,108 @@ HarnessWorkerCall request() {
     call.tool_catalog = json::array();
     call.policy = {{"read_only", true}};
     return call;
+}
+
+TEST(HarnessHostAgentTest, DoesNotInheritHighNonCloexecDescriptor) {
+    const int source = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+    ASSERT_GE(source, 0);
+    const int inherited = ::fcntl(source, F_DUPFD, 70000);
+    ::close(source);
+    if (inherited < 0) GTEST_SKIP() << "requires descriptor limit above 70000";
+    struct CloseDescriptor {
+        int fd;
+        ~CloseDescriptor() { ::close(fd); }
+    } close_descriptor{inherited};
+    ASSERT_EQ(::fcntl(inherited, F_GETFD) & FD_CLOEXEC, 0);
+    Fixture cli("if [ -e /proc/self/fd/" + std::to_string(inherited) +
+                " ]; then printf 'inherited unrelated descriptor' >&2; exit 19; fi\n"
+                "printf '%s\\n' '{\"type\":\"result\",\"structured_output\":{\"valid\":true}}'");
+    const auto response = make_host_agent_executor(cli.config("claude"))(
+        request(), std::make_shared<graph::CancelToken>());
+    EXPECT_EQ(response.kind, HarnessWorkerResponseKind::VALUE) << response.message;
+    EXPECT_EQ(response.value, json({{"valid", true}}));
+}
+
+// Several concurrent writers keep capture readable even while the parent drains.
+// A fixture-side watchdog bounds failures independently of the runner's deadlines.
+std::string flood_script() {
+    return
+        "echo $$ > leader.pid\n"
+        "(sleep 4; /bin/kill -KILL -- -$$) >/dev/null 2>&1 &\n"
+        "echo $! > descendants.pid\n"
+        "i=0\n"
+        "while [ \"$i\" -lt 16 ]; do\n"
+        "  (while [ ! -e flood.ready ]; do sleep 0.01; done; exec yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx) &\n"
+        "  echo $! >> descendants.pid\n"
+        "  i=$((i+1))\n"
+        "done\n"
+        "touch flood.ready\n"
+        "wait\n";
+}
+
+void expect_flood_stopped(const Fixture& cli) {
+    std::ifstream leader_file(cli.root / "leader.pid");
+    pid_t leader = 0;
+    ASSERT_TRUE(static_cast<bool>(leader_file >> leader));
+    EXPECT_FALSE(std::filesystem::exists("/proc/" + std::to_string(leader)));
+    std::ifstream descendants(cli.root / "descendants.pid");
+    ASSERT_TRUE(descendants.good());
+    pid_t pid = 0;
+    while (descendants >> pid) {
+        std::ifstream status("/proc/" + std::to_string(pid) + "/stat");
+        std::string pid_text, command;
+        char state = '\0';
+        if (status >> pid_text >> command >> state) EXPECT_EQ(state, 'Z') << "descendant " << pid;
+    }
+}
+
+TEST(HarnessHostAgentTest, ContinuousOutputStopsAtCaptureLimitAndKillsDescendants) {
+    Fixture cli(flood_script());
+    auto config = cli.config("codex");
+    config.max_output_bytes = 64;
+    auto executor = make_host_agent_executor(config);
+    const auto started = std::chrono::steady_clock::now();
+    const auto response = executor(request(), std::make_shared<graph::CancelToken>());
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(1500));
+    EXPECT_EQ(response.kind, HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_NE(response.message.find("HOST_OUTPUT_LIMIT"), std::string::npos);
+    expect_flood_stopped(cli);
+}
+
+TEST(HarnessHostAgentTest, ContinuousOutputHonorsDeadlineAndKillsDescendants) {
+    Fixture cli(flood_script());
+    auto config = cli.config("codex");
+    config.max_output_bytes = 1024ULL * 1024 * 1024;
+    config.request_timeout = std::chrono::milliseconds(150);
+    auto executor = make_host_agent_executor(config);
+    const auto started = std::chrono::steady_clock::now();
+    const auto response = executor(request(), std::make_shared<graph::CancelToken>());
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(1500));
+    EXPECT_EQ(response.kind, HarnessWorkerResponseKind::TIMEOUT) << response.message;
+    EXPECT_EQ(response.message.find("HOST_STARTUP_TIMEOUT"), std::string::npos);
+    expect_flood_stopped(cli);
+}
+
+TEST(HarnessHostAgentTest, ContinuousOutputHonorsCancellationAndKillsDescendants) {
+    Fixture cli(flood_script());
+    auto config = cli.config("codex");
+    config.max_output_bytes = 1024ULL * 1024 * 1024;
+    auto executor = make_host_agent_executor(config);
+    auto token = std::make_shared<graph::CancelToken>();
+    auto running = std::async(std::launch::async, [&] { return executor(request(), token); });
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!std::filesystem::exists(cli.root / "flood.ready") &&
+           std::chrono::steady_clock::now() < ready_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(std::filesystem::exists(cli.root / "flood.ready"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto cancelled = std::chrono::steady_clock::now();
+    token->cancel();
+    EXPECT_EQ(running.wait_for(std::chrono::milliseconds(1500)), std::future_status::ready);
+    const auto response = running.get();
+    EXPECT_LT(std::chrono::steady_clock::now() - cancelled, std::chrono::milliseconds(1500));
+    EXPECT_EQ(response.kind, HarnessWorkerResponseKind::CANCELLED) << response.message;
+    expect_flood_stopped(cli);
 }
 
 TEST(HarnessHostAgentTest, OpenCodeEmitsOnlyFinalJsonAndHonorsExplicitModel) {

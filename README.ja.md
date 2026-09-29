@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=6ba467cfa403c387e0a433c35a7d0002d1579850b8820d50544b399c8cadb239 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=b55194bbadc8c3c1d7ad7d1de6c96629aaeb960f4cc4b5c5f66d33ac710ec351 -->
 <p align="center">
 <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -68,6 +68,7 @@ cmake --build build --parallel
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON
@@ -76,6 +77,37 @@ cmake --build build-program --parallel
 ```
 
 [examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp)および[QuickJSオーサリング境界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)を参照してください。
+
+### パフォーマンスビルド
+
+Ninja や Unix Makefiles などの単一構成ジェネレーターは、
+`CMAKE_BUILD_TYPE` が空の場合に最適化レベルを選択しません。NeoGraph は
+この構成を警告します。GCC/Clang では QuickJS と NeoGraph が Release の
+`-O3 -DNDEBUG` フラグなしでコンパイルされるためです。
+
+GCC または Clang でローカルホスト向けのパフォーマンスビルドを行う場合：
+
+```bash
+cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
+cmake --build build-performance --parallel
+```
+
+`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` は最適化構成に
+`-march=native -mtune=native` を追加します。ローカルのスループットは
+向上しますが、成果物は非移植になるため、配布用バイナリでは無効にして
+ください。Release のハードニングは既定で有効です。
+
+GCC/Clang の最終的な Release プロファイルは、QuickJS に C11、NeoGraph に
+C++20、`-O3 -DNDEBUG` を使用します。既定のハードニングには
+`-D_GLIBCXX_ASSERTIONS`、`-fstack-protector-strong`、
+`-fcf-protection=full`、Linux の `-D_FORTIFY_SOURCE=2`、
+および RELRO/NOW リンクが含まれます。LTO とホスト固有のチューニングは
+既定では有効になりません。
 
 <a id="two-runtime-layers"></a>
 ## 2つのランタイム層
@@ -178,6 +210,8 @@ cmake -S . -B build-core \
 |---|---|
 | `NEOGRAPH_BUILD_PROGRAM` | 永続的なProgram値、カタログ、ランタイム、系統、移行 |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Programの作成およびジェネレーターコマンド |
+| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 最適化構成で非移植のホスト固有命令チューニングを有効化 |
+| `NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG` | 単一構成ビルドで `CMAKE_BUILD_TYPE` がなく、Release 最適化フラグを逃す場合に警告 |
 | `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python拡張 |
 | `NEOGRAPH_BUILD_SQLITE` | SQLiteチェックポイント、コンテキスト、Hookおよびプロバイダーレシートストア |
 | `NEOGRAPH_BUILD_POSTGRES` | PostgreSQLチェックポイントおよびProgram永続化コンポーネント |

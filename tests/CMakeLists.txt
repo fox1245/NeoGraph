@@ -288,7 +288,10 @@ if(TARGET neograph_harness)
     endif()
 endif()
 if(TARGET neograph_mcp_sqlite)
-    target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
+    target_sources(neograph_tests PRIVATE
+        test_harness_program_store.cpp
+        test_harness_tenant_persistence.cpp
+    )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTING)
 
     add_executable(neograph_harness_program_store_tests
@@ -681,6 +684,23 @@ if(TARGET cookbook_program_chatbot AND NEOGRAPH_BUILD_SQLITE)
     endif()
 endif()
 
+if(TARGET neograph_harness_mcp)
+    set(NEOGRAPH_HARNESS_CLI_TEST_TARGET neograph_harness_mcp)
+elseif(TARGET example_harness_mcp_server)
+    set(NEOGRAPH_HARNESS_CLI_TEST_TARGET example_harness_mcp_server)
+endif()
+if(NEOGRAPH_HARNESS_CLI_TEST_TARGET)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME HarnessCLI.CompileStartGet
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_harness_cli.py
+                $<TARGET_FILE:${NEOGRAPH_HARNESS_CLI_TEST_TARGET}>)
+        set_tests_properties(HarnessCLI.CompileStartGet PROPERTIES
+            TIMEOUT 60 LABELS "program;cli;integration")
+    endif()
+endif()
+
 # ThreadSanitizer ASLR notice: when CMAKE_CXX_FLAGS contains
 # `-fsanitize=thread`, the test binaries can FATAL with
 # "unexpected memory mapping" on Linux kernels with high
@@ -706,12 +726,10 @@ if(NEOGRAPH_BUILD_POSTGRES)
     # SetUp/TearDown — running them in parallel collides on DDL. Mark
     # them with a RESOURCE_LOCK so ctest serializes only this group
     # while the other ~200 tests still run concurrently.
-    # ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres joins the
-    # locked group: it talks to the same database, and the Postgres suite's
-    # drop_schema() will wipe its tables mid-run otherwise. Observed exactly
-    # that — green standalone, red under `ctest -j8`.
+    # Channel-write and subgraph persistence cases use the same checkpoint
+    # tables; the Postgres suite's drop_schema() must not race those fixtures.
     set(NEOGRAPH_PG_LOCKED_TESTS
-        "PostgresCheckpointTest.*:ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres")
+        "PostgresCheckpointTest.*:ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres:SubgraphPersistence.PostgreSQL*")
     gtest_discover_tests(neograph_tests
         TEST_FILTER "${NEOGRAPH_PG_LOCKED_TESTS}"
         PROPERTIES RESOURCE_LOCK postgres_test_db

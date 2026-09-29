@@ -3,6 +3,7 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
 #include <neograph/tool.h>
+#include "canonical_json.h"
 
 #include <sqlite3.h>
 #include <gtest/gtest.h>
@@ -47,6 +48,7 @@ class Transport final : public Provider {
 public:
     std::atomic<int> calls{0};
     bool fail_after_send = false;
+    std::vector<GeneratedArtifact> artifacts;
     ChatCompletion complete(const CompletionParams&) override {
         ++calls;
         if (fail_after_send) throw std::runtime_error("transport disconnected after send");
@@ -55,6 +57,7 @@ public:
         result.message.reasoning = "thought";
         result.usage.prompt_tokens = 7;
         result.usage.cached_prompt_tokens = 3;
+        result.artifacts = artifacts;
         return result;
     }
     std::string get_name() const override { return "transport"; }
@@ -89,6 +92,46 @@ ChatCompletion invoke(Journal& journal, const Call& call, std::shared_ptr<Transp
     return neograph::async::run_sync(resolved.broker->invoke(call.identity(), transport, std::move(params), {}));
 }
 } // namespace
+
+TEST(ProgramProviderJournal, RejectsVolatileStorage) {
+    for (const auto* path : {"", ":memory:", "file::memory:?cache=shared",
+                             "file:provider-journal?mode=memory&cache=shared"}) {
+        SCOPED_TRACE(path);
+        EXPECT_THROW((void)Journal{path}, std::invalid_argument);
+    }
+}
+
+TEST(ProgramProviderJournal, ReopenedCompletionPreservesGeneratedArtifactsWithoutRedispatch) {
+    Database db("artifacts");
+    auto transport = std::make_shared<Transport>();
+    transport->artifacts = {
+        {"image", "image/png", "AAEC/w==", "https://example.test/image", "file-image",
+         {{"width", 2}, {"nested", {{"seed", 17}, {"flags", json::array({true, false})}}}}},
+        {"video", "video/mp4", "", "https://example.test/video", "file-video",
+         {{"duration", 1.25}, {"provider", "test"}}}};
+    Call call;
+    {
+        Journal journal(db.path);
+        const auto result = invoke(journal, call, transport);
+        ASSERT_EQ(result.artifacts.size(), transport->artifacts.size());
+    }
+    Journal reopened(db.path);
+    call.attempt = 2;
+    const auto replayed = invoke(reopened, call, transport);
+    EXPECT_EQ(transport->calls, 1);
+    ASSERT_EQ(replayed.artifacts.size(), transport->artifacts.size());
+    for (std::size_t i = 0; i < replayed.artifacts.size(); ++i) {
+        const auto& actual = replayed.artifacts[i];
+        const auto& expected = transport->artifacts[i];
+        EXPECT_EQ(actual.kind, expected.kind);
+        EXPECT_EQ(actual.mime_type, expected.mime_type);
+        EXPECT_EQ(actual.base64_data, expected.base64_data);
+        EXPECT_EQ(actual.url, expected.url);
+        EXPECT_EQ(actual.file_id, expected.file_id);
+        EXPECT_EQ(neograph::program::detail::canonical_json_bytes(actual.metadata),
+                  neograph::program::detail::canonical_json_bytes(expected.metadata));
+    }
+}
 
 TEST(ProgramProviderJournal, DurableReplayChecksRequestDeploymentAndAttemptProvenance) {
     Database db("replay");
@@ -140,9 +183,20 @@ TEST(ProgramProviderJournal, DispatchedMarkerSurvivesCrashWindowAndRequiresEvide
                  std::invalid_argument);
     ChatCompletion proven;
     proven.message = {"assistant", "confirmed externally"};
+    proven.artifacts = {{"file", "application/octet-stream", "AAE=", "", "reconciled-file",
+                         {{"receipt", "external-proof"}}}};
     reopened.reconcile_success(call.owner, call.id(), digest('c'), proven);
     EXPECT_EQ(invoke(reopened, call, transport).message.content, "confirmed externally");
     EXPECT_EQ(transport->calls, 1);
+    const auto replayed = invoke(reopened, call, transport);
+    ASSERT_EQ(replayed.artifacts.size(), 1U);
+    EXPECT_EQ(replayed.artifacts[0].kind, proven.artifacts[0].kind);
+    EXPECT_EQ(replayed.artifacts[0].mime_type, proven.artifacts[0].mime_type);
+    EXPECT_EQ(replayed.artifacts[0].base64_data, proven.artifacts[0].base64_data);
+    EXPECT_EQ(replayed.artifacts[0].url, proven.artifacts[0].url);
+    EXPECT_EQ(replayed.artifacts[0].file_id, proven.artifacts[0].file_id);
+    EXPECT_EQ(neograph::program::detail::canonical_json_bytes(replayed.artifacts[0].metadata),
+              neograph::program::detail::canonical_json_bytes(proven.artifacts[0].metadata));
     EXPECT_THROW(reopened.reconcile_success(call.owner, call.id(), digest('d'), proven),
                  std::runtime_error);
 }
