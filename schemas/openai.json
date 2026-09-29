@@ -14,6 +14,7 @@
     "messages_field": "messages",
     "tools_field": "tools",
     "temperature_path": "temperature",
+    "temperature_unsupported_models": ["gpt-5*", "gpt-6*", "o1*", "o3*", "o4*"],
     "max_tokens_path": "max_completion_tokens",
     "max_tokens_required": false,
     "max_tokens_default": -1,

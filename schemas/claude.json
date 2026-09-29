@@ -16,6 +16,7 @@
     "messages_field": "messages",
     "tools_field": "tools",
     "temperature_path": "temperature",
+    "temperature_unsupported_models": ["claude-opus-4-7*", "claude-opus-4-8*", "claude-opus-5*", "claude-sonnet-5*", "claude-fable-*"],
     "max_tokens_path": "max_tokens",
     "max_tokens_required": true,
     "max_tokens_default": 4096,

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=258b381a052245ca3ecc60c371d697c3ce1bccd20a090ac54251e6f578f50457 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=47d522afc346fa4c8325357dc9ad2a21a1fbf5b9e202f2e97f72eca0eab0f507 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -84,6 +84,17 @@ NeoGraph 的所有显著变更均记录在本文件中。
   512 token，为空时回退到原问题）、`the_beast_forge`、`server_multi`、`server_live_llm`
   （延长超时；forge 还使用低强度并在为空时以加倍预算重试一次）。实测：默认强度下 forge
   的 5 次创作调用有 4 次没有返回文本，而 `reasoning_effort: low` 下 8/8 在约 25 秒内作答。
+- **按 schema 声明的模型列表省略 `temperature`；当前的 Claude 与 OpenAI 推理模型不再返回
+  HTTP 400。** `SchemaProvider` 除硬编码的 `gpt-5` 前缀判断外总是写入 `temperature`（默认
+  0.7），因此内置 `claude` schema 在 `claude-sonnet-5-5`、`claude-opus-5-5`、
+  `claude-fable-5-1`、`claude-opus-4-8/4-7` 上以 `temperature is deprecated for this model`
+  失败，`openai` schema 在 `gpt-6*`、`o1`、`o3`、`o4-mini` 上失败（两个 API 均已实测）。
+  内置 schema 现声明 `request.temperature_unsupported_models`（完整名称或 `前缀*`，不区分
+  大小写，并会匹配最后一个 `/` 之后的部分）；`SchemaProvider` 与原生 `OpenAIProvider` 都
+  读取它（后者来自内嵌的 `openai` schema），C++ 中两处 `gpt-5` 判断已移除。此前被省略的
+  模型行为不变（`gpt-5*` 仍省略：`gpt-5.1`~`5.4` 在推理强度 `low`/`high` 时拒绝
+  `temperature`）。依赖隐式 `gpt-5` 规则的**自定义 schema** 需要添加该列表。
+  `SchemaTemperaturePolicy.*` 与 `OpenAIProviderAsync.Temperature*` 覆盖此项。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=258b381a052245ca3ecc60c371d697c3ce1bccd20a090ac54251e6f578f50457 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=47d522afc346fa4c8325357dc9ad2a21a1fbf5b9e202f2e97f72eca0eab0f507 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -96,6 +96,19 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   `server_live_llm`(더 긴 타임아웃. forge는 낮은 강도와 예산 2배 재시도 1회도 사용).
   실제 측정: 기본 강도에서는 forge 작성 호출 5회 중 4회가 텍스트 없이 끝났고,
   `reasoning_effort: low`에서는 8/8이 약 25초에 응답했습니다.
+- **`temperature`를 스키마에 선언된 모델 목록에 따라 생략하며, 최신 Claude·OpenAI
+  추론 모델이 더 이상 HTTP 400을 반환하지 않음.** `SchemaProvider`는 하드코딩된 `gpt-5`
+  접두사 검사 외에는 항상 `temperature`(기본 0.7)를 써서, 내장 `claude` 스키마는
+  `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`, `claude-opus-4-8/4-7`에서
+  `temperature is deprecated for this model`로, `openai` 스키마는 `gpt-6*`, `o1`, `o3`,
+  `o4-mini`에서 실패했습니다(두 API에 실제 호출로 측정). 이제 내장 스키마가
+  `request.temperature_unsupported_models`(정확한 이름 또는 `접두사*`, 대소문자 무시,
+  마지막 `/` 뒤도 비교)를 선언하고, `SchemaProvider`와 네이티브 `OpenAIProvider`가 이를
+  읽으며(후자는 내장 `openai` 스키마에서), C++의 `gpt-5` 검사 두 곳은 제거되었습니다.
+  이전에 생략되던 모델의 동작은 그대로입니다(`gpt-5*`는 계속 생략: `gpt-5.1`~`5.4`는
+  추론 강도 `low`/`high`에서 `temperature`를 거부). 암묵적 `gpt-5` 규칙에 의존하던
+  **사용자 정의 스키마**는 목록을 추가해야 합니다. `SchemaTemperaturePolicy.*`와
+  `OpenAIProviderAsync.Temperature*`가 검증합니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

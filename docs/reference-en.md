@@ -2854,6 +2854,15 @@ Veo opts into `"pending"` for name-only submissions and incomplete polls.
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
 
+**Models that reject `temperature`:** some endpoints answer HTTP 400 when the
+request carries `temperature` (OpenAI reasoning models and `gpt-6*`, Claude Opus /
+Sonnet / Fable 4.7+ and 5.x). A schema lists such models in
+`request.temperature_unsupported_models` (exact names, or a prefix when the entry
+ends in `*`; matching ignores case and also tries the part after the last `/`, so
+`openai/o4-mini` matches `o4*`), and `SchemaProvider` then omits `temperature` for
+them. A custom schema that does not declare the list always sends `temperature`;
+copy the list from the built-in schema for your vendor if you target those models.
+
 **Usage:**
 
 ```cpp

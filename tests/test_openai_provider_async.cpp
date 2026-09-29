@@ -359,6 +359,34 @@ TEST(OpenAIProviderAsync, EmptyChoicesIsADescriptiveApiError) {
     }
 }
 
+// The native provider shares the built-in `openai` schema's
+// `request.temperature_unsupported_models` list with SchemaProvider.
+TEST(OpenAIProviderAsync, TemperatureIsOmittedForModelsThatRejectIt) {
+    for (const char* model : {"o4-mini", "gpt-6-luna", "gpt-5-mini", "openai/o3"}) {
+        MockServer mock;
+        auto       provider = llm::OpenAIProvider::create(make_config(mock));
+        auto       params   = make_params();
+        params.model        = model;
+        params.temperature  = 0.7f;
+        provider->complete(params);
+        EXPECT_FALSE(mock.last_request_json().contains("temperature")) << model;
+    }
+}
+
+TEST(OpenAIProviderAsync, TemperatureIsSentForSamplingModels) {
+    for (const char* model : {"gpt-4o-mini", "gpt-4.1", "openai/gpt-4o"}) {
+        MockServer mock;
+        auto       provider = llm::OpenAIProvider::create(make_config(mock));
+        auto       params   = make_params();
+        params.model        = model;
+        params.temperature  = 0.7f;
+        provider->complete(params);
+        const auto body = mock.last_request_json();
+        ASSERT_TRUE(body.contains("temperature")) << model;
+        EXPECT_NEAR(body["temperature"].get<double>(), 0.7, 1e-6) << model;
+    }
+}
+
 TEST(OpenAIProviderStream, TopLevelErrorIsNotAnEmptySuccess) {
     MockServer mock;
     mock.body =

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=ac6da0875abb642e5c86cafebaac1da8e5b05f5e1eb9d4744d7ca17ad7f4d690 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=e71dbdfd271fbd28aafc3d554a63bfb92e8e3fd7393db5e4f9b8cf3cae1f758d -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2762,6 +2762,14 @@ public:
 
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
+
+**`temperature`를 거부하는 모델:** 일부 엔드포인트는 요청에 `temperature`가 있으면
+HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / Sonnet / Fable 4.7+ 및
+5.x). 스키마는 이런 모델을 `request.temperature_unsupported_models`에 나열하며(정확한
+이름, 또는 `*`로 끝나는 항목은 접두사. 대소문자를 무시하고 마지막 `/` 뒤 부분도
+비교하므로 `openai/o4-mini`는 `o4*`와 일치), `SchemaProvider`는 해당 모델에서
+`temperature`를 생략합니다. 이 목록을 선언하지 않은 사용자 정의 스키마는 항상
+`temperature`를 보내므로, 해당 모델을 대상으로 한다면 내장 스키마의 목록을 복사하세요.
 
 **Usage:**
 

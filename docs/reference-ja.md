@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=ac6da0875abb642e5c86cafebaac1da8e5b05f5e1eb9d4744d7ca17ad7f4d690 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=e71dbdfd271fbd28aafc3d554a63bfb92e8e3fd7393db5e4f9b8cf3cae1f758d -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2260,6 +2260,14 @@ public:
 | `base_url` | `std::string` | `"https://api.openai.com"` | Base URL。Azure、ローカルモデル、互換 API 用に上書きします |
 | `default_model` | `std::string` | `"gpt-4o-mini"` | `CompletionParams::model` が空のときに使う model |
 | `timeout_seconds` | `int` | `60` | HTTP request のタイムアウト |
+**`temperature` を拒否するモデル:** 一部のエンドポイントは、リクエストに `temperature` が
+含まれると HTTP 400 を返します（OpenAI の推論モデルと `gpt-6*`、Claude Opus / Sonnet / Fable
+4.7 以降および 5.x）。スキーマはそのようなモデルを `request.temperature_unsupported_models`
+に列挙し（完全一致の名前、または `*` で終わる項目は前方一致。大文字小文字を区別せず、最後の
+`/` 以降も比較するため `openai/o4-mini` は `o4*` に一致）、`SchemaProvider` は該当モデルでは
+`temperature` を省略します。このリストを宣言しないカスタムスキーマは常に `temperature` を
+送るため、それらのモデルを対象にする場合は組み込みスキーマのリストをコピーしてください。
+
 **使用方法:**
 ```cpp
 auto provider = neograph::llm::OpenAIProvider::create({

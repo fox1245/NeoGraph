@@ -1,6 +1,8 @@
 // Schema-driven, network-free request mapping and response decoding.
 #include <neograph/llm/schema_provider.h>
 
+#include "temperature_policy.h"
+
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -9,12 +11,6 @@
 #include <stdexcept>
 
 namespace neograph::llm {
-namespace {
-bool model_omits_temperature(const std::string& model) {
-    return model.rfind("gpt-5", 0) == 0;
-}
-}
-
 void SchemaProvider::parse_schema()
 {
     provider_name_ = schema_.value("name", "unknown");
@@ -93,6 +89,12 @@ void SchemaProvider::parse_schema()
     } else {
         req_.temperature_path = r.value("temperature_path", "temperature");
     }
+    // temperature_unsupported_models: the schema names the model families
+    // whose endpoint answers HTTP 400 when `temperature` is present (OpenAI
+    // reasoning models, Claude 4.7+/5.x, ...). Vendor data, so it lives here
+    // rather than in a C++ branch.
+    req_.temperature_unsupported_models =
+        detail::parse_temperature_unsupported_models(r);
     req_.max_tokens_path = r.value("max_tokens_path", "max_tokens");
     req_.max_tokens_required = r.value("max_tokens_required", false);
     req_.max_tokens_default = r.value("max_tokens_default", -1);
@@ -1005,7 +1007,8 @@ json SchemaProvider::build_body(const CompletionParams& params, bool websocket) 
     // the per-schema path so node code doesn't have to negate
     // `params.temperature` at every call site.
     if (!websocket && params.temperature >= 0.0f &&
-        !req_.temperature_path.empty() && !model_omits_temperature(model)) {
+        !req_.temperature_path.empty() &&
+        !detail::model_matches_any(model, req_.temperature_unsupported_models)) {
         json_path::set_path(body, req_.temperature_path, params.temperature);
     }
 
