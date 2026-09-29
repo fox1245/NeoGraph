@@ -21,7 +21,7 @@ jobs:
       - name: Install opt-in gRPC toolchain
         run: |
           bash scripts/ci_apt_install.sh cmake build-essential pkg-config \
-            libssl-dev libgrpc++-dev protobuf-compiler protobuf-compiler-grpc
+            libssl-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
       - name: Configure gRPC boundary gate
         run: |
           cmake -S . -B build-grpc \

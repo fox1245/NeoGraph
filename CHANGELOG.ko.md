@@ -55,6 +55,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   시작·stderr 한도, handle/FD 격리, 자손 종료와 출력 읽기 한도를 적용합니다.
   macOS에서는 Darwin 시그널 매크로를 지원하고 fork 전에 플랫폼 API로
   상속 환경을 가져옵니다.
+- **깨끗한 러너의 gRPC 계약 검증.** CI가 Protobuf 컴파일러·런타임뿐 아니라
+  개발용 헤더와 라이브러리도 명시적으로 설치합니다.
 - **테넌트 안전 영속 Harness 기록.** File/SQLite에서 범위 ID와 참조가 왕복하며,
   긴 File 키는 고정 길이 hash 파일명을 사용합니다. SQLite 보존 정책은 다른
   namespace의 기록이나 journal을 삭제하지 않습니다.

@@ -56,6 +56,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   上限、handle/FD 分離、子孫終了、出力読込上限を適用します。
   macOS では Darwin のシグナルマクロに対応し、fork 前にプラットフォームの
   アクセサーから継承環境を取得します。
+- **クリーンな runner での gRPC 契約検証。** CI は Protobuf の compiler/runtime
+  だけでなく、開発用ヘッダーとライブラリも明示的にインストールします。
 - **テナント安全な永続 Harness 記録。** File/SQLite でスコープ ID と参照を
   往復し、長い File キーには固定長 hash ファイル名を使います。SQLite 保持処理
   は別 namespace の記録や journal を削除しません。
