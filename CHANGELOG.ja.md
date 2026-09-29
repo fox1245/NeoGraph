@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=314c2f180a1634b2329dd50103dcd4372480398741c64fcd5f01c3a12efabc7c -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **`OpenAIProvider` が HTTP 200 で返されたエラー本文を報告。** OpenRouter などの
+  ゲートウェイは上流の障害（例：選択したプロバイダの 502）を最上位の `error` オブジェクトを
+  持つ HTTP 200 で通知しますが、プロバイダは不透明な `json::at: key not found: choices`
+  で失敗していました。現在はゲートウェイのメッセージを含む API エラーを送出し（本文内の
+  `429` コードは `RateLimitError`）、`choices` のない本文も説明的なエラーになります。
 - **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
   保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
   静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。

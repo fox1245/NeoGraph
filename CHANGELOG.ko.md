@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=314c2f180a1634b2329dd50103dcd4372480398741c64fcd5f01c3a12efabc7c -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,11 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **`OpenAIProvider`가 HTTP 200으로 반환된 오류 본문을 보고.** OpenRouter 같은
+  게이트웨이는 상위 제공자 장애(예: 선택된 제공자의 502)를 최상위 `error` 객체가 있는
+  HTTP 200으로 알리는데, 제공자는 불투명한 `json::at: key not found: choices`로
+  실패했습니다. 이제 게이트웨이 메시지를 담은 API 오류를 던지며(본문 안의 `429`
+  코드는 `RateLimitError`), `choices`가 없는 본문도 설명적인 오류가 됩니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

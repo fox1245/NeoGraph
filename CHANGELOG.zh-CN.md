@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=314c2f180a1634b2329dd50103dcd4372480398741c64fcd5f01c3a12efabc7c -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **`OpenAIProvider` 报告以 HTTP 200 返回的错误正文。** OpenRouter 等网关会用带有顶层
+  `error` 对象的 HTTP 200 表示上游故障（例如所选提供方的 502），而提供方此前以不透明的
+  `json::at: key not found: choices` 失败。现在会抛出携带网关消息的 API 错误（正文中的
+  `429` 代码抛出 `RateLimitError`），没有 `choices` 的正文同样给出说明性错误。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

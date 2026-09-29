@@ -144,6 +144,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **`OpenAIProvider` reports error bodies returned with HTTP 200.** Gateways
+  such as OpenRouter signal an upstream failure (for example a 502 from the
+  selected provider) as HTTP 200 with a top-level `error` object; the provider
+  failed with an opaque `json::at: key not found: choices`. It now throws an
+  API error carrying the gateway message (a `429` code inside the body raises
+  `RateLimitError`), and a body without `choices` is a descriptive error too.
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and

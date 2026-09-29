@@ -316,6 +316,49 @@ TEST(OpenAIProviderAsync, NonRateLimitErrorSurfacesAsRuntimeError) {
     EXPECT_THROW(provider->complete(params), std::runtime_error);
 }
 
+// OpenRouter reports upstream provider failures as HTTP 200 with a top-level
+// error object. That must not surface as an opaque JSON lookup failure.
+TEST(OpenAIProviderAsync, ErrorBodyWithHttp200IsADescriptiveApiError) {
+    MockServer mock;
+    mock.body = R"({"error":{"message":"Upstream error from Morph: Internal server error",)"
+                R"("code":502,"metadata":{"error_type":"provider_unavailable"}}})";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    try {
+        provider->complete(make_params());
+        FAIL() << "expected the error body to raise";
+    } catch (const RateLimitError&) {
+        FAIL() << "a 502 error body is not a rate limit";
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("Upstream error from Morph"), std::string::npos) << what;
+        EXPECT_EQ(what.find("json::at"), std::string::npos) << what;
+    }
+}
+
+TEST(OpenAIProviderAsync, RateLimitCodeInsideHttp200BodyIsTyped) {
+    MockServer mock;
+    mock.body = R"({"error":{"message":"Rate limit exceeded","code":429}})";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    EXPECT_THROW(provider->complete(make_params()), RateLimitError);
+}
+
+TEST(OpenAIProviderAsync, EmptyChoicesIsADescriptiveApiError) {
+    MockServer mock;
+    mock.body = R"({"id":"x","choices":[]})";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    try {
+        provider->complete(make_params());
+        FAIL() << "expected an error for a body without choices";
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("no choices"), std::string::npos) << what;
+        EXPECT_EQ(what.find("json::at"), std::string::npos) << what;
+    }
+}
+
 TEST(OpenAIProviderStream, TopLevelErrorIsNotAnEmptySuccess) {
     MockServer mock;
     mock.body =
