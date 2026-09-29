@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3db77867cbecb5cbb07f2c4cfe4e7f1cec2825c631b4c5c6dd977471e2d6cb47 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,20 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **組み込みスキーマが呼び出しごとの推論強度に対応。** `openai_responses` は
+  `reasoning.effort`、`openai` は `reasoning_effort` を `request.per_call_fields` に宣言する
+  ため、`CompletionParams::extra_fields` で `SchemaProvider` 経由の推論モデルの隠れた推論を
+  制限できます（以前はこのキーが黙って破棄されていました）。
+  `SchemaBuiltinReasoningKnob.*` が検証します。
+- **遅い推論モデル経路のサンプルを堅牢化。** `~deepseek/deepseek-v4-flash-latest` 経路は
+  時に際限なく推論し（観測：推論トークン 4096、130 秒超、可視テキストなし）、複数の
+  サンプルが既定の 60 秒タイムアウトや空応答で失敗していました。
+  `examples/16_tree_of_thoughts.cpp`（タイムアウト 300 秒、8192 トークン上限と再試行）、
+  `examples/28_corrective_rag.cpp`（180 秒。クエリ書き換えは低い推論強度・512 トークンで、
+  空なら元の質問にフォールバック）、`the_beast_forge`・`server_multi`・`server_live_llm`
+  （タイムアウト延長。forge は低い強度と予算 2 倍の再試行 1 回も使用）。実測：既定の強度
+  では forge の作成呼び出し 5 回中 4 回がテキストなしで終了し、`reasoning_effort: low` では
+  8/8 が約 25 秒で応答しました。
 - **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
   保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
   静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。

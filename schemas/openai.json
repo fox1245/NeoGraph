@@ -22,7 +22,8 @@
       "tool_choice": "auto"
     },
     "per_call_fields": [
-      "provider"
+      "provider",
+      "reasoning_effort"
     ]
   },
   "system_prompt": {

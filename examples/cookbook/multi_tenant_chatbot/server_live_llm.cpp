@@ -230,6 +230,8 @@ int main() {
     cfg.api_key = api_key;
     cfg.base_url = "https://openrouter.ai/api";
     cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
+    // Reasoning-model calls on this route routinely exceed the 60 s default.
+    cfg.timeout_seconds = 180;
     cfg.provider_routing = {{"zdr", true}};
     auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
 

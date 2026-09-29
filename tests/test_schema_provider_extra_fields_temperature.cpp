@@ -425,5 +425,46 @@ TEST(SchemaProviderRouting, RejectsNonObjectConfiguration) {
         std::invalid_argument);
 }
 
+// Built-in schemas must let callers cap reasoning per call. Without this a
+// reasoning model can spend its whole output budget thinking (observed with
+// OpenRouter deepseek: empty replies, finish_reason=length) and callers had no
+// way to bound it through SchemaProvider.
+TEST(SchemaBuiltinReasoningKnob, ResponsesSchemaBindsReasoningEffortPerCall) {
+    SchemaProvider::Config cfg;
+    cfg.schema_path = "openai_responses";
+    cfg.api_key     = "test-key";
+    auto sp         = SchemaProvider::create(cfg);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields     = json{{"reasoning.effort", "low"}};
+    const json body    = SchemaProviderTestAccess::build_body(*sp, p);
+    ASSERT_TRUE(body.contains("reasoning")) << body.dump();
+    EXPECT_EQ(body["reasoning"]["effort"], "low");
+}
+
+TEST(SchemaBuiltinReasoningKnob, ChatSchemaBindsReasoningEffortPerCall) {
+    SchemaProvider::Config cfg;
+    cfg.schema_path = "openai";
+    cfg.api_key     = "test-key";
+    auto sp         = SchemaProvider::create(cfg);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields     = json{{"reasoning_effort", "low"}};
+    const json body    = SchemaProviderTestAccess::build_body(*sp, p);
+    EXPECT_EQ(body.value("reasoning_effort", ""), "low") << body.dump();
+}
+
+TEST(SchemaBuiltinReasoningKnob, NoKnobMeansNoReasoningKeyInBody) {
+    SchemaProvider::Config cfg;
+    cfg.schema_path = "openai_responses";
+    cfg.api_key     = "test-key";
+    auto sp         = SchemaProvider::create(cfg);
+    ASSERT_NE(sp, nullptr);
+    const json body = SchemaProviderTestAccess::build_body(*sp, basic_params());
+    EXPECT_FALSE(body.contains("reasoning")) << body.dump();
+}
+
 
 #endif // !_WIN32

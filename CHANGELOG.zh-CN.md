@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3db77867cbecb5cbb07f2c4cfe4e7f1cec2825c631b4c5c6dd977471e2d6cb47 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,17 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **内置 schema 支持按调用设置推理强度。** `openai_responses` 在 `request.per_call_fields`
+  中声明 `reasoning.effort`，`openai` 声明 `reasoning_effort`，因此可通过
+  `CompletionParams::extra_fields` 经由 `SchemaProvider` 限制推理模型的隐藏推理（此前该键
+  会被静默丢弃）。`SchemaBuiltinReasoningKnob.*` 覆盖此项。
+- **使慢速推理模型路径上的示例更健壮。** `~deepseek/deepseek-v4-flash-latest` 路径偶尔会
+  无限推理（观测：4096 个推理 token，超过 130 秒，没有可见文本），导致多个示例触发
+  默认 60 秒超时或因空回复中止。`examples/16_tree_of_thoughts.cpp`（超时 300 秒，8192
+  token 上限并重试）、`examples/28_corrective_rag.cpp`（180 秒；查询改写使用低推理强度、
+  512 token，为空时回退到原问题）、`the_beast_forge`、`server_multi`、`server_live_llm`
+  （延长超时；forge 还使用低强度并在为空时以加倍预算重试一次）。实测：默认强度下 forge
+  的 5 次创作调用有 4 次没有返回文本，而 `reasoning_effort: low` 下 8/8 在约 25 秒内作答。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。
