@@ -4,6 +4,10 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/llm/openai_provider.h>
 
+#include <builtin_schemas.h>
+
+#include "temperature_policy.h"
+
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/post.hpp>
@@ -20,13 +24,24 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace neograph::llm {
 
 namespace {
 
+// Models whose endpoint rejects `temperature` are declared once, in the
+// built-in `openai` schema (`request.temperature_unsupported_models`), and
+// shared with SchemaProvider.
 bool model_omits_temperature(std::string_view model) {
-    return model.rfind("gpt-5", 0) == 0;
+    static const std::vector<std::string> unsupported = [] {
+        const auto& schemas = builtin::schemas();
+        const auto  it      = schemas.find("openai");
+        if (it == schemas.end()) return std::vector<std::string>{};
+        return detail::parse_temperature_unsupported_models(
+            json::parse(it->second).value("request", json::object()));
+    }();
+    return detail::model_matches_any(model, unsupported);
 }
 
 }  // namespace

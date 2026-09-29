@@ -259,6 +259,10 @@ public:
         std::string messages_field;
         std::string tools_field;
         std::string temperature_path;
+        /// `request.temperature_unsupported_models`: model names (exact, or
+        /// prefix when ending in `*`) whose endpoint rejects `temperature`
+        /// with HTTP 400. build_body omits the field for these models.
+        std::vector<std::string> temperature_unsupported_models;
         std::string max_tokens_path;
         bool max_tokens_required = false;
         int max_tokens_default = -1;

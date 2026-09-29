@@ -426,4 +426,109 @@ TEST(SchemaProviderRouting, RejectsNonObjectConfiguration) {
 }
 
 
+
+// ─── request.temperature_unsupported_models ───
+//
+// Some endpoints answer HTTP 400 when `temperature` is present. Which models
+// do is vendor data, so the schema declares it. Expectations below were
+// measured against the live APIs (see the changelog entry).
+
+namespace {
+
+bool body_has_temperature(const std::string& schema_name, const std::string& model) {
+    SchemaProvider::Config cfg;
+    cfg.schema_path = schema_name;
+    cfg.api_key     = "test-key";
+    auto sp         = SchemaProvider::create(cfg);
+    EXPECT_NE(sp, nullptr);
+    CompletionParams p = basic_params();
+    p.model            = model;
+    return SchemaProviderTestAccess::build_body(*sp, p).contains("temperature");
+}
+
+}  // namespace
+
+TEST(SchemaTemperaturePolicy, ClaudeModelsThatRejectTemperatureOmitIt) {
+    for (const char* model : {"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1",
+                              "claude-opus-5", "claude-sonnet-5", "claude-fable-5",
+                              "claude-opus-4-8", "claude-opus-4-7"}) {
+        EXPECT_FALSE(body_has_temperature("claude", model)) << model;
+    }
+}
+
+TEST(SchemaTemperaturePolicy, ClaudeModelsThatAcceptTemperatureKeepIt) {
+    for (const char* model : {"claude-haiku-4-5-20251001", "claude-haiku-4-5",
+                              "claude-sonnet-4-6", "claude-opus-4-6",
+                              "claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929"}) {
+        EXPECT_TRUE(body_has_temperature("claude", model)) << model;
+    }
+}
+
+TEST(SchemaTemperaturePolicy, OpenAiReasoningFamiliesOmitTemperatureOnBothSchemas) {
+    for (const char* schema : {"openai_responses", "openai"}) {
+        for (const char* model : {"gpt-5", "gpt-5-mini", "gpt-5.5", "gpt-5.6-luna",
+                                  "gpt-6-luna", "gpt-6.1-sol", "o1", "o3", "o3-mini",
+                                  "o4-mini"}) {
+            EXPECT_FALSE(body_has_temperature(schema, model)) << schema << " " << model;
+        }
+    }
+}
+
+TEST(SchemaTemperaturePolicy, OpenAiSamplingModelsKeepTemperature) {
+    for (const char* schema : {"openai_responses", "openai"}) {
+        for (const char* model : {"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-nano",
+                                  "gpt-4-turbo", "gpt-3.5-turbo"}) {
+            EXPECT_TRUE(body_has_temperature(schema, model)) << schema << " " << model;
+        }
+    }
+}
+
+TEST(SchemaTemperaturePolicy, GatewayPrefixedModelIdsMatchTheirFamily) {
+    EXPECT_FALSE(body_has_temperature("openai", "openai/o4-mini"));
+    EXPECT_FALSE(body_has_temperature("openai", "openai/gpt-6-luna"));
+    EXPECT_FALSE(body_has_temperature("claude", "anthropic/claude-sonnet-5-5"));
+    EXPECT_TRUE(body_has_temperature("openai", "openai/gpt-4o-mini"));
+    EXPECT_TRUE(body_has_temperature("claude", "anthropic/claude-haiku-4-5"));
+}
+
+TEST(SchemaTemperaturePolicy, MatchingIsCaseInsensitive) {
+    EXPECT_FALSE(body_has_temperature("openai_responses", "GPT-6-Luna"));
+    EXPECT_FALSE(body_has_temperature("claude", "Claude-Sonnet-5-5"));
+}
+
+TEST(SchemaTemperaturePolicy, CustomSchemaListIsHonouredExactAndPrefix) {
+    auto schema = base_schema();
+    schema["request"]["temperature_unsupported_models"] =
+        json::array({"exact-model", "family-*"});
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+    const auto has_temp = [&](const char* model) {
+        CompletionParams p = basic_params();
+        p.model            = model;
+        return SchemaProviderTestAccess::build_body(*sp, p).contains("temperature");
+    };
+    EXPECT_FALSE(has_temp("exact-model"));
+    EXPECT_FALSE(has_temp("family-large"));
+    EXPECT_TRUE(has_temp("exact-model-2"));   // no '*': exact match only
+    EXPECT_TRUE(has_temp("other"));
+}
+
+TEST(SchemaTemperaturePolicy, SchemaWithoutTheKeySendsTemperatureForEveryModel) {
+    // The schema owns the contract: no C++ vendor fallback for schemas that
+    // do not declare the list.
+    auto sp = make_provider_from(base_schema());
+    ASSERT_NE(sp, nullptr);
+    CompletionParams p = basic_params();
+    p.model            = "gpt-5-mini";
+    EXPECT_TRUE(SchemaProviderTestAccess::build_body(*sp, p).contains("temperature"));
+}
+
+TEST(SchemaTemperaturePolicy, MalformedListIsRejectedAtCreation) {
+    for (const json& bad : {json("gpt-5*"), json::array({1}), json::array({""})}) {
+        auto schema = base_schema();
+        schema["request"]["temperature_unsupported_models"] = bad;
+        EXPECT_THROW((void)make_provider_from(schema), std::invalid_argument) << bad.dump();
+    }
+}
+
 #endif // !_WIN32

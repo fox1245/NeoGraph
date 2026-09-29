@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=fb96bb89b30d99d23b422c6b6c23636653a33c3c3f92d5e9a79baf358835b3bc -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,19 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **`temperature` をスキーマ宣言のモデル一覧に従って省略し、最新の Claude・OpenAI 推論
+  モデルが HTTP 400 を返さなくなった。** `SchemaProvider` はハードコードされた `gpt-5`
+  前方一致以外では常に `temperature`（既定 0.7）を書き込んでいたため、組み込みの `claude`
+  スキーマは `claude-sonnet-5-5`・`claude-opus-5-5`・`claude-fable-5-1`・`claude-opus-4-8/4-7`
+  で `temperature is deprecated for this model` により失敗し、`openai` スキーマは `gpt-6*`・
+  `o1`・`o3`・`o4-mini` で失敗していました（両 API で実測）。組み込みスキーマが
+  `request.temperature_unsupported_models`（完全一致または `接頭辞*`、大文字小文字を区別せず、
+  最後の `/` 以降も比較）を宣言し、`SchemaProvider` とネイティブ `OpenAIProvider` の両方が
+  読み込みます（後者は組み込み `openai` スキーマから）。C++ の `gpt-5` 判定 2 か所は削除
+  しました。従来省略されていたモデルの動作は変わりません（`gpt-5*` は引き続き省略：
+  `gpt-5.1`〜`5.4` は推論強度 `low`/`high` で `temperature` を拒否）。暗黙の `gpt-5` ルールに
+  依存していた**カスタムスキーマ**は一覧を追加する必要があります。
+  `SchemaTemperaturePolicy.*` と `OpenAIProviderAsync.Temperature*` が検証します。
 - **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
   保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
   静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。

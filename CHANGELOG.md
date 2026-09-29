@@ -144,6 +144,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **`temperature` is omitted per schema-declared model list; current Claude and
+  OpenAI reasoning models no longer answer HTTP 400.** `SchemaProvider` always
+  wrote `temperature` (default 0.7) except behind a hard-coded `gpt-5` prefix
+  check, so the built-in `claude` schema failed with `temperature is deprecated
+  for this model` on `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`,
+  `claude-opus-4-8/4-7` and the `openai` schemas failed on `gpt-6*`, `o1`, `o3`,
+  `o4-mini` (measured live against both APIs). Built-in schemas now declare
+  `request.temperature_unsupported_models` (exact names or `prefix*`, case-
+  insensitive, also matched after the last `/`); `SchemaProvider` and the native
+  `OpenAIProvider` both read it (the latter from the embedded `openai` schema) and
+  the two C++ `gpt-5` checks are removed. Behavior for models omitted before is
+  unchanged (`gpt-5*` stays omitted: `gpt-5.1`-`5.4` reject `temperature` at
+  reasoning effort `low`/`high`). **Custom schemas** that relied on the implicit
+  `gpt-5` rule must add the list. `SchemaTemperaturePolicy.*` and
+  `OpenAIProviderAsync.Temperature*` cover it.
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and

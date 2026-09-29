@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=cfa094d06b17ab38eaba407e3f910efdcb8850170d0cec3e77e14964d7539753 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2679,6 +2679,13 @@ public:
 
 **自定义 schema：** 将文件路径传给 `schema_path`，即可加载描述任意 API 请求/响应格式的
 自定义 schema JSON 文件。
+
+**拒绝 `temperature` 的模型：** 部分端点在请求带有 `temperature` 时返回 HTTP 400
+（OpenAI 推理模型与 `gpt-6*`、Claude Opus / Sonnet / Fable 4.7+ 及 5.x）。schema 在
+`request.temperature_unsupported_models` 中列出这些模型（完整名称，或以 `*` 结尾的条目
+表示前缀；匹配不区分大小写，并会尝试最后一个 `/` 之后的部分，因此 `openai/o4-mini`
+匹配 `o4*`），`SchemaProvider` 随后会对它们省略 `temperature`。未声明该列表的自定义
+schema 始终发送 `temperature`；若面向这些模型，请从对应厂商的内置 schema 复制该列表。
 
 **用法：**
 
