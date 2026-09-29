@@ -54,6 +54,7 @@ add_executable(neograph_tests
     test_schema_provider_stop_reason.cpp
     test_rate_limited_provider.cpp
     test_admin_api_barrier_preservation.cpp
+    test_fork_resume_semantics.cpp
     test_intent_classifier_streaming.cpp
     test_incremental_checkpoint.cpp
     test_deep_research_human_review.cpp

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3d95cddd2a9d9ff0c7b8028968a5bfab4c44b404af3eff0115f8edfb25a7f1cc -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=98376bd657cf83e768e69b6d7be99185f5fdf5d30c05ba7e282b179c720ef6af -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -395,7 +395,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### 时间旅行
 
-`engine.fork(thread_id, from_checkpoint_id)` 返回一个从过去检查点开始的新线程。适用于“如果我当时回答不同会怎样”的分支。
+`engine.fork(thread_id, from_checkpoint_id)` 返回一个从过去检查点开始的新线程。适用于“如果我当时回答不同会怎样”的分支。fork 只复制一个检查点，`resume()` 从其待执行节点继续，因此请 fork 仍有待执行节点的检查点（例如 `interrupt_before` 暂停运行的位置）；已完成线程的终止检查点没有可执行的内容。
 
 ---
 

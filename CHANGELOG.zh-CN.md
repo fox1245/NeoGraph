@@ -50,6 +50,19 @@ NeoGraph 的所有显著变更均记录在本文件中。
   在 `-32601` 时改发格式正确的 1.0 请求;没有兼容接口时给出明确错误。`A2AServer` 也按
   `A2A-Version` 以 1.0 应答,并在卡片中发布 `supportedInterfaces`。
   `A2AClient::rpc_call_with_fallback` 已移除。
+- **fork 示例在 fork 出的线程上真正执行，并记录 fork/resume 约定。**
+  `examples/08_state_management.cpp` 之前 fork 的是已完成线程的终止检查点，因此
+  `resume()` 没有执行任何节点，“Tokyo”问题一直没有回答。现在它 fork 运行在 `reviewer`
+  之前暂停的检查点，并打印真实的助手回答。`GraphEngine::fork()` 以及 reference/concepts
+  文档现明确：fork 只复制一个检查点，`resume()` 从其待执行节点继续（终止检查点没有待执行节点）。
+  `Example.StateManagement` 与 `ForkResumeSemantics.*` 覆盖两种情况。
+- **`example_evolution` 文件模式。** 演示用的 `pnoop` 节点类型现在在所有模式下注册，
+  因此文档中的 `./example_evolution seed.json task.json` 可直接使用受跟踪的
+  `examples/54_evolution_seed.json` 与 `54_evolution_task.json`（此前报
+  `compile failed: Unknown node type: 'pnoop'`）。seed 可使用内置类型或 `pnoop`；
+  其他自定义节点类型须由宿主程序注册。`Example.Evolution.*` 运行两种模式。
+- **`example_plan_executor` 摘要。** 最后一行现在报告计算得出的被重放 executor 调用数（4），
+  而不是固定的“1”。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

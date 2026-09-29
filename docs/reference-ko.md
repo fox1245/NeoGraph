@@ -1631,6 +1631,14 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
+fork는 정확히 하나의 체크포인트를 복사하며, 새 스레드에서 `resume()`은 그 체크포인트의 대기 중인
+노드부터 이어서 실행합니다. 완료된 스레드의 최신 체크포인트는 종료 상태(대기 노드 없음)이므로 이를
+fork한 뒤 `resume()`을 호출해도 아무것도 실행되지 않습니다. 분기하여 다시 실행하려면 대기 노드가 남아
+있는 이전 체크포인트(예: `interrupt_before`로 실행이 멈춘 체크포인트이며 `get_state_history()`로
+찾을 수 있습니다)의 `checkpoint_id`를 전달하고, fork에 `update_state()`를 적용한 다음 `resume()`하세요.
+`examples/08_state_management.cpp`가 이 흐름을 보여줍니다.
+
+
 Tool ownership is established in `NodeContext::tools` or
 `EngineResources::tools` before compilation. There is no post-compile transfer.
 

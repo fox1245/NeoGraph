@@ -55,6 +55,21 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   인터페이스가 없으면 명확한 오류를 던집니다. `A2AServer`도 `A2A-Version`에 따라 1.0으로
   응답하고 카드에 `supportedInterfaces`를 게시합니다. `A2AClient::rpc_call_with_fallback`은
   제거되었습니다.
+- **Fork 예제가 fork된 스레드에서 실제로 실행되며 fork/resume 계약을 문서화.**
+  `examples/08_state_management.cpp`는 완료된 스레드의 종료 체크포인트를 fork하여
+  `resume()`이 노드를 실행하지 않았고 "Tokyo" 질문에 답이 없었습니다. 이제
+  `reviewer` 직전에 멈춘 체크포인트를 fork하여 실제 어시스턴트 답변을 출력합니다.
+  `GraphEngine::fork()`와 reference/concepts 문서는 fork가 하나의 체크포인트를
+  복사하고 `resume()`이 그 대기 노드부터 이어서 실행함(종료 체크포인트에는 없음)을
+  명시합니다. `Example.StateManagement`와 `ForkResumeSemantics.*`가 두 경우를 검증합니다.
+- **`example_evolution` 파일 모드.** 데모용 `pnoop` 노드 타입을 모든 모드에서
+  등록하므로 문서화된 `./example_evolution seed.json task.json`이 추적되는
+  `examples/54_evolution_seed.json`, `54_evolution_task.json`으로 동작합니다
+  (이전에는 `compile failed: Unknown node type: 'pnoop'`). seed는 내장 타입 또는
+  `pnoop`을 쓸 수 있으며, 다른 사용자 정의 노드 타입은 호스트 프로그램이 등록해야
+  합니다. `Example.Evolution.*`가 두 모드를 실행합니다.
+- **`example_plan_executor` 요약.** 마지막 줄이 고정값 "1" 대신 계산된 재사용
+  executor 호출 수(4)를 보고합니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

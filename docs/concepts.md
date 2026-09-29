@@ -606,7 +606,10 @@ Useful when the decision to pause depends on intermediate node output
 
 `engine.fork(thread_id, from_checkpoint_id)` returns a new thread that
 starts from a past checkpoint. Useful for "what if I had answered
-differently" branching.
+differently" branching. A fork copies exactly one checkpoint and `resume()`
+continues from its pending nodes, so fork a checkpoint that still has pending
+nodes (e.g. where an `interrupt_before` paused the run); the terminal checkpoint
+of a completed thread leaves nothing to execute.
 
 ---
 

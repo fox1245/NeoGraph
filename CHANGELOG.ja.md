@@ -56,6 +56,21 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   0.3を試し、`-32601`で正しい1.0リクエストへプローブし、互換インターフェースがなければ
   明確なエラーを返します。`A2AServer`も`A2A-Version`に応じて1.0で応答し、カードに
   `supportedInterfaces`を掲載します。`A2AClient::rpc_call_with_fallback`は削除されました。
+- **fork サンプルが fork 先スレッドで実際に実行され、fork/resume の契約を文書化。**
+  `examples/08_state_management.cpp` は完了済みスレッドの終端チェックポイントを fork
+  していたため、`resume()` はノードを実行せず「Tokyo」の質問は未回答のままでした。現在は
+  `reviewer` の直前で停止したチェックポイントを fork し、実際のアシスタント回答を出力します。
+  `GraphEngine::fork()` と reference/concepts ドキュメントに、fork は 1 つのチェックポイントを
+  コピーし `resume()` はその保留ノードから続行する (終端チェックポイントには保留ノードがない)
+  ことを明記しました。`Example.StateManagement` と `ForkResumeSemantics.*` が両ケースを検証します。
+- **`example_evolution` のファイルモード。** デモ用 `pnoop` ノード型を全モードで登録するため、
+  文書化された `./example_evolution seed.json task.json` が追跡対象の
+  `examples/54_evolution_seed.json` / `54_evolution_task.json` で動作します
+  (以前は `compile failed: Unknown node type: 'pnoop'`)。seed には組み込み型または `pnoop` を
+  使用でき、それ以外のカスタムノード型はホストプログラムが登録する必要があります。
+  `Example.Evolution.*` が両モードを実行します。
+- **`example_plan_executor` の要約。** 最終行が固定値「1」ではなく、計算された再利用 executor
+  呼び出し数 (4) を報告します。
 - **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
   保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
   静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。

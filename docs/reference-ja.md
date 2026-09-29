@@ -1383,6 +1383,7 @@ std::string fork(const std::string& source_thread_id,
 | `new_thread_id` | `std::string` | 新しいスレッド識別子 |
 | `checkpoint_id` | `std::string` | 任意。特定のチェックポイントから fork (デフォルト: 最新) |
 **戻り値:** 新しく fork した状態のチェックポイント ID。
+fork はちょうど 1 つのチェックポイントをコピーし、新しいスレッドでの `resume()` はそのチェックポイントの保留中ノードから続行します。完了済みスレッドの最新チェックポイントは終端 (保留ノードなし) のため、それを fork して `resume()` を呼んでも何も実行されません。分岐して再実行するには、保留ノードが残っている以前のチェックポイント (例: `interrupt_before` で実行が停止したもので、`get_state_history()` で取得できます) の `checkpoint_id` を渡し、fork に `update_state()` を適用してから `resume()` してください。`examples/08_state_management.cpp` がこの流れを示しています。
 ツールは `NodeContext::tools` または `EngineResources::tools` でコンパイル前に所有されます。
 コンパイル後の所有権移譲はありません。
 #### `set_checkpoint_store`

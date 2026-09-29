@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=3d95cddd2a9d9ff0c7b8028968a5bfab4c44b404af3eff0115f8edfb25a7f1cc -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=98376bd657cf83e768e69b6d7be99185f5fdf5d30c05ba7e282b179c720ef6af -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -395,7 +395,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### タイムトラベル
 
-`engine.fork(thread_id, from_checkpoint_id)`は過去のチェックポイントから開始する新しいスレッドを返します。「別の答え方をしていたらどうなっていたか」という分岐に役立ちます。
+`engine.fork(thread_id, from_checkpoint_id)`は過去のチェックポイントから開始する新しいスレッドを返します。「別の答え方をしていたらどうなっていたか」という分岐に役立ちます。fork はちょうど 1 つのチェックポイントをコピーし、`resume()` はその保留ノードから続行するため、保留ノードが残っているチェックポイント (例: `interrupt_before` で実行が停止した地点) を fork してください。完了済みスレッドの終端チェックポイントには実行するものがありません。
 
 ---
 

@@ -1594,6 +1594,9 @@ std::string fork(const std::string& source_thread_id,
 
 **返回：** 新分叉状态的检查点 ID。
 
+fork 只复制一个检查点，新线程上的 `resume()` 从该检查点的待执行节点继续。已完成线程的最新检查点是终止状态（没有待执行节点），因此对其 fork 后调用 `resume()` 不会执行任何节点。若要分叉并重新执行，请传入仍有待执行节点的较早检查点的 `checkpoint_id`（例如 `interrupt_before` 暂停运行时的检查点，可通过 `get_state_history()` 找到），对 fork 应用 `update_state()`，然后 `resume()`。`examples/08_state_management.cpp` 演示了这一流程。
+
+
 工具在编译前由 `NodeContext::tools` 或 `EngineResources::tools` 持有；
 不再存在编译之后的所有权转移。
 
