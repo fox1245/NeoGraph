@@ -63,6 +63,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
   其他自定义节点类型须由宿主程序注册。`Example.Evolution.*` 运行两种模式。
 - **`example_plan_executor` 摘要。** 最后一行现在报告计算得出的被重放 executor 调用数（4），
   而不是固定的“1”。
+- **`OpenAIProvider` 报告以 HTTP 200 返回的错误正文。** OpenRouter 等网关会用带有顶层
+  `error` 对象的 HTTP 200 表示上游故障（例如所选提供方的 502），而提供方此前以不透明的
+  `json::at: key not found: choices` 失败。现在会抛出携带网关消息的 API 错误（正文中的
+  `429` 代码抛出 `RateLimitError`），没有 `choices` 的正文同样给出说明性错误。
 - **子图恢复边界。** 管理状态更新保留中断执行的续行身份；保留型子图区分新的
   父调用与同一次调用的恢复。Stateless 静态中断在产生效果前拒绝，中断恢复使用
   异步检查点读取。

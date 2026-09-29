@@ -241,7 +241,23 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     }
 
     auto resp_json = json::parse(res.body);
-    auto choice    = resp_json.at("choices").at(0);
+    // Gateways such as OpenRouter report upstream failures as HTTP 200 with
+    // a top-level {"error": {...}} body instead of a non-2xx status. Surface
+    // that as an API error rather than an opaque JSON lookup failure.
+    if (resp_json.is_object() && resp_json.contains("error")) {
+        const std::string message = "API error (HTTP 200 with error body): " + res.body;
+        const auto&       error   = resp_json["error"];
+        if (error.is_object() && error.value("code", 0) == 429) {
+            throw RateLimitError(message);
+        }
+        throw std::runtime_error(message);
+    }
+    if (!resp_json.is_object() || !resp_json.contains("choices") ||
+        !resp_json["choices"].is_array() || resp_json["choices"].empty()) {
+        throw std::runtime_error("API error: response has no choices: " +
+                                 res.body.substr(0, 500));
+    }
+    auto choice = resp_json["choices"][0];
 
     ChatCompletion completion;
     completion.message     = parse_response_message(choice);
