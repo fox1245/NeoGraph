@@ -171,6 +171,35 @@ inline json try_parse_json(std::string_view body) {
     }
 }
 
+// Whether a WebSocket Close status (RFC 6455 section 7.4.1) received before
+// the response completed marks a transient, server-side interruption worth
+// retrying. 0 means no status was carried.
+//   1001 going away, 1011 internal error, 1012 service restart, 1013 try again
+//   later, 1014 bad gateway: the server (or a proxy) is at fault or shutting
+//   down; a fresh connection is expected to work.
+//   1006 abnormal closure: reserved for "no Close frame arrived", so it is
+//   never on the wire; accepted for callers that report a dropped connection
+//   this way.
+// Not transient: 1000 normal closure (a deliberate, orderly end that the next
+// attempt is not expected to change), 1002 protocol error, 1003 unsupported
+// data, 1007 invalid payload, 1008 policy violation (auth / quota / model
+// rejections), 1009 message too big, 1010 missing extension, 1015 TLS failure,
+// and application codes 3000-4999.
+inline bool ws_close_is_transient(int code) {
+    switch (code) {
+        case 0:
+        case 1001:
+        case 1006:
+        case 1011:
+        case 1012:
+        case 1013:
+        case 1014:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Non-2xx HTTP response.
 [[noreturn]] inline void throw_http_error(int status, std::string_view body,
                                           int retry_after_seconds,

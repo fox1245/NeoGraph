@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=5838162c16278a6b02566fd4f5ba3cb4d06ae1af9b51a810946bcf228bd01d7d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=72a3ec057c43fc86df135bb3ef7168a5dbdc71902059d191ed7fdcdce0dd3900 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **일찍 끝난 WebSocket 스트림을 RFC 6455 close 상태로 분류하고, 사라진 상대는 타입 있는 오류로 보고합니다.** `response.completed` 전의 Close 프레임은 1001, 1011, 1012, 1013, 1014(서버 측 문제 또는 재시작)와 상태 없는 Close에서는 재시도 가능하고, 1000, 1002, 1003, 1007, 1008(인증/쿼터/정책), 1009, 1015와 애플리케이션 코드에서는 재시도 불가입니다. Close 프레임 없이 사라지는 상대(프록시 리셋, 서버 강제 종료, TLS 절단)는 이전에 날 소켓 예외로 새어 나갔지만, 이제 같은 재시도 가능한 `stream_truncated` `ProviderError`입니다. 호출자 취소는 그대로 전파됩니다. 모든 코드 부류를 루프백 소켓 테스트로 검증합니다.
 - **작업형(operation) 스키마가 타입 있는 실패를 보고합니다.** 작업이 만들어지기 전 제출 요청이 거부되면(HTTP 4xx/5xx) `OperationError`로 감싸져 상태와 `retryable()`이 가려졌습니다. 이제 `ProviderError` 그대로 던지므로 `RateLimitedProvider`가 안전하게 재시도할 수 있습니다. 폴링/종료 단계 실패는 작업이 이미 있고 호출을 다시 실행하면 제출이 반복되므로 `OperationError`로 유지하되, 원인 `ProviderError`를 중첩 예외(`std::rethrow_if_nested`)로 담습니다.
 - **`RateLimitedProvider`가 호출자가 이미 본 스트림을 다시 재생하지 않습니다.** 재시도는 응답을 첫 토큰부터 다시 시작하므로, 스트림 도중 `overloaded_error`나 연결 끊김 뒤에 재시도하면 `on_chunk` 콜백에 중복 출력이 전달됐습니다. 이제 콜백에 청크가 하나도 전달되지 않았을 때(또는 콜백이 없을 때)만 스트림을 재시도하고, 첫 청크가 전달된 뒤에는 오류를 그대로 전파합니다.
 - **`RateLimitedProvider`가 429가 아닌 일시적 오류에는 지수 백오프를 씁니다.** `Retry-After` 없는 재시도 가능한 500, 502, 503, 529, 스트림 안 `overloaded_error`는 이전에 rate limit 기본 대기(`default_wait_seconds`, 30초 + 1초)를 기다렸습니다. 이제 `transient_base_wait_seconds * 2^시도횟수`(기본 1초, 2초, 4초..., `max_wait_seconds`로 상한, 0이면 즉시 재시도)만큼 기다립니다. 429는 `default_wait_seconds`와 +1초 여유를 유지하고, 양수 `Retry-After`는 여전히 가장 먼저 따릅니다.

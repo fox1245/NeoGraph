@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=5838162c16278a6b02566fd4f5ba3cb4d06ae1af9b51a810946bcf228bd01d7d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=72a3ec057c43fc86df135bb3ef7168a5dbdc71902059d191ed7fdcdce0dd3900 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **早期に終わった WebSocket ストリームを RFC 6455 の close ステータスで分類し、消えた相手は型付きエラーになります。** `response.completed` より前の Close フレームは、1001、1011、1012、1013、1014（サーバー側の問題または再起動）とステータスなしの Close では再試行可能、1000、1002、1003、1007、1008（認証/クォータ/ポリシー）、1009、1015 とアプリケーションコードでは再試行不可です。Close フレームなしで消えた相手（プロキシのリセット、サーバー強制終了、TLS 切断）は以前は生のソケット例外として漏れていましたが、今は同じ再試行可能な `stream_truncated` の `ProviderError` です。呼び出し側のキャンセルは従来どおり伝播します。すべてのコード区分をループバックソケットのテストで検証しています。
 - **オペレーション型スキーマが型付きの失敗を報告します。** ジョブが作られる前に送信リクエストが拒否された場合（HTTP 4xx/5xx）は `OperationError` に包まれ、ステータスと `retryable()` が隠れていました。今は `ProviderError` そのものを投げるため、`RateLimitedProvider` が安全に再試行できます。ポーリング/完了処理の失敗はジョブがすでに存在し、呼び出しを再実行すると再送信になるため `OperationError` のままですが、原因の `ProviderError` を入れ子の例外（`std::rethrow_if_nested`）として持ちます。
 - **`RateLimitedProvider` は呼び出し側がすでに見たストリームを再生しなくなりました。** 再試行は応答を最初のトークンからやり直すため、ストリーム途中の `overloaded_error` や接続断のあとに再試行すると、`on_chunk` コールバックに重複した出力が渡されていました。今はコールバックにチャンクが 1 つも届いていない間（またはコールバックがない場合）だけストリームを再試行し、最初のチャンクが届いたあとはエラーをそのまま伝播します。
 - **`RateLimitedProvider` は 429 以外の一時的なエラーに指数バックオフを使います。** `Retry-After` のない再試行可能な 500、502、503、529、ストリーム内の `overloaded_error` は、以前は rate limit の既定待機（`default_wait_seconds`、30 秒 + 1 秒）を待っていました。今は `transient_base_wait_seconds * 2^試行回数`（既定 1 秒、2 秒、4 秒...、`max_wait_seconds` で上限、0 なら即再試行）だけ待ちます。429 は `default_wait_seconds` と +1 秒の余裕を保ち、正の `Retry-After` は従来どおり最優先で従います。

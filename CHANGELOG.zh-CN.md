@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5838162c16278a6b02566fd4f5ba3cb4d06ae1af9b51a810946bcf228bd01d7d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=72a3ec057c43fc86df135bb3ef7168a5dbdc71902059d191ed7fdcdce0dd3900 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **提前结束的 WebSocket 流按 RFC 6455 关闭状态分类，消失的对端会变成带类型的错误。** 在 `response.completed` 之前收到的 Close 帧，对 1001、1011、1012、1013、1014（服务端问题或重启）以及不带状态的 Close 可重试，对 1000、1002、1003、1007、1008（认证/配额/策略）、1009、1015 和应用自定义代码不可重试。没有 Close 帧就消失的对端（代理重置、服务器被杀、TLS 截断）过去会以原始套接字异常的形式泄漏出来，现在是同样可重试的 `stream_truncated` `ProviderError`。调用方取消仍照常传播。每一类状态码都有回环套接字测试覆盖。
 - **操作型 schema 现在报告带类型的失败。** 在任务创建之前提交请求被拒绝（HTTP 4xx/5xx）时，过去会被包装成 `OperationError`，隐藏状态码和 `retryable()`；现在直接抛出 `ProviderError`，因此 `RateLimitedProvider` 可以安全重试。轮询或收尾阶段的失败仍是 `OperationError`（任务已存在，重新执行调用会再次提交），但现在把 `ProviderError` 作为嵌套原因携带（`std::rethrow_if_nested`）。
 - **`RateLimitedProvider` 不再重放调用方已经看到的流。** 重试会从第一个 token 重新开始响应，因此在流中途遇到 `overloaded_error` 或连接中断后重试，会把重复的输出交给 `on_chunk` 回调。现在只有在没有任何数据块到达回调时（或没有回调时）才会重试流；第一个数据块送达之后，错误会直接向上传播。
 - **`RateLimitedProvider` 对非 429 的暂时性错误使用指数退避。** 没有 `Retry-After` 的可重试 500、502、503、529 或流内 `overloaded_error`，以前会等待限流默认值（`default_wait_seconds`，30 秒 + 1 秒）。现在等待 `transient_base_wait_seconds * 2^尝试次数`（默认 1 秒、2 秒、4 秒...，以 `max_wait_seconds` 为上限，0 表示立即重试）。429 仍使用 `default_wait_seconds` 和 +1 秒余量，正的 `Retry-After` 仍然优先遵循。

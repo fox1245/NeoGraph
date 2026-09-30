@@ -16,6 +16,7 @@
 #include <asio/post.hpp>
 #include <asio/io_context.hpp>
 #include <asio/redirect_error.hpp>
+#include <asio/ssl/error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -265,6 +266,18 @@ static std::pair<std::string, std::string> split_host_prefix(
     const std::string default_port = endpoint.tls ? "443" : "80";
     if (endpoint.port != default_port) host += ":" + endpoint.port;
     return {std::move(host), endpoint.prefix};
+}
+
+// A socket error that means "the peer went away" (as opposed to a caller
+// cancellation, a timeout or a local bug).
+static bool is_connection_drop(const std::error_code& code) {
+    if (code == asio::error::eof || code == asio::error::connection_reset ||
+        code == asio::error::connection_aborted || code == asio::error::broken_pipe ||
+        code == asio::error::not_connected) {
+        return true;
+    }
+    // TLS peer closed the transport without close_notify.
+    return code == asio::ssl::error::stream_truncated;
 }
 
 // Vendor request id for support tickets: Anthropic sends `request-id`,
@@ -1174,7 +1187,27 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     bool ws_debug = std::getenv("NEOGRAPH_WS_DEBUG") != nullptr;
     std::size_t ws_response_bytes = 0;
     while (!state.terminal_event_seen) {
-        auto msg = co_await ws->recv();
+        // A peer that vanishes without a Close frame (proxy reset, killed
+        // server, dropped TLS session) surfaces as a socket error, not as a
+        // Close message. That is the same "stream cut" the Close path reports,
+        // so it becomes the same typed, retryable error; cancellation and every
+        // other failure propagate unchanged. No co_await inside the catch
+        // (GCC 13 ICE, see RateLimitedProvider).
+        std::optional<async::WsMessage> received;
+        std::string connection_lost;
+        try {
+            received.emplace(co_await ws->recv());
+        } catch (const asio::system_error& error) {
+            if (!is_connection_drop(error.code())) throw;
+            connection_lost = error.code().message();
+        }
+        if (!received) {
+            throw ProviderError(
+                "openai-responses ws: connection lost before response.completed (" +
+                    connection_lost + ")",
+                0, true, "stream_truncated");
+        }
+        auto msg = std::move(*received);
         if (msg.payload.size() >
             user_config_.max_stream_response_bytes -
                 std::min(ws_response_bytes,
@@ -1211,13 +1244,9 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
             // A dropped connection (no close code, going away, abnormal,
             // internal error, service restart / overload) is transient; an
             // application-level rejection close code is not.
-            const bool transient = close_code == 0 || close_code == 1001 ||
-                                   close_code == 1006 || close_code == 1011 ||
-                                   close_code == 1012 || close_code == 1013 ||
-                                   close_code == 1014;
             throw ProviderError(
                 "openai-responses ws: server closed before response.completed" + detail,
-                0, transient, "stream_truncated");
+                0, detail::ws_close_is_transient(close_code), "stream_truncated");
         }
 
         json j;
