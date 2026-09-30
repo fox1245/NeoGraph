@@ -8,6 +8,8 @@
 #include <neograph/graph/cancel.h>
 #include <builtin_schemas.h>
 
+#include "provider_error.h"
+
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/dispatch.hpp>
@@ -265,6 +267,32 @@ static std::pair<std::string, std::string> split_host_prefix(
     return {std::move(host), endpoint.prefix};
 }
 
+// Vendor request id for support tickets: Anthropic sends `request-id`,
+// OpenAI and OpenRouter `x-request-id`.
+static std::string request_id_of(const async::HttpResponse& response) {
+    for (const char* name : {"x-request-id", "request-id"}) {
+        const auto value = response.get_header(name);
+        if (!value.empty()) return std::string(value);
+    }
+    return {};
+}
+
+static std::string request_id_of(const httplib::Result& res) {
+    if (!res) return {};
+    for (const char* name : {"x-request-id", "request-id"}) {
+        if (res->has_header(name)) return res->get_header_value(name);
+    }
+    return {};
+}
+
+void SchemaProvider::throw_http_failure(int status, const std::string& body,
+                                        int retry_after_seconds,
+                                        const std::string& request_id) const {
+    detail::throw_http_error(status, body, retry_after_seconds, request_id,
+                             detail::RetryPolicy{conn_.retryable_statuses,
+                                                 conn_.retryable_codes});
+}
+
 // Parse Retry-After (seconds-integer shape only, matching the
 // httplib-based retry_after_seconds() above). Returns -1 when missing
 // or unparsable; clamps absurd values at 600s like the sync path.
@@ -364,13 +392,9 @@ asio::awaitable<async::HttpResponse> SchemaProvider::post_json(
     }
 
     if (response.status != 200) {
-        if (response.status == 429) {
-            throw RateLimitError(
-                "API error (HTTP 429): " + response.body,
-                parse_retry_after_string(response.retry_after));
-        }
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(response.status) + "): " + response.body);
+        throw_http_failure(response.status, response.body,
+                           parse_retry_after_string(response.retry_after),
+                           request_id_of(response));
     }
     co_return response;
 }
@@ -872,13 +896,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
     }
     if (stream_error) std::rethrow_exception(stream_error);
     if (response_status != 0 && response_status != 200) {
-        if (response_status == 429) {
-            throw RateLimitError(
-                "API error (HTTP 429): " + error_body,
-                res ? retry_after_seconds(res) : -1);
-        }
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(response_status) + "): " + error_body);
+        throw_http_failure(response_status, error_body,
+                           res ? retry_after_seconds(res) : -1, request_id_of(res));
     }
     if (!res && !(terminal_event_seen && response_status == 200 &&
                   res.error() == httplib::Error::Canceled)) {
@@ -886,13 +905,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
     }
 
     if (res && res->status != 200) {
-        if (res->status == 429) {
-            throw RateLimitError(
-                "API error (HTTP 429): " + res->body,
-                retry_after_seconds(res));
-        }
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
+        throw_http_failure(res->status, res->body, retry_after_seconds(res),
+                           request_id_of(res));
     }
 
     return finish_stream(state);
@@ -1174,19 +1188,28 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
             // 6455 §5.5.1; lift both into the message so auth / quota
             // / model-not-found rejections are debuggable.
             std::string detail;
+            int close_code = 0;
             if (msg.payload.size() >= 2) {
                 std::uint16_t code =
                     (static_cast<std::uint8_t>(msg.payload[0]) << 8) |
                      static_cast<std::uint8_t>(msg.payload[1]);
+                close_code = code;
                 detail = " (close=" + std::to_string(code);
                 if (msg.payload.size() > 2) {
                     detail += " reason=\"" + msg.payload.substr(2) + "\"";
                 }
                 detail += ")";
             }
-            throw std::runtime_error(
-                "openai-responses ws: server closed before response.completed"
-                + detail);
+            // A dropped connection (no close code, going away, abnormal,
+            // internal error, service restart / overload) is transient; an
+            // application-level rejection close code is not.
+            const bool transient = close_code == 0 || close_code == 1001 ||
+                                   close_code == 1006 || close_code == 1011 ||
+                                   close_code == 1012 || close_code == 1013 ||
+                                   close_code == 1014;
+            throw ProviderError(
+                "openai-responses ws: server closed before response.completed" + detail,
+                0, transient, "stream_truncated");
         }
 
         json j;

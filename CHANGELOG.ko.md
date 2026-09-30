@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=237de2598caec5016fe3d3a932f2cb918b33447879bae8e80334b68e8bf0a4dd -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=014dde30fe345fbe53be25ac3523f0776b503922ce3ebec489d93c0f98ecc721 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **프로바이더 실패는 성공한 완료가 아니라 타입이 있는 오류입니다 (`SchemaProvider`, `OpenAIProvider`, #307, #312).** Anthropic `error` 이벤트, Responses `response.failed` / `error` 이벤트나 `status:"failed"` 본문, 종료 이벤트 전에 끊긴 스트림, Gemini의 차단된 프롬프트와 `MALFORMED_FUNCTION_CALL` 종료, OpenRouter 오류 청크가 모두 정상 `end_turn` 완료로 반환됐고, 타입이 있는 오류는 HTTP 429뿐이었습니다. 이제 `neograph::ProviderError`가 `status()`, `retryable()`, 벤더 `code()`, `request_id()`, `retry_after_seconds()`를 담습니다(`RateLimitError`가 이를 상속). 스키마가 일시적 실패 집합(`connection.retryable_statuses`, `retryable_codes`)과 실패 신호(`error` / `fail` 이벤트 액션, `streaming.error_path`, `streaming.require_terminal_event`, `response.error_path`, `failure_status_path`, `block_reason_path`, `error_finish_reasons`)를 선언하며 SSE와 WebSocket이 공유합니다. `RateLimitedProvider`는 재시도 가능한 모든 `ProviderError`(500, 502, 503, 529 등)를 재시도하고 포기할 때 구체 타입을 유지합니다. 오류 본문은 메시지에 들어가기 전에 계정 ID, 키, bearer 토큰을 가리고 잘립니다. 차단된 Gemini 프롬프트는 이제 `end_turn` 대신 `content_filter`로 보고됩니다.
 - **프로바이더 reasoning 항목이 도구 턴을 넘어 유지됩니다(`SchemaProvider`).** 턴 사이에
   reasoning 상태가 버려졌습니다: Gemini 3 도구 루프는 HTTP 400(`Function call is missing a
   thought_signature`)으로 실패했고, OpenAI Responses 모델은 처음부터 다시 추론했으며

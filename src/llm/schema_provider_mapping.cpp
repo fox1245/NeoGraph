@@ -1,6 +1,7 @@
 // Schema-driven, network-free request mapping and response decoding.
 #include <neograph/llm/schema_provider.h>
 
+#include "provider_error.h"
 #include "reasoning_carry.h"
 #include "temperature_policy.h"
 
@@ -61,6 +62,11 @@ void SchemaProvider::parse_schema()
         for (const auto& [k, v] : c["extra_headers"].items()) {
             conn_.extra_headers[k] = v.get<std::string>();
         }
+    }
+    {
+        const auto policy = detail::parse_retry_policy(c);
+        conn_.retryable_statuses = policy.statuses;
+        conn_.retryable_codes = policy.codes;
     }
 
     // --- Request ---
@@ -286,6 +292,31 @@ void SchemaProvider::parse_schema()
     }
     resp_.default_stop_reason = resp.value("default_stop_reason", "unknown");
 
+    // --- Failure signals (all optional; absent = the body is never a failure) ---
+    auto string_set = [](const json& object, const char* key, const char* section) {
+        std::set<std::string> out;
+        if (!object.contains(key)) return out;
+        const auto& list = object[key];
+        if (!list.is_array()) {
+            throw std::invalid_argument(std::string("SchemaProvider: ") + section + "." + key +
+                                        " must be an array of strings");
+        }
+        for (const auto& item : list) {
+            if (!item.is_string() || item.get<std::string>().empty()) {
+                throw std::invalid_argument(std::string("SchemaProvider: ") + section + "." + key +
+                                            " entries must be non-empty strings");
+            }
+            out.insert(item.get<std::string>());
+        }
+        return out;
+    };
+    resp_.error_path = resp.value("error_path", "");
+    resp_.failure_status_path = resp.value("failure_status_path", "");
+    resp_.failure_statuses = string_set(resp, "failure_statuses", "response");
+    resp_.block_reason_path = resp.value("block_reason_path", "");
+    resp_.block_stop_reason = resp.value("block_stop_reason", "content_filter");
+    resp_.error_finish_reasons = string_set(resp, "error_finish_reasons", "response");
+
     // --- Reasoning carry (optional; absent = reasoning items are ignored) ---
     reasoning_ = {};
     if (schema_.contains("reasoning")) {
@@ -433,6 +464,8 @@ void SchemaProvider::parse_schema()
     stream_.delta_tool_call_args_field = st.value("tool_call_args_field", "args");
     stream_.stop_reason_path = st.value("stop_reason_path", "");
     stream_.stop_reason_status_path = st.value("stop_reason_status_path", "");
+    stream_.error_path = st.value("error_path", "");
+    stream_.require_terminal_event = st.value("require_terminal_event", false);
     if (st.contains("events")) {
         stream_.events_config = st["events"];
     }
@@ -1139,6 +1172,7 @@ json SchemaProvider::build_ws_body(const CompletionParams& params) const {
 // ============================================================================
 
 ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
+    check_response_failure(resp_json);
     ChatMessage msg;
     msg.role = "assistant";
 
@@ -1403,12 +1437,29 @@ ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
     return usage;
 }
 
+// A blocked prompt returns no candidates at all; without this the empty body
+// normalizes to a plain end of turn.
+static bool prompt_blocked(const json& body, const std::string& block_reason_path) {
+    if (block_reason_path.empty()) return false;
+    const auto reason = json_path::at_path(body, block_reason_path);
+    return reason && reason->is_string() && !reason->get<std::string>().empty();
+}
+
 std::string SchemaProvider::parse_stop_reason(const json& resp_json) const {
-    auto map_reason = [](const json& value,
-                         const std::map<std::string, std::string>& mapping,
-                         bool unknown_when_unmapped) {
+    if (prompt_blocked(resp_json, resp_.block_reason_path)) return resp_.block_stop_reason;
+    auto map_reason = [this](const json& value,
+                             const std::map<std::string, std::string>& mapping,
+                             bool unknown_when_unmapped) {
         if (!value.is_string()) return std::string{};
         const auto raw = value.get<std::string>();
+        if (resp_.error_finish_reasons.count(raw) > 0) {
+            // The model failed; a normalized "unknown" stop would let the
+            // agent loop carry on as if it had answered.
+            throw ProviderError(
+                "SchemaProvider (" + provider_name_ + "): generation failed with finish reason '" +
+                    raw + "'",
+                200, false, raw);
+        }
         const auto it = mapping.find(raw);
         if (it != mapping.end()) return it->second;
         return unknown_when_unmapped ? std::string("unknown") : std::string{};
@@ -1430,11 +1481,20 @@ std::string SchemaProvider::parse_stop_reason(const json& resp_json) const {
 }
 
 std::string SchemaProvider::parse_stream_stop_reason(const json& event_json) const {
-    auto map_reason = [](const json& value,
-                         const std::map<std::string, std::string>& mapping,
-                         bool unknown_when_unmapped) {
+    if (prompt_blocked(event_json, resp_.block_reason_path)) return resp_.block_stop_reason;
+    auto map_reason = [this](const json& value,
+                             const std::map<std::string, std::string>& mapping,
+                             bool unknown_when_unmapped) {
         if (!value.is_string()) return std::string{};
         const auto raw = value.get<std::string>();
+        if (resp_.error_finish_reasons.count(raw) > 0) {
+            // The model failed; a normalized "unknown" stop would let the
+            // agent loop carry on as if it had answered.
+            throw ProviderError(
+                "SchemaProvider (" + provider_name_ + "): generation failed with finish reason '" +
+                    raw + "'",
+                200, false, raw);
+        }
         const auto it = mapping.find(raw);
         if (it != mapping.end()) return it->second;
         return unknown_when_unmapped ? std::string("unknown") : std::string{};
@@ -1453,6 +1513,63 @@ std::string SchemaProvider::parse_stream_stop_reason(const json& event_json) con
         }
     }
     return {};
+}
+
+void SchemaProvider::check_response_failure(const json& resp_json) const {
+    if (!resp_json.is_object()) return;
+    const detail::RetryPolicy policy{conn_.retryable_statuses, conn_.retryable_codes};
+    if (!resp_.error_path.empty()) {
+        const auto error = json_path::at_path(resp_json, resp_.error_path);
+        if (error && error->is_string()) {
+            throw ProviderError(
+                "API error (HTTP 200 with error body): " +
+                    detail::redact_and_truncate(error->get<std::string>()),
+                200, false);
+        }
+        if (error && error->is_object()) {
+            detail::throw_embedded_error("API error (HTTP 200 with error body)", 200,
+                                         resp_json, policy, &*error);
+        }
+    }
+    if (!resp_.failure_status_path.empty() && !resp_.failure_statuses.empty()) {
+        const auto status = json_path::at_path(resp_json, resp_.failure_status_path);
+        if (status && status->is_string() &&
+            resp_.failure_statuses.count(status->get<std::string>()) > 0) {
+            const auto value = status->get<std::string>();
+            throw ProviderError(
+                "SchemaProvider (" + provider_name_ + "): response status '" + value + "'",
+                200, false, value);
+        }
+    }
+}
+
+void SchemaProvider::throw_stream_event_error(const std::string& event_type,
+                                              const json& payload,
+                                              const json& event_cfg) const {
+    const detail::RetryPolicy policy{conn_.retryable_statuses, conn_.retryable_codes};
+    const std::string path = event_cfg.value("error_path", "error");
+    std::optional<json> error;
+    if (!path.empty()) error = json_path::at_path(payload, path);
+    const bool fail = event_cfg.value("action", "error") == "fail";
+    const std::string context = std::string(fail ? "response failed" : "stream error event") +
+                                " '" + event_type + "' (" + provider_name_ + ")";
+    detail::throw_embedded_error(context, 200, payload, policy,
+                                 (error && error->is_object()) ? &*error : nullptr);
+}
+
+void SchemaProvider::check_stream_chunk_error(const json& chunk) const {
+    if (stream_.error_path.empty() || !chunk.is_object()) return;
+    const auto error = json_path::at_path(chunk, stream_.error_path);
+    if (!error || !(error->is_object() || error->is_string())) return;
+    const detail::RetryPolicy policy{conn_.retryable_statuses, conn_.retryable_codes};
+    if (error->is_string()) {
+        throw ProviderError(
+            "stream error chunk (" + provider_name_ + "): " +
+                detail::redact_and_truncate(error->get<std::string>()),
+            200, false);
+    }
+    detail::throw_embedded_error("stream error chunk (" + provider_name_ + ")", 200, chunk,
+                                 policy, &*error);
 }
 
 } // namespace neograph::llm

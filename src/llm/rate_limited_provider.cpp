@@ -5,6 +5,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <chrono>
+#include <exception>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -30,13 +31,13 @@ std::string RateLimitedProvider::get_name() const {
     return inner_->get_name();
 }
 
-// Decide how long to sleep for a RateLimitError. Prefer the upstream's
-// Retry-After when sane; fall back to cfg_.default_wait_seconds. Always
-// cap at cfg_.max_wait_seconds so a bad value (or clock skew on the
+// Decide how long to sleep for a retryable ProviderError. Prefer the
+// upstream's Retry-After when sane; fall back to cfg_.default_wait_seconds.
+// Always cap at cfg_.max_wait_seconds so a bad value (or clock skew on the
 // server side) can't stall the caller past a reasonable bound.
-static int decide_sleep_seconds(const neograph::RateLimitError& e,
+static int decide_sleep_seconds(int retry_after_seconds,
                                 const RateLimitedProvider::Config& cfg) {
-    int s = e.retry_after_seconds();
+    int s = retry_after_seconds;
     if (s <= 0) s = cfg.default_wait_seconds;
     if (s > cfg.max_wait_seconds) return -1;  // too long; abort retry
     // +1s of slack so we don't miss the reset boundary by racing it.
@@ -55,32 +56,35 @@ RateLimitedProvider::complete_async(const CompletionParams& params) {
     for (int attempt = 0;; ++attempt) {
         // Capture the outcome of one inner call without doing a co_await
         // inside a catch block — GCC 13 ICEs on that shape (verified in
-        // Stage 3 / Sem 1.5 conn_pool work). The two optionals are
-        // mutually exclusive: either we got a result or we caught a
-        // typed rate-limit error. Other exceptions propagate normally.
+        // Stage 3 / Sem 1.5 conn_pool work). Either we got a result or we
+        // caught a retryable typed error; the original exception object is
+        // kept so the caller still sees its concrete type (RateLimitError)
+        // if we give up. Non-retryable failures propagate normally.
         std::optional<ChatCompletion> result;
-        std::optional<RateLimitError> rate_err;
+        std::exception_ptr failure;
+        int retry_after = -1;
         try {
             result.emplace(co_await inner_->complete_async(params));
-        } catch (const RateLimitError& e) {
-            rate_err.emplace(e);
+        } catch (const ProviderError& e) {
+            if (!e.retryable()) throw;
+            retry_after = e.retry_after_seconds();
+            failure = std::current_exception();
         }
 
         if (result) co_return std::move(*result);
 
-        // rate_err must be populated since we got past the try-block
-        // without re-throwing. Decide whether to retry, then sleep on
-        // an asio timer so the io_context isn't blocked.
-        const auto& e = *rate_err;
-        if (attempt >= cfg_.max_retries) throw e;
-        int wait = decide_sleep_seconds(e, cfg_);
-        if (wait < 0) throw e;
+        // `failure` is populated since we got past the try-block without
+        // re-throwing. Decide whether to retry, then sleep on an asio
+        // timer so the io_context isn't blocked.
+        if (attempt >= cfg_.max_retries) std::rethrow_exception(failure);
+        int wait = decide_sleep_seconds(retry_after, cfg_);
+        if (wait < 0) std::rethrow_exception(failure);
 
         // max_total_wait_seconds budget check: refuse to sleep past it.
         if (cfg_.max_total_wait_seconds > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start).count();
-            if (elapsed + wait > cfg_.max_total_wait_seconds) throw e;
+            if (elapsed + wait > cfg_.max_total_wait_seconds) std::rethrow_exception(failure);
         }
 
         asio::steady_timer timer(ex);
@@ -102,9 +106,9 @@ RateLimitedProvider::complete_stream(const CompletionParams& params,
     for (int attempt = 0;; ++attempt) {
         try {
             return inner_->complete_stream(params, on_chunk);
-        } catch (const RateLimitError& e) {
-            if (attempt >= cfg_.max_retries) throw;
-            int wait = decide_sleep_seconds(e, cfg_);
+        } catch (const ProviderError& e) {
+            if (!e.retryable() || attempt >= cfg_.max_retries) throw;
+            int wait = decide_sleep_seconds(e.retry_after_seconds(), cfg_);
             if (wait < 0) throw;
             if (cfg_.max_total_wait_seconds > 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(

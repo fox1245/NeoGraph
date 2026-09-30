@@ -1,9 +1,11 @@
 /**
  * @file llm/rate_limited_provider.h
- * @brief Provider decorator that honours HTTP 429 Retry-After.
+ * @brief Provider decorator that retries transient provider failures.
  *
- * Wraps any `Provider` and turns `RateLimitError` throws into a
- * bounded sleep+retry loop. The inner Provider stays policy-free;
+ * Wraps any `Provider` and turns retryable `ProviderError` throws
+ * (HTTP 429 with Retry-After, and the transient statuses/codes a schema's
+ * `connection.retryable_statuses` / `retryable_codes` declare, e.g. 500,
+ * 502, 503, 529 `overloaded_error`) into a bounded sleep+retry loop. The inner Provider stays policy-free;
  * users opt into this behaviour by wrapping only when they need it
  * (e.g., on low-tier Anthropic, not on a self-hosted vLLM).
  */
@@ -18,22 +20,24 @@
 namespace neograph::llm {
 
 /**
- * @brief Decorator that retries on RateLimitError according to its
- *        Retry-After hint.
+ * @brief Decorator that retries a retryable ProviderError (a 429
+ *        RateLimitError included) according to its Retry-After hint.
  *
  * Behaviour:
  *   * Calls through to the inner provider.
- *   * On `RateLimitError`, sleeps for `retry_after_seconds()` + 1s
- *     (or `default_wait_seconds` if the upstream didn't send a
- *     usable Retry-After), then retries.
- *   * Capped at `max_retries` attempts. After that the final
- *     `RateLimitError` propagates to the caller.
+ *   * On a `ProviderError` with `retryable() == true`, sleeps for
+ *     `retry_after_seconds()` + 1s (or `default_wait_seconds` if the
+ *     upstream didn't send a usable Retry-After), then retries.
+ *   * Capped at `max_retries` attempts. After that the final error
+ *     propagates to the caller with its concrete type
+ *     (`RateLimitError` stays a `RateLimitError`).
  *   * `max_wait_seconds` caps each individual sleep so a pathological
  *     Retry-After (server misconfigured, clock skew) can't stall the
  *     process — the decorator returns control to the caller, which
  *     can decide whether to keep going.
  *
- * Non-rate-limit exceptions pass through untouched.
+ * Non-retryable `ProviderError`s (400, 401, a blocked prompt, ...) and
+ * other exceptions pass through untouched.
  *
  * @code
  * auto inner = SchemaProvider::create({.schema_path = "claude", ...});
@@ -45,7 +49,7 @@ class NEOGRAPH_API RateLimitedProvider : public Provider {
 public:
     /// Configuration for rate-limit handling.
     struct Config {
-        int max_retries          = 3;   ///< Number of additional attempts after a RateLimitError.
+        int max_retries          = 3;   ///< Number of additional attempts after a retryable ProviderError.
         int default_wait_seconds = 30;  ///< Sleep duration when Retry-After is absent or invalid.
         int max_wait_seconds     = 120; ///< Upper cap per sleep, prevents runaway stalls.
         /// Wall-clock cap across all retries combined. 0 = unbounded
@@ -54,7 +58,7 @@ public:
         /// `max_retries * max_wait_seconds` worth of backoff to stack
         /// up — e.g. a 5×60s = 5-minute pure-sleep window. When the
         /// next sleep would push elapsed time past the cap, the
-        /// decorator surfaces the latest RateLimitError immediately
+        /// decorator surfaces the latest error immediately
         /// instead of waiting again.
         int max_total_wait_seconds = 0;
     };
@@ -74,7 +78,7 @@ public:
         return create(std::move(inner), Config{});
     }
 
-    /// Async completion that retries on RateLimitError with a non-
+    /// Async completion that retries on a retryable ProviderError with a non-
     /// blocking `asio::steady_timer` sleep. Sync `complete()` is
     /// inherited from `Provider` and routes through this via
     /// `run_sync` — the inner timer drives a fresh io_context, so

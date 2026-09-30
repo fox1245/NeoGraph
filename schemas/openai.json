@@ -7,7 +7,9 @@
     "auth_header": "Authorization",
     "auth_prefix": "Bearer ",
     "api_key_env": "OPENAI_API_KEY",
-    "extra_headers": {}
+    "extra_headers": {},
+    "retryable_statuses": [408, 429, 500, 502, 503, 504],
+    "retryable_codes": ["server_error"]
   },
   "request": {
     "model_field": "model",
@@ -111,7 +113,9 @@
       "function_call": "tool_use",
       "content_filter": "content_filter"
     },
-    "default_stop_reason": "end_turn"
+    "default_stop_reason": "end_turn",
+    "error_path": "error",
+    "error_finish_reasons": ["error"]
   },
   "streaming": {
     "format": "sse_data",
@@ -125,6 +129,7 @@
     "tool_call_id_field": "id",
     "tool_call_name_path": "function.name",
     "tool_call_args_path": "function.arguments",
-    "stop_reason_path": "choices.0.finish_reason"
+    "stop_reason_path": "choices.0.finish_reason",
+    "error_path": "error"
   }
 }

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=237de2598caec5016fe3d3a932f2cb918b33447879bae8e80334b68e8bf0a4dd -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=014dde30fe345fbe53be25ac3523f0776b503922ce3ebec489d93c0f98ecc721 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **プロバイダーの失敗は成功した完了ではなく型付きエラーになりました (`SchemaProvider`, `OpenAIProvider`, #307, #312)。** Anthropic の `error` イベント、Responses の `response.failed` / `error` イベントや `status:"failed"` の本文、終端イベントの前に切れたストリーム、Gemini のブロックされたプロンプトと `MALFORMED_FUNCTION_CALL` 終了、OpenRouter のエラーチャンクは、すべて通常の `end_turn` 完了として返され、型付きエラーは HTTP 429 だけでした。`neograph::ProviderError` が `status()`、`retryable()`、ベンダーの `code()`、`request_id()`、`retry_after_seconds()` を持つようになりました（`RateLimitError` はこれを継承）。スキーマが一時的な失敗の集合（`connection.retryable_statuses`、`retryable_codes`）と失敗シグナル（`error` / `fail` イベントアクション、`streaming.error_path`、`streaming.require_terminal_event`、`response.error_path`、`failure_status_path`、`block_reason_path`、`error_finish_reasons`）を宣言し、SSE と WebSocket が共有します。`RateLimitedProvider` は再試行可能なすべての `ProviderError`（500、502、503、529 など）を再試行し、諦めるときは具体的な型を保ちます。エラー本文はメッセージに入る前にアカウント ID・キー・bearer トークンを伏せて切り詰めます。ブロックされた Gemini のプロンプトは `end_turn` ではなく `content_filter` を報告します。
 - **プロバイダの reasoning 項目がツールターンをまたいで保持される（`SchemaProvider`）。**
   ターン間で reasoning 状態が失われていました：Gemini 3 のツールループは HTTP 400
   （`Function call is missing a thought_signature`）で失敗し、OpenAI Responses モデルは

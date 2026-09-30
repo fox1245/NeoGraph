@@ -8,7 +8,8 @@
     "auth_prefix": "",
     "api_key_env": "GEMINI_API_KEY",
     "auth_query_param": "",
-    "extra_headers": {}
+    "extra_headers": {},
+    "retryable_statuses": [408, 429, 500, 502, 503, 504]
   },
   "request": {
     "model_field": "",
@@ -115,9 +116,16 @@
       "RECITATION": "content_filter",
       "BLOCKLIST": "content_filter",
       "PROHIBITED_CONTENT": "content_filter",
-      "SPII": "content_filter"
+      "SPII": "content_filter",
+      "IMAGE_SAFETY": "content_filter",
+      "IMAGE_PROHIBITED_CONTENT": "content_filter",
+      "IMAGE_RECITATION": "content_filter"
     },
-    "default_stop_reason": "end_turn"
+    "default_stop_reason": "end_turn",
+    "block_reason_path": "promptFeedback.blockReason",
+    "error_finish_reasons": [
+      "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "OTHER"
+    ]
   },
   "streaming": {
     "format": "sse_data",
@@ -129,6 +137,7 @@
     "function_call_field": "functionCall",
     "tool_call_name_field": "name",
     "tool_call_args_field": "args",
-    "stop_reason_path": "candidates.0.finishReason"
+    "stop_reason_path": "candidates.0.finishReason",
+    "error_path": "error"
   }
 }

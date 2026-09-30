@@ -16,35 +16,77 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace neograph::graph { class CancelToken; }
 
 namespace neograph {
 
 /**
+ * @brief Typed failure reported by a Provider.
+ *
+ * Carries what a caller or a retry decorator needs without parsing the
+ * message text:
+ *  - `status()`: HTTP status of the response that carried the failure (200
+ *    for an error event or blocked completion delivered inside a successful
+ *    response, 0 when there was no response).
+ *  - `retryable()`: whether the vendor documents the failure as transient
+ *    (see the schema's `connection.retryable_statuses` / `retryable_codes`).
+ *    `RateLimitedProvider` retries exactly these.
+ *  - `code()`: the vendor's error code/type (`overloaded_error`,
+ *    `rate_limit_exceeded`, a Gemini `blockReason`, ...), or empty.
+ *  - `request_id()`: the vendor request id (`request-id` / `x-request-id`
+ *    header, or the body's `request_id`), or empty.
+ *  - `retry_after_seconds()`: the upstream's `Retry-After` in seconds, or -1.
+ *
+ * The message never contains account or credential identifiers; the vendor
+ * body is redacted and truncated before it is embedded.
+ */
+class NEOGRAPH_API ProviderError : public std::runtime_error {
+public:
+    ProviderError(const std::string& message, int status, bool retryable,
+                  std::string code = {}, std::string request_id = {},
+                  int retry_after_seconds = -1)
+        : std::runtime_error(message)
+        , status_(status)
+        , retryable_(retryable)
+        , retry_after_seconds_(retry_after_seconds)
+        , code_(std::move(code))
+        , request_id_(std::move(request_id)) {}
+
+    int status() const noexcept { return status_; }
+    bool retryable() const noexcept { return retryable_; }
+    const std::string& code() const noexcept { return code_; }
+    const std::string& request_id() const noexcept { return request_id_; }
+    /// @brief Seconds to wait per the upstream, or -1 if unknown.
+    int retry_after_seconds() const noexcept { return retry_after_seconds_; }
+
+private:
+    int status_;
+    bool retryable_;
+    int retry_after_seconds_;
+    std::string code_;
+    std::string request_id_;
+};
+
+/**
  * @brief Thrown by a Provider when an upstream API returned HTTP 429
  *        (rate limit exceeded).
  *
- * This is a typed exception so decorators like `RateLimitedProvider`
- * can catch it specifically and apply backoff, without fragile string
- * parsing of a generic error message.
+ * A `ProviderError` (status 429, always retryable) kept as its own type so
+ * existing `catch (const RateLimitError&)` sites keep working.
  *
  * The `retry_after_seconds()` value is the upstream's `Retry-After`
  * header in seconds, or -1 if no usable Retry-After was present.
  * Decorators should prefer the honest value when positive and fall
  * back to their own default when -1.
  */
-class NEOGRAPH_API RateLimitError : public std::runtime_error {
+class NEOGRAPH_API RateLimitError : public ProviderError {
 public:
-    RateLimitError(const std::string& message, int retry_after_seconds = -1)
-        : std::runtime_error(message)
-        , retry_after_seconds_(retry_after_seconds) {}
-
-    /// @brief Seconds to wait per the upstream, or -1 if unknown.
-    int retry_after_seconds() const noexcept { return retry_after_seconds_; }
-
-private:
-    int retry_after_seconds_;
+    RateLimitError(const std::string& message, int retry_after_seconds = -1,
+                   std::string code = {}, std::string request_id = {})
+        : ProviderError(message, 429, true, std::move(code),
+                        std::move(request_id), retry_after_seconds) {}
 };
 
 /// Callback invoked per token during streaming completion.

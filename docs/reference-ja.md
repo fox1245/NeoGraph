@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=631d5a7170ed9e2c1ca66b77b1d2965eec236c0b415eb60b7d7c893e4e3e839d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=652749f510f92efcbe777702b90eeab9aed7e1a5e69d906bbaf50e20386a6bfb -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2279,6 +2279,8 @@ public:
 `stream_concat_fields`。対象スキーマが宣言していない `type` の項目は再送されないため、
 プロバイダ間で移動する履歴も有効なままです。reasoning テキストが `content` に現れることは
 ありません。このセクションを持たないスキーマは従来どおり reasoning 項目を無視します。
+
+**プロバイダーの失敗:** 失敗が完了した回答のように見えてはいけません。エラーは型付けされています。`neograph::ProviderError` は `status()`、`retryable()`、ベンダーの `code()`、`request_id()`（`request-id` / `x-request-id` ヘッダー、なければ本文の `request_id`）、`retry_after_seconds()` を持ち、`RateLimitError`（HTTP 429）は `ProviderError` でありながら自身の型を保ちます。どの失敗が一時的かはスキーマのデータです。`connection.retryable_statuses`（既定 408/429/500/502/503/504、組み込みの `claude` スキーマは 529 を追加）と `connection.retryable_codes`（ストリーム内のエラーを一時的と分類する `overloaded_error` などのベンダーコード）。`RateLimitedProvider` は再試行可能なエラーだけを再試行します。ベンダーの本文は、例外メッセージに入れる前にアカウント/ユーザー ID・API キー・bearer トークンを伏せ、1 KiB に切り詰めます。2xx 応答内の失敗シグナルはスキーマで宣言し、SSE と WebSocket が共有します。ストリームイベントのアクション `error` / `fail`（`error_path` がエラーオブジェクトの位置。例: Anthropic の `error`、Responses の `error` と `response.failed`）、`streaming.error_path`（データチャンク内のエラーオブジェクト）、`streaming.require_terminal_event`（終端イベントの前にストリームが終わるとコード `stream_truncated` の再試行可能な `ProviderError`）、`response.error_path`、`response.failure_status_path` + `failure_statuses`（`status:"failed"` の本文）、`response.block_reason_path`（ブロックされたプロンプトは `block_stop_reason`、既定 `content_filter` で報告）、`response.error_finish_reasons`（モデルの失敗を意味する生の finish reason）。これらのキーがないスキーマのシグナル処理は従来どおりです。
 
 **使用方法:**
 ```cpp

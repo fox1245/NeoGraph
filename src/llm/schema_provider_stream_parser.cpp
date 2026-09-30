@@ -39,6 +39,7 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
 
             try {
                 auto j = json::parse(payload);
+                check_stream_chunk_error(j);
                 if (const auto reason = parse_stream_stop_reason(j); !reason.empty()) {
                     observed_stop_reason = reason;
                 }
@@ -157,6 +158,9 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         }
                     }
                 }
+            } catch (const ProviderError&) {
+                // A failure the vendor reported is not a malformed chunk.
+                throw;
             } catch (...) {
                 // Skip malformed chunks
             }
@@ -205,6 +209,11 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
 
                 if (action == "ignore") {
                     // noop
+                }
+                else if (action == "error" || action == "fail") {
+                    // Vendor-reported failure (`error` event, `response.failed`):
+                    // never a normal end of turn.
+                    throw_stream_event_error(event_type, j, event_cfg);
                 }
                 else if (action == "usage") {
                     // SSE event dedicated to emitting usage numbers.
@@ -371,6 +380,8 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                     }
                     terminal_event_seen = true;
                 }
+            } catch (const ProviderError&) {
+                throw;
             } catch (...) {
                 // Skip malformed
             }
@@ -431,22 +442,15 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
             observed_stop_reason = reason;
         }
 
-        // Server-side error frames terminate the stream with detail.
-        if (event_type == "error") {
-            std::string err_msg = j.value("message", "");
-            if (err_msg.empty() && j.contains("error") && j["error"].is_object()) {
-                err_msg = j["error"].value("message", "unknown");
-            }
-            throw std::runtime_error(
-                "openai-responses ws error: " + err_msg);
-        }
-
         if (!events_config.contains(event_type)) continue;
         const auto& event_cfg = events_config[event_type];
         const std::string action = event_cfg.value("action", "ignore");
 
         if (action == "ignore") {
             continue;
+        } else if (action == "error" || action == "fail") {
+            // Same schema-declared failure events as the SSE path.
+            throw_stream_event_error(event_type, j, event_cfg);
         } else if (action == "block_start") {
             // Mirrors complete_stream's block_start: openai-responses
             // schema sets block_path="item", tool_call_type="function_call",
@@ -538,6 +542,14 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
 }
 
 ChatCompletion SchemaProvider::finish_stream(StreamParseState& state) const {
+    if (stream_.require_terminal_event && !state.terminal_event_seen) {
+        // The connection ended (or was cut) before the vendor's terminal
+        // event. What arrived is a fragment, not a finished answer.
+        throw ProviderError(
+            "SchemaProvider (" + provider_name_ +
+                "): stream ended before its terminal event; the response is incomplete",
+            200, true, "stream_truncated");
+    }
     state.completion.message.content = std::move(state.full_content);
     for (auto& [_, tc] : state.tc_map) {
         state.completion.message.tool_calls.push_back(std::move(tc));

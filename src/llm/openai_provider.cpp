@@ -6,6 +6,7 @@
 
 #include <builtin_schemas.h>
 
+#include "provider_error.h"
 #include "temperature_policy.h"
 
 #include <asio/bind_cancellation_slot.hpp>
@@ -42,6 +43,35 @@ bool model_omits_temperature(std::string_view model) {
             json::parse(it->second).value("request", json::object()));
     }();
     return detail::model_matches_any(model, unsupported);
+}
+
+// Which statuses / codes are transient is declared once, in the built-in
+// `openai` schema (`connection.retryable_*`), and shared with SchemaProvider.
+const detail::RetryPolicy& retry_policy() {
+    static const detail::RetryPolicy policy = [] {
+        const auto& schemas = builtin::schemas();
+        const auto  it      = schemas.find("openai");
+        if (it == schemas.end()) return detail::RetryPolicy{};
+        return detail::parse_retry_policy(
+            json::parse(it->second).value("connection", json::object()));
+    }();
+    return policy;
+}
+
+std::string request_id_of(const async::HttpResponse& response) {
+    for (const char* name : {"x-request-id", "request-id"}) {
+        const auto value = response.get_header(name);
+        if (!value.empty()) return std::string(value);
+    }
+    return {};
+}
+
+std::string request_id_of(const httplib::Result& res) {
+    if (!res) return {};
+    for (const char* name : {"x-request-id", "request-id"}) {
+        if (res->has_header(name)) return res->get_header_value(name);
+    }
+    return {};
 }
 
 }  // namespace
@@ -245,14 +275,10 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
         res = co_await std::move(request);
     }
 
-    if (res.status == 429) {
-        throw RateLimitError("API error (HTTP 429): " + res.body,
-                             parse_retry_after_seconds(res.retry_after));
-    }
-
     if (res.status != 200) {
-        throw std::runtime_error("API error (HTTP " + std::to_string(res.status) +
-                                 "): " + res.body);
+        detail::throw_http_error(res.status, res.body,
+                                 parse_retry_after_seconds(res.retry_after),
+                                 request_id_of(res), retry_policy());
     }
 
     auto resp_json = json::parse(res.body);
@@ -260,12 +286,8 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     // a top-level {"error": {...}} body instead of a non-2xx status. Surface
     // that as an API error rather than an opaque JSON lookup failure.
     if (resp_json.is_object() && resp_json.contains("error")) {
-        const std::string message = "API error (HTTP 200 with error body): " + res.body;
-        const auto&       error   = resp_json["error"];
-        if (error.is_object() && error.value("code", 0) == 429) {
-            throw RateLimitError(message);
-        }
-        throw std::runtime_error(message);
+        detail::throw_embedded_error("API error (HTTP 200 with error body)", 200, resp_json,
+                                     retry_policy());
     }
     if (!resp_json.is_object() || !resp_json.contains("choices") ||
         !resp_json["choices"].is_array() || resp_json["choices"].empty()) {
@@ -403,7 +425,7 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                 }
 
                 if (j.is_object() && j.contains("error")) {
-                    throw std::runtime_error("API stream error: " + payload);
+                    detail::throw_embedded_error("API stream error", 200, j, retry_policy());
                 }
 
                 // The final chunk (after include_usage=true) has
@@ -469,8 +491,11 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     if (stream_error) std::rethrow_exception(stream_error);
 
     if (response_status != 0 && response_status != 200) {
-        throw std::runtime_error("API error (HTTP " + std::to_string(response_status) +
-                                 "): " + error_body);
+        detail::throw_http_error(response_status, error_body,
+                                 res ? parse_retry_after_seconds(
+                                           res->get_header_value("Retry-After"))
+                                     : -1,
+                                 request_id_of(res), retry_policy());
     }
 
     if (!res && !(terminal_event_seen && response_status == 200 &&
@@ -483,8 +508,9 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     }
 
     if (res && res->status != 200) {
-        throw std::runtime_error("API error (HTTP " + std::to_string(res->status) +
-                                 "): " + res->body);
+        detail::throw_http_error(res->status, res->body,
+                                 parse_retry_after_seconds(res->get_header_value("Retry-After")),
+                                 request_id_of(res), retry_policy());
     }
 
     completion.message.content = full_content;

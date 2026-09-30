@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=631d5a7170ed9e2c1ca66b77b1d2965eec236c0b415eb60b7d7c893e4e3e839d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=652749f510f92efcbe777702b90eeab9aed7e1a5e69d906bbaf50e20386a6bfb -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2700,6 +2700,8 @@ Gemini 3 的 `thoughtSignature`、OpenRouter 的 `reasoning_details`。schema �
 流式传输的 `delta_fields` 与 `stream_concat_fields`。目标 schema 未声明的 `type` 的条目不会被
 重放，因此在不同提供方之间流转的历史仍然有效。reasoning 文本不会出现在 `content` 中。
 没有该部分的 schema 与以前一样忽略 reasoning 条目。
+
+**提供方失败处理:** 失败不能看起来像已完成的回答。错误带有类型。`neograph::ProviderError` 携带 `status()`、`retryable()`、厂商 `code()`、`request_id()`（`request-id` / `x-request-id` 响应头，否则取正文中的 `request_id`）和 `retry_after_seconds()`；`RateLimitError`（HTTP 429）是 `ProviderError`，并保持自己的类型。哪些失败是暂时性的由 schema 数据决定：`connection.retryable_statuses`（默认 408/429/500/502/503/504，内置 `claude` schema 增加 529）和 `connection.retryable_codes`（把流内错误归为暂时性的厂商代码，如 `overloaded_error`）。`RateLimitedProvider` 只重试可重试的错误。厂商响应正文在进入异常消息之前，会隐去账户/用户 ID、API 密钥和 bearer 令牌，并截断到 1 KiB。2xx 响应内的失败信号在 schema 中声明，SSE 与 WebSocket 共用：流事件动作 `error` / `fail`（`error_path` 指向错误对象，例如 Anthropic 的 `error`、Responses 的 `error` 和 `response.failed`）、`streaming.error_path`（数据块中的错误对象）、`streaming.require_terminal_event`（终止事件之前流就结束，则抛出代码为 `stream_truncated` 的可重试 `ProviderError`）、`response.error_path`、`response.failure_status_path` + `failure_statuses`（`status:"failed"` 的正文）、`response.block_reason_path`（被拦截的提示以 `block_stop_reason` 报告，默认 `content_filter`）、`response.error_finish_reasons`（表示模型失败的原始 finish reason）。没有这些键的 schema，信号处理与以前相同。
 
 **用法：**
 

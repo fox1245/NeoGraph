@@ -9,7 +9,9 @@
     "api_key_env": "ANTHROPIC_API_KEY",
     "extra_headers": {
       "anthropic-version": "2023-06-01"
-    }
+    },
+    "retryable_statuses": [408, 429, 500, 502, 503, 504, 529],
+    "retryable_codes": ["overloaded_error", "api_error"]
   },
   "request": {
     "model_field": "model",
@@ -157,8 +159,12 @@
       },
       "message_stop": {
         "action": "done"
+      },
+      "error": {
+        "action": "error"
       }
     },
+    "require_terminal_event": true,
     "stop_reason_path": "delta.stop_reason"
   }
 }

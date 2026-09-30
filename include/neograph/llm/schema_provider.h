@@ -252,6 +252,13 @@ public:
         std::string api_key_env;
         std::string auth_query_param;
         std::map<std::string, std::string> extra_headers;
+        /// HTTP statuses this vendor documents as transient
+        /// (`connection.retryable_statuses`). A failure with one of these
+        /// becomes a retryable `ProviderError`; 429 is always a `RateLimitError`.
+        std::set<int> retryable_statuses;
+        /// Vendor error codes/types that mark an in-stream or HTTP-200 error
+        /// as transient (`connection.retryable_codes`), e.g. `overloaded_error`.
+        std::set<std::string> retryable_codes;
     };
 
     struct RequestConfig {
@@ -362,6 +369,24 @@ public:
         std::string stop_reason_status_path;
         std::map<std::string, std::string> stop_reason_status_map;
         std::string default_stop_reason = "unknown";
+        /// Optional `response.error_path`: dotted path of an error object that
+        /// marks a response as a failure even though the HTTP status was 200
+        /// (gateways, `status: "failed"` bodies). Present -> `ProviderError`.
+        std::string error_path;
+        /// Optional `response.failure_status_path` + `failure_statuses`: a
+        /// body whose status field holds one of these values (`failed`,
+        /// `cancelled`) is a failure, never an empty successful completion.
+        std::string failure_status_path;
+        std::set<std::string> failure_statuses;
+        /// Optional `response.block_reason_path`: present and non-empty means
+        /// the prompt was blocked; the completion reports `block_stop_reason`
+        /// instead of a normal end of turn.
+        std::string block_reason_path;
+        std::string block_stop_reason = "content_filter";
+        /// Optional `response.error_finish_reasons`: raw vendor finish reasons
+        /// that mean the model failed (not "stopped"); they throw a
+        /// non-retryable `ProviderError` carrying the reason as its code.
+        std::set<std::string> error_finish_reasons;
         struct ArtifactRule {
             std::string items_path, type_path, type, match_path, kind;
             std::string mime_type, mime_path, base64_path, url_path, file_id_path, metadata_path;
@@ -418,6 +443,14 @@ public:
         std::string delta_tool_call_args_field;
         std::string stop_reason_path;
         std::string stop_reason_status_path;
+        /// Optional `streaming.error_path`: dotted path checked in every
+        /// data chunk (SSE_DATA); an object there is an in-stream error.
+        std::string error_path;
+        /// `streaming.require_terminal_event`: the stream is only complete if
+        /// its terminal event (`done` action / done signal) arrived. EOF
+        /// without one throws a retryable `ProviderError` instead of
+        /// returning the partial output as a finished answer.
+        bool require_terminal_event = false;
         json events_config;
     };
 
@@ -536,6 +569,21 @@ public:
                           const StreamCallback& on_chunk) const;
     ChatCompletion finish_stream(StreamParseState& state) const;
 
+    // Throws a typed ProviderError when a non-stream body (HTTP 200) is a
+    // failure per the schema's `response.error_path` / `failure_status_*`.
+    void check_response_failure(const json& resp_json) const;
+    // Throws the typed error described by a stream event whose schema action
+    // is `error` or `fail` (SSE and WebSocket share it).
+    [[noreturn]] void throw_stream_event_error(const std::string& event_type,
+                                              const json& payload,
+                                              const json& event_cfg) const;
+    // Throws when `error_path` of a chunk holds an error object.
+    void check_stream_chunk_error(const json& chunk) const;
+    // Retry classification for HTTP failures of this provider's schema.
+    [[noreturn]] void throw_http_failure(int status, const std::string& body,
+                                         int retry_after_seconds,
+                                         const std::string& request_id) const;
+
     // Owns HTTP/1.1 vs HTTP/2 selection and operation-local cancellation
     // for both chat completions and schema-described JSON endpoints.
     asio::awaitable<async::HttpResponse> post_json(
@@ -637,7 +685,8 @@ class SchemaProviderTestAccess {
             if (state.terminal_event_seen) break;
         }
         if (!state.terminal_event_seen) {
-            throw std::runtime_error("openai-responses ws: server closed before response.completed");
+            throw ProviderError("openai-responses ws: server closed before response.completed",
+                                0, true, "stream_truncated");
         }
         return sp.finish_stream(state);
     }
