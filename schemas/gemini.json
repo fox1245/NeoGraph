@@ -87,7 +87,8 @@
   },
   "reasoning": {
     "thought_flag_field": "thought",
-    "signature_field": "thoughtSignature"
+    "signature_field": "thoughtSignature",
+    "foreign_signature": "skip_thought_signature_validator"
   },
   "response": {
     "strategy": "candidates_parts",

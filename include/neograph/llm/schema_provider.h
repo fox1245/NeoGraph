@@ -418,6 +418,14 @@ public:
         /// Part-style: sibling field of a functionCall part carrying an opaque
         /// signature that must be echoed on the same part when replayed.
         std::string signature_field;
+        /// Part-style, optional: value placed in `signature_field` on the first
+        /// tool call of an assistant message that carries no captured
+        /// signature -- a history that came from another vendor or model, or
+        /// was built by hand. The API validates the signature and would answer
+        /// HTTP 400 without one; the vendor documents this placeholder as a
+        /// last resort that lowers quality for that turn. Absent = never invent
+        /// a signature.
+        std::string foreign_signature;
         /// Chat-style: assistant message field holding an opaque array that is
         /// captured verbatim and replayed on the assistant message.
         std::string message_field;

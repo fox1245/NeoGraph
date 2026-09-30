@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=72a3ec057c43fc86df135bb3ef7168a5dbdc71902059d191ed7fdcdce0dd3900 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f14ed7e7c8361fa70c971e14b712b88da06f10f12100e280d3e9ccaeb2fdd9c9 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **Gemini 3 が他のベンダーやモデルの作った履歴を受け付けます (#305/#306)。** Claude や OpenAI から Gemini に移った履歴、または手で作った履歴は、ツール呼び出しに Gemini の署名がないため HTTP 400（`Function call is missing a thought_signature`）で失敗していました。スキーマが `reasoning.foreign_signature` を宣言できるようになり、インタープリターはキャプチャされた署名のないアシスタントメッセージの最初のツール呼び出しにその値を入れます（Gemini はターンの最初の呼び出しだけを検証）。組み込みの `gemini` スキーマは Google が文書化した `skip_thought_signature_validator` を宣言します。実測: Claude thinking -> Gemini 3 は 400 でしたが、プレースホルダーを使うと gemini-3.1-flash-lite、3.5-flash、3.6/3.7/3.8-flash で成功し、gemini-2.5-flash-lite もそのまま受け付けます。キャプチャされた署名があれば常にそちらが優先されます。
 - **早期に終わった WebSocket ストリームを RFC 6455 の close ステータスで分類し、消えた相手は型付きエラーになります。** `response.completed` より前の Close フレームは、1001、1011、1012、1013、1014（サーバー側の問題または再起動）とステータスなしの Close では再試行可能、1000、1002、1003、1007、1008（認証/クォータ/ポリシー）、1009、1015 とアプリケーションコードでは再試行不可です。Close フレームなしで消えた相手（プロキシのリセット、サーバー強制終了、TLS 切断）は以前は生のソケット例外として漏れていましたが、今は同じ再試行可能な `stream_truncated` の `ProviderError` です。呼び出し側のキャンセルは従来どおり伝播します。すべてのコード区分をループバックソケットのテストで検証しています。
 - **オペレーション型スキーマが型付きの失敗を報告します。** ジョブが作られる前に送信リクエストが拒否された場合（HTTP 4xx/5xx）は `OperationError` に包まれ、ステータスと `retryable()` が隠れていました。今は `ProviderError` そのものを投げるため、`RateLimitedProvider` が安全に再試行できます。ポーリング/完了処理の失敗はジョブがすでに存在し、呼び出しを再実行すると再送信になるため `OperationError` のままですが、原因の `ProviderError` を入れ子の例外（`std::rethrow_if_nested`）として持ちます。
 - **`RateLimitedProvider` は呼び出し側がすでに見たストリームを再生しなくなりました。** 再試行は応答を最初のトークンからやり直すため、ストリーム途中の `overloaded_error` や接続断のあとに再試行すると、`on_chunk` コールバックに重複した出力が渡されていました。今はコールバックにチャンクが 1 つも届いていない間（またはコールバックがない場合）だけストリームを再試行し、最初のチャンクが届いたあとはエラーをそのまま伝播します。

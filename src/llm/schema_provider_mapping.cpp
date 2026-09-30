@@ -348,6 +348,11 @@ void SchemaProvider::parse_schema()
         reasoning_.text_field = string_field("text_field");
         reasoning_.thought_flag_field = string_field("thought_flag_field");
         reasoning_.signature_field = string_field("signature_field");
+        reasoning_.foreign_signature = string_field("foreign_signature");
+        if (!reasoning_.foreign_signature.empty() && reasoning_.signature_field.empty()) {
+            throw std::invalid_argument(
+                "SchemaProvider: reasoning.foreign_signature requires reasoning.signature_field");
+        }
         reasoning_.message_field = string_field("message_field");
         if (rj.contains("delta_fields")) {
             if (!rj["delta_fields"].is_object()) {
@@ -733,6 +738,8 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     text_vars["TEXT"] = msg.content;
                     parts.push_back(substitute(tool_call_.text_item_template, text_vars));
                 }
+                bool signed_call = false;
+                std::optional<std::size_t> first_call_part;
                 for (const auto& tc : msg.tool_calls) {
                     std::map<std::string, json> vars;
                     vars["NAME"] = tc.name;
@@ -746,9 +753,18 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     if (!reasoning_.signature_field.empty()) {
                         if (auto sig = detail::find_tool_call_signature(msg.reasoning_details, tc.id)) {
                             part[reasoning_.signature_field] = *sig;
+                            signed_call = true;
                         }
                     }
+                    if (!first_call_part) first_call_part = parts.size();
                     parts.push_back(std::move(part));
+                }
+                // No captured signature anywhere in this turn: the history is
+                // foreign. Only the first call of a turn is validated.
+                if (!signed_call && first_call_part && !reasoning_.foreign_signature.empty()) {
+                    json first = parts[*first_call_part];
+                    first[reasoning_.signature_field] = reasoning_.foreign_signature;
+                    parts[*first_call_part] = std::move(first);
                 }
                 j[msgs_.content_field] = parts;
                 break;

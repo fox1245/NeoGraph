@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=72a3ec057c43fc86df135bb3ef7168a5dbdc71902059d191ed7fdcdce0dd3900 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f14ed7e7c8361fa70c971e14b712b88da06f10f12100e280d3e9ccaeb2fdd9c9 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **Gemini 3 现在接受由其他厂商或模型写成的历史 (#305/#306)。** 从 Claude、OpenAI 迁移到 Gemini 的历史或手工构造的历史，因为工具调用没有 Gemini 签名，会以 HTTP 400（`Function call is missing a thought_signature`）失败。schema 现在可以声明 `reasoning.foreign_signature`，解释器会把它放在没有捕获签名的助手消息的第一个工具调用上（Gemini 只校验一个轮次的第一个调用）。内置 `gemini` schema 声明了 Google 文档中的 `skip_thought_signature_validator`。实测：Claude thinking -> Gemini 3 原本是 400，使用占位符后在 gemini-3.1-flash-lite、3.5-flash 和 3.6/3.7/3.8-flash 上成功，gemini-2.5-flash-lite 也照常接受。已捕获的签名始终优先。
 - **提前结束的 WebSocket 流按 RFC 6455 关闭状态分类，消失的对端会变成带类型的错误。** 在 `response.completed` 之前收到的 Close 帧，对 1001、1011、1012、1013、1014（服务端问题或重启）以及不带状态的 Close 可重试，对 1000、1002、1003、1007、1008（认证/配额/策略）、1009、1015 和应用自定义代码不可重试。没有 Close 帧就消失的对端（代理重置、服务器被杀、TLS 截断）过去会以原始套接字异常的形式泄漏出来，现在是同样可重试的 `stream_truncated` `ProviderError`。调用方取消仍照常传播。每一类状态码都有回环套接字测试覆盖。
 - **操作型 schema 现在报告带类型的失败。** 在任务创建之前提交请求被拒绝（HTTP 4xx/5xx）时，过去会被包装成 `OperationError`，隐藏状态码和 `retryable()`；现在直接抛出 `ProviderError`，因此 `RateLimitedProvider` 可以安全重试。轮询或收尾阶段的失败仍是 `OperationError`（任务已存在，重新执行调用会再次提交），但现在把 `ProviderError` 作为嵌套原因携带（`std::rethrow_if_nested`）。
 - **`RateLimitedProvider` 不再重放调用方已经看到的流。** 重试会从第一个 token 重新开始响应，因此在流中途遇到 `overloaded_error` 或连接中断后重试，会把重复的输出交给 `on_chunk` 回调。现在只有在没有任何数据块到达回调时（或没有回调时）才会重试流；第一个数据块送达之后，错误会直接向上传播。

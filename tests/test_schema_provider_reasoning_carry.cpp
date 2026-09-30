@@ -188,7 +188,8 @@ TEST(ReasoningCarryClaude, SchemaWithoutAReasoningSectionBehavesAsBefore) {
 
 TEST(ReasoningCarrySchema, MalformedReasoningSectionIsRejectedAtCreation) {
     for (const char* bad : {R"("carry_types": "thinking")", R"("carry_types": [1])",
-                            R"("carry_types": [""])", R"("text_field": 5)"}) {
+                            R"("carry_types": [""])", R"("text_field": 5)",
+                            R"("foreign_signature": "placeholder")"}) {
         // Reuse a working built-in shape by patching a copy written to disk.
         const std::string schema = std::string(R"({"name":"x","connection":{"base_url":"http://127.0.0.1:9","endpoint":"/e"},)") +
             R"("request":{"messages_field":"messages"},"system_prompt":{"strategy":"in_messages"},)" +
@@ -299,6 +300,68 @@ TEST(ReasoningCarryGemini, SignatureIsEchoedOnTheSameFunctionCallPart) {
     EXPECT_EQ(parts[0].at("thoughtSignature"), "SIG-A");
     EXPECT_EQ(parts[1].at("functionCall").at("name"), "get_time");
     EXPECT_FALSE(parts[1].contains("thoughtSignature")) << "no signature was captured for call_b";
+}
+
+// A history that moved to Gemini from another vendor has tool calls with no
+// captured signature. Gemini 3 answers HTTP 400 ("Function call is missing a
+// thought_signature") for such a call; Google documents a placeholder value for
+// exactly this case (checked live: 400 without it, 200 with it, on several
+// Gemini 3.x models). The schema declares the value; no vendor name is in C++.
+
+TEST(ReasoningCarryGemini, ForeignHistoryGetsThePlaceholderOnTheFirstCallOnly) {
+    auto sp = builtin("gemini");
+    ChatMessage assistant;
+    assistant.role       = "assistant";
+    assistant.tool_calls = {ToolCall{"toolu_x", "get_weather", R"({"city":"Seoul"})"},
+                            ToolCall{"toolu_y", "get_time", "{}"}};
+    // No reasoning_details: the message came from Claude (or was written by hand).
+
+    const json body = SchemaProviderTestAccess::build_body(*sp, tool_turn(assistant, "get_weather"));
+    const json parts = body.at("contents").at(1).at("parts");
+
+    ASSERT_EQ(parts.size(), 2u) << parts.dump();
+    EXPECT_EQ(parts[0].at("thoughtSignature"), "skip_thought_signature_validator");
+    EXPECT_FALSE(parts[1].contains("thoughtSignature")) << "only the first call of a turn is validated";
+}
+
+TEST(ReasoningCarryGemini, ACapturedSignatureIsNeverReplacedByThePlaceholder) {
+    auto sp = builtin("gemini");
+    ChatMessage assistant;
+    assistant.role       = "assistant";
+    assistant.tool_calls = {ToolCall{"call_a", "get_weather", "{}"}, ToolCall{"call_b", "get_time", "{}"}};
+    assistant.reasoning_details = json::array(
+        {json{{"type", "tool_call_signature"}, {"tool_call_id", "call_a"}, {"signature", "SIG-A"}}});
+
+    const json parts = SchemaProviderTestAccess::build_body(*sp, tool_turn(assistant, "get_weather"))
+                           .at("contents").at(1).at("parts");
+    EXPECT_EQ(parts[0].at("thoughtSignature"), "SIG-A");
+    EXPECT_FALSE(parts[1].contains("thoughtSignature"));
+}
+
+TEST(ReasoningCarryGemini, ATextOnlyForeignTurnGetsNoSignature) {
+    auto sp = builtin("gemini");
+    ChatMessage assistant;
+    assistant.role    = "assistant";
+    assistant.content = "The weather is fine.";
+    CompletionParams p;
+    p.model = "test-model";
+    p.messages.push_back({"user", "hi"});
+    p.messages.push_back(assistant);
+    p.messages.push_back({"user", "thanks"});
+    const json body = SchemaProviderTestAccess::build_body(*sp, p);
+    EXPECT_EQ(body.dump().find("thoughtSignature"), std::string::npos) << body.dump();
+}
+
+TEST(ReasoningCarryGemini, SchemasWithoutAPlaceholderNeverInventOne) {
+    // Claude and the OpenAI schemas declare no signature field at all.
+    for (const char* name : {"claude", "openai_responses", "openai"}) {
+        auto sp = builtin(name);
+        ChatMessage assistant;
+        assistant.role       = "assistant";
+        assistant.tool_calls = {ToolCall{"call_1", "get_weather", "{}"}};
+        const json body = SchemaProviderTestAccess::build_body(*sp, tool_turn(assistant, "get_weather"));
+        EXPECT_EQ(body.dump().find("skip_thought_signature_validator"), std::string::npos) << name;
+    }
 }
 
 // ─── OpenRouter / chat completions (opaque message array) ───

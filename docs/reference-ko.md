@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=652749f510f92efcbe777702b90eeab9aed7e1a5e69d906bbaf50e20386a6bfb -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=3a571751ae08e966cb1c868cdc1473d1e7c1eabe1c247ae22e83bc991ded5404 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2782,6 +2782,8 @@ HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / S
 대상 스키마가 선언하지 않은 `type`의 항목은 다시 보내지 않으므로, 프로바이더를 오가는
 히스토리도 유효하게 유지됩니다. reasoning 텍스트는 `content`에 나타나지 않습니다. 이
 섹션이 없는 스키마는 이전처럼 reasoning 항목을 무시합니다.
+
+**벤더나 모델이 바뀐 히스토리:** 항목은 대상 스키마가 그 `type`을 선언한 경우에만 재전송되므로, 프로바이더 사이를 옮겨 다닌 히스토리도 유효하게 유지됩니다. 출처의 reasoning은 버려지고 엉뚱한 API로 보내지지 않습니다. 하나의 비호환이 남아 있습니다. Gemini 3는 모델 턴마다 첫 `functionCall`의 `thoughtSignature`를 검증하고, 자신이 서명하지 않은 호출에는 HTTP 400을 돌려줍니다. Claude, OpenAI, 또는 손으로 만든 히스토리의 모든 호출이 여기에 해당합니다. 스키마는 `reasoning.foreign_signature`(`signature_field` 필요)를 선언할 수 있고, 캡처된 서명이 없는 어시스턴트 메시지의 첫 도구 호출에 그 값이 들어갑니다. 내장 `gemini` 스키마는 Google이 문서화한 자리표시자 `skip_thought_signature_validator`를 선언하며, 벤더는 이를 그 턴의 품질을 낮추는 최후의 수단이라고 설명합니다. 이 키가 없는 스키마는 서명을 만들어 내지 않습니다.
 
 **프로바이더 실패 처리:** 실패가 완료된 답변처럼 보여서는 안 됩니다. 오류는 타입이 있습니다. `neograph::ProviderError`는 `status()`, `retryable()`, 벤더 `code()`, `request_id()`(`request-id` / `x-request-id` 헤더, 없으면 본문의 `request_id`), `retry_after_seconds()`를 담고, `RateLimitError`(HTTP 429)는 `ProviderError`이면서 자기 타입을 유지합니다. 어떤 실패가 일시적인지는 스키마 데이터입니다. `connection.retryable_statuses`(기본 408/429/500/502/503/504, 내장 `claude` 스키마는 529 추가)와 `connection.retryable_codes`(스트림 안 오류를 일시적으로 분류하는 `overloaded_error` 같은 벤더 코드). `RateLimitedProvider`는 재시도 가능한 오류만 재시도합니다. 벤더 본문은 예외 메시지에 넣기 전에 계정/사용자 ID, API 키, bearer 토큰을 가리고 1 KiB로 자릅니다. 2xx 응답 안의 실패 신호는 스키마에 선언하며 SSE와 WebSocket이 공유합니다. 스트림 이벤트 액션 `error`/`fail`(`error_path`가 오류 객체 위치, 예: Anthropic `error`, Responses `error`·`response.failed`), `streaming.error_path`(데이터 청크 안의 오류 객체), `streaming.require_terminal_event`(종료 이벤트 전에 스트림이 끝나면 코드 `stream_truncated`인 재시도 가능 `ProviderError`), `response.error_path`, `response.failure_status_path` + `failure_statuses`(`status:"failed"` 본문), `response.block_reason_path`(차단된 프롬프트는 `block_stop_reason`, 기본 `content_filter`로 보고), `response.error_finish_reasons`(모델 실패를 뜻하는 원본 finish reason). 이 키가 없는 스키마의 신호 처리는 기존과 같습니다.
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=72a3ec057c43fc86df135bb3ef7168a5dbdc71902059d191ed7fdcdce0dd3900 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=f14ed7e7c8361fa70c971e14b712b88da06f10f12100e280d3e9ccaeb2fdd9c9 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **Gemini 3가 다른 벤더나 모델이 만든 히스토리를 받아들입니다 (#305/#306).** Claude나 OpenAI에서 Gemini로 넘어왔거나 손으로 만든 히스토리는 도구 호출에 Gemini 서명이 없어 HTTP 400(`Function call is missing a thought_signature`)으로 실패했습니다. 이제 스키마가 `reasoning.foreign_signature`를 선언할 수 있고, 인터프리터가 캡처된 서명이 없는 어시스턴트 메시지의 첫 도구 호출에 그 값을 넣습니다(Gemini는 턴의 첫 호출만 검증). 내장 `gemini` 스키마는 Google이 문서화한 `skip_thought_signature_validator`를 선언합니다. 실측: Claude thinking -> Gemini 3는 400이었고, 자리표시자를 쓰면 gemini-3.1-flash-lite, 3.5-flash, 3.6/3.7/3.8-flash에서 성공하며 gemini-2.5-flash-lite도 그대로 받아들입니다. 캡처된 서명이 있으면 항상 그것이 우선합니다.
 - **일찍 끝난 WebSocket 스트림을 RFC 6455 close 상태로 분류하고, 사라진 상대는 타입 있는 오류로 보고합니다.** `response.completed` 전의 Close 프레임은 1001, 1011, 1012, 1013, 1014(서버 측 문제 또는 재시작)와 상태 없는 Close에서는 재시도 가능하고, 1000, 1002, 1003, 1007, 1008(인증/쿼터/정책), 1009, 1015와 애플리케이션 코드에서는 재시도 불가입니다. Close 프레임 없이 사라지는 상대(프록시 리셋, 서버 강제 종료, TLS 절단)는 이전에 날 소켓 예외로 새어 나갔지만, 이제 같은 재시도 가능한 `stream_truncated` `ProviderError`입니다. 호출자 취소는 그대로 전파됩니다. 모든 코드 부류를 루프백 소켓 테스트로 검증합니다.
 - **작업형(operation) 스키마가 타입 있는 실패를 보고합니다.** 작업이 만들어지기 전 제출 요청이 거부되면(HTTP 4xx/5xx) `OperationError`로 감싸져 상태와 `retryable()`이 가려졌습니다. 이제 `ProviderError` 그대로 던지므로 `RateLimitedProvider`가 안전하게 재시도할 수 있습니다. 폴링/종료 단계 실패는 작업이 이미 있고 호출을 다시 실행하면 제출이 반복되므로 `OperationError`로 유지하되, 원인 `ProviderError`를 중첩 예외(`std::rethrow_if_nested`)로 담습니다.
 - **`RateLimitedProvider`가 호출자가 이미 본 스트림을 다시 재생하지 않습니다.** 재시도는 응답을 첫 토큰부터 다시 시작하므로, 스트림 도중 `overloaded_error`나 연결 끊김 뒤에 재시도하면 `on_chunk` 콜백에 중복 출력이 전달됐습니다. 이제 콜백에 청크가 하나도 전달되지 않았을 때(또는 콜백이 없을 때)만 스트림을 재시도하고, 첫 청크가 전달된 뒤에는 오류를 그대로 전파합니다.
