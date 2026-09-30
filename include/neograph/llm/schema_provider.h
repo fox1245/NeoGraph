@@ -56,6 +56,13 @@ namespace neograph::llm {
 
 namespace test_access { class SchemaProviderTestAccess; }  // fwd-decl for friend
 
+/// A failure of an operation-style (submit / poll / finalize) schema after the
+/// job exists, or a malformed operation response. A transport or HTTP failure
+/// while polling or finalizing carries its cause as a nested exception:
+/// `std::rethrow_if_nested(error)` yields the `ProviderError` (status,
+/// retryable, vendor code). It is deliberately not itself retryable, because
+/// re-running the call would submit the job again. A failure of the submission
+/// request itself (no job yet) is thrown as the `ProviderError` directly.
 class NEOGRAPH_API OperationError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;

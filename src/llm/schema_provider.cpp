@@ -521,6 +521,9 @@ SchemaProvider::complete_async(const CompletionParams& params)
             }
             check_operation();
             if (!operation_.id_path.empty()) {
+                // No job exists yet, so a typed provider failure keeps its type
+                // and retryable flag: retrying the submission cannot duplicate work.
+                if (dynamic_cast<const ProviderError*>(&error) != nullptr) throw;
                 throw OperationError(std::string("SchemaProvider: submission failed: ") + error.what());
             }
             throw;
@@ -593,7 +596,11 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 throw;
             } catch (const std::exception& error) {
                 check_operation();
-                throw OperationError(std::string("SchemaProvider: poll failed: ") + error.what());
+                // The job exists, so this stays an OperationError (re-running the
+                // call would submit it again); the cause remains reachable through
+                // std::rethrow_if_nested.
+                std::throw_with_nested(
+                    OperationError(std::string("SchemaProvider: poll failed: ") + error.what()));
             }
             check_operation();
             resp_json = json::parse(res.body);
@@ -612,7 +619,8 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 throw;
             } catch (const std::exception& error) {
                 check_operation();
-                throw OperationError(std::string("SchemaProvider: finalize failed: ") + error.what());
+                std::throw_with_nested(
+                    OperationError(std::string("SchemaProvider: finalize failed: ") + error.what()));
             }
             check_operation();
             resp_json = json::parse(res.body);

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f1b3edef901c4beec3eca79a7c4c7474c0afe5012bd70a27c20dd24c226c8190 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5838162c16278a6b02566fd4f5ba3cb4d06ae1af9b51a810946bcf228bd01d7d -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **操作型 schema 现在报告带类型的失败。** 在任务创建之前提交请求被拒绝（HTTP 4xx/5xx）时，过去会被包装成 `OperationError`，隐藏状态码和 `retryable()`；现在直接抛出 `ProviderError`，因此 `RateLimitedProvider` 可以安全重试。轮询或收尾阶段的失败仍是 `OperationError`（任务已存在，重新执行调用会再次提交），但现在把 `ProviderError` 作为嵌套原因携带（`std::rethrow_if_nested`）。
 - **`RateLimitedProvider` 不再重放调用方已经看到的流。** 重试会从第一个 token 重新开始响应，因此在流中途遇到 `overloaded_error` 或连接中断后重试，会把重复的输出交给 `on_chunk` 回调。现在只有在没有任何数据块到达回调时（或没有回调时）才会重试流；第一个数据块送达之后，错误会直接向上传播。
 - **`RateLimitedProvider` 对非 429 的暂时性错误使用指数退避。** 没有 `Retry-After` 的可重试 500、502、503、529 或流内 `overloaded_error`，以前会等待限流默认值（`default_wait_seconds`，30 秒 + 1 秒）。现在等待 `transient_base_wait_seconds * 2^尝试次数`（默认 1 秒、2 秒、4 秒...，以 `max_wait_seconds` 为上限，0 表示立即重试）。429 仍使用 `default_wait_seconds` 和 +1 秒余量，正的 `Retry-After` 仍然优先遵循。
 - **提供方失败现在是带类型的错误,而不是成功的完成 (`SchemaProvider`, `OpenAIProvider`, #307, #312)。** Anthropic 的 `error` 事件、Responses 的 `response.failed` / `error` 事件或 `status:"failed"` 正文、在终止事件之前被切断的流、Gemini 被拦截的提示和 `MALFORMED_FUNCTION_CALL` 结束、以及 OpenRouter 的错误数据块，过去都会作为正常的 `end_turn` 完成返回，只有 HTTP 429 是带类型的错误。现在 `neograph::ProviderError` 携带 `status()`、`retryable()`、厂商 `code()`、`request_id()` 和 `retry_after_seconds()`（`RateLimitError` 继承自它）。schema 声明暂时性失败集合（`connection.retryable_statuses`、`retryable_codes`）和失败信号（`error` / `fail` 事件动作、`streaming.error_path`、`streaming.require_terminal_event`、`response.error_path`、`failure_status_path`、`block_reason_path`、`error_finish_reasons`），SSE 与 WebSocket 共用。`RateLimitedProvider` 会重试所有可重试的 `ProviderError`（500、502、503、529 等），放弃时保留具体类型；错误正文在进入消息前会隐去账户 ID、密钥和 bearer 令牌并被截断。被拦截的 Gemini 提示现在报告 `content_filter`，而不是 `end_turn`。
