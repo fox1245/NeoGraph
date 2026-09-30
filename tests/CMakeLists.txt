@@ -64,6 +64,7 @@ add_executable(neograph_tests
     test_schema_provider_ws_failures.cpp
     test_schema_provider_usage.cpp
     test_schema_provider_knobs.cpp
+    test_schema_provider_headers.cpp
     test_async_conn_pool.cpp
     test_schema_provider_primitives.cpp
     test_schema_provider_wire_contract.cpp

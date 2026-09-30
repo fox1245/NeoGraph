@@ -132,7 +132,8 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     }
     const bool credentialed = !conn_.auth_header.empty() ||
                               !conn_.auth_query_param.empty() ||
-                              !conn_.extra_headers.empty();
+                              !conn_.extra_headers.empty() ||
+                              !user_config_.extra_headers.empty();
     (void)async::validate_credential_endpoint(
         conn_.base_url, credentialed,
         user_config_.allow_insecure_loopback);
@@ -428,7 +429,8 @@ SchemaProvider::complete_async(const CompletionParams& params)
         endpoint = async::validate_credential_endpoint(
             conn_.base_url,
             !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
-                !conn_.extra_headers.empty() || !api_key.empty(),
+                !conn_.extra_headers.empty() ||
+                    !user_config_.extra_headers.empty() || !api_key.empty(),
             user_config_.allow_insecure_loopback);
         auto body = build_body(params);
         body_str = body.dump();
@@ -701,7 +703,8 @@ SchemaProvider::request_json_async(
         endpoint = async::validate_credential_endpoint(
             conn_.base_url,
             !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
-                !conn_.extra_headers.empty() || !api_key.empty(),
+                !conn_.extra_headers.empty() ||
+                    !user_config_.extra_headers.empty() || !api_key.empty(),
             user_config_.allow_insecure_loopback);
 
         // If the schema endpoint contains $MODEL, prefer the model in the
@@ -788,7 +791,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
         (void)async::validate_credential_endpoint(
             conn_.base_url,
             !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
-                !conn_.extra_headers.empty() || !api_key.empty(),
+                !conn_.extra_headers.empty() ||
+                    !user_config_.extra_headers.empty() || !api_key.empty(),
             user_config_.allow_insecure_loopback);
         body_str = build_sse_body(params).dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
@@ -1144,7 +1148,7 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     // same set here, minus auth which we just put in).
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
-        for (const auto& [k, v] : conn_.extra_headers) {
+        for (const auto& [k, v] : resolved_extra_headers()) {
             ws_headers.emplace_back(k, v);
         }
     }

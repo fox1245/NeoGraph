@@ -2,6 +2,7 @@
 #include <neograph/llm/schema_provider.h>
 
 #include "provider_error.h"
+#include "header_template.h"
 #include "reasoning_carry.h"
 #include "temperature_policy.h"
 #include "usage_policy.h"
@@ -62,6 +63,14 @@ void SchemaProvider::parse_schema()
     if (c.contains("extra_headers") && c["extra_headers"].is_object()) {
         for (const auto& [k, v] : c["extra_headers"].items()) {
             conn_.extra_headers[k] = v.get<std::string>();
+            detail::validate_header_template(k, conn_.extra_headers[k]);
+        }
+    }
+    for (const auto& [name, value] : user_config_.extra_headers) {
+        detail::validate_header_name(name);
+        if (detail::has_line_break(value)) {
+            throw std::invalid_argument("SchemaProvider: Config::extra_headers value for '" + name +
+                                        "' contains a line break");
         }
     }
     {
@@ -686,6 +695,41 @@ std::string SchemaProvider::build_endpoint(const std::string& model,
     return ep;
 }
 
+namespace {
+// HTTP header names are case-insensitive: replacing must not leave two headers
+// that differ only in case (both would be sent).
+void set_header(std::map<std::string, std::string>& headers, const std::string& name,
+                std::string value) {
+    const auto same = [&name](const std::string& other) {
+        if (other.size() != name.size()) return false;
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                std::tolower(static_cast<unsigned char>(other[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (auto it = headers.begin(); it != headers.end();) {
+        it = same(it->first) ? headers.erase(it) : std::next(it);
+    }
+    headers[name] = std::move(value);
+}
+}  // namespace
+
+std::map<std::string, std::string> SchemaProvider::resolved_extra_headers() const {
+    std::map<std::string, std::string> headers;
+    for (const auto& [name, value] : conn_.extra_headers) {
+        if (auto expanded = detail::expand_header_template(name, value)) {
+            set_header(headers, name, std::move(*expanded));
+        }
+    }
+    for (const auto& [name, value] : user_config_.extra_headers) {
+        set_header(headers, name, value);
+    }
+    return headers;
+}
+
 std::map<std::string, std::string> SchemaProvider::build_headers(
     std::string_view api_key) const {
     std::map<std::string, std::string> headers;
@@ -695,9 +739,10 @@ std::map<std::string, std::string> SchemaProvider::build_headers(
         headers[conn_.auth_header] = conn_.auth_prefix + std::string(api_key);
     }
 
-    // Extra headers (e.g., anthropic-version)
-    for (const auto& [k, v] : conn_.extra_headers) {
-        headers[k] = v;
+    // Extra headers: the schema's (e.g. anthropic-version, with ${ENV}
+    // expanded), then Config::extra_headers, which win.
+    for (auto& [name, value] : resolved_extra_headers()) {
+        set_header(headers, name, std::move(value));
     }
 
     return headers;

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8b27d42665ba32812c74df47ddd0d656efbdf962e787880a334a5a1382fbdbd8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **随部署变化的请求头 (#310)。** `SchemaProvider::Config::extra_headers` 可以从代码添加或替换请求头（名称不区分大小写，值按字面使用，拒绝换行），schema 的请求头值也可以引用环境变量：`${NAME}`（必需；变量缺失时请求失败并点名该变量）和 `${NAME?}`（未设置时省略整个请求头）。内置 `claude` schema 声明了 `anthropic-workspace-id: ${ANTHROPIC_WORKSPACE_ID?}` 和 `anthropic-beta: ${ANTHROPIC_BETA?}`，因此可以使用 Anthropic 多工作区 API 密钥（缺少工作区请求头会返回 HTTP 400）以及 interleaved thinking 等 beta 功能。凭据仍然不会发送到非回环的 `http://` 端点。
 - **逐次调用的请求旋钮、诊断与厂商规则 (#309)。** 过去每次调用只能设置 `provider` 和 `reasoning.effort`，其他 `extra_fields` 键都被静默丢弃（实测：`extra_fields.thinking` 从未到达网络），因此拼写错误和不支持的旋钮看起来像成功。现在内置 schema 声明各厂商接受的旋钮（`claude`：`thinking`、`output_config.effort`、`cache_control`、`tool_choice`；`gemini`：`thinkingConfig.*`、`safetySettings`、`toolConfig`；`openai_responses`：`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`；`openai`：`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`），`request.unknown_knob_policy: "error"` 让其他键抛出点名已声明键的 `std::invalid_argument`（自定义 schema 除非选择加入，否则保持 `"drop"`）。新的 `request.rules`（`omit`/`when`、`require_greater`）表达厂商约束：`claude` schema 现在在 thinking 为 `enabled`/`adaptive` 时把 `temperature` 交给服务端（此前任何非 1 的值都是 HTTP 400），并在发送前拒绝 `max_tokens <= thinking.budget_tokens`。
 - **缓存与推理 token 用量 (#308)。** `ChatCompletion::Usage::cached_prompt_tokens` 和 `reasoning_tokens` 早已存在，但没有任何解析器填充它们，因此所有提供方都是 0；`UsageAccumulator` 会丢弃它们，Anthropic 的提示数也漏掉了整个已缓存前缀（实测：`input_tokens=3` 旁边是 `cache_read_input_tokens=9818`）。现在 schema 声明映射（`response.prompt_extra_fields`、`cached_tokens_path`、`reasoning_tokens_path`、`completion_includes_reasoning`；usage 事件使用 `prompt_extra_paths`、`cached_path`、`reasoning_path`），非流式、SSE、WebSocket 路径和原生 `OpenAIProvider` 以相同方式读取。Anthropic 的 `cache_read=900` / `creation=300` / `input=12` 现在报告为 `prompt=1212, cached=900`；Gemini 的补全数包含 thought（可见 3 + thought 266 = 269）；从不报告总数的流（Anthropic）按提示 + 补全计算。`UsageAccumulator`、`RunResult::usage` 和 `Agent::usage()` 会累加这些子集，模型 token 预算仍以总数为准。
 - **按所有者作用域划分的实验性活动 Program 启动。** C++ `ProgramRuntime`

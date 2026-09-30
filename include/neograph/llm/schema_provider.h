@@ -104,6 +104,15 @@ public:
         /// Anthropic-compatible endpoint. Empty values preserve schema fields.
         std::string auth_header_override;
         std::string auth_prefix_override;
+        /// Extra request headers set from code (for example
+        /// `anthropic-workspace-id`, `anthropic-beta`). They are added after the
+        /// schema's `connection.extra_headers` and replace a schema header of
+        /// the same name (names compare case-insensitively). Values are sent
+        /// literally; an unusable name or a value containing a line break is
+        /// rejected when the provider is created. Adding headers does not
+        /// relax the credential rule: credentials are still refused over a
+        /// non-loopback `http://` endpoint.
+        std::map<std::string, std::string> extra_headers;
         /// Drive `complete_stream` over a WebSocket instead of HTTP/SSE.
         /// Currently supported only for the "openai-responses" schema.
         /// This matches OpenAI's WebSocket mode at `/v1/responses`, which
@@ -677,6 +686,9 @@ public:
 
     std::string build_endpoint(const std::string& model, bool streaming,
                                std::string_view api_key) const;
+    // The schema's `connection.extra_headers` with `${ENV}` / `${ENV?}`
+    // expanded (see header_template.h), then `Config::extra_headers` on top.
+    std::map<std::string, std::string> resolved_extra_headers() const;
     std::map<std::string, std::string> build_headers(
         std::string_view api_key) const;
     std::string get_api_key() const;
@@ -704,6 +716,11 @@ class SchemaProviderTestAccess {
     static json build_body(const SchemaProvider& sp,
                            const CompletionParams& params) {
         return sp.build_body(params);
+    }
+
+    static std::map<std::string, std::string> build_headers(const SchemaProvider& sp,
+                                                           std::string_view api_key) {
+        return sp.build_headers(api_key);
     }
 
     static json build_sse_body(const SchemaProvider& sp,

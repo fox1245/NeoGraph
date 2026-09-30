@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8b27d42665ba32812c74df47ddd0d656efbdf962e787880a334a5a1382fbdbd8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **배포별 요청 헤더 (#310).** `SchemaProvider::Config::extra_headers`로 코드에서 요청 헤더를 추가하거나 대체할 수 있고(이름은 대소문자 무시, 값은 그대로, 줄바꿈 거부), 스키마 헤더 값이 환경 변수를 참조할 수 있습니다. `${NAME}`(필수, 변수가 없으면 이름을 알리며 요청 실패)과 `${NAME?}`(변수가 없으면 헤더 전체 생략)입니다. 내장 `claude` 스키마가 `anthropic-workspace-id: ${ANTHROPIC_WORKSPACE_ID?}`와 `anthropic-beta: ${ANTHROPIC_BETA?}`를 선언하므로, Anthropic 다중 워크스페이스 API 키(워크스페이스 헤더가 없으면 HTTP 400)와 interleaved thinking 같은 베타 기능을 쓸 수 있습니다. 자격 증명은 루프백이 아닌 `http://` 엔드포인트로는 여전히 거부됩니다.
 - **호출별 요청 노브, 진단, 벤더 규칙 (#309).** 호출별로 설정할 수 있는 것은 `provider`와 `reasoning.effort`뿐이었고 나머지 `extra_fields` 키는 조용히 버려졌습니다(실측: `extra_fields.thinking`이 wire에 도달하지 않음). 그래서 오타와 지원하지 않는 노브가 성공처럼 보였습니다. 이제 내장 스키마가 각 벤더가 받는 노브를 선언하고(`claude`: `thinking`, `output_config.effort`, `cache_control`, `tool_choice`; `gemini`: `thinkingConfig.*`, `safetySettings`, `toolConfig`; `openai_responses`: `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`; `openai`: `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`), `request.unknown_knob_policy: "error"`는 그 밖의 키가 선언된 키를 알려 주는 `std::invalid_argument`를 던지게 합니다(커스텀 스키마는 옵트인하지 않으면 `"drop"` 유지). 새 `request.rules`(`omit`/`when`, `require_greater`)는 벤더 제약을 표현합니다. `claude` 스키마는 이제 thinking이 `enabled`/`adaptive`인 동안 `temperature`를 서버에 맡기고(1이 아닌 값이면 HTTP 400이었음), `max_tokens <= thinking.budget_tokens`를 요청 전에 거부합니다.
 - **캐시 및 추론 토큰 사용량 (#308).** `ChatCompletion::Usage::cached_prompt_tokens`와 `reasoning_tokens`가 있었지만 어떤 파서도 채우지 않아 모든 프로바이더에서 0이었고, `UsageAccumulator`는 이를 버렸으며, Anthropic의 프롬프트 수는 캐시된 접두부 전체를 빠뜨렸습니다(실측: `input_tokens=3`, `cache_read_input_tokens=9818`). 이제 스키마가 매핑(`response.prompt_extra_fields`, `cached_tokens_path`, `reasoning_tokens_path`, `completion_includes_reasoning`; usage 이벤트는 `prompt_extra_paths`, `cached_path`, `reasoning_path`)을 선언하고, 비스트림, SSE, WebSocket 경로와 네이티브 `OpenAIProvider`가 똑같이 읽습니다. Anthropic `cache_read=900` / `creation=300` / `input=12`는 이제 `prompt=1212, cached=900`으로 보고되고, Gemini의 완성 수는 thought를 포함하며(보이는 3 + thought 266 = 269), 합계를 보고하지 않는 스트림(Anthropic)은 프롬프트 + 완성으로 계산합니다. `UsageAccumulator`, `RunResult::usage`, `Agent::usage()`가 부분집합을 합산하며, 모델 토큰 예산은 계속 합계 기준입니다.
 - **소유자 범위의 실험적 활성 Program 시작.** C++ `ProgramRuntime`와 Python

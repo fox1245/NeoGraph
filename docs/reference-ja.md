@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=8cb84cef6fe5557e225d000975a9f20f8e607f60c4be0b39f9739812e70e8b81 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=fd68914f16f52207e7f28ecc4dcdba6e3a0666cc1187486831f8abce51e61af4 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2279,6 +2279,8 @@ public:
 `stream_concat_fields`。対象スキーマが宣言していない `type` の項目は再送されないため、
 プロバイダ間で移動する履歴も有効なままです。reasoning テキストが `content` に現れることは
 ありません。このセクションを持たないスキーマは従来どおり reasoning 項目を無視します。
+
+**デプロイごとに変わるリクエストヘッダー:** スキーマの `connection.extra_headers` の値は、`api_key_env` と同様にリクエストごとに読まれる環境変数を参照できます。`${NAME}` は設定済みで空でない必要があり（そうでなければ変数名を示してリクエストが失敗し、空のヘッダーは送られません）、`${NAME?}` は変数が未設定または空のときヘッダー全体を省略します。組み込みの `claude` スキーマは `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"`（Anthropic のマルチワークスペース API キーはこのヘッダーがないと HTTP 400）と `"anthropic-beta": "${ANTHROPIC_BETA?}"` を宣言します。`SchemaProvider::Config::extra_headers` はコードからヘッダーを設定し、スキーマのヘッダーの後に追加され、同名のスキーマヘッダーを置き換え（名前は大文字小文字を区別しないため、2 つの表記が同時に送られることはありません）、そのまま送信されます。不正なヘッダー名、形式の誤った `${...}`、改行を含む値（または展開後の環境変数の値）は拒否されます。ヘッダーがスキーマ由来でも `Config` 由来でも、資格情報はループバックでない `http://` エンドポイントには引き続き送られません。
 
 **呼び出しごとのリクエストノブ:** `CompletionParams::extra_fields` は 1 回の呼び出しについて本文のパスを値に対応付け、スキーマが `request.per_call_fields` に列挙したパスだけが受け付けられます。組み込みスキーマの宣言: `claude` は `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`provider`、`gemini` は `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`、`safetySettings`、`toolConfig`、`openai_responses` は `reasoning.effort`、`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`provider`、`openai`（chat / OpenRouter）は `reasoning_effort`、`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`、`provider`。それ以外のキーは `request.unknown_knob_policy` が決めます。`"error"`（すべての組み込みスキーマ）は宣言済みキーを名指しする `std::invalid_argument` を投げ、タイプミスや未対応のノブが成功に見えないようにします。`"drop"`（このキーができる前に書かれたカスタムスキーマの既定）は無視します。`request.rules` は完成した本文へのベンダー制約を表します。`{"omit": path, "when": {"path": p, "in": [...]}}` はフィールドを削除し、`{"require_greater": {"path": a, "than": b}}` は両方が整数で `a <= b` のときリクエストを送る前に拒否します。`claude` スキーマはこれを HTTP 400 になる Anthropic の 2 つの規則に使います。`thinking.type` が `enabled` または `adaptive` の間は `temperature` をサーバー既定値に任せ、`max_tokens` は `thinking.budget_tokens` より大きくなければなりません。
 

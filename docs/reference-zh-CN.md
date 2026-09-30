@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8cb84cef6fe5557e225d000975a9f20f8e607f60c4be0b39f9739812e70e8b81 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fd68914f16f52207e7f28ecc4dcdba6e3a0666cc1187486831f8abce51e61af4 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2700,6 +2700,8 @@ Gemini 3 的 `thoughtSignature`、OpenRouter 的 `reasoning_details`。schema �
 流式传输的 `delta_fields` 与 `stream_concat_fields`。目标 schema 未声明的 `type` 的条目不会被
 重放，因此在不同提供方之间流转的历史仍然有效。reasoning 文本不会出现在 `content` 中。
 没有该部分的 schema 与以前一样忽略 reasoning 条目。
+
+**随部署变化的请求头:** schema 的 `connection.extra_headers` 值可以引用环境变量，与 `api_key_env` 一样在每次请求时读取：`${NAME}` 必须已设置且非空（否则请求失败并指出变量名，绝不发送空请求头），`${NAME?}` 在变量未设置或为空时省略整个请求头。内置 `claude` schema 声明了 `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"`（Anthropic 多工作区 API 密钥缺少它会返回 HTTP 400）和 `"anthropic-beta": "${ANTHROPIC_BETA?}"`。`SchemaProvider::Config::extra_headers` 从代码设置请求头：它们添加在 schema 的请求头之后，替换同名的 schema 请求头（名称不区分大小写，因此不会同时发送两种写法），并按字面发送。无效的请求头名称、格式错误的 `${...}`，以及包含换行的值（或展开后的环境变量值）都会被拒绝。无论请求头来自 schema 还是 `Config`，凭据仍然不会发送到非回环的 `http://` 端点。
 
 **逐次调用的请求旋钮:** `CompletionParams::extra_fields` 为单次调用把请求体路径映射到值，只有 schema 在 `request.per_call_fields` 中列出的路径才会被接受。内置 schema 的声明：`claude` 为 `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`provider`；`gemini` 为 `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`、`safetySettings`、`toolConfig`；`openai_responses` 为 `reasoning.effort`、`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`provider`；`openai`（chat / OpenRouter）为 `reasoning_effort`、`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`、`provider`。其他键由 `request.unknown_knob_policy` 决定：`"error"`（所有内置 schema）抛出点名已声明键的 `std::invalid_argument`，让拼写错误或不支持的旋钮不会看起来像成功；`"drop"`（该键出现之前编写的自定义 schema 的默认值）则忽略。`request.rules` 表达对最终请求体的厂商约束：`{"omit": path, "when": {"path": p, "in": [...]}}` 删除字段，`{"require_greater": {"path": a, "than": b}}` 在两者都是整数且 `a <= b` 时于发送前拒绝请求。`claude` schema 用它们处理两条否则会返回 HTTP 400 的 Anthropic 规则：当 `thinking.type` 为 `enabled` 或 `adaptive` 时 `temperature` 交给服务端默认值，且 `max_tokens` 必须大于 `thinking.budget_tokens`。
 

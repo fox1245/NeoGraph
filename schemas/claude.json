@@ -8,7 +8,9 @@
     "auth_prefix": "",
     "api_key_env": "ANTHROPIC_API_KEY",
     "extra_headers": {
-      "anthropic-version": "2023-06-01"
+      "anthropic-version": "2023-06-01",
+      "anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}",
+      "anthropic-beta": "${ANTHROPIC_BETA?}"
     },
     "retryable_statuses": [408, 429, 500, 502, 503, 504, 529],
     "retryable_codes": ["overloaded_error", "api_error"]

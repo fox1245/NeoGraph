@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8cb84cef6fe5557e225d000975a9f20f8e607f60c4be0b39f9739812e70e8b81 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fd68914f16f52207e7f28ecc4dcdba6e3a0666cc1187486831f8abce51e61af4 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2782,6 +2782,8 @@ HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / S
 대상 스키마가 선언하지 않은 `type`의 항목은 다시 보내지 않으므로, 프로바이더를 오가는
 히스토리도 유효하게 유지됩니다. reasoning 텍스트는 `content`에 나타나지 않습니다. 이
 섹션이 없는 스키마는 이전처럼 reasoning 항목을 무시합니다.
+
+**배포마다 달라지는 요청 헤더:** 스키마의 `connection.extra_headers` 값은 `api_key_env`처럼 요청마다 읽는 환경 변수를 참조할 수 있습니다. `${NAME}`은 설정되어 있고 비어 있지 않아야 하며(아니면 변수 이름을 알리며 요청이 실패하고 빈 헤더를 보내지 않습니다), `${NAME?}`은 변수가 없거나 비어 있으면 헤더 전체를 생략합니다. 내장 `claude` 스키마는 `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"`(Anthropic 다중 워크스페이스 API 키는 이 헤더가 없으면 HTTP 400)와 `"anthropic-beta": "${ANTHROPIC_BETA?}"`를 선언합니다. `SchemaProvider::Config::extra_headers`는 코드에서 헤더를 설정하며, 스키마 헤더 뒤에 추가되고 같은 이름의 스키마 헤더를 대체하며(이름은 대소문자를 구분하지 않으므로 두 표기가 함께 전송되지 않음) 그대로 전송됩니다. 잘못된 헤더 이름, 형식이 틀린 `${...}`, 줄바꿈이 들어 있는 값(또는 확장된 환경 변수 값)은 거부됩니다. 헤더가 스키마에서 오든 `Config`에서 오든 자격 증명은 루프백이 아닌 `http://` 엔드포인트로는 여전히 거부됩니다.
 
 **호출별 요청 노브:** `CompletionParams::extra_fields`는 한 번의 호출에 대해 본문 경로를 값에 매핑하며, 스키마가 `request.per_call_fields`에 나열한 경로만 받아들여집니다. 내장 스키마의 선언: `claude`는 `thinking`, `output_config.effort`, `cache_control`, `tool_choice`, `provider`; `gemini`는 `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`, `safetySettings`, `toolConfig`; `openai_responses`는 `reasoning.effort`, `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`, `provider`; `openai`(chat / OpenRouter)는 `reasoning_effort`, `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`, `provider`. 그 밖의 키는 `request.unknown_knob_policy`가 결정합니다. `"error"`(모든 내장 스키마)는 선언된 키를 이름으로 알려 주는 `std::invalid_argument`를 던져 오타나 지원하지 않는 노브가 성공처럼 보이지 않게 하고, `"drop"`(이 키가 생기기 전에 작성된 커스텀 스키마의 기본값)은 무시합니다. `request.rules`는 완성된 본문에 대한 벤더 제약을 표현합니다. `{"omit": path, "when": {"path": p, "in": [...]}}`는 필드를 제거하고, `{"require_greater": {"path": a, "than": b}}`는 둘 다 정수이고 `a <= b`이면 요청을 보내기 전에 거부합니다. `claude` 스키마는 이를 HTTP 400으로 돌아오는 Anthropic 규칙 두 가지에 씁니다. `thinking.type`이 `enabled` 또는 `adaptive`이면 `temperature`를 서버 기본값에 맡기고, `max_tokens`는 `thinking.budget_tokens`보다 커야 합니다.
 
