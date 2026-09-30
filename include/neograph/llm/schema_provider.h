@@ -369,6 +369,35 @@ public:
         std::vector<ArtifactRule> artifacts;
     };
 
+    /// Optional `reasoning` schema section: which provider reasoning items a
+    /// response carries verbatim into `ChatMessage::reasoning_details` and
+    /// replays on the assistant message that produced them. The interpreter
+    /// knows no vendor names; every field below is data declared per schema.
+    struct ReasoningConfig {
+        /// Block/item `type` values (content[] / output[] entries) kept
+        /// verbatim, in wire order. Replayed in front of the tool calls.
+        std::set<std::string> carry_types;
+        /// Field of a carried item holding readable text (a string, or an
+        /// array of objects with a `text` string) for `ChatMessage::reasoning`.
+        std::string text_field;
+        /// Part-style: a part whose boolean field of this name is true is
+        /// reasoning, not user-visible content.
+        std::string thought_flag_field;
+        /// Part-style: sibling field of a functionCall part carrying an opaque
+        /// signature that must be echoed on the same part when replayed.
+        std::string signature_field;
+        /// Chat-style: assistant message field holding an opaque array that is
+        /// captured verbatim and replayed on the assistant message.
+        std::string message_field;
+        /// Streaming, event style: maps a delta `type` to the field of the
+        /// carried block it extends (string values are concatenated), for
+        /// example `thinking_delta` -> `thinking`, `signature_delta` -> `signature`.
+        std::map<std::string, std::string> delta_fields;
+        /// Streaming, chat style: fields of `message_field` fragments that are
+        /// concatenated when fragments of one item (same type + index) arrive.
+        std::set<std::string> stream_concat_fields;
+    };
+
     struct StreamConfig {
         StreamFormat format;
         std::string prefix;
@@ -460,6 +489,7 @@ public:
     ToolResultConfig tool_result_;
     ImageConfig image_;
     ResponseConfig resp_;
+    ReasoningConfig reasoning_;
     StreamConfig stream_;
     struct OperationConfig {
         std::string id_path, done_path, error_path, result_path;
@@ -484,6 +514,10 @@ public:
         struct EventBlock {
             std::string type, id, name, args;
             int index = -1;
+            /// Set for blocks whose type the schema carries verbatim; `raw`
+            /// accumulates the block (start payload + deltas) until it stops.
+            bool carried = false;
+            json raw;
         };
         ChatCompletion completion;
         SchemaPrimitiveRequestContext primitive_context;

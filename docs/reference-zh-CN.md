@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=e71dbdfd271fbd28aafc3d554a63bfb92e8e3fd7393db5e4f9b8cf3cae1f758d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=631d5a7170ed9e2c1ca66b77b1d2965eec236c0b415eb60b7d7c893e4e3e839d -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2689,6 +2689,17 @@ public:
 表示前缀；匹配不区分大小写，并会尝试最后一个 `/` 之后的部分，因此 `openai/o4-mini`
 匹配 `o4*`），`SchemaProvider` 随后会对它们省略 `temperature`。未声明该列表的自定义
 schema 始终发送 `temperature`；若面向这些模型，请从对应厂商的内置 schema 复制该列表。
+
+**提供方 reasoning 条目：** reasoning 模型会返回必须随工具循环下一次请求一起发送的条目：
+Anthropic 的 `thinking` 块（含 `signature`）、OpenAI Responses 的 `reasoning` 条目、
+Gemini 3 的 `thoughtSignature`、OpenRouter 的 `reasoning_details`。schema 通过可选的顶层
+`reasoning` 部分声明它们：`carry_types`（原样保存在 `ChatMessage::reasoning_details` 中，
+并在生成它的助手消息的工具调用之前重放的块/条目 `type` 值）、`text_field`（供
+`ChatMessage::reasoning` 使用的可读文本所在位置）、`thought_flag_field` 与
+`signature_field`（Gemini 风格的 part）、`message_field`（聊天风格的不透明数组），以及用于
+流式传输的 `delta_fields` 与 `stream_concat_fields`。目标 schema 未声明的 `type` 的条目不会被
+重放，因此在不同提供方之间流转的历史仍然有效。reasoning 文本不会出现在 `content` 中。
+没有该部分的 schema 与以前一样忽略 reasoning 条目。
 
 **用法：**
 

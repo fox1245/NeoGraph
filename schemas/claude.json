@@ -91,6 +91,17 @@
       "text": "$TEXT"
     }
   },
+  "reasoning": {
+    "carry_types": [
+      "thinking",
+      "redacted_thinking"
+    ],
+    "text_field": "thinking",
+    "delta_fields": {
+      "thinking_delta": "thinking",
+      "signature_delta": "signature"
+    }
+  },
   "response": {
     "strategy": "content_array",
     "content_path": "content",

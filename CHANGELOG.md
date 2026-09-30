@@ -144,6 +144,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Provider reasoning items survive tool turns (`SchemaProvider`).** Reasoning state
+  was dropped between turns: Gemini 3 tool loops failed with HTTP 400 (`Function call is
+  missing a thought_signature`), OpenAI Responses models re-reasoned from scratch (reasoning
+  items were ignored), Anthropic `thinking` blocks and OpenRouter `reasoning_details` were
+  lost, and Gemini thought parts leaked into `content` and the stream. A schema can now
+  declare a `reasoning` section (`carry_types`, `text_field`, `thought_flag_field`,
+  `signature_field`, `message_field`, `delta_fields`, `stream_concat_fields`); the
+  interpreter carries those items verbatim into `ChatMessage::reasoning_details`
+  (non-stream, SSE and WebSocket; OpenRouter fragments are merged by index) and replays
+  them in front of the tool calls of the assistant message that produced them, dropping
+  items of types the target schema does not declare. The built-in `claude`,
+  `openai_responses`, `gemini` and `openai` schemas declare it, and the `openai` stream now
+  also reads `delta.reasoning`. Live: Gemini 3 turn 2 succeeds where the stripped control
+  still returns 400; Anthropic thinking, OpenAI Responses (`gpt-5-mini`, `o4-mini`) and
+  OpenRouter loops replay without error, streaming included. `ReasoningCarry*` cover it
+  (#305, #306).
 - **A2A client speaks the A2A 1.0 wire format (interop with a2a-sdk >= 1.0).**
   `example_a2a_client` completed discovery against the shipped Python A2A
   server (`27_a2a_server.py`, a2a-sdk 1.1.5) but `message/send` failed with

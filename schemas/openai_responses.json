@@ -77,6 +77,12 @@
       "text": "$TEXT"
     }
   },
+  "reasoning": {
+    "carry_types": [
+      "reasoning"
+    ],
+    "text_field": "summary"
+  },
   "response": {
     "strategy": "output_array",
     "output_path": "output",
@@ -156,7 +162,8 @@
       },
       "response.output_item.done": {
         "action": "block_stop",
-        "tool_call_type": "function_call"
+        "tool_call_type": "function_call",
+        "final_block_path": "item"
       },
       "response.completed": {
         "action": "done"

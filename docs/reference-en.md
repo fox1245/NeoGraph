@@ -2863,6 +2863,19 @@ ends in `*`; matching ignores case and also tries the part after the last `/`, s
 them. A custom schema that does not declare the list always sends `temperature`;
 copy the list from the built-in schema for your vendor if you target those models.
 
+**Provider reasoning items:** reasoning models return items that must accompany the next
+request of a tool loop: Anthropic `thinking` blocks with their `signature`, OpenAI
+Responses `reasoning` items, Gemini 3 `thoughtSignature`, OpenRouter `reasoning_details`.
+A schema declares them in an optional top-level `reasoning` section: `carry_types` (block
+or item `type` values kept verbatim in `ChatMessage::reasoning_details` and replayed in
+front of the tool calls of the assistant message that produced them), `text_field` (where
+the readable text lives, for `ChatMessage::reasoning`), `thought_flag_field` and
+`signature_field` (Gemini-style parts), `message_field` (a chat-style opaque array), and
+for streaming `delta_fields` and `stream_concat_fields`. Items whose `type` the target
+schema does not declare are never replayed, so a history that moves between providers
+stays valid. Reasoning text never appears in `content`. A schema without the section
+ignores reasoning items as before.
+
 **Usage:**
 
 ```cpp

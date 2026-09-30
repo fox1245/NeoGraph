@@ -59,6 +59,7 @@ add_executable(neograph_tests
     test_incremental_checkpoint.cpp
     test_deep_research_human_review.cpp
     test_deep_research_truncation.cpp
+    test_schema_provider_reasoning_carry.cpp
     test_async_conn_pool.cpp
     test_schema_provider_primitives.cpp
     test_schema_provider_wire_contract.cpp

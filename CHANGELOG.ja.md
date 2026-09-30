@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=47d522afc346fa4c8325357dc9ad2a21a1fbf5b9e202f2e97f72eca0eab0f507 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=237de2598caec5016fe3d3a932f2cb918b33447879bae8e80334b68e8bf0a4dd -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,22 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **プロバイダの reasoning 項目がツールターンをまたいで保持される（`SchemaProvider`）。**
+  ターン間で reasoning 状態が失われていました：Gemini 3 のツールループは HTTP 400
+  （`Function call is missing a thought_signature`）で失敗し、OpenAI Responses モデルは
+  最初から推論し直し（reasoning 項目は無視）、Anthropic の `thinking` ブロックと OpenRouter
+  の `reasoning_details` は失われ、Gemini の thought part は `content` とストリームに漏れて
+  いました。スキーマが `reasoning` セクション（`carry_types`、`text_field`、
+  `thought_flag_field`、`signature_field`、`message_field`、`delta_fields`、
+  `stream_concat_fields`）を宣言できるようになり、インタプリタはそれらの項目を原文のまま
+  `ChatMessage::reasoning_details` に保持し（非ストリーミング・SSE・WebSocket。OpenRouter の
+  断片は index ごとに結合）、それを生成したアシスタントメッセージのツール呼び出しの前に
+  再送します。対象スキーマが宣言していない type の項目は破棄します。組み込みの `claude`、
+  `openai_responses`、`gemini`、`openai` スキーマが宣言し、`openai` のストリームは
+  `delta.reasoning` も読むようになりました。実測：Gemini 3 の 2 ターン目が成功し（項目を
+  除いた対照は依然 400）、Anthropic の thinking、OpenAI Responses（`gpt-5-mini`、
+  `o4-mini`）、OpenRouter のループがストリーミングを含めエラーなく再送されます。
+  `ReasoningCarry*` が検証します（#305、#306）。
 - **A2AクライアントがA2A 1.0ワイヤ形式に対応(a2a-sdk 1.0以降と相互運用)。**
   `example_a2a_client`は同梱のPython A2Aサーバー(`27_a2a_server.py`、a2a-sdk 1.1.5)で
   ディスカバリーに成功したものの、`message/send`が`-32602 Invalid params`で失敗していました。

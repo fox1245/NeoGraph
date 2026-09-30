@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=47d522afc346fa4c8325357dc9ad2a21a1fbf5b9e202f2e97f72eca0eab0f507 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=237de2598caec5016fe3d3a932f2cb918b33447879bae8e80334b68e8bf0a4dd -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,19 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **提供方 reasoning 条目在工具轮次之间得以保留（`SchemaProvider`）。** 此前 reasoning
+  状态在轮次之间被丢弃：Gemini 3 工具循环以 HTTP 400（`Function call is missing a
+  thought_signature`）失败，OpenAI Responses 模型从头重新推理（reasoning 条目被忽略），
+  Anthropic 的 `thinking` 块与 OpenRouter 的 `reasoning_details` 丢失，Gemini 的 thought
+  part 还泄漏到 `content` 与流中。schema 现可声明 `reasoning` 部分（`carry_types`、
+  `text_field`、`thought_flag_field`、`signature_field`、`message_field`、`delta_fields`、
+  `stream_concat_fields`）；解释器将这些条目原样保存到 `ChatMessage::reasoning_details`
+  （非流式、SSE 与 WebSocket；OpenRouter 的片段按 index 合并），并在生成它的助手消息的
+  工具调用之前重放，丢弃目标 schema 未声明类型的条目。内置的 `claude`、
+  `openai_responses`、`gemini`、`openai` schema 已声明，`openai` 流现在也读取
+  `delta.reasoning`。实测：Gemini 3 第二轮成功（去掉条目的对照仍返回 400），Anthropic
+  thinking、OpenAI Responses（`gpt-5-mini`、`o4-mini`）与 OpenRouter 的循环（含流式）重放
+  均无错误。`ReasoningCarry*` 覆盖此项（#305、#306）。
 - **A2A 客户端支持 A2A 1.0 线路格式(与 a2a-sdk 1.0 及以上互通)。**
   `example_a2a_client` 对随附的 Python A2A 服务器(`27_a2a_server.py`,a2a-sdk 1.1.5)
   发现成功,但 `message/send` 以 `-32602 Invalid params` 失败:客户端始终发送 0.3 请求体

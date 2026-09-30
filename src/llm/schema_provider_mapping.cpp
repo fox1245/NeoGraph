@@ -1,12 +1,14 @@
 // Schema-driven, network-free request mapping and response decoding.
 #include <neograph/llm/schema_provider.h>
 
+#include "reasoning_carry.h"
 #include "temperature_policy.h"
 
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <stdexcept>
 
@@ -283,6 +285,66 @@ void SchemaProvider::parse_schema()
         }
     }
     resp_.default_stop_reason = resp.value("default_stop_reason", "unknown");
+
+    // --- Reasoning carry (optional; absent = reasoning items are ignored) ---
+    reasoning_ = {};
+    if (schema_.contains("reasoning")) {
+        const auto& rj = schema_["reasoning"];
+        if (!rj.is_object()) {
+            throw std::invalid_argument("SchemaProvider: reasoning must be an object");
+        }
+        auto string_field = [&rj](const char* key) {
+            if (!rj.contains(key)) return std::string();
+            if (!rj[key].is_string()) {
+                throw std::invalid_argument(
+                    std::string("SchemaProvider: reasoning.") + key + " must be a string");
+            }
+            return rj[key].get<std::string>();
+        };
+        if (rj.contains("carry_types")) {
+            if (!rj["carry_types"].is_array()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: reasoning.carry_types must be an array of strings");
+            }
+            for (const auto& t : rj["carry_types"]) {
+                if (!t.is_string() || t.get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: reasoning.carry_types entries must be non-empty strings");
+                }
+                reasoning_.carry_types.insert(t.get<std::string>());
+            }
+        }
+        reasoning_.text_field = string_field("text_field");
+        reasoning_.thought_flag_field = string_field("thought_flag_field");
+        reasoning_.signature_field = string_field("signature_field");
+        reasoning_.message_field = string_field("message_field");
+        if (rj.contains("delta_fields")) {
+            if (!rj["delta_fields"].is_object()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: reasoning.delta_fields must be an object of strings");
+            }
+            for (auto [delta_type, target] : rj["delta_fields"].items()) {
+                if (!target.is_string() || target.get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: reasoning.delta_fields values must be non-empty strings");
+                }
+                reasoning_.delta_fields[delta_type] = target.get<std::string>();
+            }
+        }
+        if (rj.contains("stream_concat_fields")) {
+            if (!rj["stream_concat_fields"].is_array()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: reasoning.stream_concat_fields must be an array of strings");
+            }
+            for (const auto& f : rj["stream_concat_fields"]) {
+                if (!f.is_string() || f.get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: reasoning.stream_concat_fields entries must be non-empty strings");
+                }
+                reasoning_.stream_concat_fields.insert(f.get<std::string>());
+            }
+        }
+    }
 
     artifact_parser_primitive_name_ = resp.value("artifact_parser", "rules");
     require_primitive(SchemaPrimitiveCategory::ArtifactParser,
@@ -595,11 +657,21 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     tc_arr.push_back(substitute(tool_call_.item_template, vars));
                 }
                 j[tool_call_.field] = tc_arr;
+                if (!reasoning_.message_field.empty() && msg.reasoning_details.is_array() &&
+                    !msg.reasoning_details.empty()) {
+                    j[reasoning_.message_field] = msg.reasoning_details;
+                }
                 break;
             }
             case ToolCallStrategy::CONTENT_ARRAY: {
                 // Claude: content is array of text + tool_use items
                 json content_arr = json::array();
+                // Carried reasoning blocks go first, unmodified.
+                if (msg.reasoning_details.is_array()) {
+                    for (const auto& item : msg.reasoning_details) {
+                        if (detail::is_carried_item(item, reasoning_.carry_types)) content_arr.push_back(item);
+                    }
+                }
                 if (!msg.content.empty()) {
                     std::map<std::string, json> text_vars;
                     text_vars["TEXT"] = msg.content;
@@ -637,7 +709,13 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     } catch (...) {
                         vars["ARGUMENTS_OBJECT"] = json::object();
                     }
-                    parts.push_back(substitute(tool_call_.item_template, vars));
+                    json part = substitute(tool_call_.item_template, vars);
+                    if (!reasoning_.signature_field.empty()) {
+                        if (auto sig = detail::find_tool_call_signature(msg.reasoning_details, tc.id)) {
+                            part[reasoning_.signature_field] = *sig;
+                        }
+                    }
+                    parts.push_back(std::move(part));
                 }
                 j[msgs_.content_field] = parts;
                 break;
@@ -690,6 +768,10 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
     } else {
         j[msgs_.content_field] = msg.content;
     }
+    if (msg.role == "assistant" && !reasoning_.message_field.empty() &&
+        msg.reasoning_details.is_array() && !msg.reasoning_details.empty()) {
+        j[reasoning_.message_field] = msg.reasoning_details;
+    }
 
     return j;
 }
@@ -716,6 +798,12 @@ json SchemaProvider::serialize_messages(const std::vector<ChatMessage>& messages
             }
 
             if (!msg.tool_calls.empty()) {
+                // Carried reasoning items precede the items they produced.
+                if (msg.reasoning_details.is_array()) {
+                    for (const auto& item : msg.reasoning_details) {
+                        if (detail::is_carried_item(item, reasoning_.carry_types)) arr.push_back(item);
+                    }
+                }
                 // Optional leading text message from the assistant.
                 if (!msg.content.empty()) {
                     json text_msg;
@@ -1078,6 +1166,14 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                 }
             }
 
+            // Opaque provider continuation (for example OpenRouter
+            // `reasoning_details`), kept verbatim and replayed on this message.
+            if (!reasoning_.message_field.empty() &&
+                message->contains(reasoning_.message_field) &&
+                (*message)[reasoning_.message_field].is_array()) {
+                msg.reasoning_details = (*message)[reasoning_.message_field];
+            }
+
             if (message->contains(resp_.tool_calls_field) &&
                 (*message)[resp_.tool_calls_field].is_array()) {
                 for (const auto& tc : (*message)[resp_.tool_calls_field]) {
@@ -1126,6 +1222,11 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                         }
                     }
                     msg.tool_calls.push_back(std::move(call));
+                } else if (reasoning_.carry_types.count(type) > 0) {
+                    detail::push_reasoning_detail(msg, block);
+                    if (!reasoning_.text_field.empty() && block.contains(reasoning_.text_field)) {
+                        detail::append_reasoning_text(msg, detail::reasoning_text_of(block[reasoning_.text_field]));
+                    }
                 }
             }
             msg.content = full_text;
@@ -1166,7 +1267,13 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                     }
                     msg.tool_calls.push_back(std::move(call));
                 }
-                // Other item types (reasoning, web_search_call, etc.) are ignored.
+                else if (reasoning_.carry_types.count(type) > 0) {
+                    detail::push_reasoning_detail(msg, item);
+                    if (!reasoning_.text_field.empty() && item.contains(reasoning_.text_field)) {
+                        detail::append_reasoning_text(msg, detail::reasoning_text_of(item[reasoning_.text_field]));
+                    }
+                }
+                // Other item types (web_search_call, etc.) are ignored.
             }
             msg.content = full_text;
             break;
@@ -1178,9 +1285,19 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
 
             std::string full_text;
             for (const auto& part : *parts) {
+                // A "thought" part is reasoning, not user-visible content.
+                const bool is_thought =
+                    !reasoning_.thought_flag_field.empty() &&
+                    part.contains(reasoning_.thought_flag_field) &&
+                    part[reasoning_.thought_flag_field].is_boolean() &&
+                    part[reasoning_.thought_flag_field].get<bool>();
                 if (part.contains(resp_.text_field) && part[resp_.text_field].is_string()) {
-                    if (!full_text.empty()) full_text += "\n";
-                    full_text += part[resp_.text_field].get<std::string>();
+                    if (is_thought) {
+                        detail::append_reasoning_text(msg, part[resp_.text_field].get<std::string>());
+                    } else {
+                        if (!full_text.empty()) full_text += "\n";
+                        full_text += part[resp_.text_field].get<std::string>();
+                    }
                 }
                 if (part.contains(resp_.function_call_field)) {
                     const auto& fc = part[resp_.function_call_field];
@@ -1190,6 +1307,15 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                     if (fc.contains(resp_.tool_call_args_field)) {
                         const auto& args = fc[resp_.tool_call_args_field];
                         call.arguments = args.dump();
+                    }
+                    // The signature sits beside the functionCall and must be
+                    // echoed on that same part; key it by the tool-call id.
+                    if (!reasoning_.signature_field.empty() &&
+                        part.contains(reasoning_.signature_field)) {
+                        detail::push_reasoning_detail(msg, json{
+                            {"type", "tool_call_signature"},
+                            {"tool_call_id", call.id},
+                            {"signature", part[reasoning_.signature_field]}});
                     }
                     msg.tool_calls.push_back(std::move(call));
                 }

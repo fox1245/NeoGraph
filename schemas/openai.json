@@ -80,6 +80,14 @@
       "text": "$TEXT"
     }
   },
+  "reasoning": {
+    "message_field": "reasoning_details",
+    "stream_concat_fields": [
+      "summary",
+      "text",
+      "data"
+    ]
+  },
   "response": {
     "strategy": "choices_message",
     "message_path": "choices.0.message",
@@ -111,7 +119,7 @@
     "done_signal": "[DONE]",
     "delta_path": "choices.0.delta",
     "content_field": "content",
-    "reasoning_fields": ["reasoning_content"],
+    "reasoning_fields": ["reasoning_content", "reasoning"],
     "tool_calls_field": "tool_calls",
     "tool_call_index_field": "index",
     "tool_call_id_field": "id",

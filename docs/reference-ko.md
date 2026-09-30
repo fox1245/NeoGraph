@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=e71dbdfd271fbd28aafc3d554a63bfb92e8e3fd7393db5e4f9b8cf3cae1f758d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=631d5a7170ed9e2c1ca66b77b1d2965eec236c0b415eb60b7d7c893e4e3e839d -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2770,6 +2770,18 @@ HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / S
 비교하므로 `openai/o4-mini`는 `o4*`와 일치), `SchemaProvider`는 해당 모델에서
 `temperature`를 생략합니다. 이 목록을 선언하지 않은 사용자 정의 스키마는 항상
 `temperature`를 보내므로, 해당 모델을 대상으로 한다면 내장 스키마의 목록을 복사하세요.
+
+**프로바이더 reasoning 항목:** reasoning 모델은 도구 루프의 다음 요청에 함께 보내야 하는
+항목을 반환합니다: Anthropic `thinking` 블록(`signature` 포함), OpenAI Responses
+`reasoning` 항목, Gemini 3 `thoughtSignature`, OpenRouter `reasoning_details`. 스키마는
+선택적인 최상위 `reasoning` 섹션으로 이를 선언합니다: `carry_types`(원문 그대로
+`ChatMessage::reasoning_details`에 보관했다가, 그것을 만든 어시스턴트 메시지의 도구 호출
+앞에 다시 보내는 블록/항목의 `type` 값), `text_field`(`ChatMessage::reasoning`용 읽을 수
+있는 텍스트의 위치), `thought_flag_field`·`signature_field`(Gemini 방식의 part),
+`message_field`(채팅 방식의 불투명 배열), 스트리밍용 `delta_fields`·`stream_concat_fields`.
+대상 스키마가 선언하지 않은 `type`의 항목은 다시 보내지 않으므로, 프로바이더를 오가는
+히스토리도 유효하게 유지됩니다. reasoning 텍스트는 `content`에 나타나지 않습니다. 이
+섹션이 없는 스키마는 이전처럼 reasoning 항목을 무시합니다.
 
 **Usage:**
 

@@ -1,6 +1,8 @@
 // Schema-configured SSE decoding, independent of HTTP/WebSocket ownership.
 #include <neograph/llm/schema_provider.h>
 
+#include "reasoning_carry.h"
+
 #include <stdexcept>
 #include <utility>
 
@@ -65,11 +67,21 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                     auto parts = json_path::at_path(j, stream_.delta_parts_path);
                     if (parts && parts->is_array()) {
                         for (const auto& part : *parts) {
+                            // A "thought" part is reasoning, never public content.
+                            const bool is_thought =
+                                !reasoning_.thought_flag_field.empty() &&
+                                part.contains(reasoning_.thought_flag_field) &&
+                                part[reasoning_.thought_flag_field].is_boolean() &&
+                                part[reasoning_.thought_flag_field].get<bool>();
                             if (part.contains(stream_.delta_text_field) &&
                                 part[stream_.delta_text_field].is_string()) {
                                 std::string token = part[stream_.delta_text_field].get<std::string>();
-                                full_content += token;
-                                if (on_chunk) on_chunk(token);
+                                if (is_thought) {
+                                    completion.message.reasoning += token;
+                                } else {
+                                    full_content += token;
+                                    if (on_chunk) on_chunk(token);
+                                }
                             }
                             if (part.contains(stream_.delta_function_call_field)) {
                                 const auto& fc = part[stream_.delta_function_call_field];
@@ -78,6 +90,14 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                                 call.name = fc.value(stream_.delta_tool_call_name_field, "");
                                 if (fc.contains(stream_.delta_tool_call_args_field)) {
                                     call.arguments = fc[stream_.delta_tool_call_args_field].dump();
+                                }
+                                // Signature beside the functionCall, keyed by tool-call id.
+                                if (!reasoning_.signature_field.empty() &&
+                                    part.contains(reasoning_.signature_field)) {
+                                    detail::push_reasoning_detail(completion.message, json{
+                                        {"type", "tool_call_signature"},
+                                        {"tool_call_id", call.id},
+                                        {"signature", part[reasoning_.signature_field]}});
                                 }
                                 tc_map[gemini_tc_index++] = call;
                             }
@@ -107,6 +127,16 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                                 (*delta)[field].get<std::string>();
                             break;
                         }
+                    }
+
+                    // Opaque provider continuation arrives as fragments of one
+                    // item; merge them and keep the result verbatim.
+                    if (!reasoning_.message_field.empty() &&
+                        delta->contains(reasoning_.message_field)) {
+                        detail::merge_reasoning_fragments(
+                            completion.message.reasoning_details,
+                            (*delta)[reasoning_.message_field],
+                            reasoning_.stream_concat_fields);
                     }
 
                     // Tool calls (streamed incrementally)
@@ -214,6 +244,10 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                             cb.id = block->value(id_fld, "");
                             cb.name = block->value(name_fld, "");
                         }
+                        if (reasoning_.carry_types.count(cb.type) > 0 && block->is_object()) {
+                            cb.carried = true;
+                            cb.raw = *block;
+                        }
                         event_blocks.push_back(cb);
                         event_block_index = cb.index;
                     }
@@ -243,6 +277,24 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         std::string args_fld = event_cfg.value("tool_args_field", "partial_json");
                         std::string chunk = delta->value(args_fld, "");
                         cur_block.args += chunk;
+                    }
+                    else if (cur_block.carried && cur_block.raw.is_object()) {
+                        // Extends a carried block (thinking text, signature...).
+                        const auto target = reasoning_.delta_fields.find(delta_type);
+                        if (target != reasoning_.delta_fields.end()) {
+                            const std::string piece = delta->value(target->second, "");
+                            if (!piece.empty()) {
+                                std::string so_far;
+                                if (cur_block.raw.contains(target->second) &&
+                                    cur_block.raw[target->second].is_string()) {
+                                    so_far = cur_block.raw[target->second].get<std::string>();
+                                }
+                                cur_block.raw[target->second] = so_far + piece;
+                                if (target->second == reasoning_.text_field) {
+                                    completion.message.reasoning += piece;
+                                }
+                            }
+                        }
                     }
                 }
                 else if (action == "text_delta") {
@@ -275,6 +327,27 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                             call.name = cb.name;
                             call.arguments = cb.args;
                             tc_map[cb.index] = call;
+                        }
+                        if (cb.carried) {
+                            // Prefer the complete item some APIs send with the
+                            // stop event; otherwise keep the accumulated block.
+                            json item = cb.raw;
+                            bool from_event = false;
+                            const std::string final_path = event_cfg.value("final_block_path", "");
+                            if (!final_path.empty()) {
+                                auto final_item = json_path::at_path(j, final_path);
+                                if (final_item && final_item->is_object()) {
+                                    item = *final_item;
+                                    from_event = true;
+                                }
+                            }
+                            if (from_event && !reasoning_.text_field.empty() &&
+                                item.contains(reasoning_.text_field)) {
+                                detail::append_reasoning_text(
+                                    completion.message,
+                                    detail::reasoning_text_of(item[reasoning_.text_field]));
+                            }
+                            detail::push_reasoning_detail(completion.message, std::move(item));
                         }
                     }
                     event_block_index = -1;
@@ -393,6 +466,10 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
                     cb.id   = block->value(id_fld, "");
                     cb.name = block->value(name_fld, "");
                 }
+                if (reasoning_.carry_types.count(cb.type) > 0 && block->is_object()) {
+                    cb.carried = true;
+                    cb.raw = *block;
+                }
                 event_blocks.push_back(cb);
                 event_block_index = cb.index;
             }
@@ -420,6 +497,25 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
                     call.name      = cb.name;
                     call.arguments = cb.args;
                     tc_map[cb.index] = call;
+                }
+                if (cb.carried) {
+                    json item = cb.raw;
+                    bool from_event = false;
+                    const std::string final_path = event_cfg.value("final_block_path", "");
+                    if (!final_path.empty()) {
+                        auto final_item = json_path::at_path(j, final_path);
+                        if (final_item && final_item->is_object()) {
+                            item = *final_item;
+                            from_event = true;
+                        }
+                    }
+                    if (from_event && !reasoning_.text_field.empty() &&
+                        item.contains(reasoning_.text_field)) {
+                        detail::append_reasoning_text(
+                            completion.message,
+                            detail::reasoning_text_of(item[reasoning_.text_field]));
+                    }
+                    detail::push_reasoning_detail(completion.message, std::move(item));
                 }
             }
             event_block_index = -1;

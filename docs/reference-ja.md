@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=e71dbdfd271fbd28aafc3d554a63bfb92e8e3fd7393db5e4f9b8cf3cae1f758d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=631d5a7170ed9e2c1ca66b77b1d2965eec236c0b415eb60b7d7c893e4e3e839d -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2267,6 +2267,18 @@ public:
 `/` 以降も比較するため `openai/o4-mini` は `o4*` に一致）、`SchemaProvider` は該当モデルでは
 `temperature` を省略します。このリストを宣言しないカスタムスキーマは常に `temperature` を
 送るため、それらのモデルを対象にする場合は組み込みスキーマのリストをコピーしてください。
+
+**プロバイダの reasoning 項目:** reasoning モデルは、ツールループの次のリクエストに同梱すべき
+項目を返します：Anthropic の `thinking` ブロック（`signature` 付き）、OpenAI Responses の
+`reasoning` 項目、Gemini 3 の `thoughtSignature`、OpenRouter の `reasoning_details`。
+スキーマは任意の最上位 `reasoning` セクションでこれらを宣言します：`carry_types`（原文のまま
+`ChatMessage::reasoning_details` に保持し、それを生成したアシスタントメッセージのツール
+呼び出しの前に再送するブロック/項目の `type` 値）、`text_field`（`ChatMessage::reasoning`
+用の可読テキストの場所）、`thought_flag_field` と `signature_field`（Gemini 形式の part）、
+`message_field`（チャット形式の不透明な配列）、ストリーミング用の `delta_fields` と
+`stream_concat_fields`。対象スキーマが宣言していない `type` の項目は再送されないため、
+プロバイダ間で移動する履歴も有効なままです。reasoning テキストが `content` に現れることは
+ありません。このセクションを持たないスキーマは従来どおり reasoning 項目を無視します。
 
 **使用方法:**
 ```cpp
