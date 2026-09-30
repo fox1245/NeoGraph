@@ -978,9 +978,10 @@ TEST(A2AServerV1, LegacyRequestsKeepLegacyResponses) {
     LiveServer srv;
     // No header = 0.3 (spec), even with the PascalCase spelling an older
     // NeoGraph client fell back to.
-    auto pascal = raw_rpc(srv, "SendMessage", kV1SendParams, "");
-    EXPECT_EQ(pascal["result"]["kind"], "task");
-    EXPECT_EQ(pascal["result"]["status"]["state"], "completed");
+    // Not named `pascal`: Apple's system headers define that as a macro.
+    auto pascal_spelling = raw_rpc(srv, "SendMessage", kV1SendParams, "");
+    EXPECT_EQ(pascal_spelling["result"]["kind"], "task");
+    EXPECT_EQ(pascal_spelling["result"]["status"]["state"], "completed");
     auto slash = raw_rpc(srv, "message/send", kV1SendParams, "0.3");
     EXPECT_EQ(slash["result"]["kind"], "task");
 }
