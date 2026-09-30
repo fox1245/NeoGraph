@@ -52,6 +52,7 @@ add_executable(neograph_tests
     test_schema_provider_stream_usage.cpp
     test_schema_provider_responses_stream.cpp
     test_schema_provider_stop_reason.cpp
+    test_schema_provider_tool_use_stop_reason.cpp
     test_rate_limited_provider.cpp
     test_admin_api_barrier_preservation.cpp
     test_fork_resume_semantics.cpp

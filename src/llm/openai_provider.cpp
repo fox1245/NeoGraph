@@ -7,6 +7,7 @@
 #include <builtin_schemas.h>
 
 #include "provider_error.h"
+#include "stop_reason.h"
 #include "temperature_policy.h"
 #include "usage_policy.h"
 
@@ -339,6 +340,8 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     if (completion.stop_reason.empty()) {
         completion.stop_reason = completion.message.tool_calls.empty() ? "end_turn" : "tool_use";
     }
+    completion.stop_reason = detail::reconcile_stop_reason(
+        std::move(completion.stop_reason), !completion.message.tool_calls.empty());
 
     if (resp_json.contains("usage")) {
         completion.usage = detail::parse_usage_object(resp_json["usage"], usage_spec());
@@ -550,9 +553,11 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     for (auto& [idx, tc] : tc_map) {
         completion.message.tool_calls.push_back(tc);
     }
-    completion.stop_reason = observed_stop_reason.empty()
-                                 ? (completion.message.tool_calls.empty() ? "end_turn" : "tool_use")
-                                 : observed_stop_reason;
+    completion.stop_reason = detail::reconcile_stop_reason(
+        observed_stop_reason.empty()
+            ? (completion.message.tool_calls.empty() ? "end_turn" : "tool_use")
+            : observed_stop_reason,
+        !completion.message.tool_calls.empty());
 
     return completion;
 }

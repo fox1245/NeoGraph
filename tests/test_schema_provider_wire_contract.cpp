@@ -400,7 +400,8 @@ TEST(SchemaProviderWireContract, OfflineClaudeAndGeminiSseFixtures) {
     ASSERT_EQ(gemini_result.message.tool_calls.size(), 1U);
     EXPECT_EQ(gemini_result.message.tool_calls[0].name, "weather");
     EXPECT_EQ(gemini_result.usage.total_tokens, 9);
-    EXPECT_EQ(gemini_result.stop_reason, "end_turn");
+    // Gemini sends STOP next to a functionCall; the turn asks for tools to run.
+    EXPECT_EQ(gemini_result.stop_reason, "tool_use");
 }
 
 TEST(SchemaProviderWireContract, OfflineWebSocketEventsStopAtDoneAndRejectErrors) {
