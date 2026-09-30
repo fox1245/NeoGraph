@@ -276,6 +276,55 @@ TEST(RateLimitedProviderRetries, GivingUpKeepsTheConcreteErrorType) {
     EXPECT_EQ(vendor.calls.load(), 2);
 }
 
+namespace {
+std::unique_ptr<neograph::llm::RateLimitedProvider> retrying_with(
+    const Vendor& vendor, neograph::llm::RateLimitedProvider::Config cfg) {
+    return neograph::llm::RateLimitedProvider::create(
+        std::shared_ptr<neograph::Provider>(schema_provider("claude", &vendor).release()), cfg);
+}
+double seconds_since(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+}  // namespace
+
+TEST(RateLimitedProviderBackoff, TransientErrorsBackOffExponentiallyNotByTheRateLimitDefault) {
+    // default_wait_seconds (30s) is the rate-limit window; a 503 must not use it.
+    Vendor vendor({{503, claude_error("overloaded_error", "Overloaded"), {}},
+                   {503, claude_error("overloaded_error", "Overloaded"), {}},
+                   {200, kClaudeOk, {}}});
+    neograph::llm::RateLimitedProvider::Config cfg;  // defaults: base 1s, default_wait 30s
+    const auto start = std::chrono::steady_clock::now();
+    const auto completion = retrying_with(vendor, cfg)->complete(params());
+    const double elapsed = seconds_since(start);
+    EXPECT_EQ(completion.message.content, "pong");
+    EXPECT_EQ(vendor.calls.load(), 3);
+    EXPECT_GE(elapsed, 2.8);  // 1s + 2s
+    EXPECT_LT(elapsed, 8.0);
+}
+
+TEST(RateLimitedProviderBackoff, ZeroBaseRetriesImmediately) {
+    Vendor vendor({{500, claude_error("api_error", "oops"), {}}, {200, kClaudeOk, {}}});
+    neograph::llm::RateLimitedProvider::Config cfg;
+    cfg.transient_base_wait_seconds = 0;
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(retrying_with(vendor, cfg)->complete(params()).message.content, "pong");
+    EXPECT_LT(seconds_since(start), 0.9);
+}
+
+TEST(RateLimitedProviderBackoff, BackoffIsCappedByMaxWait) {
+    // base 5s exceeds the 3s cap on the very first sleep, so the wait is the
+    // cap (3s), not 5s: the retry still happens, just no later than the cap.
+    Vendor vendor({{503, claude_error("overloaded_error", "Overloaded"), {}}, {200, kClaudeOk, {}}});
+    neograph::llm::RateLimitedProvider::Config cfg;
+    cfg.transient_base_wait_seconds = 5;
+    cfg.max_wait_seconds = 3;
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(retrying_with(vendor, cfg)->complete(params()).message.content, "pong");
+    const double elapsed = seconds_since(start);
+    EXPECT_GE(elapsed, 2.8);
+    EXPECT_LT(elapsed, 4.5);
+}
+
 // ─── #307: Anthropic ───
 
 TEST(ProviderFailureClaude, ErrorEventMidStreamIsARetryableError) {

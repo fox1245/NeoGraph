@@ -4,6 +4,7 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <optional>
@@ -31,17 +32,34 @@ std::string RateLimitedProvider::get_name() const {
     return inner_->get_name();
 }
 
-// Decide how long to sleep for a retryable ProviderError. Prefer the
-// upstream's Retry-After when sane; fall back to cfg_.default_wait_seconds.
-// Always cap at cfg_.max_wait_seconds so a bad value (or clock skew on the
+// Decide how long to sleep before retry number `attempt` (0-based) of a
+// retryable ProviderError. Prefer the upstream's Retry-After when it is
+// positive. Without one, a rate limit (429) waits cfg.default_wait_seconds --
+// the quota window is long -- while any other transient failure (500, 502,
+// 503, 529, an in-stream `overloaded_error`) backs off exponentially from
+// cfg.transient_base_wait_seconds, since a server hiccup clears in seconds.
+// Always cap at cfg.max_wait_seconds so a bad value (or clock skew on the
 // server side) can't stall the caller past a reasonable bound.
-static int decide_sleep_seconds(int retry_after_seconds,
+static int decide_sleep_seconds(int status, int retry_after_seconds, int attempt,
                                 const RateLimitedProvider::Config& cfg) {
-    int s = retry_after_seconds;
-    if (s <= 0) s = cfg.default_wait_seconds;
+    const bool rate_limited = status == 429;
+    long long s = retry_after_seconds;
+    if (s <= 0) {
+        if (rate_limited) {
+            s = cfg.default_wait_seconds;
+        } else if (cfg.transient_base_wait_seconds <= 0) {
+            s = 0;
+        } else {
+            // base * 2^attempt without overflowing: stop doubling at the cap.
+            s = cfg.transient_base_wait_seconds;
+            for (int i = 0; i < attempt && s <= cfg.max_wait_seconds; ++i) s *= 2;
+            s = std::min<long long>(s, cfg.max_wait_seconds);
+        }
+    }
     if (s > cfg.max_wait_seconds) return -1;  // too long; abort retry
-    // +1s of slack so we don't miss the reset boundary by racing it.
-    return s + 1;
+    // A rate limit gets +1s of slack so we don't miss the reset boundary by
+    // racing it; a plain backoff does not need it.
+    return static_cast<int>(rate_limited ? s + 1 : s);
 }
 
 asio::awaitable<ChatCompletion>
@@ -63,11 +81,13 @@ RateLimitedProvider::complete_async(const CompletionParams& params) {
         std::optional<ChatCompletion> result;
         std::exception_ptr failure;
         int retry_after = -1;
+        int failure_status = 0;
         try {
             result.emplace(co_await inner_->complete_async(params));
         } catch (const ProviderError& e) {
             if (!e.retryable()) throw;
             retry_after = e.retry_after_seconds();
+            failure_status = e.status();
             failure = std::current_exception();
         }
 
@@ -77,7 +97,7 @@ RateLimitedProvider::complete_async(const CompletionParams& params) {
         // re-throwing. Decide whether to retry, then sleep on an asio
         // timer so the io_context isn't blocked.
         if (attempt >= cfg_.max_retries) std::rethrow_exception(failure);
-        int wait = decide_sleep_seconds(retry_after, cfg_);
+        int wait = decide_sleep_seconds(failure_status, retry_after, attempt, cfg_);
         if (wait < 0) std::rethrow_exception(failure);
 
         // max_total_wait_seconds budget check: refuse to sleep past it.
@@ -108,7 +128,7 @@ RateLimitedProvider::complete_stream(const CompletionParams& params,
             return inner_->complete_stream(params, on_chunk);
         } catch (const ProviderError& e) {
             if (!e.retryable() || attempt >= cfg_.max_retries) throw;
-            int wait = decide_sleep_seconds(e.retry_after_seconds(), cfg_);
+            int wait = decide_sleep_seconds(e.status(), e.retry_after_seconds(), attempt, cfg_);
             if (wait < 0) throw;
             if (cfg_.max_total_wait_seconds > 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(

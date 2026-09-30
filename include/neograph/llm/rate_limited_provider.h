@@ -26,8 +26,10 @@ namespace neograph::llm {
  * Behaviour:
  *   * Calls through to the inner provider.
  *   * On a `ProviderError` with `retryable() == true`, sleeps for
- *     `retry_after_seconds()` + 1s (or `default_wait_seconds` if the
- *     upstream didn't send a usable Retry-After), then retries.
+ *     `retry_after_seconds()` when the upstream sent a usable one. Without
+ *     it a 429 sleeps `default_wait_seconds` (+1s slack), and any other
+ *     transient failure backs off exponentially from
+ *     `transient_base_wait_seconds`. Then retries.
  *   * Capped at `max_retries` attempts. After that the final error
  *     propagates to the caller with its concrete type
  *     (`RateLimitError` stays a `RateLimitError`).
@@ -50,7 +52,12 @@ public:
     /// Configuration for rate-limit handling.
     struct Config {
         int max_retries          = 3;   ///< Number of additional attempts after a retryable ProviderError.
-        int default_wait_seconds = 30;  ///< Sleep duration when Retry-After is absent or invalid.
+        int default_wait_seconds = 30;  ///< Sleep before retrying a 429 when Retry-After is absent or invalid.
+        /// Base of the capped exponential backoff used for retryable errors
+        /// that are not rate limits (500, 502, 503, 529, in-stream overload)
+        /// and carry no Retry-After: `base * 2^attempt` seconds, capped at
+        /// `max_wait_seconds`. 0 retries immediately.
+        int transient_base_wait_seconds = 1;
         int max_wait_seconds     = 120; ///< Upper cap per sleep, prevents runaway stalls.
         /// Wall-clock cap across all retries combined. 0 = unbounded
         /// (back-compat with the original behaviour). Set this when
