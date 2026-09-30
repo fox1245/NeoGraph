@@ -371,6 +371,19 @@ public:
         std::string prompt_tokens_field;
         std::string completion_tokens_field;
         std::string total_tokens_field;
+        /// Optional usage fields ADDED to the prompt count (Anthropic reports
+        /// the cached prefix apart from `input_tokens`).
+        std::vector<std::string> prompt_extra_fields;
+        /// Optional path (inside the usage object) of the prompt-token subset
+        /// served from cache -> `Usage::cached_prompt_tokens`.
+        std::string cached_tokens_path;
+        /// Optional path of the completion-token subset spent on reasoning
+        /// -> `Usage::reasoning_tokens`.
+        std::string reasoning_tokens_path;
+        /// False when the vendor's completion counter excludes reasoning
+        /// (Gemini); reasoning is then added so `completion_tokens` is
+        /// everything the model produced.
+        bool completion_includes_reasoning = true;
         std::string stop_reason_path;
         std::map<std::string, std::string> stop_reason_map;
         std::string stop_reason_status_path;

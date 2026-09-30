@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f14ed7e7c8361fa70c971e14b712b88da06f10f12100e280d3e9ccaeb2fdd9c9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eaff119675e6e044d0e05d65cfccbe0f95da47b62e6f5e07b01d47170652c99c -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **缓存与推理 token 用量 (#308)。** `ChatCompletion::Usage::cached_prompt_tokens` 和 `reasoning_tokens` 早已存在，但没有任何解析器填充它们，因此所有提供方都是 0；`UsageAccumulator` 会丢弃它们，Anthropic 的提示数也漏掉了整个已缓存前缀（实测：`input_tokens=3` 旁边是 `cache_read_input_tokens=9818`）。现在 schema 声明映射（`response.prompt_extra_fields`、`cached_tokens_path`、`reasoning_tokens_path`、`completion_includes_reasoning`；usage 事件使用 `prompt_extra_paths`、`cached_path`、`reasoning_path`），非流式、SSE、WebSocket 路径和原生 `OpenAIProvider` 以相同方式读取。Anthropic 的 `cache_read=900` / `creation=300` / `input=12` 现在报告为 `prompt=1212, cached=900`；Gemini 的补全数包含 thought（可见 3 + thought 266 = 269）；从不报告总数的流（Anthropic）按提示 + 补全计算。`UsageAccumulator`、`RunResult::usage` 和 `Agent::usage()` 会累加这些子集，模型 token 预算仍以总数为准。
 - **按所有者作用域划分的实验性活动 Program 启动。** C++ `ProgramRuntime`
   和 Python `LocalProgramHost` 在新运行时只选择一次已批准的不可变激活记录，
   同时返回所选激活记录和固定于对应版本的句柄。回滚仅影响后续启动。

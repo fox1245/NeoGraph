@@ -34,6 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error handling. Public provider and schema contracts are unchanged.
 
 ### Added
+- **Cached and reasoning token usage (#308).** `ChatCompletion::Usage::cached_prompt_tokens` and `reasoning_tokens` existed but no parser filled them, so they read 0 for every provider, `UsageAccumulator` dropped them and Anthropic's prompt count omitted its whole cached prefix (live: `input_tokens=3` next to `cache_read_input_tokens=9818`). Schemas now declare the mapping (`response.prompt_extra_fields`, `cached_tokens_path`, `reasoning_tokens_path`, `completion_includes_reasoning`; usage events take `prompt_extra_paths`, `cached_path`, `reasoning_path`), read identically by the non-stream, SSE and WebSocket paths and the native `OpenAIProvider`. Anthropic `cache_read=900` / `creation=300` / `input=12` now reports `prompt=1212, cached=900`; Gemini's completion count includes thoughts (3 visible + 266 thoughts = 269); streams that never report a total (Anthropic) get prompt + completion. `UsageAccumulator`, `RunResult::usage` and `Agent::usage()` sum the subsets; the model-token budget stays total-based.
 - **Non-recursive async-primary checkpoint adapters.** Native coroutine
   stores use `AsyncCheckpointStore` plus `adapt_async_checkpoint_store()`;
   sync-only stores use `CheckpointStoreCore` plus the bounded-worker adapter.

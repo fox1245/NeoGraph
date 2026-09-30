@@ -109,6 +109,9 @@
     }],
     "completion_tokens_field": "candidatesTokenCount",
     "total_tokens_field": "totalTokenCount",
+    "cached_tokens_path": "cachedContentTokenCount",
+    "reasoning_tokens_path": "thoughtsTokenCount",
+    "completion_includes_reasoning": false,
     "stop_reason_path": "candidates.0.finishReason",
     "stop_reason_map": {
       "STOP": "end_turn",

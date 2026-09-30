@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f14ed7e7c8361fa70c971e14b712b88da06f10f12100e280d3e9ccaeb2fdd9c9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eaff119675e6e044d0e05d65cfccbe0f95da47b62e6f5e07b01d47170652c99c -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **キャッシュ／推論トークンの使用量 (#308)。** `ChatCompletion::Usage::cached_prompt_tokens` と `reasoning_tokens` はありましたが、どのパーサーも埋めておらず全プロバイダーで 0 でした。`UsageAccumulator` はそれらを捨て、Anthropic のプロンプト数はキャッシュ済みの先頭部分全体を欠いていました（実測: `input_tokens=3` に対し `cache_read_input_tokens=9818`）。スキーマがマッピング（`response.prompt_extra_fields`、`cached_tokens_path`、`reasoning_tokens_path`、`completion_includes_reasoning`。usage イベントは `prompt_extra_paths`、`cached_path`、`reasoning_path`）を宣言し、非ストリーム、SSE、WebSocket の各経路とネイティブの `OpenAIProvider` が同じように読みます。Anthropic の `cache_read=900` / `creation=300` / `input=12` は `prompt=1212, cached=900` と報告され、Gemini の補完数は thought を含み（可視 3 + thought 266 = 269）、合計を報告しないストリーム（Anthropic）はプロンプト + 補完になります。`UsageAccumulator`、`RunResult::usage`、`Agent::usage()` は部分集合を合算し、モデルトークン予算は引き続き合計基準です。
 - **所有者スコープの実験的なアクティブ Program 起動。** C++ の
   `ProgramRuntime` と Python の `LocalProgramHost` は、新規実行時に
   承認済みの不変なアクティベーションを一度だけ選択し、選択した記録と

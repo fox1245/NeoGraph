@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=3a571751ae08e966cb1c868cdc1473d1e7c1eabe1c247ae22e83bc991ded5404 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8793f9637cd5b8ee610111b32a5d5597c8a7fc290b19535ede8e5afa7d6c05a3 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2700,6 +2700,8 @@ Gemini 3 的 `thoughtSignature`、OpenRouter 的 `reasoning_details`。schema �
 流式传输的 `delta_fields` 与 `stream_concat_fields`。目标 schema 未声明的 `type` 的条目不会被
 重放，因此在不同提供方之间流转的历史仍然有效。reasoning 文本不会出现在 `content` 中。
 没有该部分的 schema 与以前一样忽略 reasoning 条目。
+
+**Token 用量:** `ChatCompletion::Usage` 携带 `prompt_tokens`、`completion_tokens`、`total_tokens`，以及子集 `cached_prompt_tokens`（由缓存提供的提示 token）和 `reasoning_tokens`（用于推理的补全 token）。各厂商对基础计数器包含什么并不一致，因此映射是 `response` 中的 schema 数据：`prompt_extra_fields`（加到提示数上的用量字段；Anthropic 的 `input_tokens` 不含已缓存前缀，所以其 schema 列出 `cache_read_input_tokens` 和 `cache_creation_input_tokens`）、`cached_tokens_path`、`reasoning_tokens_path`，以及补全计数器不含推理时（Gemini 的 `candidatesTokenCount` 与 `thoughtsTokenCount`）使用的 `completion_includes_reasoning: false`。流式 `usage` 事件接受对应的 `prompt_extra_paths`、`cached_path` 和 `reasoning_path`；从不报告总数的流按提示 + 补全计算。非流式、SSE、WebSocket 路径以及原生 `OpenAIProvider` 都读取同一份映射。`UsageAccumulator`、`RunResult::usage` 和 `Agent::usage()` 同样累加这些子集（钳制在父计数器以内），模型 token 预算仍以总数为准。
 
 **更换了厂商或模型的历史:** 只有目标 schema 声明了某项的 `type`，该项才会被重放，因此在提供方之间迁移的历史仍然有效；来源的 reasoning 会被丢弃，不会发给错误的 API。仍有一个不兼容：Gemini 3 会校验每个模型轮次中第一个 `functionCall` 的 `thoughtSignature`，对不是它自己签名的调用返回 HTTP 400，而由 Claude、OpenAI 或手工构造的历史中，每个调用都属于这种情况。schema 可以声明 `reasoning.foreign_signature`（需要 `signature_field`），该值会放在没有捕获签名的助手消息的第一个工具调用上。内置 `gemini` schema 声明了 Google 文档中的占位符 `skip_thought_signature_validator`，厂商称其为最后手段，会降低该轮的质量。没有该键的 schema 不会凭空生成签名。
 

@@ -110,6 +110,8 @@
     "prompt_tokens_field": "input_tokens",
     "completion_tokens_field": "output_tokens",
     "total_tokens_field": "total_tokens",
+    "cached_tokens_path": "input_tokens_details.cached_tokens",
+    "reasoning_tokens_path": "output_tokens_details.reasoning_tokens",
     "stop_reason_path": "incomplete_details.reason",
     "stop_reason_status_path": "status",
     "stop_reason_map": {

@@ -1,6 +1,8 @@
 // Schema-configured SSE decoding, independent of HTTP/WebSocket ownership.
 #include <neograph/llm/schema_provider.h>
 
+#include "usage_policy.h"
+
 #include "reasoning_carry.h"
 
 #include <stdexcept>
@@ -52,14 +54,8 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                 if (!resp_.usage_path.empty()) {
                     auto u = json_path::at_path(j, resp_.usage_path);
                     if (u && u->is_object()) {
-                        int p = u->value(resp_.prompt_tokens_field, 0);
-                        int c = u->value(resp_.completion_tokens_field, 0);
-                        if (p > 0) completion.usage.prompt_tokens = p;
-                        if (c > 0) completion.usage.completion_tokens = c;
-                        if (!resp_.total_tokens_field.empty()) {
-                            int t = u->value(resp_.total_tokens_field, 0);
-                            if (t > 0) completion.usage.total_tokens = t;
-                        }
+                        detail::merge_stream_usage(completion.usage,
+                                                   detail::parse_usage_object(*u, resp_));
                     }
                 }
 
@@ -218,21 +214,32 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                 else if (action == "usage") {
                     // SSE event dedicated to emitting usage numbers.
                     // Schema declares `prompt_path` / `completion_path`
-                    // / `total_path` relative to the event's JSON
-                    // payload; any that resolves to a non-zero integer
-                    // overwrites the cumulative usage.
-                    auto read_int = [&](const std::string& p) -> int {
-                        if (p.empty()) return 0;
-                        auto v = json_path::at_path(j, p);
-                        if (!v || !v->is_number_integer()) return 0;
-                        return v->template get<int>();
-                    };
-                    int p = read_int(event_cfg.value("prompt_path", ""));
-                    int c = read_int(event_cfg.value("completion_path", ""));
-                    int t = read_int(event_cfg.value("total_path", ""));
-                    if (p > 0) completion.usage.prompt_tokens = p;
-                    if (c > 0) completion.usage.completion_tokens = c;
-                    if (t > 0) completion.usage.total_tokens = t;
+                    // / `total_path` / `cached_path` / `reasoning_path`
+                    // relative to the event's JSON payload, plus
+                    // `prompt_extra_paths` whose values are ADDED to the
+                    // prompt count (Anthropic's cached prefix); any that
+                    // resolves to a non-zero integer overwrites the
+                    // cumulative usage.
+                    ChatCompletion::Usage latest;
+                    latest.prompt_tokens = detail::usage_int_at(j, event_cfg.value("prompt_path", ""));
+                    if (event_cfg.contains("prompt_extra_paths") &&
+                        event_cfg["prompt_extra_paths"].is_array()) {
+                        for (const auto& extra : event_cfg["prompt_extra_paths"]) {
+                            if (extra.is_string()) {
+                                latest.prompt_tokens = detail::saturating_add(
+                                    latest.prompt_tokens,
+                                    detail::usage_int_at(j, extra.get<std::string>()));
+                            }
+                        }
+                    }
+                    latest.completion_tokens =
+                        detail::usage_int_at(j, event_cfg.value("completion_path", ""));
+                    latest.total_tokens = detail::usage_int_at(j, event_cfg.value("total_path", ""));
+                    latest.cached_prompt_tokens =
+                        detail::usage_int_at(j, event_cfg.value("cached_path", ""));
+                    latest.reasoning_tokens =
+                        detail::usage_int_at(j, event_cfg.value("reasoning_path", ""));
+                    detail::merge_stream_usage(completion.usage, latest);
                 }
                 else if (action == "block_start") {
                     // New content block / output item starting.
@@ -419,19 +426,7 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
         if (resp_.usage_path.empty()) return;
         auto u = json_path::at_path(container, resp_.usage_path);
         if (!u || !u->is_object()) return;
-        int p = u->value(resp_.prompt_tokens_field, 0);
-        int c = u->value(resp_.completion_tokens_field, 0);
-        if (p > 0) completion.usage.prompt_tokens = p;
-        if (c > 0) completion.usage.completion_tokens = c;
-        if (!resp_.total_tokens_field.empty()) {
-            int t = u->value(resp_.total_tokens_field, 0);
-            if (t > 0) completion.usage.total_tokens = t;
-        }
-        if (completion.usage.total_tokens == 0) {
-            completion.usage.total_tokens =
-                completion.usage.prompt_tokens +
-                completion.usage.completion_tokens;
-        }
+        detail::merge_stream_usage(completion.usage, detail::parse_usage_object(*u, resp_));
     };
 
     // A single frame is a value-level event; `continue` skips that frame.
@@ -549,6 +544,12 @@ ChatCompletion SchemaProvider::finish_stream(StreamParseState& state) const {
             "SchemaProvider (" + provider_name_ +
                 "): stream ended before its terminal event; the response is incomplete",
             200, true, "stream_truncated");
+    }
+    // A stream may report the parts (Anthropic: input at message_start, output
+    // at message_delta) but never a total; the components are the total.
+    if (state.completion.usage.total_tokens == 0) {
+        state.completion.usage.total_tokens = detail::saturating_add(
+            state.completion.usage.prompt_tokens, state.completion.usage.completion_tokens);
     }
     state.completion.message.content = std::move(state.full_content);
     for (auto& [_, tc] : state.tc_map) {

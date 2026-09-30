@@ -4,6 +4,7 @@
 #include "provider_error.h"
 #include "reasoning_carry.h"
 #include "temperature_policy.h"
+#include "usage_policy.h"
 
 #include <cctype>
 #include <chrono>
@@ -274,6 +275,23 @@ void SchemaProvider::parse_schema()
     resp_.prompt_tokens_field = resp.value("prompt_tokens_field", "prompt_tokens");
     resp_.completion_tokens_field = resp.value("completion_tokens_field", "completion_tokens");
     resp_.total_tokens_field = resp.value("total_tokens_field", "total_tokens");
+    resp_.cached_tokens_path = resp.value("cached_tokens_path", "");
+    resp_.reasoning_tokens_path = resp.value("reasoning_tokens_path", "");
+    resp_.completion_includes_reasoning = resp.value("completion_includes_reasoning", true);
+    if (resp.contains("prompt_extra_fields")) {
+        const auto& extras = resp["prompt_extra_fields"];
+        if (!extras.is_array()) {
+            throw std::invalid_argument(
+                "SchemaProvider: response.prompt_extra_fields must be an array of strings");
+        }
+        for (const auto& item : extras) {
+            if (!item.is_string() || item.get<std::string>().empty()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: response.prompt_extra_fields entries must be non-empty strings");
+            }
+            resp_.prompt_extra_fields.push_back(item.get<std::string>());
+        }
+    }
     resp_.stop_reason_path = resp.value("stop_reason_path", "");
     if (resp.contains("stop_reason_map") && resp["stop_reason_map"].is_object()) {
         for (const auto& [raw, normalized] : resp["stop_reason_map"].items()) {
@@ -1439,18 +1457,9 @@ std::vector<GeneratedArtifact> SchemaProvider::parse_artifacts(
 }
 
 ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
-    ChatCompletion::Usage usage;
-    auto u = json_path::at_path(resp_json, resp_.usage_path);
-    if (!u) return usage;
-
-    usage.prompt_tokens = u->value(resp_.prompt_tokens_field, 0);
-    usage.completion_tokens = u->value(resp_.completion_tokens_field, 0);
-    if (!resp_.total_tokens_field.empty()) {
-        usage.total_tokens = u->value(resp_.total_tokens_field, 0);
-    } else {
-        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
-    }
-    return usage;
+    const auto u = json_path::at_path(resp_json, resp_.usage_path);
+    if (!u) return {};
+    return detail::parse_usage_object(*u, resp_);
 }
 
 // A blocked prompt returns no candidates at all; without this the empty body

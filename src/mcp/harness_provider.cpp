@@ -496,8 +496,10 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                  {"outcome", completion_outcome},
                  {"tool_call_count", completion.message.tool_calls.size()},
                  {"usage",
-                  {{"completion_tokens", completion.usage.completion_tokens},
+                  {{"cached_prompt_tokens", completion.usage.cached_prompt_tokens},
+                   {"completion_tokens", completion.usage.completion_tokens},
                    {"prompt_tokens", completion.usage.prompt_tokens},
+                   {"reasoning_tokens", completion.usage.reasoning_tokens},
                    {"total_tokens", completion.usage.total_tokens}}}},
                 provider_correlation);
             const bool cancelled_after_completion_event = cancel->is_cancelled();

@@ -105,6 +105,8 @@
     "prompt_tokens_field": "prompt_tokens",
     "completion_tokens_field": "completion_tokens",
     "total_tokens_field": "total_tokens",
+    "cached_tokens_path": "prompt_tokens_details.cached_tokens",
+    "reasoning_tokens_path": "completion_tokens_details.reasoning_tokens",
     "stop_reason_path": "choices.0.finish_reason",
     "stop_reason_map": {
       "stop": "end_turn",

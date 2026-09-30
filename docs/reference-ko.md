@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=3a571751ae08e966cb1c868cdc1473d1e7c1eabe1c247ae22e83bc991ded5404 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8793f9637cd5b8ee610111b32a5d5597c8a7fc290b19535ede8e5afa7d6c05a3 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2782,6 +2782,8 @@ HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / S
 대상 스키마가 선언하지 않은 `type`의 항목은 다시 보내지 않으므로, 프로바이더를 오가는
 히스토리도 유효하게 유지됩니다. reasoning 텍스트는 `content`에 나타나지 않습니다. 이
 섹션이 없는 스키마는 이전처럼 reasoning 항목을 무시합니다.
+
+**토큰 사용량:** `ChatCompletion::Usage`는 `prompt_tokens`, `completion_tokens`, `total_tokens`와 부분집합인 `cached_prompt_tokens`(캐시에서 제공된 프롬프트 토큰), `reasoning_tokens`(추론에 쓴 완성 토큰)를 담습니다. 벤더마다 기본 카운터에 무엇이 포함되는지 다르므로 매핑은 `response`의 스키마 데이터입니다. `prompt_extra_fields`(프롬프트 수에 더하는 사용량 필드; Anthropic은 `input_tokens`에 캐시된 접두부를 포함하지 않으므로 스키마가 `cache_read_input_tokens`와 `cache_creation_input_tokens`를 나열), `cached_tokens_path`, `reasoning_tokens_path`, 그리고 완성 카운터가 추론을 제외하는 곳(Gemini의 `candidatesTokenCount`와 `thoughtsTokenCount`)의 `completion_includes_reasoning: false`. 스트리밍 `usage` 이벤트는 대응하는 `prompt_extra_paths`, `cached_path`, `reasoning_path`를 받고, 합계를 보고하지 않는 스트림은 프롬프트 + 완성으로 계산합니다. 비스트림, SSE, WebSocket 경로와 네이티브 `OpenAIProvider`가 모두 같은 매핑을 읽습니다. `UsageAccumulator`, `RunResult::usage`, `Agent::usage()`도 부분집합을 합산하며(부모 카운터로 클램프), 모델 토큰 예산은 계속 합계 기준입니다.
 
 **벤더나 모델이 바뀐 히스토리:** 항목은 대상 스키마가 그 `type`을 선언한 경우에만 재전송되므로, 프로바이더 사이를 옮겨 다닌 히스토리도 유효하게 유지됩니다. 출처의 reasoning은 버려지고 엉뚱한 API로 보내지지 않습니다. 하나의 비호환이 남아 있습니다. Gemini 3는 모델 턴마다 첫 `functionCall`의 `thoughtSignature`를 검증하고, 자신이 서명하지 않은 호출에는 HTTP 400을 돌려줍니다. Claude, OpenAI, 또는 손으로 만든 히스토리의 모든 호출이 여기에 해당합니다. 스키마는 `reasoning.foreign_signature`(`signature_field` 필요)를 선언할 수 있고, 캡처된 서명이 없는 어시스턴트 메시지의 첫 도구 호출에 그 값이 들어갑니다. 내장 `gemini` 스키마는 Google이 문서화한 자리표시자 `skip_thought_signature_validator`를 선언하며, 벤더는 이를 그 턴의 품질을 낮추는 최후의 수단이라고 설명합니다. 이 키가 없는 스키마는 서명을 만들어 내지 않습니다.
 

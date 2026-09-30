@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=3a571751ae08e966cb1c868cdc1473d1e7c1eabe1c247ae22e83bc991ded5404 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=8793f9637cd5b8ee610111b32a5d5597c8a7fc290b19535ede8e5afa7d6c05a3 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2279,6 +2279,8 @@ public:
 `stream_concat_fields`。対象スキーマが宣言していない `type` の項目は再送されないため、
 プロバイダ間で移動する履歴も有効なままです。reasoning テキストが `content` に現れることは
 ありません。このセクションを持たないスキーマは従来どおり reasoning 項目を無視します。
+
+**トークン使用量:** `ChatCompletion::Usage` は `prompt_tokens`、`completion_tokens`、`total_tokens` と、部分集合の `cached_prompt_tokens`（キャッシュから提供されたプロンプトトークン）、`reasoning_tokens`（推論に使った補完トークン）を持ちます。ベンダーごとに基本カウンターの含む範囲が違うため、マッピングは `response` のスキーマデータです。`prompt_extra_fields`（プロンプト数に加算する使用量フィールド。Anthropic は `input_tokens` にキャッシュ済みの先頭部分を含めないため、スキーマが `cache_read_input_tokens` と `cache_creation_input_tokens` を列挙）、`cached_tokens_path`、`reasoning_tokens_path`、補完カウンターが推論を除外する場合（Gemini の `candidatesTokenCount` と `thoughtsTokenCount`）の `completion_includes_reasoning: false`。ストリーミングの `usage` イベントは対応する `prompt_extra_paths`、`cached_path`、`reasoning_path` を受け取り、合計を報告しないストリームはプロンプト + 補完で計算します。非ストリーム、SSE、WebSocket の各経路とネイティブの `OpenAIProvider` は同じマッピングを読みます。`UsageAccumulator`、`RunResult::usage`、`Agent::usage()` も部分集合を合算し（親カウンターにクランプ）、モデルトークン予算は引き続き合計基準です。
 
 **ベンダーやモデルが変わった履歴:** 項目は、対象スキーマがその `type` を宣言している場合にのみ再送されるため、プロバイダー間を移った履歴も有効なままです。元の reasoning は破棄され、誤った API に送られることはありません。ひとつだけ非互換が残ります。Gemini 3 はモデルのターンごとに最初の `functionCall` の `thoughtSignature` を検証し、自分が署名していない呼び出しには HTTP 400 を返します。Claude、OpenAI、または手で作った履歴のすべての呼び出しが該当します。スキーマは `reasoning.foreign_signature`（`signature_field` が必要）を宣言でき、キャプチャされた署名のないアシスタントメッセージの最初のツール呼び出しにその値が入ります。組み込みの `gemini` スキーマは Google が文書化したプレースホルダー `skip_thought_signature_validator` を宣言しており、ベンダーはこれをそのターンの品質を下げる最後の手段としています。このキーのないスキーマは署名を作り出しません。
 

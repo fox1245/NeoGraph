@@ -8,6 +8,7 @@
 
 #include "provider_error.h"
 #include "temperature_policy.h"
+#include "usage_policy.h"
 
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
@@ -56,6 +57,42 @@ const detail::RetryPolicy& retry_policy() {
             json::parse(it->second).value("connection", json::object()));
     }();
     return policy;
+}
+
+// Token-usage mapping (cached / reasoning counters included) is declared once,
+// in the built-in `openai` schema's `response` section, and shared with
+// SchemaProvider.
+struct UsageSpec {
+    std::string prompt_tokens_field{"prompt_tokens"};
+    std::string completion_tokens_field{"completion_tokens"};
+    std::string total_tokens_field{"total_tokens"};
+    std::vector<std::string> prompt_extra_fields;
+    std::string cached_tokens_path;
+    std::string reasoning_tokens_path;
+    bool completion_includes_reasoning = true;
+};
+
+const UsageSpec& usage_spec() {
+    static const UsageSpec spec = [] {
+        UsageSpec out;
+        const auto& schemas = builtin::schemas();
+        const auto  it      = schemas.find("openai");
+        if (it == schemas.end()) return out;
+        const auto response = json::parse(it->second).value("response", json::object());
+        out.prompt_tokens_field     = response.value("prompt_tokens_field", out.prompt_tokens_field);
+        out.completion_tokens_field = response.value("completion_tokens_field", out.completion_tokens_field);
+        out.total_tokens_field      = response.value("total_tokens_field", out.total_tokens_field);
+        out.cached_tokens_path      = response.value("cached_tokens_path", "");
+        out.reasoning_tokens_path   = response.value("reasoning_tokens_path", "");
+        out.completion_includes_reasoning = response.value("completion_includes_reasoning", true);
+        if (response.contains("prompt_extra_fields") && response["prompt_extra_fields"].is_array()) {
+            for (const auto& field : response["prompt_extra_fields"]) {
+                if (field.is_string()) out.prompt_extra_fields.push_back(field.get<std::string>());
+            }
+        }
+        return out;
+    }();
+    return spec;
 }
 
 std::string request_id_of(const async::HttpResponse& response) {
@@ -304,10 +341,7 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     }
 
     if (resp_json.contains("usage")) {
-        auto u                             = resp_json["usage"];
-        completion.usage.prompt_tokens     = u.value("prompt_tokens", 0);
-        completion.usage.completion_tokens = u.value("completion_tokens", 0);
-        completion.usage.total_tokens      = u.value("total_tokens", 0);
+        completion.usage = detail::parse_usage_object(resp_json["usage"], usage_spec());
     }
 
     co_return completion;
@@ -433,12 +467,11 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                 // it before falling through to per-choice delta
                 // handling.
                 if (j.contains("usage") && !j["usage"].is_null()) {
-                    auto u                             = j["usage"];
-                    completion.usage.prompt_tokens     = u.value("prompt_tokens", 0);
-                    completion.usage.completion_tokens = u.value("completion_tokens", 0);
-                    completion.usage.total_tokens =
-                        u.value("total_tokens", completion.usage.prompt_tokens +
-                                                    completion.usage.completion_tokens);
+                    completion.usage = detail::parse_usage_object(j["usage"], usage_spec());
+                    if (completion.usage.total_tokens == 0) {
+                        completion.usage.total_tokens = detail::saturating_add(
+                            completion.usage.prompt_tokens, completion.usage.completion_tokens);
+                    }
                 }
 
                 if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
