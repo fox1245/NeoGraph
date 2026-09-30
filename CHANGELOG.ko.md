@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,9 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **배포별 요청 헤더 (#310).** `SchemaProvider::Config::extra_headers`로 코드에서 요청 헤더를 추가하거나 대체할 수 있고(이름은 대소문자 무시, 값은 그대로, 줄바꿈 거부), 스키마 헤더 값이 환경 변수를 참조할 수 있습니다. `${NAME}`(필수, 변수가 없으면 이름을 알리며 요청 실패)과 `${NAME?}`(변수가 없으면 헤더 전체 생략)입니다. 내장 `claude` 스키마가 `anthropic-workspace-id: ${ANTHROPIC_WORKSPACE_ID?}`와 `anthropic-beta: ${ANTHROPIC_BETA?}`를 선언하므로, Anthropic 다중 워크스페이스 API 키(워크스페이스 헤더가 없으면 HTTP 400)와 interleaved thinking 같은 베타 기능을 쓸 수 있습니다. 자격 증명은 루프백이 아닌 `http://` 엔드포인트로는 여전히 거부됩니다.
+- **호출별 요청 노브, 진단, 벤더 규칙 (#309).** 호출별로 설정할 수 있는 것은 `provider`와 `reasoning.effort`뿐이었고 나머지 `extra_fields` 키는 조용히 버려졌습니다(실측: `extra_fields.thinking`이 wire에 도달하지 않음). 그래서 오타와 지원하지 않는 노브가 성공처럼 보였습니다. 이제 내장 스키마가 각 벤더가 받는 노브를 선언하고(`claude`: `thinking`, `output_config.effort`, `cache_control`, `tool_choice`; `gemini`: `thinkingConfig.*`, `safetySettings`, `toolConfig`; `openai_responses`: `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`; `openai`: `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`), `request.unknown_knob_policy: "error"`는 그 밖의 키가 선언된 키를 알려 주는 `std::invalid_argument`를 던지게 합니다(커스텀 스키마는 옵트인하지 않으면 `"drop"` 유지). 새 `request.rules`(`omit`/`when`, `require_greater`)는 벤더 제약을 표현합니다. `claude` 스키마는 이제 thinking이 `enabled`/`adaptive`인 동안 `temperature`를 서버에 맡기고(1이 아닌 값이면 HTTP 400이었음), `max_tokens <= thinking.budget_tokens`를 요청 전에 거부합니다.
+- **캐시 및 추론 토큰 사용량 (#308).** `ChatCompletion::Usage::cached_prompt_tokens`와 `reasoning_tokens`가 있었지만 어떤 파서도 채우지 않아 모든 프로바이더에서 0이었고, `UsageAccumulator`는 이를 버렸으며, Anthropic의 프롬프트 수는 캐시된 접두부 전체를 빠뜨렸습니다(실측: `input_tokens=3`, `cache_read_input_tokens=9818`). 이제 스키마가 매핑(`response.prompt_extra_fields`, `cached_tokens_path`, `reasoning_tokens_path`, `completion_includes_reasoning`; usage 이벤트는 `prompt_extra_paths`, `cached_path`, `reasoning_path`)을 선언하고, 비스트림, SSE, WebSocket 경로와 네이티브 `OpenAIProvider`가 똑같이 읽습니다. Anthropic `cache_read=900` / `creation=300` / `input=12`는 이제 `prompt=1212, cached=900`으로 보고되고, Gemini의 완성 수는 thought를 포함하며(보이는 3 + thought 266 = 269), 합계를 보고하지 않는 스트림(Anthropic)은 프롬프트 + 완성으로 계산합니다. `UsageAccumulator`, `RunResult::usage`, `Agent::usage()`가 부분집합을 합산하며, 모델 토큰 예산은 계속 합계 기준입니다.
 - **소유자 범위의 실험적 활성 Program 시작.** C++ `ProgramRuntime`와 Python
   `LocalProgramHost`는 새 실행에서 승인된 불변 활성화를 한 번만 선택하고,
   선택한 활성화와 해당 버전에 고정된 핸들을 함께 반환합니다. 롤백은 이후
@@ -43,6 +46,93 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **Gemini 3가 다른 벤더나 모델이 만든 히스토리를 받아들입니다 (#305/#306).** Claude나 OpenAI에서 Gemini로 넘어왔거나 손으로 만든 히스토리는 도구 호출에 Gemini 서명이 없어 HTTP 400(`Function call is missing a thought_signature`)으로 실패했습니다. 이제 스키마가 `reasoning.foreign_signature`를 선언할 수 있고, 인터프리터가 캡처된 서명이 없는 어시스턴트 메시지의 첫 도구 호출에 그 값을 넣습니다(Gemini는 턴의 첫 호출만 검증). 내장 `gemini` 스키마는 Google이 문서화한 `skip_thought_signature_validator`를 선언합니다. 실측: Claude thinking -> Gemini 3는 400이었고, 자리표시자를 쓰면 gemini-3.1-flash-lite, 3.5-flash, 3.6/3.7/3.8-flash에서 성공하며 gemini-2.5-flash-lite도 그대로 받아들입니다. 캡처된 서명이 있으면 항상 그것이 우선합니다.
+- **일찍 끝난 WebSocket 스트림을 RFC 6455 close 상태로 분류하고, 사라진 상대는 타입 있는 오류로 보고합니다.** `response.completed` 전의 Close 프레임은 1001, 1011, 1012, 1013, 1014(서버 측 문제 또는 재시작)와 상태 없는 Close에서는 재시도 가능하고, 1000, 1002, 1003, 1007, 1008(인증/쿼터/정책), 1009, 1015와 애플리케이션 코드에서는 재시도 불가입니다. Close 프레임 없이 사라지는 상대(프록시 리셋, 서버 강제 종료, TLS 절단)는 이전에 날 소켓 예외로 새어 나갔지만, 이제 같은 재시도 가능한 `stream_truncated` `ProviderError`입니다. 호출자 취소는 그대로 전파됩니다. 모든 코드 부류를 루프백 소켓 테스트로 검증합니다.
+- **작업형(operation) 스키마가 타입 있는 실패를 보고합니다.** 작업이 만들어지기 전 제출 요청이 거부되면(HTTP 4xx/5xx) `OperationError`로 감싸져 상태와 `retryable()`이 가려졌습니다. 이제 `ProviderError` 그대로 던지므로 `RateLimitedProvider`가 안전하게 재시도할 수 있습니다. 폴링/종료 단계 실패는 작업이 이미 있고 호출을 다시 실행하면 제출이 반복되므로 `OperationError`로 유지하되, 원인 `ProviderError`를 중첩 예외(`std::rethrow_if_nested`)로 담습니다.
+- **`RateLimitedProvider`가 호출자가 이미 본 스트림을 다시 재생하지 않습니다.** 재시도는 응답을 첫 토큰부터 다시 시작하므로, 스트림 도중 `overloaded_error`나 연결 끊김 뒤에 재시도하면 `on_chunk` 콜백에 중복 출력이 전달됐습니다. 이제 콜백에 청크가 하나도 전달되지 않았을 때(또는 콜백이 없을 때)만 스트림을 재시도하고, 첫 청크가 전달된 뒤에는 오류를 그대로 전파합니다.
+- **`RateLimitedProvider`가 429가 아닌 일시적 오류에는 지수 백오프를 씁니다.** `Retry-After` 없는 재시도 가능한 500, 502, 503, 529, 스트림 안 `overloaded_error`는 이전에 rate limit 기본 대기(`default_wait_seconds`, 30초 + 1초)를 기다렸습니다. 이제 `transient_base_wait_seconds * 2^시도횟수`(기본 1초, 2초, 4초..., `max_wait_seconds`로 상한, 0이면 즉시 재시도)만큼 기다립니다. 429는 `default_wait_seconds`와 +1초 여유를 유지하고, 양수 `Retry-After`는 여전히 가장 먼저 따릅니다.
+- **프로바이더 실패는 성공한 완료가 아니라 타입이 있는 오류입니다 (`SchemaProvider`, `OpenAIProvider`, #307, #312).** Anthropic `error` 이벤트, Responses `response.failed` / `error` 이벤트나 `status:"failed"` 본문, 종료 이벤트 전에 끊긴 스트림, Gemini의 차단된 프롬프트와 `MALFORMED_FUNCTION_CALL` 종료, OpenRouter 오류 청크가 모두 정상 `end_turn` 완료로 반환됐고, 타입이 있는 오류는 HTTP 429뿐이었습니다. 이제 `neograph::ProviderError`가 `status()`, `retryable()`, 벤더 `code()`, `request_id()`, `retry_after_seconds()`를 담습니다(`RateLimitError`가 이를 상속). 스키마가 일시적 실패 집합(`connection.retryable_statuses`, `retryable_codes`)과 실패 신호(`error` / `fail` 이벤트 액션, `streaming.error_path`, `streaming.require_terminal_event`, `response.error_path`, `failure_status_path`, `block_reason_path`, `error_finish_reasons`)를 선언하며 SSE와 WebSocket이 공유합니다. `RateLimitedProvider`는 재시도 가능한 모든 `ProviderError`(500, 502, 503, 529 등)를 재시도하고 포기할 때 구체 타입을 유지합니다. 오류 본문은 메시지에 들어가기 전에 계정 ID, 키, bearer 토큰을 가리고 잘립니다. 차단된 Gemini 프롬프트는 이제 `end_turn` 대신 `content_filter`로 보고됩니다.
+- **프로바이더 reasoning 항목이 도구 턴을 넘어 유지됩니다(`SchemaProvider`).** 턴 사이에
+  reasoning 상태가 버려졌습니다: Gemini 3 도구 루프는 HTTP 400(`Function call is missing a
+  thought_signature`)으로 실패했고, OpenAI Responses 모델은 처음부터 다시 추론했으며
+  (reasoning 항목 무시), Anthropic `thinking` 블록과 OpenRouter `reasoning_details`는
+  사라졌고, Gemini thought part는 `content`와 스트림으로 새어 나왔습니다. 이제 스키마가
+  `reasoning` 섹션(`carry_types`, `text_field`, `thought_flag_field`, `signature_field`,
+  `message_field`, `delta_fields`, `stream_concat_fields`)을 선언할 수 있으며, 해석기는 해당
+  항목을 원문 그대로 `ChatMessage::reasoning_details`에 보관하고(비스트리밍·SSE·WebSocket.
+  OpenRouter 조각은 index별로 병합), 그것을 만든 어시스턴트 메시지의 도구 호출 앞에 다시
+  보냅니다. 대상 스키마가 선언하지 않은 타입의 항목은 버립니다. 내장 `claude`,
+  `openai_responses`, `gemini`, `openai` 스키마가 이를 선언하고, `openai` 스트림은 이제
+  `delta.reasoning`도 읽습니다. 실제 측정: Gemini 3 2번째 턴이 성공하며(항목을 제거한
+  대조군은 여전히 400), Anthropic thinking·OpenAI Responses(`gpt-5-mini`, `o4-mini`)·
+  OpenRouter 루프가 스트리밍 포함 오류 없이 재전송됩니다. `ReasoningCarry*`가 검증합니다
+  (#305, #306).
+- **A2A 클라이언트가 A2A 1.0 와이어 형식을 사용합니다 (a2a-sdk 1.0 이상과 상호운용).**
+  `example_a2a_client`는 기본 제공 Python A2A 서버(`27_a2a_server.py`, a2a-sdk 1.1.5)에서
+  디스커버리는 성공했지만 `message/send`가 `-32602 Invalid params`로 실패했습니다.
+  클라이언트가 항상 0.3 본문(`kind`, 소문자 role)을 보내고 PascalCase 폴백도 같은
+  본문을 재전송했으며 `A2A-Version: 1.0` 헤더도 보내지 않았기 때문입니다.
+  이제 `A2AClient`는 AgentCard(`supportedInterfaces`, 없으면 0.3 `protocolVersion`)에서
+  `WireDialect`를 선택해 1.0(`SendMessage`, `A2A-Version: 1.0`, `ROLE_*`/`TASK_STATE_*`,
+  `kind` 없는 평탄한 Part) 또는 기존 0.3 형식으로 요청하고 두 형식의 응답·스트림을 모두
+  해석합니다. 카드가 없으면 0.3 후 `-32601`에서 올바른 1.0 요청으로 프로브하며, 호환
+  인터페이스가 없으면 명확한 오류를 던집니다. `A2AServer`도 `A2A-Version`에 따라 1.0으로
+  응답하고 카드에 `supportedInterfaces`를 게시합니다. `A2AClient::rpc_call_with_fallback`은
+  제거되었습니다.
+- **Fork 예제가 fork된 스레드에서 실제로 실행되며 fork/resume 계약을 문서화.**
+  `examples/08_state_management.cpp`는 완료된 스레드의 종료 체크포인트를 fork하여
+  `resume()`이 노드를 실행하지 않았고 "Tokyo" 질문에 답이 없었습니다. 이제
+  `reviewer` 직전에 멈춘 체크포인트를 fork하여 실제 어시스턴트 답변을 출력합니다.
+  `GraphEngine::fork()`와 reference/concepts 문서는 fork가 하나의 체크포인트를
+  복사하고 `resume()`이 그 대기 노드부터 이어서 실행함(종료 체크포인트에는 없음)을
+  명시합니다. `Example.StateManagement`와 `ForkResumeSemantics.*`가 두 경우를 검증합니다.
+- **`example_evolution` 파일 모드.** 데모용 `pnoop` 노드 타입을 모든 모드에서
+  등록하므로 문서화된 `./example_evolution seed.json task.json`이 추적되는
+  `examples/54_evolution_seed.json`, `54_evolution_task.json`으로 동작합니다
+  (이전에는 `compile failed: Unknown node type: 'pnoop'`). seed는 내장 타입 또는
+  `pnoop`을 쓸 수 있으며, 다른 사용자 정의 노드 타입은 호스트 프로그램이 등록해야
+  합니다. `Example.Evolution.*`가 두 모드를 실행합니다.
+- **`example_plan_executor` 요약.** 마지막 줄이 고정값 "1" 대신 계산된 재사용
+  executor 호출 수(4)를 보고합니다.
+- **`OpenAIProvider`가 HTTP 200으로 반환된 오류 본문을 보고.** OpenRouter 같은
+  게이트웨이는 상위 제공자 장애(예: 선택된 제공자의 502)를 최상위 `error` 객체가 있는
+  HTTP 200으로 알리는데, 제공자는 불투명한 `json::at: key not found: choices`로
+  실패했습니다. 이제 게이트웨이 메시지를 담은 API 오류를 던지며(본문 안의 `429`
+  코드는 `RateLimitError`), `choices`가 없는 본문도 설명적인 오류가 됩니다.
+- **Deep Research가 잘린 completion을 완성된 보고서로 보고하지 않음.**
+  `create_deep_research_graph`는 `max_tokens`에서 잘린 빈 completion(숨은 추론에 출력
+  예산을 모두 쓴 추론 모델)을 성공 응답으로 취급하여 `example_deep_research`가 빈 최종
+  보고서와 함께 종료 코드 0으로 끝났습니다(실제 실행 3/3). 이제 LLM 호출은 빈
+  `max_tokens` 절단을 출력 예산을 두 배로 늘려 재시도하며(최대 2회, 상한 16384 토큰),
+  빈 최종 보고서는 오류, 일부만 잘린 보고서는 `Incomplete`로 표시됩니다.
+  `DeepResearchTruncation.*`가 예산 단계를 검증합니다.
+- **내장 스키마가 호출별 추론 강도를 지원.** `openai_responses`는 `reasoning.effort`,
+  `openai`는 `reasoning_effort`를 `request.per_call_fields`에 선언하므로
+  `CompletionParams::extra_fields`로 `SchemaProvider`를 통해 추론 모델의 숨은 추론을
+  제한할 수 있습니다(이전에는 해당 키가 조용히 버려졌습니다).
+  `SchemaBuiltinReasoningKnob.*`가 검증합니다.
+- **느린 추론 모델 경로의 예제를 견고하게 개선.** `~deepseek/deepseek-v4-flash-latest`
+  경로는 가끔 끝없이 추론하여(관측: 추론 토큰 4096개, 130초 초과, 보이는 텍스트 없음)
+  여러 예제가 기본 60초 타임아웃에 걸리거나 빈 응답으로 중단되었습니다.
+  `examples/16_tree_of_thoughts.cpp`(타임아웃 300초, 8192토큰 상한과 재시도),
+  `examples/28_corrective_rag.cpp`(180초. 쿼리 재작성은 낮은 추론 강도, 512토큰이며
+  결과가 비면 원래 질문으로 대체), `the_beast_forge`, `server_multi`,
+  `server_live_llm`(더 긴 타임아웃. forge는 낮은 강도와 예산 2배 재시도 1회도 사용).
+  실제 측정: 기본 강도에서는 forge 작성 호출 5회 중 4회가 텍스트 없이 끝났고,
+  `reasoning_effort: low`에서는 8/8이 약 25초에 응답했습니다.
+- **`temperature`를 스키마에 선언된 모델 목록에 따라 생략하며, 최신 Claude·OpenAI
+  추론 모델이 더 이상 HTTP 400을 반환하지 않음.** `SchemaProvider`는 하드코딩된 `gpt-5`
+  접두사 검사 외에는 항상 `temperature`(기본 0.7)를 써서, 내장 `claude` 스키마는
+  `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`, `claude-opus-4-8/4-7`에서
+  `temperature is deprecated for this model`로, `openai` 스키마는 `gpt-6*`, `o1`, `o3`,
+  `o4-mini`에서 실패했습니다(두 API에 실제 호출로 측정). 이제 내장 스키마가
+  `request.temperature_unsupported_models`(정확한 이름 또는 `접두사*`, 대소문자 무시,
+  마지막 `/` 뒤도 비교)를 선언하고, `SchemaProvider`와 네이티브 `OpenAIProvider`가 이를
+  읽으며(후자는 내장 `openai` 스키마에서), C++의 `gpt-5` 검사 두 곳은 제거되었습니다.
+  이전에 생략되던 모델의 동작은 그대로입니다(`gpt-5*`는 계속 생략: `gpt-5.1`~`5.4`는
+  추론 강도 `low`/`high`에서 `temperature`를 거부). 암묵적 `gpt-5` 규칙에 의존하던
+  **사용자 정의 스키마**는 목록을 추가해야 합니다. `SchemaTemperaturePolicy.*`와
+  `OpenAIProviderAsync.Temperature*`가 검증합니다.
 - **서브그래프 복구 경계.** 관리용 상태 갱신은 중단된 실행의 재개 식별자를
   보존하고, 보존형 자식은 새 부모 호출과 같은 호출의 재개를 구분합니다.
   Stateless 정적 중단은 효과 실행 전에 거부하며 중단 복구는 비동기 체크포인트

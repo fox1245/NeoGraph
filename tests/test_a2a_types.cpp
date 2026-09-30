@@ -179,4 +179,195 @@ TEST(A2ATypes, AgentCardPreservesUnknownFieldsInRaw) {
               "client should keep this");
 }
 
+
+// --- A2A 1.0 (protobuf-JSON) dialect -------------------------------------
+
+TEST(A2ATypesV1, MessageHasNoKindAndUsesRoleEnum) {
+    Message m;
+    m.message_id = "m-1";
+    m.role       = Role::User;
+    m.parts.push_back(Part::text_part("hi"));
+    m.context_id = "c-1";
+
+    json j;
+    to_json(j, m, WireDialect::V1_0);
+    EXPECT_FALSE(j.contains("kind"));
+    EXPECT_EQ(j["role"], "ROLE_USER");
+    ASSERT_EQ(j["parts"].size(), 1u);
+    EXPECT_FALSE(j["parts"][0].contains("kind"));
+    EXPECT_EQ(j["parts"][0]["text"], "hi");
+
+    // The 0.3 overload is unchanged.
+    json legacy;
+    to_json(legacy, m);
+    EXPECT_EQ(legacy["kind"], "message");
+    EXPECT_EQ(legacy["role"], "user");
+    EXPECT_EQ(legacy["parts"][0]["kind"], "text");
+
+    Message back;
+    from_json(j, back);
+    EXPECT_EQ(back.role, Role::User);
+    EXPECT_EQ(back.parts[0].kind, "text");
+    EXPECT_EQ(back.parts[0].text, "hi");
+    EXPECT_EQ(back.context_id.value_or(""), "c-1");
+}
+
+TEST(A2ATypesV1, TaskStatesUseProtoEnumNames) {
+    EXPECT_EQ(task_state_to_string(TaskState::InputRequired, WireDialect::V1_0),
+              "TASK_STATE_INPUT_REQUIRED");
+    EXPECT_EQ(task_state_to_string(TaskState::Unknown, WireDialect::V1_0),
+              "TASK_STATE_UNSPECIFIED");
+    EXPECT_EQ(task_state_to_string(TaskState::Working, WireDialect::V0_3), "working");
+    for (auto st : {TaskState::Submitted, TaskState::Working, TaskState::InputRequired,
+                    TaskState::Completed, TaskState::Canceled, TaskState::Failed,
+                    TaskState::Rejected, TaskState::AuthRequired}) {
+        EXPECT_EQ(task_state_from_string(task_state_to_string(st, WireDialect::V1_0)), st);
+        EXPECT_EQ(task_state_from_string(task_state_to_string(st)), st);
+    }
+    EXPECT_EQ(role_to_string(Role::Agent, WireDialect::V1_0), "ROLE_AGENT");
+    EXPECT_EQ(role_from_string("ROLE_AGENT"), Role::Agent);
+}
+
+TEST(A2ATypesV1, FilePartMapsToRawUrlFilenameMediaType) {
+    Part bytes;
+    bytes.kind = "file";
+    bytes.file = {{"bytes", "aGk="}, {"name", "a.txt"}, {"mimeType", "text/plain"}};
+    json j;
+    to_json(j, bytes, WireDialect::V1_0);
+    EXPECT_EQ(j, json::parse(R"({"raw":"aGk=","filename":"a.txt","mediaType":"text/plain"})"));
+
+    Part decoded;
+    from_json(j, decoded);
+    EXPECT_EQ(decoded.kind, "file");
+    EXPECT_EQ(decoded.file["bytes"], "aGk=");
+    EXPECT_EQ(decoded.file["name"], "a.txt");
+    EXPECT_EQ(decoded.file["mimeType"], "text/plain");
+
+    Part uri;
+    from_json(json::parse(R"({"url":"https://x/y.png","mediaType":"image/png"})"), uri);
+    EXPECT_EQ(uri.kind, "file");
+    EXPECT_EQ(uri.file["uri"], "https://x/y.png");
+
+    Part data;
+    from_json(json::parse(R"({"data":{"k":1},"mediaType":"application/json"})"), data);
+    EXPECT_EQ(data.kind, "data");
+    EXPECT_EQ(data.data["k"], 1);
+    json dj;
+    to_json(dj, data, WireDialect::V1_0);
+    EXPECT_EQ(dj, json::parse(R"({"data":{"k":1},"mediaType":"application/json"})"));
+}
+
+TEST(A2ATypesV1, TaskRoundTripWithoutKind) {
+    auto j = json::parse(R"({
+        "id": "t", "contextId": "c",
+        "status": {"state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00Z"},
+        "artifacts": [{"artifactId": "a", "parts": [{"text": "x"}]}],
+        "history": [{"messageId": "m", "role": "ROLE_USER", "parts": [{"text": "q"}]}]
+    })");
+    Task t;
+    from_json(j, t);
+    EXPECT_EQ(t.status.state, TaskState::Working);
+    ASSERT_EQ(t.history.size(), 1u);
+    EXPECT_EQ(t.history[0].role, Role::User);
+
+    json out;
+    to_json(out, t, WireDialect::V1_0);
+    EXPECT_FALSE(out.contains("kind"));
+    EXPECT_EQ(out["status"]["state"], "TASK_STATE_WORKING");
+    EXPECT_EQ(out["history"][0]["role"], "ROLE_USER");
+    EXPECT_FALSE(out["history"][0].contains("kind"));
+}
+
+TEST(A2ATypesV1, SendConfigurationInvertsBlockingToReturnImmediately) {
+    MessageSendConfiguration c;
+    c.blocking = true;
+    c.history_length = 4;
+    json j;
+    to_json(j, c, WireDialect::V1_0);
+    EXPECT_EQ(j["returnImmediately"], false);
+    EXPECT_FALSE(j.contains("blocking"));
+    EXPECT_EQ(j["historyLength"], 4);
+
+    MessageSendConfiguration back;
+    from_json(j, back);
+    ASSERT_TRUE(back.blocking.has_value());
+    EXPECT_TRUE(*back.blocking);
+}
+
+TEST(A2ATypesV1, StreamEventsDecodeWrappersAndDeriveFinal) {
+    auto status = parse_stream_event(json::parse(R"({"statusUpdate": {
+        "taskId": "t", "contextId": "c", "status": {"state": "TASK_STATE_COMPLETED"}}})"));
+    ASSERT_EQ(status.type, StreamEvent::Type::StatusUpdate);
+    EXPECT_TRUE(status.is_final());
+
+    auto working = parse_stream_event(json::parse(R"({"statusUpdate": {
+        "taskId": "t", "contextId": "c", "status": {"state": "TASK_STATE_WORKING"}}})"));
+    EXPECT_FALSE(working.is_final());
+
+    auto artifact = parse_stream_event(json::parse(R"({"artifactUpdate": {
+        "taskId": "t", "contextId": "c", "append": true, "lastChunk": true,
+        "artifact": {"artifactId": "a", "parts": [{"text": "z"}]}}})"));
+    ASSERT_EQ(artifact.type, StreamEvent::Type::ArtifactUpdate);
+    EXPECT_TRUE(artifact.artifact_update->append);
+    EXPECT_EQ(artifact.artifact_update->artifact.parts[0].text, "z");
+
+    auto message = parse_stream_event(json::parse(R"({"message": {
+        "messageId": "m", "role": "ROLE_AGENT", "parts": [{"text": "only"}]}})"));
+    ASSERT_EQ(message.type, StreamEvent::Type::Task);
+    EXPECT_EQ(message.task->history[0].parts[0].text, "only");
+
+    // An opening Task snapshot is not the end of the stream.
+    auto opening = parse_stream_event(json::parse(R"({"task": {
+        "id": "t", "status": {"state": "TASK_STATE_SUBMITTED"}}})"));
+    EXPECT_FALSE(opening.is_final());
+    EXPECT_TRUE(message.is_final());
+
+    // 0.3 frames still decode (final carried explicitly).
+    auto legacy = parse_stream_event(json::parse(R"({"kind": "status-update",
+        "taskId": "t", "contextId": "c", "final": false,
+        "status": {"state": "completed"}})"));
+    EXPECT_FALSE(legacy.is_final());
+}
+
+TEST(A2ATypesV1, TaskFromResultAcceptsBothGenerations) {
+    EXPECT_EQ(task_from_result(json::parse(
+        R"({"task": {"id": "a", "status": {"state": "TASK_STATE_FAILED"}}})")).status.state,
+        TaskState::Failed);
+    EXPECT_EQ(task_from_result(json::parse(
+        R"({"id": "b", "status": {"state": "TASK_STATE_CANCELED"}})")).id, "b");
+    EXPECT_EQ(task_from_result(json::parse(
+        R"({"kind": "task", "id": "c", "status": {"state": "completed"}})")).id, "c");
+    EXPECT_EQ(task_from_result(json()).status.state, TaskState::Failed);
+    EXPECT_EQ(task_from_result(json::parse(R"({"weird": 1})")).status.state,
+              TaskState::Unknown);
+}
+
+TEST(A2ATypesV1, AgentCardParsesSupportedInterfaces) {
+    AgentCard c;
+    from_json(json::parse(R"({
+        "name": "n", "description": "d", "version": "1",
+        "supportedInterfaces": [
+            {"url": "https://a/rpc", "protocolBinding": "JSONRPC",
+             "protocolVersion": "1.0", "tenant": "t1"},
+            {"url": "grpc.a:443", "protocolBinding": "GRPC", "protocolVersion": "1.0"}],
+        "capabilities": {"streaming": true},
+        "defaultInputModes": [], "defaultOutputModes": [], "skills": []
+    })"), c);
+    ASSERT_EQ(c.supported_interfaces.size(), 2u);
+    EXPECT_EQ(c.supported_interfaces[0].tenant, "t1");
+    EXPECT_EQ(c.url, "https://a/rpc");
+    EXPECT_EQ(c.protocol_version, "1.0");
+    EXPECT_EQ(c.preferred_transport, "JSONRPC");
+
+    AgentCard legacy;
+    from_json(json::parse(R"({
+        "name": "n", "url": "https://b/", "protocolVersion": "0.3.0",
+        "preferredTransport": "JSONRPC",
+        "additionalInterfaces": [{"url": "https://b/grpc", "transport": "GRPC"}]
+    })"), legacy);
+    ASSERT_EQ(legacy.supported_interfaces.size(), 2u);
+    EXPECT_EQ(legacy.supported_interfaces[0].protocol_version, "0.3.0");
+    EXPECT_EQ(legacy.supported_interfaces[1].protocol_binding, "GRPC");
+}
+
 }  // namespace

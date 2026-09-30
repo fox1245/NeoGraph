@@ -5,7 +5,7 @@
 // Scenario:
 //   1. Run graph → interrupt → inspect state (get_state)
 //   2. Modify state (update_state) — edit messages and resume
-//   3. Fork — fork from an existing checkpoint to a new thread
+//   3. Fork — fork from an earlier checkpoint to a new thread and run it
 //   4. Time travel — re-run from a past checkpoint
 //
 // No API key required (uses Mock Provider)
@@ -161,9 +161,30 @@ int main() {
     // ================================================================
     print_separator("3. Fork");
 
-    // Fork from thread-001's current state to a new thread
-    auto fork_cp_id = engine->fork("thread-001", "thread-001-tokyo");
-    std::cout << "Fork complete: thread-001 -> thread-001-tokyo\n";
+    // A fork copies ONE checkpoint into a new thread, and resume() continues
+    // from that checkpoint's pending nodes. thread-001's latest checkpoint is
+    // terminal (nothing left to run), so forking it would leave resume() with
+    // no node to execute. Branch from the earlier checkpoint where the run
+    // paused before "reviewer" instead: the fork then still has "reviewer"
+    // pending and really runs it against the edited conversation.
+    std::string pause_cp_id;
+    std::string pause_next;
+    for (const auto& cp : engine->get_state_history("thread-001")) {  // newest first
+        if (cp.interrupt_phase == neograph::graph::CheckpointPhase::Before &&
+            !cp.next_nodes.empty()) {
+            pause_cp_id = cp.id;
+            pause_next  = cp.next_nodes.front();
+            break;
+        }
+    }
+    if (pause_cp_id.empty()) {
+        std::cerr << "no pre-reviewer checkpoint found in thread-001\n";
+        return 1;
+    }
+
+    auto fork_cp_id = engine->fork("thread-001", "thread-001-tokyo", pause_cp_id);
+    std::cout << "Fork complete: thread-001 @ " << pause_cp_id.substr(0, 8)
+              << "... (paused before '" << pause_next << "') -> thread-001-tokyo\n";
     std::cout << "New checkpoint ID: " << fork_cp_id << "\n\n";
 
     // Modify the forked thread's state
@@ -173,8 +194,12 @@ int main() {
         })}
     });
 
-    // Execute on the forked thread
+    // Execute on the forked thread: the pending node runs and answers Tokyo
     auto forked_result = engine->resume("thread-001-tokyo");
+    if (forked_result.execution_trace.empty()) {
+        std::cerr << "forked thread executed no node\n";
+        return 1;
+    }
     std::cout << "Forked thread execution trace: ";
     for (const auto& n : forked_result.execution_trace) std::cout << n << " → ";
     std::cout << "END\n\n";

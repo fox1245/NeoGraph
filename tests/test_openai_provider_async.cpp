@@ -316,6 +316,77 @@ TEST(OpenAIProviderAsync, NonRateLimitErrorSurfacesAsRuntimeError) {
     EXPECT_THROW(provider->complete(params), std::runtime_error);
 }
 
+// OpenRouter reports upstream provider failures as HTTP 200 with a top-level
+// error object. That must not surface as an opaque JSON lookup failure.
+TEST(OpenAIProviderAsync, ErrorBodyWithHttp200IsADescriptiveApiError) {
+    MockServer mock;
+    mock.body = R"({"error":{"message":"Upstream error from Morph: Internal server error",)"
+                R"("code":502,"metadata":{"error_type":"provider_unavailable"}}})";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    try {
+        provider->complete(make_params());
+        FAIL() << "expected the error body to raise";
+    } catch (const RateLimitError&) {
+        FAIL() << "a 502 error body is not a rate limit";
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("Upstream error from Morph"), std::string::npos) << what;
+        EXPECT_EQ(what.find("json::at"), std::string::npos) << what;
+    }
+}
+
+TEST(OpenAIProviderAsync, RateLimitCodeInsideHttp200BodyIsTyped) {
+    MockServer mock;
+    mock.body = R"({"error":{"message":"Rate limit exceeded","code":429}})";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    EXPECT_THROW(provider->complete(make_params()), RateLimitError);
+}
+
+TEST(OpenAIProviderAsync, EmptyChoicesIsADescriptiveApiError) {
+    MockServer mock;
+    mock.body = R"({"id":"x","choices":[]})";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    try {
+        provider->complete(make_params());
+        FAIL() << "expected an error for a body without choices";
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("no choices"), std::string::npos) << what;
+        EXPECT_EQ(what.find("json::at"), std::string::npos) << what;
+    }
+}
+
+// The native provider shares the built-in `openai` schema's
+// `request.temperature_unsupported_models` list with SchemaProvider.
+TEST(OpenAIProviderAsync, TemperatureIsOmittedForModelsThatRejectIt) {
+    for (const char* model : {"o4-mini", "gpt-6-luna", "gpt-5-mini", "openai/o3"}) {
+        MockServer mock;
+        auto       provider = llm::OpenAIProvider::create(make_config(mock));
+        auto       params   = make_params();
+        params.model        = model;
+        params.temperature  = 0.7f;
+        provider->complete(params);
+        EXPECT_FALSE(mock.last_request_json().contains("temperature")) << model;
+    }
+}
+
+TEST(OpenAIProviderAsync, TemperatureIsSentForSamplingModels) {
+    for (const char* model : {"gpt-4o-mini", "gpt-4.1", "openai/gpt-4o"}) {
+        MockServer mock;
+        auto       provider = llm::OpenAIProvider::create(make_config(mock));
+        auto       params   = make_params();
+        params.model        = model;
+        params.temperature  = 0.7f;
+        provider->complete(params);
+        const auto body = mock.last_request_json();
+        ASSERT_TRUE(body.contains("temperature")) << model;
+        EXPECT_NEAR(body["temperature"].get<double>(), 0.7, 1e-6) << model;
+    }
+}
+
 TEST(OpenAIProviderStream, TopLevelErrorIsNotAnEmptySuccess) {
     MockServer mock;
     mock.body =

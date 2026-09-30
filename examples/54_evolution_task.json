@@ -1,0 +1,6 @@
+{
+  "name": "trivial",
+  "input": {"messages": []},
+  "expected_output": {"messages": []},
+  "expected_super_steps": 2
+}

@@ -44,9 +44,27 @@ static ChatCompletion ask(Provider& p,
     CompletionParams params;
     params.model = "~deepseek/deepseek-v4-flash-latest";
     params.temperature = temperature;
+    // This is a reasoning puzzle: the model legitimately reasons for
+    // thousands of tokens (a 2048-token cap, or effort=low, left every expand
+    // call without visible text), and occasionally reasons without bound
+    // (observed: >130 s, no visible text) or stalls until the HTTP timeout.
+    // Allow a generous budget but bound the worst case, and retry a call that
+    // spent it all thinking or timed out rather than abort a ~45-call search.
+    params.max_tokens = 8192;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user",   user});
-    return p.complete(params);
+    constexpr int kAttempts = 3;
+    for (int attempt = 1;; ++attempt) {
+        try {
+            ChatCompletion reply = p.complete(params);
+            const bool spent_budget_thinking =
+                reply.message.content.empty() && reply.stop_reason == "max_tokens";
+            if (!spent_budget_thinking || attempt == kAttempts) return reply;
+        } catch (const std::exception& e) {
+            if (attempt == kAttempts) throw;
+            std::cerr << "  (call failed: " << e.what() << " — retrying)\n";
+        }
+    }
 }
 
 // Ask the LLM to propose N continuations of `current_state`.
@@ -143,6 +161,11 @@ int main() {
     cfg.base_url_override = "https://openrouter.ai/api";
     cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
     cfg.provider_routing = {{"zdr", true}};
+    // The default 60 s HTTP timeout is shorter than one reasoning-model
+    // Responses call here (observed 29-130 s), so the first expand would
+    // fail with "async_post: timeout". 300 s covers the 8192-token budget
+    // below at the slowest observed generation speed.
+    cfg.timeout_seconds = 300;
     auto provider = llm::SchemaProvider::create(cfg);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"

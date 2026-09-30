@@ -5,6 +5,14 @@
 //
 // The input seed is already strict Core JSON; evolution mutates only the
 // canonical interchange topology and never translates a source language.
+//
+// Node types: the seed may use any built-in node type plus the demo `pnoop`
+// no-op type, which this example registers in BOTH modes (so the tracked
+// examples/54_evolution_seed.json + 54_evolution_task.json run as-is):
+//   ./example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+// Any other custom node type must be registered with NodeFactory by the host
+// program before evolve() runs; otherwise the compile gate rejects every
+// candidate with "Unknown node type" and the run exits 1 (compile_passed 0).
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/node.h>
 
@@ -57,12 +65,14 @@ std::unique_ptr<GraphNode> make_smoke_pnoop(const std::string& name, const json&
 int main(int argc, char** argv) {
     json seed_doc, task_doc;
 
+    // Demo node type used by --smoke and available to file-mode seeds.
+    NodeFactory::instance().register_type(
+        "pnoop", make_smoke_pnoop,
+        json::object(), json::object());
+
     if (argc == 2 && std::string(argv[1]) == "--smoke") {
         seed_doc = json::parse(kSmokeSeed);
         task_doc = json::parse(kSmokeTask);
-        NodeFactory::instance().register_type(
-            "pnoop", make_smoke_pnoop,
-            json::object(), json::object());
     } else if (argc == 3) {
         auto read_file = [](const char* path) {
             std::ifstream in(path);
@@ -78,7 +88,9 @@ int main(int argc, char** argv) {
         task_doc = json::parse(read_file(argv[2]));
     } else {
         std::cerr << "usage: " << argv[0] << " seed.json task.json\n"
-                  << "   or: " << argv[0] << " --smoke\n";
+                  << "   or: " << argv[0] << " --smoke\n"
+                  << "seed node types: built-ins or the demo 'pnoop'; "
+                     "other custom types must be registered by the host\n";
         return 2;
     }
 

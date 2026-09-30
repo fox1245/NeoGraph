@@ -304,12 +304,18 @@ static std::string rewrite_query(Provider& p, const std::string& question) {
         "trailing punctuation."});
     cp.messages.push_back({"user", question});
     cp.temperature = 0.0f;
+    // A keyword query needs a few tokens. Reasoning models occasionally
+    // reason without bound on even this trivial prompt (observed: 4096
+    // reasoning tokens, >130 s, empty text), so cap the budget and fall
+    // back to the original question when nothing usable comes back.
+    cp.max_tokens = 512;
+    cp.extra_fields = json{{"reasoning.effort", "low"}};
     auto out = p.complete(cp).message.content;
     // Strip trailing newlines / whitespace.
     while (!out.empty()
            && (out.back() == '\n' || out.back() == ' ' || out.back() == '\t'))
         out.pop_back();
-    return out;
+    return out.empty() ? question : out;
 }
 
 // Coroutine wrapped in a free function so the GCC frontend doesn't
@@ -330,7 +336,9 @@ post_web_search(neograph::async::AsyncEndpoint endpoint,
         {"Content-Type",  "application/json"},
     };
     na::RequestOptions opts;
-    opts.timeout = std::chrono::seconds(60);
+    // The hosted web_search tool runs the search server-side inside one
+    // reasoning-model call; that routinely takes longer than 60 s.
+    opts.timeout = std::chrono::seconds(180);
 
     auto ex = co_await asio::this_coro::executor;
     co_return co_await na::async_post(
@@ -438,7 +446,7 @@ int main() {
         cfg.api_key         = api_key;
         cfg.base_url_override = "https://openrouter.ai/api";
         cfg.default_model   = model;
-        cfg.timeout_seconds = 60;
+        cfg.timeout_seconds = 180;   // reasoning-model calls can exceed 60 s
         cfg.provider_routing = {{"zdr", true}};
         auto provider = llm::SchemaProvider::create(cfg);
 

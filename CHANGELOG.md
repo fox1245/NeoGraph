@@ -34,6 +34,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error handling. Public provider and schema contracts are unchanged.
 
 ### Added
+- **Per-deployment request headers (#310).** `SchemaProvider::Config::extra_headers` adds or replaces request headers from code (case-insensitive names, literal values, line breaks rejected), and schema header values can reference environment variables: `${NAME}` (required; a missing variable fails the request naming it) and `${NAME?}` (the whole header is omitted when unset). The built-in `claude` schema declares `anthropic-workspace-id: ${ANTHROPIC_WORKSPACE_ID?}` and `anthropic-beta: ${ANTHROPIC_BETA?}`, so an Anthropic multi-workspace API key (HTTP 400 without the workspace header) and beta features such as interleaved thinking can be used. Credentials are still refused over a non-loopback `http://` endpoint.
+- **Per-call request knobs with diagnostics and vendor rules (#309).** Only `provider` and `reasoning.effort` could be set per call; every other `extra_fields` key was silently dropped (live: `extra_fields.thinking` never reached the wire), so typos and unsupported knobs looked like success. The built-in schemas now declare the knobs each vendor accepts (`claude`: `thinking`, `output_config.effort`, `cache_control`, `tool_choice`; `gemini`: `thinkingConfig.*`, `safetySettings`, `toolConfig`; `openai_responses`: `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`; `openai`: `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`), and `request.unknown_knob_policy: "error"` makes any other key throw `std::invalid_argument` naming the declared ones (custom schemas keep `"drop"` unless they opt in). New `request.rules` (`omit`/`when`, `require_greater`) express vendor constraints: the `claude` schema now leaves `temperature` to the server while thinking is `enabled`/`adaptive` (was HTTP 400 for any temperature but 1) and rejects `max_tokens <= thinking.budget_tokens` before the request.
+- **Cached and reasoning token usage (#308).** `ChatCompletion::Usage::cached_prompt_tokens` and `reasoning_tokens` existed but no parser filled them, so they read 0 for every provider, `UsageAccumulator` dropped them and Anthropic's prompt count omitted its whole cached prefix (live: `input_tokens=3` next to `cache_read_input_tokens=9818`). Schemas now declare the mapping (`response.prompt_extra_fields`, `cached_tokens_path`, `reasoning_tokens_path`, `completion_includes_reasoning`; usage events take `prompt_extra_paths`, `cached_path`, `reasoning_path`), read identically by the non-stream, SSE and WebSocket paths and the native `OpenAIProvider`. Anthropic `cache_read=900` / `creation=300` / `input=12` now reports `prompt=1212, cached=900`; Gemini's completion count includes thoughts (3 visible + 266 thoughts = 269); streams that never report a total (Anthropic) get prompt + completion. `UsageAccumulator`, `RunResult::usage` and `Agent::usage()` sum the subsets; the model-token budget stays total-based.
 - **Non-recursive async-primary checkpoint adapters.** Native coroutine
   stores use `AsyncCheckpointStore` plus `adapt_async_checkpoint_store()`;
   sync-only stores use `CheckpointStoreCore` plus the bounded-worker adapter.
@@ -144,6 +147,120 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chronological Human/AI/Tool window.
 
 ### Fixed
+- **Gemini 3 accepts histories written by another vendor or model (#305/#306).** A history that moved to Gemini from Claude, OpenAI or was built by hand failed with HTTP 400 (`Function call is missing a thought_signature`) because its tool calls carry no Gemini signature. A schema can now declare `reasoning.foreign_signature`; the interpreter places it on the first tool call of an assistant message that has no captured signature (Gemini validates only the first call of a turn). The built-in `gemini` schema declares Google's documented `skip_thought_signature_validator`. Live: Claude thinking -> Gemini 3 was 400; with the placeholder it succeeds on gemini-3.1-flash-lite, 3.5-flash and 3.6/3.7/3.8-flash, and gemini-2.5-flash-lite still accepts it. A captured signature always wins.
+- **WebSocket streams that end early are classified by RFC 6455 close status, and a vanished peer is a typed error.** A Close frame before `response.completed` is retryable for 1001, 1011, 1012, 1013, 1014 (server-side or restarting) and for a Close without a status, and not retryable for 1000, 1002, 1003, 1007, 1008 (auth/quota/policy), 1009, 1015 and application codes. A peer that disappears without a Close frame (proxy reset, killed server, TLS truncation) used to escape as a raw socket exception; it is now the same retryable `stream_truncated` `ProviderError`. Caller cancellation still propagates unchanged. Covered by loopback-socket tests for every code class.
+- **Operation-style schemas report typed failures.** A rejected submission (HTTP 4xx/5xx before any job exists) was wrapped in `OperationError`, hiding the status and `retryable()` flag; it is now thrown as the `ProviderError` itself, so `RateLimitedProvider` can retry it safely. A poll or finalize failure stays an `OperationError` (the job already exists, and re-running the call would submit it again), but now carries the `ProviderError` as its nested cause (`std::rethrow_if_nested`).
+- **`RateLimitedProvider` no longer replays a stream the caller already saw.** A retry restarts the response at its first token, so retrying after an `overloaded_error` or a cut connection mid-stream handed the `on_chunk` callback duplicate output. A stream is now retried only while no chunk has reached the callback (or when there is no callback); after the first delivered chunk the error propagates.
+- **`RateLimitedProvider` backs off exponentially for transient non-429 errors.** A retryable 500, 502, 503, 529 or in-stream `overloaded_error` without a `Retry-After` used to wait the rate-limit default (`default_wait_seconds`, 30s + 1s). It now waits `transient_base_wait_seconds * 2^attempt` (default 1s, 2s, 4s..., capped at `max_wait_seconds`; 0 retries immediately). A 429 keeps `default_wait_seconds` and the +1s reset slack, and any positive `Retry-After` is still honoured first.
+- **Provider failures are typed errors, not successful completions (`SchemaProvider`, `OpenAIProvider`, #307, #312).** An Anthropic `error` event, a Responses `response.failed` / `error` event or `status:"failed"` body, a stream cut before its terminal event, a Gemini blocked prompt or `MALFORMED_FUNCTION_CALL` finish, and an OpenRouter error chunk all returned a normal `end_turn` completion, and only HTTP 429 was a typed error. `neograph::ProviderError` now carries `status()`, `retryable()`, the vendor `code()`, `request_id()` and `retry_after_seconds()` (`RateLimitError` derives from it). Schemas declare the transient set (`connection.retryable_statuses`, `retryable_codes`) and the failure signals (`error` / `fail` event actions, `streaming.error_path`, `streaming.require_terminal_event`, `response.error_path`, `failure_status_path`, `block_reason_path`, `error_finish_reasons`), shared by SSE and WebSocket. `RateLimitedProvider` retries every retryable `ProviderError` (500, 502, 503, 529, ...) and keeps the concrete type when it gives up; error bodies are redacted (account ids, keys, bearer tokens) and truncated before they reach a message. A blocked Gemini prompt now reports `content_filter` instead of `end_turn`.
+- **Provider reasoning items survive tool turns (`SchemaProvider`).** Reasoning state
+  was dropped between turns: Gemini 3 tool loops failed with HTTP 400 (`Function call is
+  missing a thought_signature`), OpenAI Responses models re-reasoned from scratch (reasoning
+  items were ignored), Anthropic `thinking` blocks and OpenRouter `reasoning_details` were
+  lost, and Gemini thought parts leaked into `content` and the stream. A schema can now
+  declare a `reasoning` section (`carry_types`, `text_field`, `thought_flag_field`,
+  `signature_field`, `message_field`, `delta_fields`, `stream_concat_fields`); the
+  interpreter carries those items verbatim into `ChatMessage::reasoning_details`
+  (non-stream, SSE and WebSocket; OpenRouter fragments are merged by index) and replays
+  them in front of the tool calls of the assistant message that produced them, dropping
+  items of types the target schema does not declare. The built-in `claude`,
+  `openai_responses`, `gemini` and `openai` schemas declare it, and the `openai` stream now
+  also reads `delta.reasoning`. Live: Gemini 3 turn 2 succeeds where the stripped control
+  still returns 400; Anthropic thinking, OpenAI Responses (`gpt-5-mini`, `o4-mini`) and
+  OpenRouter loops replay without error, streaming included. `ReasoningCarry*` cover it
+  (#305, #306).
+- **A2A client speaks the A2A 1.0 wire format (interop with a2a-sdk >= 1.0).**
+  `example_a2a_client` completed discovery against the shipped Python A2A
+  server (`27_a2a_server.py`, a2a-sdk 1.1.5) but `message/send` failed with
+  `-32602 Invalid params`: the client always emitted the 0.3 body (`kind`
+  discriminators, `user`/`agent` roles, `kind`-tagged Parts), tried slash-form
+  methods first, and its PascalCase fallback re-sent that same 0.3 body — which
+  a 1.0 server (protobuf `ParseDict`) rejects; the `A2A-Version: 1.0` header a
+  1.0 server requires was never sent either. `A2AClient` now selects a
+  `WireDialect` from the AgentCard (`supportedInterfaces[]` `protocolBinding` /
+  `protocolVersion` / `tenant`, else 0.3 `protocolVersion` / `preferredTransport`
+  / `additionalInterfaces`) and emits the matching form: 1.0 uses
+  `SendMessage` / `SendStreamingMessage` / `GetTask` / `CancelTask`, the
+  `A2A-Version: 1.0` header, `ROLE_*` / `TASK_STATE_*` enums, flat Parts
+  (`text` / `raw` / `url` / `data`, `filename`, `mediaType`) and no `kind`;
+  0.3 is byte-for-byte what it was. Responses are decoded tolerantly in both
+  forms (`{"task"}` / `{"message"}` wrappers, `statusUpdate` /
+  `artifactUpdate` stream frames without `final`); a 1.0 stream is assembled into
+  the returned `Task`. Without a fetched card the client still probes
+  (0.3, then a correctly shaped 1.0 request on `-32601`) and remembers the
+  result. A card with no JSONRPC interface at protocol 1.x/0.x fails with a
+  clear "no compatible interface" error instead of a server-side `-32602`.
+  Streaming also reads CRLF/`: comment`/multi-line SSE (sse-starlette) and
+  reports non-SSE JSON-RPC error replies instead of returning an empty Task.
+  `A2AServer` answers by `A2A-Version` (empty = 0.3, `1.x` = protobuf-JSON
+  `{"task"}` results, an opening Task then `statusUpdate` / `artifactUpdate`
+  stream, `-32009` for other versions) and its card now also lists
+  `supportedInterfaces` (1.0, 0.3). New: `WireDialect`, `to_json(..., dialect)`,
+  `task_from_result`, `AgentInterface` / `AgentCard::supported_interfaces`,
+  `A2ARpcError`, `A2AClient::wire_dialect()`. Removed:
+  `A2AClient::rpc_call_with_fallback` (one body could never fit both
+  generations); `rpc_call*` gained an optional dialect argument.
+- **Fork example executes on the forked thread; documented fork/resume contract.**
+  `examples/08_state_management.cpp` forked the terminal checkpoint of a
+  completed thread, so `resume()` ran no node and the "Tokyo" question stayed
+  unanswered. It now forks the checkpoint where the run paused before
+  `reviewer` and prints the real assistant answer. `GraphEngine::fork()` and
+  the reference/concepts docs now state that a fork copies one checkpoint and
+  `resume()` continues from its pending nodes (a terminal checkpoint has none).
+  `Example.StateManagement` and `ForkResumeSemantics.*` cover both cases.
+- **`example_evolution` file mode.** The demo `pnoop` node type is now
+  registered in every mode, so the documented `./example_evolution seed.json
+  task.json` works with the tracked `examples/54_evolution_seed.json` and
+  `54_evolution_task.json` (previously `compile failed: Unknown node type:
+  'pnoop'`). Seeds may use built-in types or `pnoop`; other custom node types
+  must be registered by the host program. `Example.Evolution.*` run both modes.
+- **`example_plan_executor` summary.** The closing line now reports the
+  computed number of replayed executor calls (4) instead of a fixed "1".
+- **`OpenAIProvider` reports error bodies returned with HTTP 200.** Gateways
+  such as OpenRouter signal an upstream failure (for example a 502 from the
+  selected provider) as HTTP 200 with a top-level `error` object; the provider
+  failed with an opaque `json::at: key not found: choices`. It now throws an
+  API error carrying the gateway message (a `429` code inside the body raises
+  `RateLimitError`), and a body without `choices` is a descriptive error too.
+- **Deep Research no longer reports a truncated completion as a finished report.**
+  `create_deep_research_graph` treated an empty completion cut off at
+  `max_tokens` (a reasoning model that spent its whole output budget on hidden
+  reasoning) as a successful answer, so `example_deep_research` exited 0 with an
+  empty final report (3 of 3 live runs). Its LLM calls now retry an empty
+  `max_tokens` truncation with a doubled output budget (two retries, capped at
+  16384 tokens); an empty final report is an error and a partially truncated
+  one is marked `Incomplete`. `DeepResearchTruncation.*` cover the budget ladder.
+- **Built-in schemas accept per-call reasoning effort.** `openai_responses`
+  declares `reasoning.effort` and `openai` declares `reasoning_effort` in
+  `request.per_call_fields`, so `CompletionParams::extra_fields` can cap a
+  reasoning model's hidden reasoning through `SchemaProvider` (the key used to
+  be silently dropped). `SchemaBuiltinReasoningKnob.*` cover it.
+- **Examples on slow reasoning-model routes are made robust.** The
+  `~deepseek/deepseek-v4-flash-latest` route occasionally reasons without bound
+  (observed: 4096 reasoning tokens, over 130 s, no visible text), which made
+  several examples time out at the 60 s default or abort on empty replies.
+  `examples/16_tree_of_thoughts.cpp` (300 s timeout, 8192-token bound with a
+  retry), `examples/28_corrective_rag.cpp` (180 s; the query rewrite uses low
+  reasoning effort, 512 tokens and falls back to the original question),
+  `the_beast_forge`, `server_multi` and `server_live_llm` (longer timeouts; forge
+  also uses low effort and one doubled-budget retry). Live evidence: with the
+  default effort 4 of 5 forge authoring calls returned no text; with
+  `reasoning_effort: low` 8 of 8 answered in about 25 s.
+- **`temperature` is omitted per schema-declared model list; current Claude and
+  OpenAI reasoning models no longer answer HTTP 400.** `SchemaProvider` always
+  wrote `temperature` (default 0.7) except behind a hard-coded `gpt-5` prefix
+  check, so the built-in `claude` schema failed with `temperature is deprecated
+  for this model` on `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`,
+  `claude-opus-4-8/4-7` and the `openai` schemas failed on `gpt-6*`, `o1`, `o3`,
+  `o4-mini` (measured live against both APIs). Built-in schemas now declare
+  `request.temperature_unsupported_models` (exact names or `prefix*`, case-
+  insensitive, also matched after the last `/`); `SchemaProvider` and the native
+  `OpenAIProvider` both read it (the latter from the embedded `openai` schema) and
+  the two C++ `gpt-5` checks are removed. Behavior for models omitted before is
+  unchanged (`gpt-5*` stays omitted: `gpt-5.1`-`5.4` reject `temperature` at
+  reasoning effort `low`/`high`). **Custom schemas** that relied on the implicit
+  `gpt-5` rule must add the list. `SchemaTemperaturePolicy.*` and
+  `OpenAIProviderAsync.Temperature*` cover it.
 - **Subgraph recovery boundaries.** Administrative updates preserve interrupted
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and

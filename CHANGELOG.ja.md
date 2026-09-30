@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=653eccb040271f4822bf30674f67eb497399017bff28cbcf6ba72cd973443f0f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,9 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **デプロイごとのリクエストヘッダー (#310)。** `SchemaProvider::Config::extra_headers` でコードからリクエストヘッダーを追加・置換でき（名前は大文字小文字を区別せず、値はそのまま、改行は拒否）、スキーマのヘッダー値は環境変数を参照できます。`${NAME}`（必須。未設定なら変数名を示してリクエスト失敗）と `${NAME?}`（未設定ならヘッダー全体を省略）です。組み込みの `claude` スキーマが `anthropic-workspace-id: ${ANTHROPIC_WORKSPACE_ID?}` と `anthropic-beta: ${ANTHROPIC_BETA?}` を宣言するため、Anthropic のマルチワークスペース API キー（ワークスペースヘッダーがないと HTTP 400）や interleaved thinking などのベータ機能を使えます。資格情報はループバックでない `http://` エンドポイントには引き続き送られません。
+- **呼び出しごとのリクエストノブ、診断、ベンダー規則 (#309)。** 呼び出しごとに設定できたのは `provider` と `reasoning.effort` だけで、他の `extra_fields` キーは黙って捨てられていました（実測: `extra_fields.thinking` は wire に届かない）。そのためタイプミスや未対応のノブが成功に見えました。組み込みスキーマが各ベンダーの受け付けるノブを宣言し（`claude`: `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`gemini`: `thinkingConfig.*`、`safetySettings`、`toolConfig`、`openai_responses`: `reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`openai`: `reasoning`、`include_reasoning`、`usage`、`models`、`response_format`）、`request.unknown_knob_policy: "error"` はそれ以外のキーに宣言済みキーを名指しする `std::invalid_argument` を投げさせます（カスタムスキーマはオプトインしない限り `"drop"` のまま）。新しい `request.rules`（`omit`/`when`、`require_greater`）がベンダー制約を表します。`claude` スキーマは thinking が `enabled`/`adaptive` の間 `temperature` をサーバーに任せ（1 以外は HTTP 400 でした）、`max_tokens <= thinking.budget_tokens` をリクエスト前に拒否します。
+- **キャッシュ／推論トークンの使用量 (#308)。** `ChatCompletion::Usage::cached_prompt_tokens` と `reasoning_tokens` はありましたが、どのパーサーも埋めておらず全プロバイダーで 0 でした。`UsageAccumulator` はそれらを捨て、Anthropic のプロンプト数はキャッシュ済みの先頭部分全体を欠いていました（実測: `input_tokens=3` に対し `cache_read_input_tokens=9818`）。スキーマがマッピング（`response.prompt_extra_fields`、`cached_tokens_path`、`reasoning_tokens_path`、`completion_includes_reasoning`。usage イベントは `prompt_extra_paths`、`cached_path`、`reasoning_path`）を宣言し、非ストリーム、SSE、WebSocket の各経路とネイティブの `OpenAIProvider` が同じように読みます。Anthropic の `cache_read=900` / `creation=300` / `input=12` は `prompt=1212, cached=900` と報告され、Gemini の補完数は thought を含み（可視 3 + thought 266 = 269）、合計を報告しないストリーム（Anthropic）はプロンプト + 補完になります。`UsageAccumulator`、`RunResult::usage`、`Agent::usage()` は部分集合を合算し、モデルトークン予算は引き続き合計基準です。
 - **所有者スコープの実験的なアクティブ Program 起動。** C++ の
   `ProgramRuntime` と Python の `LocalProgramHost` は、新規実行時に
   承認済みの不変なアクティベーションを一度だけ選択し、選択した記録と
@@ -45,6 +48,93 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **Gemini 3 が他のベンダーやモデルの作った履歴を受け付けます (#305/#306)。** Claude や OpenAI から Gemini に移った履歴、または手で作った履歴は、ツール呼び出しに Gemini の署名がないため HTTP 400（`Function call is missing a thought_signature`）で失敗していました。スキーマが `reasoning.foreign_signature` を宣言できるようになり、インタープリターはキャプチャされた署名のないアシスタントメッセージの最初のツール呼び出しにその値を入れます（Gemini はターンの最初の呼び出しだけを検証）。組み込みの `gemini` スキーマは Google が文書化した `skip_thought_signature_validator` を宣言します。実測: Claude thinking -> Gemini 3 は 400 でしたが、プレースホルダーを使うと gemini-3.1-flash-lite、3.5-flash、3.6/3.7/3.8-flash で成功し、gemini-2.5-flash-lite もそのまま受け付けます。キャプチャされた署名があれば常にそちらが優先されます。
+- **早期に終わった WebSocket ストリームを RFC 6455 の close ステータスで分類し、消えた相手は型付きエラーになります。** `response.completed` より前の Close フレームは、1001、1011、1012、1013、1014（サーバー側の問題または再起動）とステータスなしの Close では再試行可能、1000、1002、1003、1007、1008（認証/クォータ/ポリシー）、1009、1015 とアプリケーションコードでは再試行不可です。Close フレームなしで消えた相手（プロキシのリセット、サーバー強制終了、TLS 切断）は以前は生のソケット例外として漏れていましたが、今は同じ再試行可能な `stream_truncated` の `ProviderError` です。呼び出し側のキャンセルは従来どおり伝播します。すべてのコード区分をループバックソケットのテストで検証しています。
+- **オペレーション型スキーマが型付きの失敗を報告します。** ジョブが作られる前に送信リクエストが拒否された場合（HTTP 4xx/5xx）は `OperationError` に包まれ、ステータスと `retryable()` が隠れていました。今は `ProviderError` そのものを投げるため、`RateLimitedProvider` が安全に再試行できます。ポーリング/完了処理の失敗はジョブがすでに存在し、呼び出しを再実行すると再送信になるため `OperationError` のままですが、原因の `ProviderError` を入れ子の例外（`std::rethrow_if_nested`）として持ちます。
+- **`RateLimitedProvider` は呼び出し側がすでに見たストリームを再生しなくなりました。** 再試行は応答を最初のトークンからやり直すため、ストリーム途中の `overloaded_error` や接続断のあとに再試行すると、`on_chunk` コールバックに重複した出力が渡されていました。今はコールバックにチャンクが 1 つも届いていない間（またはコールバックがない場合）だけストリームを再試行し、最初のチャンクが届いたあとはエラーをそのまま伝播します。
+- **`RateLimitedProvider` は 429 以外の一時的なエラーに指数バックオフを使います。** `Retry-After` のない再試行可能な 500、502、503、529、ストリーム内の `overloaded_error` は、以前は rate limit の既定待機（`default_wait_seconds`、30 秒 + 1 秒）を待っていました。今は `transient_base_wait_seconds * 2^試行回数`（既定 1 秒、2 秒、4 秒...、`max_wait_seconds` で上限、0 なら即再試行）だけ待ちます。429 は `default_wait_seconds` と +1 秒の余裕を保ち、正の `Retry-After` は従来どおり最優先で従います。
+- **プロバイダーの失敗は成功した完了ではなく型付きエラーになりました (`SchemaProvider`, `OpenAIProvider`, #307, #312)。** Anthropic の `error` イベント、Responses の `response.failed` / `error` イベントや `status:"failed"` の本文、終端イベントの前に切れたストリーム、Gemini のブロックされたプロンプトと `MALFORMED_FUNCTION_CALL` 終了、OpenRouter のエラーチャンクは、すべて通常の `end_turn` 完了として返され、型付きエラーは HTTP 429 だけでした。`neograph::ProviderError` が `status()`、`retryable()`、ベンダーの `code()`、`request_id()`、`retry_after_seconds()` を持つようになりました（`RateLimitError` はこれを継承）。スキーマが一時的な失敗の集合（`connection.retryable_statuses`、`retryable_codes`）と失敗シグナル（`error` / `fail` イベントアクション、`streaming.error_path`、`streaming.require_terminal_event`、`response.error_path`、`failure_status_path`、`block_reason_path`、`error_finish_reasons`）を宣言し、SSE と WebSocket が共有します。`RateLimitedProvider` は再試行可能なすべての `ProviderError`（500、502、503、529 など）を再試行し、諦めるときは具体的な型を保ちます。エラー本文はメッセージに入る前にアカウント ID・キー・bearer トークンを伏せて切り詰めます。ブロックされた Gemini のプロンプトは `end_turn` ではなく `content_filter` を報告します。
+- **プロバイダの reasoning 項目がツールターンをまたいで保持される（`SchemaProvider`）。**
+  ターン間で reasoning 状態が失われていました：Gemini 3 のツールループは HTTP 400
+  （`Function call is missing a thought_signature`）で失敗し、OpenAI Responses モデルは
+  最初から推論し直し（reasoning 項目は無視）、Anthropic の `thinking` ブロックと OpenRouter
+  の `reasoning_details` は失われ、Gemini の thought part は `content` とストリームに漏れて
+  いました。スキーマが `reasoning` セクション（`carry_types`、`text_field`、
+  `thought_flag_field`、`signature_field`、`message_field`、`delta_fields`、
+  `stream_concat_fields`）を宣言できるようになり、インタプリタはそれらの項目を原文のまま
+  `ChatMessage::reasoning_details` に保持し（非ストリーミング・SSE・WebSocket。OpenRouter の
+  断片は index ごとに結合）、それを生成したアシスタントメッセージのツール呼び出しの前に
+  再送します。対象スキーマが宣言していない type の項目は破棄します。組み込みの `claude`、
+  `openai_responses`、`gemini`、`openai` スキーマが宣言し、`openai` のストリームは
+  `delta.reasoning` も読むようになりました。実測：Gemini 3 の 2 ターン目が成功し（項目を
+  除いた対照は依然 400）、Anthropic の thinking、OpenAI Responses（`gpt-5-mini`、
+  `o4-mini`）、OpenRouter のループがストリーミングを含めエラーなく再送されます。
+  `ReasoningCarry*` が検証します（#305、#306）。
+- **A2AクライアントがA2A 1.0ワイヤ形式に対応(a2a-sdk 1.0以降と相互運用)。**
+  `example_a2a_client`は同梱のPython A2Aサーバー(`27_a2a_server.py`、a2a-sdk 1.1.5)で
+  ディスカバリーに成功したものの、`message/send`が`-32602 Invalid params`で失敗していました。
+  クライアントが常に0.3の本文(`kind`、小文字のrole)を送り、PascalCaseへのフォールバックも
+  同じ本文を再送し、`A2A-Version: 1.0`ヘッダーも送っていなかったためです。`A2AClient`は
+  AgentCard(`supportedInterfaces`、なければ0.3の`protocolVersion`)から`WireDialect`を選び、
+  1.0(`SendMessage`、`A2A-Version: 1.0`、`ROLE_*`/`TASK_STATE_*`、`kind`のないフラットなPart)
+  または従来の0.3形式で送信し、両形式のレスポンスとストリームを解釈します。カード未取得時は
+  0.3を試し、`-32601`で正しい1.0リクエストへプローブし、互換インターフェースがなければ
+  明確なエラーを返します。`A2AServer`も`A2A-Version`に応じて1.0で応答し、カードに
+  `supportedInterfaces`を掲載します。`A2AClient::rpc_call_with_fallback`は削除されました。
+- **fork サンプルが fork 先スレッドで実際に実行され、fork/resume の契約を文書化。**
+  `examples/08_state_management.cpp` は完了済みスレッドの終端チェックポイントを fork
+  していたため、`resume()` はノードを実行せず「Tokyo」の質問は未回答のままでした。現在は
+  `reviewer` の直前で停止したチェックポイントを fork し、実際のアシスタント回答を出力します。
+  `GraphEngine::fork()` と reference/concepts ドキュメントに、fork は 1 つのチェックポイントを
+  コピーし `resume()` はその保留ノードから続行する (終端チェックポイントには保留ノードがない)
+  ことを明記しました。`Example.StateManagement` と `ForkResumeSemantics.*` が両ケースを検証します。
+- **`example_evolution` のファイルモード。** デモ用 `pnoop` ノード型を全モードで登録するため、
+  文書化された `./example_evolution seed.json task.json` が追跡対象の
+  `examples/54_evolution_seed.json` / `54_evolution_task.json` で動作します
+  (以前は `compile failed: Unknown node type: 'pnoop'`)。seed には組み込み型または `pnoop` を
+  使用でき、それ以外のカスタムノード型はホストプログラムが登録する必要があります。
+  `Example.Evolution.*` が両モードを実行します。
+- **`example_plan_executor` の要約。** 最終行が固定値「1」ではなく、計算された再利用 executor
+  呼び出し数 (4) を報告します。
+- **`OpenAIProvider` が HTTP 200 で返されたエラー本文を報告。** OpenRouter などの
+  ゲートウェイは上流の障害（例：選択したプロバイダの 502）を最上位の `error` オブジェクトを
+  持つ HTTP 200 で通知しますが、プロバイダは不透明な `json::at: key not found: choices`
+  で失敗していました。現在はゲートウェイのメッセージを含む API エラーを送出し（本文内の
+  `429` コードは `RateLimitError`）、`choices` のない本文も説明的なエラーになります。
+- **Deep Research が途中で切れた completion を完成した報告として扱わなくなった。**
+  `create_deep_research_graph` は `max_tokens` で切れた空の completion（隠れた推論に出力
+  予算をすべて使った推論モデル）を成功応答として扱い、`example_deep_research` は空の
+  最終報告のまま終了コード 0 で終わっていました（実行 3/3）。LLM 呼び出しは空の
+  `max_tokens` 切断を出力予算を倍にして再試行し（最大 2 回、上限 16384 トークン）、空の
+  最終報告はエラー、一部だけ切れた報告は `Incomplete` と表示されます。
+  `DeepResearchTruncation.*` が予算の段階を検証します。
+- **組み込みスキーマが呼び出しごとの推論強度に対応。** `openai_responses` は
+  `reasoning.effort`、`openai` は `reasoning_effort` を `request.per_call_fields` に宣言する
+  ため、`CompletionParams::extra_fields` で `SchemaProvider` 経由の推論モデルの隠れた推論を
+  制限できます（以前はこのキーが黙って破棄されていました）。
+  `SchemaBuiltinReasoningKnob.*` が検証します。
+- **遅い推論モデル経路のサンプルを堅牢化。** `~deepseek/deepseek-v4-flash-latest` 経路は
+  時に際限なく推論し（観測：推論トークン 4096、130 秒超、可視テキストなし）、複数の
+  サンプルが既定の 60 秒タイムアウトや空応答で失敗していました。
+  `examples/16_tree_of_thoughts.cpp`（タイムアウト 300 秒、8192 トークン上限と再試行）、
+  `examples/28_corrective_rag.cpp`（180 秒。クエリ書き換えは低い推論強度・512 トークンで、
+  空なら元の質問にフォールバック）、`the_beast_forge`・`server_multi`・`server_live_llm`
+  （タイムアウト延長。forge は低い強度と予算 2 倍の再試行 1 回も使用）。実測：既定の強度
+  では forge の作成呼び出し 5 回中 4 回がテキストなしで終了し、`reasoning_effort: low` では
+  8/8 が約 25 秒で応答しました。
+- **`temperature` をスキーマ宣言のモデル一覧に従って省略し、最新の Claude・OpenAI 推論
+  モデルが HTTP 400 を返さなくなった。** `SchemaProvider` はハードコードされた `gpt-5`
+  前方一致以外では常に `temperature`（既定 0.7）を書き込んでいたため、組み込みの `claude`
+  スキーマは `claude-sonnet-5-5`・`claude-opus-5-5`・`claude-fable-5-1`・`claude-opus-4-8/4-7`
+  で `temperature is deprecated for this model` により失敗し、`openai` スキーマは `gpt-6*`・
+  `o1`・`o3`・`o4-mini` で失敗していました（両 API で実測）。組み込みスキーマが
+  `request.temperature_unsupported_models`（完全一致または `接頭辞*`、大文字小文字を区別せず、
+  最後の `/` 以降も比較）を宣言し、`SchemaProvider` とネイティブ `OpenAIProvider` の両方が
+  読み込みます（後者は組み込み `openai` スキーマから）。C++ の `gpt-5` 判定 2 か所は削除
+  しました。従来省略されていたモデルの動作は変わりません（`gpt-5*` は引き続き省略：
+  `gpt-5.1`〜`5.4` は推論強度 `low`/`high` で `temperature` を拒否）。暗黙の `gpt-5` ルールに
+  依存していた**カスタムスキーマ**は一覧を追加する必要があります。
+  `SchemaTemperaturePolicy.*` と `OpenAIProviderAsync.Temperature*` が検証します。
 - **サブグラフの復旧境界。** 管理用状態更新は中断した実行の継続 ID を保持し、
   保持型の子は新しい親呼出しと同じ呼出しの再開を区別します。Stateless の
   静的中断は効果の前に拒否し、中断復旧は非同期チェックポイント読込を使います。

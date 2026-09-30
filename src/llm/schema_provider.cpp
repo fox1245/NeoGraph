@@ -8,12 +8,15 @@
 #include <neograph/graph/cancel.h>
 #include <builtin_schemas.h>
 
+#include "provider_error.h"
+
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/post.hpp>
 #include <asio/io_context.hpp>
 #include <asio/redirect_error.hpp>
+#include <asio/ssl/error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -129,7 +132,8 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     }
     const bool credentialed = !conn_.auth_header.empty() ||
                               !conn_.auth_query_param.empty() ||
-                              !conn_.extra_headers.empty();
+                              !conn_.extra_headers.empty() ||
+                              !user_config_.extra_headers.empty();
     (void)async::validate_credential_endpoint(
         conn_.base_url, credentialed,
         user_config_.allow_insecure_loopback);
@@ -265,6 +269,44 @@ static std::pair<std::string, std::string> split_host_prefix(
     return {std::move(host), endpoint.prefix};
 }
 
+// A socket error that means "the peer went away" (as opposed to a caller
+// cancellation, a timeout or a local bug).
+static bool is_connection_drop(const std::error_code& code) {
+    if (code == asio::error::eof || code == asio::error::connection_reset ||
+        code == asio::error::connection_aborted || code == asio::error::broken_pipe ||
+        code == asio::error::not_connected) {
+        return true;
+    }
+    // TLS peer closed the transport without close_notify.
+    return code == asio::ssl::error::stream_truncated;
+}
+
+// Vendor request id for support tickets: Anthropic sends `request-id`,
+// OpenAI and OpenRouter `x-request-id`.
+static std::string request_id_of(const async::HttpResponse& response) {
+    for (const char* name : {"x-request-id", "request-id"}) {
+        const auto value = response.get_header(name);
+        if (!value.empty()) return std::string(value);
+    }
+    return {};
+}
+
+static std::string request_id_of(const httplib::Result& res) {
+    if (!res) return {};
+    for (const char* name : {"x-request-id", "request-id"}) {
+        if (res->has_header(name)) return res->get_header_value(name);
+    }
+    return {};
+}
+
+void SchemaProvider::throw_http_failure(int status, const std::string& body,
+                                        int retry_after_seconds,
+                                        const std::string& request_id) const {
+    detail::throw_http_error(status, body, retry_after_seconds, request_id,
+                             detail::RetryPolicy{conn_.retryable_statuses,
+                                                 conn_.retryable_codes});
+}
+
 // Parse Retry-After (seconds-integer shape only, matching the
 // httplib-based retry_after_seconds() above). Returns -1 when missing
 // or unparsable; clamps absurd values at 600s like the sync path.
@@ -364,13 +406,9 @@ asio::awaitable<async::HttpResponse> SchemaProvider::post_json(
     }
 
     if (response.status != 200) {
-        if (response.status == 429) {
-            throw RateLimitError(
-                "API error (HTTP 429): " + response.body,
-                parse_retry_after_string(response.retry_after));
-        }
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(response.status) + "): " + response.body);
+        throw_http_failure(response.status, response.body,
+                           parse_retry_after_string(response.retry_after),
+                           request_id_of(response));
     }
     co_return response;
 }
@@ -391,7 +429,8 @@ SchemaProvider::complete_async(const CompletionParams& params)
         endpoint = async::validate_credential_endpoint(
             conn_.base_url,
             !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
-                !conn_.extra_headers.empty() || !api_key.empty(),
+                !conn_.extra_headers.empty() ||
+                    !user_config_.extra_headers.empty() || !api_key.empty(),
             user_config_.allow_insecure_loopback);
         auto body = build_body(params);
         body_str = body.dump();
@@ -497,6 +536,9 @@ SchemaProvider::complete_async(const CompletionParams& params)
             }
             check_operation();
             if (!operation_.id_path.empty()) {
+                // No job exists yet, so a typed provider failure keeps its type
+                // and retryable flag: retrying the submission cannot duplicate work.
+                if (dynamic_cast<const ProviderError*>(&error) != nullptr) throw;
                 throw OperationError(std::string("SchemaProvider: submission failed: ") + error.what());
             }
             throw;
@@ -569,7 +611,11 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 throw;
             } catch (const std::exception& error) {
                 check_operation();
-                throw OperationError(std::string("SchemaProvider: poll failed: ") + error.what());
+                // The job exists, so this stays an OperationError (re-running the
+                // call would submit it again); the cause remains reachable through
+                // std::rethrow_if_nested.
+                std::throw_with_nested(
+                    OperationError(std::string("SchemaProvider: poll failed: ") + error.what()));
             }
             check_operation();
             resp_json = json::parse(res.body);
@@ -588,7 +634,8 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 throw;
             } catch (const std::exception& error) {
                 check_operation();
-                throw OperationError(std::string("SchemaProvider: finalize failed: ") + error.what());
+                std::throw_with_nested(
+                    OperationError(std::string("SchemaProvider: finalize failed: ") + error.what()));
             }
             check_operation();
             resp_json = json::parse(res.body);
@@ -656,7 +703,8 @@ SchemaProvider::request_json_async(
         endpoint = async::validate_credential_endpoint(
             conn_.base_url,
             !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
-                !conn_.extra_headers.empty() || !api_key.empty(),
+                !conn_.extra_headers.empty() ||
+                    !user_config_.extra_headers.empty() || !api_key.empty(),
             user_config_.allow_insecure_loopback);
 
         // If the schema endpoint contains $MODEL, prefer the model in the
@@ -743,7 +791,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
         (void)async::validate_credential_endpoint(
             conn_.base_url,
             !conn_.auth_header.empty() || !conn_.auth_query_param.empty() ||
-                !conn_.extra_headers.empty() || !api_key.empty(),
+                !conn_.extra_headers.empty() ||
+                    !user_config_.extra_headers.empty() || !api_key.empty(),
             user_config_.allow_insecure_loopback);
         body_str = build_sse_body(params).dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
@@ -872,13 +921,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
     }
     if (stream_error) std::rethrow_exception(stream_error);
     if (response_status != 0 && response_status != 200) {
-        if (response_status == 429) {
-            throw RateLimitError(
-                "API error (HTTP 429): " + error_body,
-                res ? retry_after_seconds(res) : -1);
-        }
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(response_status) + "): " + error_body);
+        throw_http_failure(response_status, error_body,
+                           res ? retry_after_seconds(res) : -1, request_id_of(res));
     }
     if (!res && !(terminal_event_seen && response_status == 200 &&
                   res.error() == httplib::Error::Canceled)) {
@@ -886,13 +930,8 @@ ChatCompletion SchemaProvider::complete_stream_http(
     }
 
     if (res && res->status != 200) {
-        if (res->status == 429) {
-            throw RateLimitError(
-                "API error (HTTP 429): " + res->body,
-                retry_after_seconds(res));
-        }
-        throw std::runtime_error(
-            "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
+        throw_http_failure(res->status, res->body, retry_after_seconds(res),
+                           request_id_of(res));
     }
 
     return finish_stream(state);
@@ -1109,7 +1148,7 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     // same set here, minus auth which we just put in).
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
-        for (const auto& [k, v] : conn_.extra_headers) {
+        for (const auto& [k, v] : resolved_extra_headers()) {
             ws_headers.emplace_back(k, v);
         }
     }
@@ -1152,7 +1191,27 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     bool ws_debug = std::getenv("NEOGRAPH_WS_DEBUG") != nullptr;
     std::size_t ws_response_bytes = 0;
     while (!state.terminal_event_seen) {
-        auto msg = co_await ws->recv();
+        // A peer that vanishes without a Close frame (proxy reset, killed
+        // server, dropped TLS session) surfaces as a socket error, not as a
+        // Close message. That is the same "stream cut" the Close path reports,
+        // so it becomes the same typed, retryable error; cancellation and every
+        // other failure propagate unchanged. No co_await inside the catch
+        // (GCC 13 ICE, see RateLimitedProvider).
+        std::optional<async::WsMessage> received;
+        std::string connection_lost;
+        try {
+            received.emplace(co_await ws->recv());
+        } catch (const asio::system_error& error) {
+            if (!is_connection_drop(error.code())) throw;
+            connection_lost = error.code().message();
+        }
+        if (!received) {
+            throw ProviderError(
+                "openai-responses ws: connection lost before response.completed (" +
+                    connection_lost + ")",
+                0, true, "stream_truncated");
+        }
+        auto msg = std::move(*received);
         if (msg.payload.size() >
             user_config_.max_stream_response_bytes -
                 std::min(ws_response_bytes,
@@ -1174,19 +1233,24 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
             // 6455 §5.5.1; lift both into the message so auth / quota
             // / model-not-found rejections are debuggable.
             std::string detail;
+            int close_code = 0;
             if (msg.payload.size() >= 2) {
                 std::uint16_t code =
                     (static_cast<std::uint8_t>(msg.payload[0]) << 8) |
                      static_cast<std::uint8_t>(msg.payload[1]);
+                close_code = code;
                 detail = " (close=" + std::to_string(code);
                 if (msg.payload.size() > 2) {
                     detail += " reason=\"" + msg.payload.substr(2) + "\"";
                 }
                 detail += ")";
             }
-            throw std::runtime_error(
-                "openai-responses ws: server closed before response.completed"
-                + detail);
+            // A dropped connection (no close code, going away, abnormal,
+            // internal error, service restart / overload) is transient; an
+            // application-level rejection close code is not.
+            throw ProviderError(
+                "openai-responses ws: server closed before response.completed" + detail,
+                0, detail::ws_close_is_transient(close_code), "stream_truncated");
         }
 
         json j;

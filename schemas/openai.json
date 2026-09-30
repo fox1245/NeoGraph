@@ -7,13 +7,16 @@
     "auth_header": "Authorization",
     "auth_prefix": "Bearer ",
     "api_key_env": "OPENAI_API_KEY",
-    "extra_headers": {}
+    "extra_headers": {},
+    "retryable_statuses": [408, 429, 500, 502, 503, 504],
+    "retryable_codes": ["server_error"]
   },
   "request": {
     "model_field": "model",
     "messages_field": "messages",
     "tools_field": "tools",
     "temperature_path": "temperature",
+    "temperature_unsupported_models": ["gpt-5*", "gpt-6*", "o1*", "o3*", "o4*"],
     "max_tokens_path": "max_completion_tokens",
     "max_tokens_required": false,
     "max_tokens_default": -1,
@@ -22,8 +25,15 @@
       "tool_choice": "auto"
     },
     "per_call_fields": [
-      "provider"
-    ]
+      "provider",
+      "reasoning_effort",
+      "reasoning",
+      "include_reasoning",
+      "usage",
+      "models",
+      "response_format"
+    ],
+    "unknown_knob_policy": "error"
   },
   "system_prompt": {
     "strategy": "in_messages",
@@ -78,6 +88,14 @@
       "text": "$TEXT"
     }
   },
+  "reasoning": {
+    "message_field": "reasoning_details",
+    "stream_concat_fields": [
+      "summary",
+      "text",
+      "data"
+    ]
+  },
   "response": {
     "strategy": "choices_message",
     "message_path": "choices.0.message",
@@ -93,6 +111,8 @@
     "prompt_tokens_field": "prompt_tokens",
     "completion_tokens_field": "completion_tokens",
     "total_tokens_field": "total_tokens",
+    "cached_tokens_path": "prompt_tokens_details.cached_tokens",
+    "reasoning_tokens_path": "completion_tokens_details.reasoning_tokens",
     "stop_reason_path": "choices.0.finish_reason",
     "stop_reason_map": {
       "stop": "end_turn",
@@ -101,7 +121,9 @@
       "function_call": "tool_use",
       "content_filter": "content_filter"
     },
-    "default_stop_reason": "end_turn"
+    "default_stop_reason": "end_turn",
+    "error_path": "error",
+    "error_finish_reasons": ["error"]
   },
   "streaming": {
     "format": "sse_data",
@@ -109,12 +131,13 @@
     "done_signal": "[DONE]",
     "delta_path": "choices.0.delta",
     "content_field": "content",
-    "reasoning_fields": ["reasoning_content"],
+    "reasoning_fields": ["reasoning_content", "reasoning"],
     "tool_calls_field": "tool_calls",
     "tool_call_index_field": "index",
     "tool_call_id_field": "id",
     "tool_call_name_path": "function.name",
     "tool_call_args_path": "function.arguments",
-    "stop_reason_path": "choices.0.finish_reason"
+    "stop_reason_path": "choices.0.finish_reason",
+    "error_path": "error"
   }
 }

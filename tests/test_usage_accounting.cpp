@@ -63,6 +63,31 @@ private:
     int completion_;
 };
 
+// Reports cached and reasoning subsets on every completion (issue #308).
+class DetailedUsageProvider : public Provider {
+public:
+    DetailedUsageProvider(int prompt, int completion, int cached, int reasoning)
+        : prompt_(prompt), completion_(completion), cached_(cached), reasoning_(reasoning) {}
+
+    ChatCompletion complete(const CompletionParams&) override {
+        ChatCompletion c;
+        c.message = ChatMessage{"assistant", "ok"};
+        c.usage.prompt_tokens        = prompt_;
+        c.usage.completion_tokens    = completion_;
+        c.usage.total_tokens         = prompt_ + completion_;
+        c.usage.cached_prompt_tokens = cached_;
+        c.usage.reasoning_tokens     = reasoning_;
+        return c;
+    }
+    ChatCompletion complete_stream(const CompletionParams& p, const StreamCallback&) override {
+        return complete(p);
+    }
+    std::string get_name() const override { return "detailed-usage-stub"; }
+
+private:
+    int prompt_, completion_, cached_, reasoning_;
+};
+
 json llm_graph(int llm_nodes) {
     json nodes  = json::object();
     json edges  = json::array();
@@ -114,6 +139,42 @@ TEST(UsageAccounting, MultipleLLMNodesSum) {
     EXPECT_EQ(result.usage.total_tokens, 30);
     EXPECT_EQ(result.usage.prompt_tokens, 20);
     EXPECT_EQ(result.usage.completion_tokens, 10);
+}
+
+// Cached-prompt and reasoning tokens are part of the run total (issue #308),
+// summed across nodes like the basic counters.
+TEST(UsageAccounting, CachedAndReasoningTokensReachRunResult) {
+    auto result = run_graph(llm_graph(2),
+                            std::make_shared<DetailedUsageProvider>(100, 40, 64, 25), "detailed");
+
+    EXPECT_EQ(result.usage.prompt_tokens, 200);
+    EXPECT_EQ(result.usage.completion_tokens, 80);
+    EXPECT_EQ(result.usage.cached_prompt_tokens, 128);
+    EXPECT_EQ(result.usage.reasoning_tokens, 50);
+    EXPECT_EQ(result.usage.total_tokens, 280) << "the budget total ignores the subsets";
+}
+
+// A subset cannot exceed the counter it is part of; a malformed report is
+// clamped rather than trusted, and negative values are ignored.
+TEST(UsageAccounting, SubsetsAreClampedToTheirParentCounter) {
+    UsageAccumulator accumulator;
+    ChatCompletion::Usage usage;
+    usage.prompt_tokens        = 10;
+    usage.completion_tokens    = 4;
+    usage.cached_prompt_tokens = 99;
+    usage.reasoning_tokens     = 99;
+    accumulator.add(usage);
+    ChatCompletion::Usage negative;
+    negative.prompt_tokens        = 5;
+    negative.cached_prompt_tokens = -7;
+    negative.reasoning_tokens     = -7;
+    accumulator.add(negative);
+
+    const auto snapshot = accumulator.snapshot();
+    EXPECT_EQ(snapshot.prompt_tokens, 15);
+    EXPECT_EQ(snapshot.cached_prompt_tokens, 10);
+    EXPECT_EQ(snapshot.reasoning_tokens, 4);
+    EXPECT_EQ(snapshot.total_tokens, 19);
 }
 
 // A graph with no LLM node reports zero, not an error and not garbage.

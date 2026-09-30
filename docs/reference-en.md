@@ -1693,6 +1693,16 @@ or creating what-if scenarios.
 
 **Returns:** The checkpoint ID of the new forked state.
 
+A fork is a copy of exactly one checkpoint, and `resume()` on the new thread
+continues from that checkpoint's pending nodes. The latest checkpoint of a
+completed thread is terminal (no pending nodes), so forking it and calling
+`resume()` executes nothing. To branch and re-execute, pass the `checkpoint_id`
+of an earlier checkpoint that still has pending nodes (for example the one where
+an `interrupt_before` paused the run, found via `get_state_history()`), apply
+`update_state()` to the fork, then `resume()` it. `examples/08_state_management.cpp`
+shows this flow.
+
+
 Tool ownership is established before compilation via `NodeContext::tools` or
 `EngineResources::tools`; there is no post-compilation ownership transfer.
 
@@ -2844,6 +2854,38 @@ Veo opts into `"pending"` for name-only submissions and incomplete polls.
 **Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
 describing any API's request/response format.
 
+**Models that reject `temperature`:** some endpoints answer HTTP 400 when the
+request carries `temperature` (OpenAI reasoning models and `gpt-6*`, Claude Opus /
+Sonnet / Fable 4.7+ and 5.x). A schema lists such models in
+`request.temperature_unsupported_models` (exact names, or a prefix when the entry
+ends in `*`; matching ignores case and also tries the part after the last `/`, so
+`openai/o4-mini` matches `o4*`), and `SchemaProvider` then omits `temperature` for
+them. A custom schema that does not declare the list always sends `temperature`;
+copy the list from the built-in schema for your vendor if you target those models.
+
+**Provider reasoning items:** reasoning models return items that must accompany the next
+request of a tool loop: Anthropic `thinking` blocks with their `signature`, OpenAI
+Responses `reasoning` items, Gemini 3 `thoughtSignature`, OpenRouter `reasoning_details`.
+A schema declares them in an optional top-level `reasoning` section: `carry_types` (block
+or item `type` values kept verbatim in `ChatMessage::reasoning_details` and replayed in
+front of the tool calls of the assistant message that produced them), `text_field` (where
+the readable text lives, for `ChatMessage::reasoning`), `thought_flag_field` and
+`signature_field` (Gemini-style parts), `message_field` (a chat-style opaque array), and
+for streaming `delta_fields` and `stream_concat_fields`. Items whose `type` the target
+schema does not declare are never replayed, so a history that moves between providers
+stays valid. Reasoning text never appears in `content`. A schema without the section
+ignores reasoning items as before.
+
+**Request headers that vary per deployment:** a schema's `connection.extra_headers` values may reference environment variables, read on every request like `api_key_env`: `${NAME}` must be set and non-empty (otherwise the request fails naming the variable, never sending an empty header), and `${NAME?}` omits the whole header when the variable is unset or empty. The built-in `claude` schema declares `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"` (an Anthropic multi-workspace API key gets HTTP 400 without it) and `"anthropic-beta": "${ANTHROPIC_BETA?}"`. `SchemaProvider::Config::extra_headers` sets headers from code; they are added after the schema's, replace a schema header of the same name (names compare case-insensitively, so two spellings are never both sent) and are sent literally. Invalid header names, malformed `${...}`, and values (or expanded environment values) containing a line break are rejected. Credentials are still refused over a non-loopback `http://` endpoint whether the headers come from the schema or from `Config`.
+
+**Per-call request knobs:** `CompletionParams::extra_fields` maps a body path to a value for one call, and only paths the schema lists in `request.per_call_fields` are accepted. The built-in schemas declare: `claude` `thinking`, `output_config.effort`, `cache_control`, `tool_choice`, `provider`; `gemini` `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`, `safetySettings`, `toolConfig`; `openai_responses` `reasoning.effort`, `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`, `provider`; `openai` (chat / OpenRouter) `reasoning_effort`, `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`, `provider`. `request.unknown_knob_policy` decides what happens to any other key: `"error"` (all built-in schemas) throws `std::invalid_argument` naming the declared keys, so a typo or an unsupported knob cannot look like success; `"drop"` (the default for custom schemas written before the key existed) ignores it. `request.rules` express vendor constraints on the finished body: `{"omit": path, "when": {"path": p, "in": [...]}}` drops a field, and `{"require_greater": {"path": a, "than": b}}` rejects the request before it is sent when both are integers and `a <= b`. The `claude` schema uses them for the two Anthropic rules that otherwise return HTTP 400: `temperature` is left to the server default while `thinking.type` is `enabled` or `adaptive`, and `max_tokens` must exceed `thinking.budget_tokens`.
+
+**Token usage:** `ChatCompletion::Usage` carries `prompt_tokens`, `completion_tokens`, `total_tokens` and the subsets `cached_prompt_tokens` (prompt tokens served from cache) and `reasoning_tokens` (completion tokens spent on reasoning). Vendors disagree about what the basic counters include, so the mapping is schema data in `response`: `prompt_extra_fields` (usage fields added to the prompt count; Anthropic reports `input_tokens` without its cached prefix, so its schema lists `cache_read_input_tokens` and `cache_creation_input_tokens`), `cached_tokens_path`, `reasoning_tokens_path`, and `completion_includes_reasoning: false` where the completion counter excludes reasoning (Gemini's `candidatesTokenCount` versus `thoughtsTokenCount`). A streaming `usage` event takes the matching `prompt_extra_paths`, `cached_path` and `reasoning_path`; a stream that never reports a total gets prompt + completion. The non-stream, SSE and WebSocket paths and the native `OpenAIProvider` all read the same mapping. `UsageAccumulator`, `RunResult::usage` and `Agent::usage()` sum the subsets too (clamped to their parent counter); the model-token budget stays total-based.
+
+**Histories that changed vendor or model:** items are replayed only if the target schema declares their `type`, so a history that moves between providers stays valid; the source's reasoning is dropped, never sent to the wrong API. One incompatibility remains: Gemini 3 validates a `thoughtSignature` on the first `functionCall` of every model turn and answers HTTP 400 for a call it did not sign, which is every call in a history written by Claude, OpenAI or by hand. A schema can declare `reasoning.foreign_signature` (requires `signature_field`); the value is then placed on the first tool call of an assistant message that carries no captured signature. The built-in `gemini` schema declares Google's documented placeholder `skip_thought_signature_validator`, which the vendor calls a last resort that lowers quality for that turn. A schema without the key never invents a signature.
+
+**Provider failures:** a failure must never look like a finished answer. Errors are typed: `neograph::ProviderError` carries `status()`, `retryable()`, the vendor `code()`, `request_id()` (the `request-id` / `x-request-id` header, else the body's `request_id`) and `retry_after_seconds()`; `RateLimitError` (HTTP 429) is a `ProviderError` and keeps its own type. Which failures are transient is schema data: `connection.retryable_statuses` (default 408/429/500/502/503/504; the built-in `claude` schema adds 529) and `connection.retryable_codes` (vendor codes such as `overloaded_error` that mark an in-stream error transient). `RateLimitedProvider` retries exactly the retryable errors. Vendor bodies are redacted (account/user ids, API keys, bearer tokens) and truncated to 1 KiB before they enter an exception message. Failure signals inside a 2xx response are declared in the schema and shared by SSE and WebSocket: the stream event actions `error` and `fail` (`error_path` locates the error object; for example Anthropic `error`, Responses `error` and `response.failed`), `streaming.error_path` (an error object in any data chunk), `streaming.require_terminal_event` (EOF before the terminal event throws a retryable `ProviderError` with code `stream_truncated`), `response.error_path` and `response.failure_status_path` + `failure_statuses` (a `status:"failed"` body), `response.block_reason_path` (a blocked prompt reports `block_stop_reason`, default `content_filter`) and `response.error_finish_reasons` (raw finish reasons that mean the model failed). A schema without these keys handles signals as before.
+
 **Usage:**
 
 ```cpp
@@ -3666,13 +3708,18 @@ pointer to that canonical source-level reference.
 
 **Header:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
 JSON-RPC 2.0 over Streamable HTTP. `A2AClient` calls a remote
-agent (`message/send`, `tasks/get`, `tasks/cancel`, AgentCard
-discovery, `message/stream` SSE); the server side adapts a
-NeoGraph `GraphEngine` into an A2A endpoint via
-`GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
-see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
-and httplib chunked (server). Caller node embeds an A2A call as
-a graph node.
+agent (send, get, cancel, AgentCard discovery, streaming SSE); the
+server side adapts a NeoGraph `GraphEngine` into an A2A endpoint via
+`GraphAgentAdapter`. Two wire generations are spoken (`WireDialect`):
+A2A 1.0 protobuf-JSON (`SendMessage`, `A2A-Version: 1.0`, `ROLE_*` /
+`TASK_STATE_*`, flat Parts, no `kind`) and 0.3 (`message/send`, `kind`
+discriminators). The client selects the dialect from the AgentCard
+(`supportedInterfaces` protocol binding/version, else `protocolVersion`),
+probes 0.3-then-1.0 when no card was fetched, and throws a clear
+"no compatible interface" error when the card offers no JSONRPC 1.x/0.x
+binding; the server answers per `A2A-Version` and advertises both
+versions in its card. Streaming uses `SseFrameSplitter` (client) and
+httplib chunked (server). Caller node embeds an A2A call as a graph node.
 
 **Public headers:** [`include/neograph/a2a/`](../include/neograph/a2a/).
 

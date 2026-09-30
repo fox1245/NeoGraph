@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fd68914f16f52207e7f28ecc4dcdba6e3a0666cc1187486831f8abce51e61af4 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1594,6 +1594,9 @@ std::string fork(const std::string& source_thread_id,
 
 **返回：** 新分叉状态的检查点 ID。
 
+fork 只复制一个检查点，新线程上的 `resume()` 从该检查点的待执行节点继续。已完成线程的最新检查点是终止状态（没有待执行节点），因此对其 fork 后调用 `resume()` 不会执行任何节点。若要分叉并重新执行，请传入仍有待执行节点的较早检查点的 `checkpoint_id`（例如 `interrupt_before` 暂停运行时的检查点，可通过 `get_state_history()` 找到），对 fork 应用 `update_state()`，然后 `resume()`。`examples/08_state_management.cpp` 演示了这一流程。
+
+
 工具在编译前由 `NodeContext::tools` 或 `EngineResources::tools` 持有；
 不再存在编译之后的所有权转移。
 
@@ -2680,6 +2683,34 @@ public:
 **自定义 schema：** 将文件路径传给 `schema_path`，即可加载描述任意 API 请求/响应格式的
 自定义 schema JSON 文件。
 
+**拒绝 `temperature` 的模型：** 部分端点在请求带有 `temperature` 时返回 HTTP 400
+（OpenAI 推理模型与 `gpt-6*`、Claude Opus / Sonnet / Fable 4.7+ 及 5.x）。schema 在
+`request.temperature_unsupported_models` 中列出这些模型（完整名称，或以 `*` 结尾的条目
+表示前缀；匹配不区分大小写，并会尝试最后一个 `/` 之后的部分，因此 `openai/o4-mini`
+匹配 `o4*`），`SchemaProvider` 随后会对它们省略 `temperature`。未声明该列表的自定义
+schema 始终发送 `temperature`；若面向这些模型，请从对应厂商的内置 schema 复制该列表。
+
+**提供方 reasoning 条目：** reasoning 模型会返回必须随工具循环下一次请求一起发送的条目：
+Anthropic 的 `thinking` 块（含 `signature`）、OpenAI Responses 的 `reasoning` 条目、
+Gemini 3 的 `thoughtSignature`、OpenRouter 的 `reasoning_details`。schema 通过可选的顶层
+`reasoning` 部分声明它们：`carry_types`（原样保存在 `ChatMessage::reasoning_details` 中，
+并在生成它的助手消息的工具调用之前重放的块/条目 `type` 值）、`text_field`（供
+`ChatMessage::reasoning` 使用的可读文本所在位置）、`thought_flag_field` 与
+`signature_field`（Gemini 风格的 part）、`message_field`（聊天风格的不透明数组），以及用于
+流式传输的 `delta_fields` 与 `stream_concat_fields`。目标 schema 未声明的 `type` 的条目不会被
+重放，因此在不同提供方之间流转的历史仍然有效。reasoning 文本不会出现在 `content` 中。
+没有该部分的 schema 与以前一样忽略 reasoning 条目。
+
+**随部署变化的请求头:** schema 的 `connection.extra_headers` 值可以引用环境变量，与 `api_key_env` 一样在每次请求时读取：`${NAME}` 必须已设置且非空（否则请求失败并指出变量名，绝不发送空请求头），`${NAME?}` 在变量未设置或为空时省略整个请求头。内置 `claude` schema 声明了 `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"`（Anthropic 多工作区 API 密钥缺少它会返回 HTTP 400）和 `"anthropic-beta": "${ANTHROPIC_BETA?}"`。`SchemaProvider::Config::extra_headers` 从代码设置请求头：它们添加在 schema 的请求头之后，替换同名的 schema 请求头（名称不区分大小写，因此不会同时发送两种写法），并按字面发送。无效的请求头名称、格式错误的 `${...}`，以及包含换行的值（或展开后的环境变量值）都会被拒绝。无论请求头来自 schema 还是 `Config`，凭据仍然不会发送到非回环的 `http://` 端点。
+
+**逐次调用的请求旋钮:** `CompletionParams::extra_fields` 为单次调用把请求体路径映射到值，只有 schema 在 `request.per_call_fields` 中列出的路径才会被接受。内置 schema 的声明：`claude` 为 `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`provider`；`gemini` 为 `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`、`safetySettings`、`toolConfig`；`openai_responses` 为 `reasoning.effort`、`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`provider`；`openai`（chat / OpenRouter）为 `reasoning_effort`、`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`、`provider`。其他键由 `request.unknown_knob_policy` 决定：`"error"`（所有内置 schema）抛出点名已声明键的 `std::invalid_argument`，让拼写错误或不支持的旋钮不会看起来像成功；`"drop"`（该键出现之前编写的自定义 schema 的默认值）则忽略。`request.rules` 表达对最终请求体的厂商约束：`{"omit": path, "when": {"path": p, "in": [...]}}` 删除字段，`{"require_greater": {"path": a, "than": b}}` 在两者都是整数且 `a <= b` 时于发送前拒绝请求。`claude` schema 用它们处理两条否则会返回 HTTP 400 的 Anthropic 规则：当 `thinking.type` 为 `enabled` 或 `adaptive` 时 `temperature` 交给服务端默认值，且 `max_tokens` 必须大于 `thinking.budget_tokens`。
+
+**Token 用量:** `ChatCompletion::Usage` 携带 `prompt_tokens`、`completion_tokens`、`total_tokens`，以及子集 `cached_prompt_tokens`（由缓存提供的提示 token）和 `reasoning_tokens`（用于推理的补全 token）。各厂商对基础计数器包含什么并不一致，因此映射是 `response` 中的 schema 数据：`prompt_extra_fields`（加到提示数上的用量字段；Anthropic 的 `input_tokens` 不含已缓存前缀，所以其 schema 列出 `cache_read_input_tokens` 和 `cache_creation_input_tokens`）、`cached_tokens_path`、`reasoning_tokens_path`，以及补全计数器不含推理时（Gemini 的 `candidatesTokenCount` 与 `thoughtsTokenCount`）使用的 `completion_includes_reasoning: false`。流式 `usage` 事件接受对应的 `prompt_extra_paths`、`cached_path` 和 `reasoning_path`；从不报告总数的流按提示 + 补全计算。非流式、SSE、WebSocket 路径以及原生 `OpenAIProvider` 都读取同一份映射。`UsageAccumulator`、`RunResult::usage` 和 `Agent::usage()` 同样累加这些子集（钳制在父计数器以内），模型 token 预算仍以总数为准。
+
+**更换了厂商或模型的历史:** 只有目标 schema 声明了某项的 `type`，该项才会被重放，因此在提供方之间迁移的历史仍然有效；来源的 reasoning 会被丢弃，不会发给错误的 API。仍有一个不兼容：Gemini 3 会校验每个模型轮次中第一个 `functionCall` 的 `thoughtSignature`，对不是它自己签名的调用返回 HTTP 400，而由 Claude、OpenAI 或手工构造的历史中，每个调用都属于这种情况。schema 可以声明 `reasoning.foreign_signature`（需要 `signature_field`），该值会放在没有捕获签名的助手消息的第一个工具调用上。内置 `gemini` schema 声明了 Google 文档中的占位符 `skip_thought_signature_validator`，厂商称其为最后手段，会降低该轮的质量。没有该键的 schema 不会凭空生成签名。
+
+**提供方失败处理:** 失败不能看起来像已完成的回答。错误带有类型。`neograph::ProviderError` 携带 `status()`、`retryable()`、厂商 `code()`、`request_id()`（`request-id` / `x-request-id` 响应头，否则取正文中的 `request_id`）和 `retry_after_seconds()`；`RateLimitError`（HTTP 429）是 `ProviderError`，并保持自己的类型。哪些失败是暂时性的由 schema 数据决定：`connection.retryable_statuses`（默认 408/429/500/502/503/504，内置 `claude` schema 增加 529）和 `connection.retryable_codes`（把流内错误归为暂时性的厂商代码，如 `overloaded_error`）。`RateLimitedProvider` 只重试可重试的错误。厂商响应正文在进入异常消息之前，会隐去账户/用户 ID、API 密钥和 bearer 令牌，并截断到 1 KiB。2xx 响应内的失败信号在 schema 中声明，SSE 与 WebSocket 共用：流事件动作 `error` / `fail`（`error_path` 指向错误对象，例如 Anthropic 的 `error`、Responses 的 `error` 和 `response.failed`）、`streaming.error_path`（数据块中的错误对象）、`streaming.require_terminal_event`（终止事件之前流就结束，则抛出代码为 `stream_truncated` 的可重试 `ProviderError`）、`response.error_path`、`response.failure_status_path` + `failure_statuses`（`status:"failed"` 的正文）、`response.block_reason_path`（被拦截的提示以 `block_stop_reason` 报告，默认 `content_filter`）、`response.error_finish_reasons`（表示模型失败的原始 finish reason）。没有这些键的 schema，信号处理与以前相同。
+
 **用法：**
 
 ```cpp
@@ -3313,11 +3344,14 @@ int main() {
 
 **头文件：** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
 基于 Streamable HTTP 的 JSON-RPC 2.0。`A2AClient` 调用远程
-agent（`message/send`、`tasks/get`、`tasks/cancel`、AgentCard
-发现、`message/stream` SSE）；服务器端通过
-`GraphAgentAdapter` 将 NeoGraph `GraphEngine` 适配为 A2A 端点。支持
-`v0.3` / `v1` 双版本方法名分发，参见提交 `bc675a1`。流式传输使用
-`SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
+agent（发送、获取、取消、AgentCard 发现、流式 SSE）；服务器端通过
+`GraphAgentAdapter` 将 NeoGraph `GraphEngine` 适配为 A2A 端点。支持两代线路格式
+（`WireDialect`）：A2A 1.0 protobuf-JSON（`SendMessage`、`A2A-Version: 1.0`、
+`ROLE_*` / `TASK_STATE_*`、无 `kind` 的扁平 Part）与 0.3（`message/send`、`kind` 判别字段）。
+客户端根据 AgentCard（`supportedInterfaces` 的绑定/版本，否则 `protocolVersion`）选择方言，
+未获取卡片时先以 0.3 再以 1.0 探测；卡片没有 JSONRPC 1.x/0.x 兼容绑定时抛出明确的
+“no compatible interface” 错误；服务器按 `A2A-Version` 应答，并在卡片中同时声明两个版本。
+流式传输使用 `SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
 将 A2A 调用嵌入为图节点。
 
 **公共头文件：** [`include/neograph/a2a/`](../include/neograph/a2a/)。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=fd68914f16f52207e7f28ecc4dcdba6e3a0666cc1187486831f8abce51e61af4 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -1383,6 +1383,7 @@ std::string fork(const std::string& source_thread_id,
 | `new_thread_id` | `std::string` | 新しいスレッド識別子 |
 | `checkpoint_id` | `std::string` | 任意。特定のチェックポイントから fork (デフォルト: 最新) |
 **戻り値:** 新しく fork した状態のチェックポイント ID。
+fork はちょうど 1 つのチェックポイントをコピーし、新しいスレッドでの `resume()` はそのチェックポイントの保留中ノードから続行します。完了済みスレッドの最新チェックポイントは終端 (保留ノードなし) のため、それを fork して `resume()` を呼んでも何も実行されません。分岐して再実行するには、保留ノードが残っている以前のチェックポイント (例: `interrupt_before` で実行が停止したもので、`get_state_history()` で取得できます) の `checkpoint_id` を渡し、fork に `update_state()` を適用してから `resume()` してください。`examples/08_state_management.cpp` がこの流れを示しています。
 ツールは `NodeContext::tools` または `EngineResources::tools` でコンパイル前に所有されます。
 コンパイル後の所有権移譲はありません。
 #### `set_checkpoint_store`
@@ -2259,6 +2260,36 @@ public:
 | `base_url` | `std::string` | `"https://api.openai.com"` | Base URL。Azure、ローカルモデル、互換 API 用に上書きします |
 | `default_model` | `std::string` | `"gpt-4o-mini"` | `CompletionParams::model` が空のときに使う model |
 | `timeout_seconds` | `int` | `60` | HTTP request のタイムアウト |
+**`temperature` を拒否するモデル:** 一部のエンドポイントは、リクエストに `temperature` が
+含まれると HTTP 400 を返します（OpenAI の推論モデルと `gpt-6*`、Claude Opus / Sonnet / Fable
+4.7 以降および 5.x）。スキーマはそのようなモデルを `request.temperature_unsupported_models`
+に列挙し（完全一致の名前、または `*` で終わる項目は前方一致。大文字小文字を区別せず、最後の
+`/` 以降も比較するため `openai/o4-mini` は `o4*` に一致）、`SchemaProvider` は該当モデルでは
+`temperature` を省略します。このリストを宣言しないカスタムスキーマは常に `temperature` を
+送るため、それらのモデルを対象にする場合は組み込みスキーマのリストをコピーしてください。
+
+**プロバイダの reasoning 項目:** reasoning モデルは、ツールループの次のリクエストに同梱すべき
+項目を返します：Anthropic の `thinking` ブロック（`signature` 付き）、OpenAI Responses の
+`reasoning` 項目、Gemini 3 の `thoughtSignature`、OpenRouter の `reasoning_details`。
+スキーマは任意の最上位 `reasoning` セクションでこれらを宣言します：`carry_types`（原文のまま
+`ChatMessage::reasoning_details` に保持し、それを生成したアシスタントメッセージのツール
+呼び出しの前に再送するブロック/項目の `type` 値）、`text_field`（`ChatMessage::reasoning`
+用の可読テキストの場所）、`thought_flag_field` と `signature_field`（Gemini 形式の part）、
+`message_field`（チャット形式の不透明な配列）、ストリーミング用の `delta_fields` と
+`stream_concat_fields`。対象スキーマが宣言していない `type` の項目は再送されないため、
+プロバイダ間で移動する履歴も有効なままです。reasoning テキストが `content` に現れることは
+ありません。このセクションを持たないスキーマは従来どおり reasoning 項目を無視します。
+
+**デプロイごとに変わるリクエストヘッダー:** スキーマの `connection.extra_headers` の値は、`api_key_env` と同様にリクエストごとに読まれる環境変数を参照できます。`${NAME}` は設定済みで空でない必要があり（そうでなければ変数名を示してリクエストが失敗し、空のヘッダーは送られません）、`${NAME?}` は変数が未設定または空のときヘッダー全体を省略します。組み込みの `claude` スキーマは `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"`（Anthropic のマルチワークスペース API キーはこのヘッダーがないと HTTP 400）と `"anthropic-beta": "${ANTHROPIC_BETA?}"` を宣言します。`SchemaProvider::Config::extra_headers` はコードからヘッダーを設定し、スキーマのヘッダーの後に追加され、同名のスキーマヘッダーを置き換え（名前は大文字小文字を区別しないため、2 つの表記が同時に送られることはありません）、そのまま送信されます。不正なヘッダー名、形式の誤った `${...}`、改行を含む値（または展開後の環境変数の値）は拒否されます。ヘッダーがスキーマ由来でも `Config` 由来でも、資格情報はループバックでない `http://` エンドポイントには引き続き送られません。
+
+**呼び出しごとのリクエストノブ:** `CompletionParams::extra_fields` は 1 回の呼び出しについて本文のパスを値に対応付け、スキーマが `request.per_call_fields` に列挙したパスだけが受け付けられます。組み込みスキーマの宣言: `claude` は `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`provider`、`gemini` は `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`、`safetySettings`、`toolConfig`、`openai_responses` は `reasoning.effort`、`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`provider`、`openai`（chat / OpenRouter）は `reasoning_effort`、`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`、`provider`。それ以外のキーは `request.unknown_knob_policy` が決めます。`"error"`（すべての組み込みスキーマ）は宣言済みキーを名指しする `std::invalid_argument` を投げ、タイプミスや未対応のノブが成功に見えないようにします。`"drop"`（このキーができる前に書かれたカスタムスキーマの既定）は無視します。`request.rules` は完成した本文へのベンダー制約を表します。`{"omit": path, "when": {"path": p, "in": [...]}}` はフィールドを削除し、`{"require_greater": {"path": a, "than": b}}` は両方が整数で `a <= b` のときリクエストを送る前に拒否します。`claude` スキーマはこれを HTTP 400 になる Anthropic の 2 つの規則に使います。`thinking.type` が `enabled` または `adaptive` の間は `temperature` をサーバー既定値に任せ、`max_tokens` は `thinking.budget_tokens` より大きくなければなりません。
+
+**トークン使用量:** `ChatCompletion::Usage` は `prompt_tokens`、`completion_tokens`、`total_tokens` と、部分集合の `cached_prompt_tokens`（キャッシュから提供されたプロンプトトークン）、`reasoning_tokens`（推論に使った補完トークン）を持ちます。ベンダーごとに基本カウンターの含む範囲が違うため、マッピングは `response` のスキーマデータです。`prompt_extra_fields`（プロンプト数に加算する使用量フィールド。Anthropic は `input_tokens` にキャッシュ済みの先頭部分を含めないため、スキーマが `cache_read_input_tokens` と `cache_creation_input_tokens` を列挙）、`cached_tokens_path`、`reasoning_tokens_path`、補完カウンターが推論を除外する場合（Gemini の `candidatesTokenCount` と `thoughtsTokenCount`）の `completion_includes_reasoning: false`。ストリーミングの `usage` イベントは対応する `prompt_extra_paths`、`cached_path`、`reasoning_path` を受け取り、合計を報告しないストリームはプロンプト + 補完で計算します。非ストリーム、SSE、WebSocket の各経路とネイティブの `OpenAIProvider` は同じマッピングを読みます。`UsageAccumulator`、`RunResult::usage`、`Agent::usage()` も部分集合を合算し（親カウンターにクランプ）、モデルトークン予算は引き続き合計基準です。
+
+**ベンダーやモデルが変わった履歴:** 項目は、対象スキーマがその `type` を宣言している場合にのみ再送されるため、プロバイダー間を移った履歴も有効なままです。元の reasoning は破棄され、誤った API に送られることはありません。ひとつだけ非互換が残ります。Gemini 3 はモデルのターンごとに最初の `functionCall` の `thoughtSignature` を検証し、自分が署名していない呼び出しには HTTP 400 を返します。Claude、OpenAI、または手で作った履歴のすべての呼び出しが該当します。スキーマは `reasoning.foreign_signature`（`signature_field` が必要）を宣言でき、キャプチャされた署名のないアシスタントメッセージの最初のツール呼び出しにその値が入ります。組み込みの `gemini` スキーマは Google が文書化したプレースホルダー `skip_thought_signature_validator` を宣言しており、ベンダーはこれをそのターンの品質を下げる最後の手段としています。このキーのないスキーマは署名を作り出しません。
+
+**プロバイダーの失敗:** 失敗が完了した回答のように見えてはいけません。エラーは型付けされています。`neograph::ProviderError` は `status()`、`retryable()`、ベンダーの `code()`、`request_id()`（`request-id` / `x-request-id` ヘッダー、なければ本文の `request_id`）、`retry_after_seconds()` を持ち、`RateLimitError`（HTTP 429）は `ProviderError` でありながら自身の型を保ちます。どの失敗が一時的かはスキーマのデータです。`connection.retryable_statuses`（既定 408/429/500/502/503/504、組み込みの `claude` スキーマは 529 を追加）と `connection.retryable_codes`（ストリーム内のエラーを一時的と分類する `overloaded_error` などのベンダーコード）。`RateLimitedProvider` は再試行可能なエラーだけを再試行します。ベンダーの本文は、例外メッセージに入れる前にアカウント/ユーザー ID・API キー・bearer トークンを伏せ、1 KiB に切り詰めます。2xx 応答内の失敗シグナルはスキーマで宣言し、SSE と WebSocket が共有します。ストリームイベントのアクション `error` / `fail`（`error_path` がエラーオブジェクトの位置。例: Anthropic の `error`、Responses の `error` と `response.failed`）、`streaming.error_path`（データチャンク内のエラーオブジェクト）、`streaming.require_terminal_event`（終端イベントの前にストリームが終わるとコード `stream_truncated` の再試行可能な `ProviderError`）、`response.error_path`、`response.failure_status_path` + `failure_statuses`（`status:"failed"` の本文）、`response.block_reason_path`（ブロックされたプロンプトは `block_stop_reason`、既定 `content_filter` で報告）、`response.error_finish_reasons`（モデルの失敗を意味する生の finish reason）。これらのキーがないスキーマのシグナル処理は従来どおりです。
+
 **使用方法:**
 ```cpp
 auto provider = neograph::llm::OpenAIProvider::create({
@@ -2879,10 +2910,15 @@ int main() {
 ### `neograph::a2a` — Agent-to-Agent プロトコル
 **ヘッダー:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
 Streamable HTTP 上の JSON-RPC 2.0 です。`A2AClient` はリモートエージェントに
-(`message/send`、`tasks/get`、`tasks/cancel`、AgentCard の検出、`message/stream` SSE) を呼び出します。
+(送信、取得、キャンセル、AgentCard の検出、ストリーミング SSE) を呼び出します。
 サーバー側は `GraphAgentAdapter` を通じて NeoGraph の `GraphEngine` を A2A エンドポイントへ適応させます。
-`v0.3` / `v1` のメソッド名を二重にディスパッチします。
-commit `bc675a1` を参照してください。ストリーミングには (client 側) `SseFrameSplitter` と
+2 つのワイヤ世代 (`WireDialect`) を扱います: A2A 1.0 の protobuf-JSON (`SendMessage`、
+`A2A-Version: 1.0`、`ROLE_*` / `TASK_STATE_*`、`kind` のないフラットな Part) と
+0.3 (`message/send`、`kind` 識別子) です。クライアントは AgentCard (`supportedInterfaces` の
+バインディング/バージョン、なければ `protocolVersion`) から方言を選び、カード未取得時は
+0.3 → 1.0 の順にプローブし、JSONRPC 1.x/0.x の互換バインディングがなければ明確な
+「no compatible interface」エラーを投げます。サーバーは `A2A-Version` に応じて応答し、カードに
+両バージョンを掲載します。ストリーミングには (client 側) `SseFrameSplitter` と
 (server 側) httplib chunked を使います。caller node は A2A 呼び出しをグラフノードとして組み込みます。
 
 **公開ヘッダー:** [`include/neograph/a2a/`](../include/neograph/a2a/)。

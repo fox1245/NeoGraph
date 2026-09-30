@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <neograph/llm/rate_limited_provider.h>
 #include <neograph/llm/schema_provider.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/async/run_sync.h>
@@ -27,6 +28,8 @@ struct MediaServer {
     std::atomic<bool> unsafe_id{false};
     std::atomic<bool> missing_result{false};
     std::atomic<bool> http_error{false};
+    std::atomic<int> submit_http_failures{0};  // fail this many submissions with HTTP 503
+    std::atomic<int> submissions{0};
     std::atomic<bool> omit_pending_status{false};
     std::atomic<bool> wrong_status_type{false};
     std::atomic<bool> saw_veo_envelope{false};
@@ -50,7 +53,12 @@ struct MediaServer {
             const auto body = json::parse(req.body);
             saw_veo_envelope = body.at("instances").at(0).at("prompt") == "A paper kite" &&
                 !body.contains("messages") && !body.contains("temperature");
-            if (submit_error) {
+            ++submissions;
+            if (submit_http_failures > 0) {
+                --submit_http_failures;
+                res.status = 503;
+                res.set_content(R"({"error":{"code":503,"message":"overloaded","status":"UNAVAILABLE"}})", "application/json");
+            } else if (submit_error) {
                 res.set_content(R"({"error":{"code":7,"message":"submit denied"}})", "application/json");
             } else if (omit_pending_status) {
                 res.set_content(R"({"name":"models/veo-test/operations/op-7"})", "application/json");
@@ -225,6 +233,64 @@ TEST(SchemaProviderMedia, HttpFailureDoesNotBecomeSuccess) {
     auto p = provider(server, "veo");
     server.http_error = true;
     EXPECT_THROW(p->complete(prompt_params()), llm::OperationError);
+}
+
+TEST(SchemaProviderMedia, PollHttpFailureChainsTheTypedCause) {
+    MediaServer server;
+    auto p = provider(server, "veo");
+    server.http_error = true;
+    try {
+        p->complete(prompt_params());
+        FAIL() << "expected OperationError";
+    } catch (const llm::OperationError& error) {
+        try {
+            std::rethrow_if_nested(error);
+            FAIL() << "the poll failure lost its cause";
+        } catch (const ProviderError& cause) {
+            EXPECT_EQ(cause.status(), 503);
+            EXPECT_TRUE(cause.retryable());
+        }
+    }
+}
+
+TEST(SchemaProviderMedia, SubmissionHttpFailureKeepsItsTypeBecauseNoJobExists) {
+    MediaServer server;
+    auto p = provider(server, "veo");
+    server.submit_http_failures = 1;
+    try {
+        p->complete(prompt_params());
+        FAIL() << "expected ProviderError";
+    } catch (const llm::OperationError&) {
+        FAIL() << "a rejected submission must not be an OperationError";
+    } catch (const ProviderError& error) {
+        EXPECT_EQ(error.status(), 503);
+        EXPECT_TRUE(error.retryable());
+        EXPECT_EQ(error.code(), "503");
+    }
+    EXPECT_EQ(server.polls, 0);
+}
+
+TEST(SchemaProviderMedia, RateLimitedProviderRetriesARejectedSubmission) {
+    MediaServer server;
+    server.submit_http_failures = 1;
+    llm::RateLimitedProvider::Config retry;
+    retry.transient_base_wait_seconds = 0;
+    auto retrying = llm::RateLimitedProvider::create(
+        std::shared_ptr<Provider>(provider(server, "veo").release()), retry);
+    const auto completion = retrying->complete(prompt_params());
+    EXPECT_FALSE(completion.artifacts.empty());
+    EXPECT_EQ(server.submissions, 2);
+}
+
+TEST(SchemaProviderMedia, RateLimitedProviderNeverResubmitsAJobThatAlreadyExists) {
+    MediaServer server;
+    server.http_error = true;  // every poll fails with 503
+    llm::RateLimitedProvider::Config retry;
+    retry.transient_base_wait_seconds = 0;
+    auto retrying = llm::RateLimitedProvider::create(
+        std::shared_ptr<Provider>(provider(server, "veo").release()), retry);
+    EXPECT_THROW(retrying->complete(prompt_params()), llm::OperationError);
+    EXPECT_EQ(server.submissions, 1);  // one job, not four
 }
 
 TEST(SchemaProviderMedia, DeadlineBoundsRepeatedPolling) {

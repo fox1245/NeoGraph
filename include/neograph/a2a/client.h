@@ -3,16 +3,20 @@
  * @brief A2A (Agent-to-Agent) JSON-RPC client over Streamable HTTP.
  *
  * Implements the JSON-RPC 2.0 binding of the A2A protocol — see
- * https://a2a-protocol.org/latest/specification/. Methods supported in
- * this version:
- *   - `message/send`        (sync)
- *   - `tasks/get`
- *   - `tasks/cancel`
+ * https://a2a-protocol.org/latest/specification/. Methods supported:
+ *   - send message (`SendMessage` / `message/send`)
+ *   - streaming send (`SendStreamingMessage` / `message/stream`, SSE)
+ *   - get task (`GetTask` / `tasks/get`)
+ *   - cancel task (`CancelTask` / `tasks/cancel`)
  *   - AgentCard discovery via GET `/.well-known/agent-card.json`
  *
- * Streaming (`message/stream`, SSE-framed `tasks/resubscribe`) is not
- * implemented in v1; the awaitable returns once the server reports
- * a terminal TaskState.
+ * Two wire generations are spoken (see WireDialect in types.h): the A2A
+ * 1.0 protobuf-JSON form (PascalCase methods, `A2A-Version: 1.0` header,
+ * `ROLE_*` / `TASK_STATE_*` enums, flat Parts, no `kind`) and the 0.3
+ * JSON-Schema form (slash-form methods, `kind` discriminators). The
+ * dialect is selected from the AgentCard's `supportedInterfaces` /
+ * `protocolVersion` once the card has been fetched; before that it is
+ * learned by probing (0.3 first, 1.0 on "method not found").
  */
 #pragma once
 
@@ -26,9 +30,23 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace neograph::a2a {
+
+/// JSON-RPC error object returned by the remote agent. `what()` carries
+/// "A2A RPC error (code=<n>): <message>".
+class NEOGRAPH_API A2ARpcError : public std::runtime_error {
+  public:
+    A2ARpcError(int code, const std::string& what)
+        : std::runtime_error(what), code_(code) {}
+    int code() const noexcept { return code_; }
+
+  private:
+    int code_;
+};
 
 /**
  * @brief A2A client — call a remote agent over JSON-RPC + HTTP.
@@ -42,6 +60,18 @@ namespace neograph::a2a {
  * lock. Stream callbacks still run on the network thread and must provide
  * their own synchronization for shared application state. Reuses
  * neograph::async::async_post for transport.
+ *
+ * Dialect selection: after @ref fetch_agent_card the first RPC picks the
+ * first `supportedInterfaces` entry with a `JSONRPC` binding and a `1.x`
+ * (-> WireDialect::V1_0) or `0.x` (-> V0_3) protocol version, preferring an
+ * entry whose URL equals the client's `base_url`; a 0.3 card without
+ * `supportedInterfaces` selects V0_3 from its `protocolVersion` /
+ * `preferredTransport` / `additionalInterfaces`. When the card offers no
+ * compatible interface the call throws `std::runtime_error` naming what the
+ * card offers. The RPC endpoint is always `base_url` (card URLs only take
+ * part in the choice); a selected interface `tenant` is copied into every
+ * request. Without a fetched card the client sends 0.3 first and switches
+ * to 1.0 on a -32601 reply, remembering the outcome.
  *
  * @code
  * a2a::A2AClient client("https://agent.example.com");
@@ -58,6 +88,10 @@ class NEOGRAPH_API A2AClient {
 
     /// Override the default 30 s request timeout.
     void set_timeout(std::chrono::seconds t);
+
+    /// Wire dialect in use: selected from the fetched AgentCard or learned by
+    /// probing. `nullopt` until the first card fetch / successful RPC.
+    std::optional<WireDialect> wire_dialect() const;
 
     /**
      * Set the explicit Authorization header for subsequent RPC requests.
@@ -104,8 +138,10 @@ class NEOGRAPH_API A2AClient {
     Task cancel_task(const std::string& task_id);
     asio::awaitable<Task> cancel_task_async(const std::string& task_id);
 
-    /// `message/stream` — send a message and receive SSE-framed status
-    /// updates as the agent progresses, plus the final Task.
+    /// `SendStreamingMessage` / `message/stream` — send a message and receive
+    /// SSE-framed status updates as the agent progresses, plus the final Task
+    /// (assembled from the stream's Task / status / artifact events for 1.0
+    /// agents, which have no terminal `final` frame).
     ///
     /// `on_event` is invoked synchronously on the network thread for
     /// each parsed StreamEvent. Return `true` to keep reading or
@@ -129,20 +165,14 @@ class NEOGRAPH_API A2AClient {
     Task send_message_stream(const MessageSendParams& params,
                              EventCallback on_event);
 
-    /// Lower-level: arbitrary JSON-RPC method.
-    json rpc_call(const std::string& method, const json& params);
-    asio::awaitable<json> rpc_call_async(const std::string& method, const json& params);
-
-    /// Two A2A protocol generations are deployed in the wild:
-    /// v1 (PascalCase, e.g. "SendMessage") used by a2a-sdk Python ≥1.0.0,
-    /// and v0.3 (slash-form, e.g. "message/send") used by a2a-js HEAD and
-    /// pre-v1 deployments. Try @p v1_method first; on a -32601
-    /// "method not found" reply, retry with @p v03_method on the same
-    /// params. Other JSON-RPC errors propagate.
-    asio::awaitable<json> rpc_call_with_fallback(
-        const std::string& v1_method,
-        const std::string& v03_method,
-        const json& params);
+    /// Lower-level: arbitrary JSON-RPC method, sent verbatim. When
+    /// @p dialect is V1_0 the `A2A-Version: 1.0` header is attached.
+    /// Throws A2ARpcError for a JSON-RPC error reply.
+    json rpc_call(const std::string& method, const json& params,
+                  std::optional<WireDialect> dialect = std::nullopt);
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method, const json& params,
+        std::optional<WireDialect> dialect = std::nullopt);
 
     const std::string& base_url() const { return base_url_; }
 
@@ -158,6 +188,30 @@ class NEOGRAPH_API A2AClient {
     AgentCard cached_card_;
     bool      card_loaded_ = false;
     std::string authorization_header_;
+
+    /// Dialect/tenant chosen from the card or learned by probing.
+    struct Selection {
+        WireDialect dialect = WireDialect::V0_3;
+        std::string tenant;
+    };
+    std::optional<Selection> selection_;
+
+    /// Card-derived selection (memoised), probe result, or nullopt when the
+    /// dialect is still unknown. Throws when the card has no compatible
+    /// interface.
+    std::optional<Selection> resolve_selection();
+    void remember_probe(WireDialect dialect);
+
+    /// One unary A2A call: picks the method name and request body for the
+    /// resolved (or probed) dialect. @p build receives the dialect and the
+    /// selected interface tenant.
+    asio::awaitable<json> call_method(
+        const char* v1_method, const char* v03_method,
+        const std::function<json(WireDialect, const std::string& tenant)>& build);
+
+    Task stream_once(WireDialect dialect, const std::string& tenant,
+                     const MessageSendParams& params, const EventCallback& on_event,
+                     bool& saw_events);
 
     std::string request_authorization_header() const;
 

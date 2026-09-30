@@ -525,4 +525,341 @@ TEST(A2AClient, NormalizeBaseUrlStripsWellKnownPath) {
     EXPECT_EQ(card.name, "mock-agent");
 }
 
+
+// ---------------------------------------------------------------------------
+// A2A 1.0 wire dialect (protobuf-JSON) — modelled on a2a-sdk >= 1.0, which
+// parses SendMessageRequest with protobuf `ParseDict` (so a stray `kind`
+// is -32602), only knows PascalCase methods (slash-form is -32601) and
+// requires the `A2A-Version: 1.0` header.
+// ---------------------------------------------------------------------------
+namespace {
+
+bool has_key_deep(const json& j, const std::string& key) {
+    if (j.is_object()) {
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            if (it.key() == key || has_key_deep(it.value(), key)) return true;
+        }
+    } else if (j.is_array()) {
+        for (const auto& v : j) if (has_key_deep(v, key)) return true;
+    }
+    return false;
+}
+
+struct MockV1Server {
+    httplib::Server svr;
+    std::thread     t;
+    int             port = 0;
+
+    std::mutex               mu;
+    std::vector<std::string> methods;
+    std::vector<std::string> versions;   ///< A2A-Version header per RPC
+    std::vector<json>        bodies;     ///< params per RPC
+    std::atomic<int>         rpc_count{0};
+
+    json card = json::object();
+    /// Returned as `result` for unary methods.
+    json unary_result = json::parse(R"({
+        "task": {
+            "id": "t-1", "contextId": "c-1",
+            "status": {"state": "TASK_STATE_COMPLETED",
+                       "message": {"messageId": "a-1", "role": "ROLE_AGENT",
+                                   "parts": [{"text": "hello from v1", "mediaType": "text/plain"}]}},
+            "artifacts": [{"artifactId": "art-1",
+                           "parts": [{"text": "artifact text"}]}]
+        }
+    })");
+    /// Raw SSE body returned for SendStreamingMessage.
+    std::string sse_body;
+
+    MockV1Server() {
+        card = json::parse(R"({
+            "name": "v1-agent", "description": "d", "version": "1.0.0",
+            "supportedInterfaces": [
+                {"url": "http://127.0.0.1/", "protocolBinding": "JSONRPC",
+                 "protocolVersion": "1.0"}],
+            "capabilities": {"streaming": true},
+            "defaultInputModes": ["text/plain"],
+            "defaultOutputModes": ["text/plain"],
+            "skills": []
+        })");
+        svr.Get("/.well-known/agent-card.json",
+                [this](const httplib::Request&, httplib::Response& res) {
+                    res.set_content(card.dump(), "application/json");
+                });
+        svr.Post("/", [this](const httplib::Request& req, httplib::Response& res) {
+            rpc_count.fetch_add(1);
+            auto parsed = json::parse(req.body);
+            auto method = parsed.value("method", std::string());
+            json params = parsed.value("params", json::object());
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                methods.push_back(method);
+                versions.push_back(req.get_header_value("A2A-Version"));
+                bodies.push_back(params);
+            }
+            json env = {{"jsonrpc", "2.0"}, {"id", parsed["id"]}};
+            const bool v1_method = method == "SendMessage" || method == "GetTask"
+                                || method == "CancelTask"
+                                || method == "SendStreamingMessage";
+            if (!v1_method) {
+                env["error"] = {{"code", -32601}, {"message", "Method not found"}};
+            } else if (req.get_header_value("A2A-Version") != "1.0") {
+                env["error"] = {{"code", -32009}, {"message", "version not supported"}};
+            } else if (has_key_deep(params, "kind")) {
+                env["error"] = {{"code", -32602}, {"message", "Invalid parameters"},
+                                {"data", "Message has no field named \"kind\""}};
+            } else if (method == "SendStreamingMessage") {
+                res.set_content(sse_body, "text/event-stream");
+                return;
+            } else if (method == "GetTask" || method == "CancelTask") {
+                env["result"] = unary_result["task"];
+            } else {
+                env["result"] = unary_result;
+            }
+            res.set_content(env.dump(), "application/json");
+        });
+        port = svr.bind_to_any_port("127.0.0.1");
+        t = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    ~MockV1Server() { svr.stop(); if (t.joinable()) t.join(); }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port); }
+};
+
+}  // namespace
+
+TEST(A2AClientV1, CardWithV1InterfaceSendsV1RequestBody) {
+    MockV1Server srv;
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    auto task = client.send_message_sync("hi v1", "task-x", "ctx-x");
+
+    ASSERT_EQ(srv.rpc_count.load(), 1) << "no slash-form probe when the card says 1.0";
+    EXPECT_EQ(srv.methods[0],  "SendMessage");
+    EXPECT_EQ(srv.versions[0], "1.0");
+    const auto& msg = srv.bodies[0]["message"];
+    EXPECT_FALSE(has_key_deep(srv.bodies[0], "kind"));
+    EXPECT_EQ(msg.value("role", std::string()), "ROLE_USER");
+    EXPECT_EQ(msg.value("taskId", std::string()), "task-x");
+    EXPECT_EQ(msg.value("contextId", std::string()), "ctx-x");
+    ASSERT_EQ(msg["parts"].size(), 1u);
+    EXPECT_EQ(msg["parts"][0].value("text", std::string()), "hi v1");
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
+
+    // {"task": ...} wrapper, TASK_STATE_* and flat Parts are decoded.
+    EXPECT_EQ(task.id, "t-1");
+    EXPECT_EQ(task.context_id, "c-1");
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    ASSERT_TRUE(task.status.message.has_value());
+    EXPECT_EQ(task.status.message->role, Role::Agent);
+    EXPECT_EQ(task.status.message->parts[0].text, "hello from v1");
+    ASSERT_EQ(task.artifacts.size(), 1u);
+    EXPECT_EQ(task.artifacts[0].parts[0].text, "artifact text");
+}
+
+TEST(A2AClientV1, GetAndCancelUsePascalCaseWithVersionHeader) {
+    MockV1Server srv;
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    auto got = client.get_task("t-1", 3);
+    auto cancelled = client.cancel_task("t-1");
+
+    ASSERT_EQ(srv.methods.size(), 2u);
+    EXPECT_EQ(srv.methods[0], "GetTask");
+    EXPECT_EQ(srv.methods[1], "CancelTask");
+    EXPECT_EQ(srv.versions[0], "1.0");
+    EXPECT_EQ(srv.versions[1], "1.0");
+    EXPECT_EQ(srv.bodies[0].value("id", std::string()), "t-1");
+    EXPECT_EQ(srv.bodies[0].value("historyLength", 0), 3);
+    EXPECT_EQ(got.status.state, TaskState::Completed);   // bare Task result
+    EXPECT_EQ(cancelled.id, "t-1");
+}
+
+TEST(A2AClientV1, MessageOnlyResultBecomesCompletedTask) {
+    MockV1Server srv;
+    srv.unary_result = json::parse(R"({
+        "message": {"messageId": "m-9", "role": "ROLE_AGENT", "contextId": "c-9",
+                    "parts": [{"text": "just a message"}]}
+    })");
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    auto task = client.send_message_sync("hi");
+    EXPECT_EQ(task.context_id, "c-9");
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    ASSERT_EQ(task.history.size(), 1u);
+    EXPECT_EQ(task.history[0].parts[0].text, "just a message");
+}
+
+TEST(A2AClientV1, WithoutCardProbeFallsBackToV1BodyAndIsRemembered) {
+    // The regression: the fallback used to retry PascalCase `SendMessage`
+    // with the 0.3 body (`kind` fields), which a v1 server rejects with
+    // -32602 "Invalid params".
+    MockV1Server srv;
+    A2AClient client(srv.url());
+    EXPECT_FALSE(client.wire_dialect().has_value());
+    auto task = client.send_message_sync("probe");
+
+    ASSERT_EQ(srv.rpc_count.load(), 2);
+    EXPECT_EQ(srv.methods[0], "message/send");
+    EXPECT_EQ(srv.methods[1], "SendMessage");
+    EXPECT_EQ(srv.versions[1], "1.0");
+    EXPECT_FALSE(has_key_deep(srv.bodies[1], "kind"));
+    EXPECT_EQ(srv.bodies[1]["message"].value("role", std::string()), "ROLE_USER");
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
+
+    (void)client.send_message_sync("again");
+    ASSERT_EQ(srv.rpc_count.load(), 3) << "probe outcome is remembered";
+    EXPECT_EQ(srv.methods[2], "SendMessage");
+}
+
+TEST(A2AClientV1, LegacyCardKeepsSlashMethodsAndKindBody) {
+    MockA2AServer srv;   // 0.3 card, protocolVersion "0.3.0"
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    (void)client.send_message_sync("legacy");
+    EXPECT_EQ(srv.last_method, "message/send");
+    EXPECT_EQ(srv.last_params["message"].value("kind", std::string()), "message");
+    EXPECT_EQ(srv.last_params["message"].value("role", std::string()), "user");
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V0_3);
+}
+
+TEST(A2AClientV1, NoCompatibleInterfaceFailsClearlyWithoutSending) {
+    MockV1Server srv;
+    srv.card["supportedInterfaces"] = json::parse(R"([
+        {"url": "grpc.example:443", "protocolBinding": "GRPC", "protocolVersion": "1.0"},
+        {"url": "http://x/", "protocolBinding": "JSONRPC", "protocolVersion": "2.0"}
+    ])");
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    try {
+        (void)client.send_message_sync("hi");
+        FAIL() << "expected an incompatible-interface error";
+    } catch (const std::runtime_error& e) {
+        std::string what = e.what();
+        EXPECT_NE(what.find("no compatible interface"), std::string::npos) << what;
+        EXPECT_NE(what.find("GRPC 1.0"), std::string::npos) << what;
+        EXPECT_NE(what.find("JSONRPC 2.0"), std::string::npos) << what;
+    }
+    EXPECT_EQ(srv.rpc_count.load(), 0);
+}
+
+TEST(A2AClientV1, SelectionPrefersMatchingUrlAndPropagatesTenant) {
+    MockV1Server srv;
+    srv.card["supportedInterfaces"] = json::parse(
+        R"([{"url": "http://elsewhere.example/a2a/", "protocolBinding": "JSONRPC",
+             "protocolVersion": "0.3"},
+            {"url": ")" + srv.url() + R"(/", "protocolBinding": "jsonrpc",
+             "protocolVersion": "1.0", "tenant": "acme"}])");
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    (void)client.send_message_sync("hi");
+    ASSERT_EQ(srv.methods.size(), 1u);
+    EXPECT_EQ(srv.methods[0], "SendMessage");   // not the earlier 0.3 entry
+    EXPECT_EQ(srv.bodies[0].value("tenant", std::string()), "acme");
+}
+
+TEST(A2AClientV1, StreamingUsesSendStreamingMessageAndAssemblesTask) {
+    MockV1Server srv;
+    // sse-starlette (a2a-sdk) frames with CRLF line endings and interleaves
+    // `: ping` comments; 1.0 has no `final` flag and no trailing Task.
+    auto frame = [](const json& result) {
+        return "data: " + json({{"jsonrpc", "2.0"}, {"id", 1}, {"result", result}}).dump()
+             + "\r\n\r\n";
+    };
+    srv.sse_body =
+        frame(json::parse(R"({"task": {"id": "t-s", "contextId": "c-s",
+              "status": {"state": "TASK_STATE_SUBMITTED"}}})"))
+        + ": ping\r\n\r\n"
+        + frame(json::parse(R"({"statusUpdate": {"taskId": "t-s", "contextId": "c-s",
+              "status": {"state": "TASK_STATE_WORKING"}}})"))
+        + frame(json::parse(R"({"artifactUpdate": {"taskId": "t-s", "contextId": "c-s",
+              "artifact": {"artifactId": "a", "parts": [{"text": "Hel"}]},
+              "append": false, "lastChunk": false}})"))
+        + frame(json::parse(R"({"artifactUpdate": {"taskId": "t-s", "contextId": "c-s",
+              "artifact": {"artifactId": "a", "parts": [{"text": "lo"}]},
+              "append": true, "lastChunk": true}})"))
+        + frame(json::parse(R"({"statusUpdate": {"taskId": "t-s", "contextId": "c-s",
+              "status": {"state": "TASK_STATE_COMPLETED"}}})"));
+
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    std::vector<StreamEvent::Type> types;
+    bool last_final = false;
+    auto task = client.send_message_stream("stream", [&](const StreamEvent& ev) {
+        types.push_back(ev.type);
+        last_final = ev.is_final();
+        return true;
+    });
+
+    ASSERT_EQ(srv.methods.size(), 1u);
+    EXPECT_EQ(srv.methods[0], "SendStreamingMessage");
+    EXPECT_EQ(srv.versions[0], "1.0");
+    EXPECT_FALSE(has_key_deep(srv.bodies[0], "kind"));
+    ASSERT_EQ(types.size(), 5u);
+    EXPECT_EQ(types[0], StreamEvent::Type::Task);
+    EXPECT_EQ(types[1], StreamEvent::Type::StatusUpdate);
+    EXPECT_EQ(types[2], StreamEvent::Type::ArtifactUpdate);
+    EXPECT_TRUE(last_final) << "terminal 1.0 state ends the stream";
+    EXPECT_EQ(task.id, "t-s");
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    ASSERT_EQ(task.artifacts.size(), 1u);
+    ASSERT_EQ(task.artifacts[0].parts.size(), 2u);
+    EXPECT_EQ(task.artifacts[0].parts[0].text + task.artifacts[0].parts[1].text, "Hello");
+}
+
+TEST(A2AClientV1, StreamingProbeSurfacesJsonRpcErrorBodyInsteadOfEmptyTask) {
+    // Non-SSE JSON-RPC error replies used to be swallowed (empty Task).
+    MockV1Server srv;
+    srv.sse_body = "";
+    A2AClient client(srv.url());
+    // No card: the 0.3 probe (`message/stream`) gets -32601, the client
+    // retries as SendStreamingMessage, which answers with an empty stream.
+    auto task = client.send_message_stream("hi", nullptr);
+    ASSERT_EQ(srv.methods.size(), 2u);
+    EXPECT_EQ(srv.methods[0], "message/stream");
+    EXPECT_EQ(srv.methods[1], "SendStreamingMessage");
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
+
+    // A genuine RPC error is reported, not hidden.
+    MockA2AServer failing;
+    failing.forced_error = json::parse(R"({"code": -32602, "message": "Invalid params"})");
+    A2AClient c2(failing.url());
+    try {
+        (void)c2.send_message_stream("hi", nullptr);
+        FAIL() << "expected A2ARpcError";
+    } catch (const A2ARpcError& e) {
+        EXPECT_EQ(e.code(), -32602);
+    }
+}
+
+
+TEST(A2AClientV1, CallerNodeReturnsAnswerNotInterimHistoryNote) {
+    // a2a-sdk style final Task: the user's turn and an interim "working"
+    // note sit in `history`, the answer is an artifact and the terminal
+    // status carries no message.
+    MockV1Server srv;
+    srv.unary_result = json::parse(R"({"task": {
+        "id": "t-2", "contextId": "c-2",
+        "status": {"state": "TASK_STATE_COMPLETED"},
+        "artifacts": [{"artifactId": "a", "parts": [{"text": "final answer"}]}],
+        "history": [
+            {"messageId": "u", "role": "ROLE_USER",  "parts": [{"text": "question"}]},
+            {"messageId": "w", "role": "ROLE_AGENT", "parts": [{"text": "working on it"}]}]
+    }})");
+    auto client = std::make_shared<A2AClient>(srv.url());
+    (void)client->fetch_agent_card();
+    A2ACallerNode node("caller", client);
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "question");
+    neograph::graph::RunContext ctx;
+
+    auto out = neograph::async::run_sync(node.run({state, ctx}));
+    ASSERT_FALSE(out.writes.empty());
+    EXPECT_EQ(out.writes[0].value, json("final answer"));
+}
 }  // namespace

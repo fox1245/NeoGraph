@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "smoke_seed",
+  "channels": {"messages": {"reducer": "append"}},
+  "nodes": {
+    "n0": {"type": "pnoop"},
+    "n1": {"type": "pnoop"}
+  },
+  "edges": [
+    {"from": "__start__", "to": "n0"},
+    {"from": "n0", "to": "n1"}
+  ]
+}
