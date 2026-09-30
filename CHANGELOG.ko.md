@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=3e0092dd0389e230c0f6d5d3d5491862745c0b8bc2f2ff221c1a3ec60eab6ba5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=f1b3edef901c4beec3eca79a7c4c7474c0afe5012bd70a27c20dd24c226c8190 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   user data로 전달할 수 있습니다.
 
 ### 수정됨
+- **`RateLimitedProvider`가 호출자가 이미 본 스트림을 다시 재생하지 않습니다.** 재시도는 응답을 첫 토큰부터 다시 시작하므로, 스트림 도중 `overloaded_error`나 연결 끊김 뒤에 재시도하면 `on_chunk` 콜백에 중복 출력이 전달됐습니다. 이제 콜백에 청크가 하나도 전달되지 않았을 때(또는 콜백이 없을 때)만 스트림을 재시도하고, 첫 청크가 전달된 뒤에는 오류를 그대로 전파합니다.
 - **`RateLimitedProvider`가 429가 아닌 일시적 오류에는 지수 백오프를 씁니다.** `Retry-After` 없는 재시도 가능한 500, 502, 503, 529, 스트림 안 `overloaded_error`는 이전에 rate limit 기본 대기(`default_wait_seconds`, 30초 + 1초)를 기다렸습니다. 이제 `transient_base_wait_seconds * 2^시도횟수`(기본 1초, 2초, 4초..., `max_wait_seconds`로 상한, 0이면 즉시 재시도)만큼 기다립니다. 429는 `default_wait_seconds`와 +1초 여유를 유지하고, 양수 `Retry-After`는 여전히 가장 먼저 따릅니다.
 - **프로바이더 실패는 성공한 완료가 아니라 타입이 있는 오류입니다 (`SchemaProvider`, `OpenAIProvider`, #307, #312).** Anthropic `error` 이벤트, Responses `response.failed` / `error` 이벤트나 `status:"failed"` 본문, 종료 이벤트 전에 끊긴 스트림, Gemini의 차단된 프롬프트와 `MALFORMED_FUNCTION_CALL` 종료, OpenRouter 오류 청크가 모두 정상 `end_turn` 완료로 반환됐고, 타입이 있는 오류는 HTTP 429뿐이었습니다. 이제 `neograph::ProviderError`가 `status()`, `retryable()`, 벤더 `code()`, `request_id()`, `retry_after_seconds()`를 담습니다(`RateLimitError`가 이를 상속). 스키마가 일시적 실패 집합(`connection.retryable_statuses`, `retryable_codes`)과 실패 신호(`error` / `fail` 이벤트 액션, `streaming.error_path`, `streaming.require_terminal_event`, `response.error_path`, `failure_status_path`, `block_reason_path`, `error_finish_reasons`)를 선언하며 SSE와 WebSocket이 공유합니다. `RateLimitedProvider`는 재시도 가능한 모든 `ProviderError`(500, 502, 503, 529 등)를 재시도하고 포기할 때 구체 타입을 유지합니다. 오류 본문은 메시지에 들어가기 전에 계정 ID, 키, bearer 토큰을 가리고 잘립니다. 차단된 Gemini 프롬프트는 이제 `end_turn` 대신 `content_filter`로 보고됩니다.
 - **프로바이더 reasoning 항목이 도구 턴을 넘어 유지됩니다(`SchemaProvider`).** 턴 사이에

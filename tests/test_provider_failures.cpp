@@ -325,6 +325,69 @@ TEST(RateLimitedProviderBackoff, BackoffIsCappedByMaxWait) {
     EXPECT_LT(elapsed, 4.5);
 }
 
+// ─── streams are never retried after output was delivered ───
+
+namespace {
+std::string sse_body(const std::vector<std::pair<std::string, json>>& events) {
+    std::string body;
+    for (const auto& line : sse_events(events)) body += line + "\n";
+    return body;
+}
+std::vector<std::pair<std::string, json>> claude_full_stream() {
+    auto events = claude_partial_stream();
+    events.push_back({"content_block_stop", {{"type", "content_block_stop"}}});
+    events.push_back({"message_delta",
+                      {{"type", "message_delta"},
+                       {"delta", {{"stop_reason", "end_turn"}}},
+                       {"usage", {{"output_tokens", 2}}}}});
+    events.push_back({"message_stop", {{"type", "message_stop"}}});
+    return events;
+}
+}  // namespace
+
+TEST(RateLimitedProviderStream, DoesNotRetryAfterChunksWereDelivered) {
+    auto broken = claude_partial_stream();
+    broken.push_back({"error",
+                      {{"type", "error"},
+                       {"error", {{"type", "overloaded_error"}, {"message", "Overloaded"}}}}});
+    Vendor vendor({{200, sse_body(broken), {}, "text/event-stream"},
+                   {200, sse_body(claude_full_stream()), {}, "text/event-stream"}});
+    neograph::llm::RateLimitedProvider::Config cfg;
+    cfg.transient_base_wait_seconds = 0;
+    std::string streamed;
+    const auto error = caught([&] {
+        retrying_with(vendor, cfg)->complete_stream(
+            params(), [&](const std::string& chunk) { streamed += chunk; });
+    });
+    EXPECT_EQ(error.code(), "overloaded_error");
+    EXPECT_EQ(vendor.calls.load(), 1);   // not replayed
+    EXPECT_EQ(streamed, "partial ");     // delivered exactly once
+}
+
+TEST(RateLimitedProviderStream, RetriesWhenTheFailureCameBeforeAnyChunk) {
+    Vendor vendor({{503, claude_error("overloaded_error", "Overloaded"), {}},
+                   {200, sse_body(claude_full_stream()), {}, "text/event-stream"}});
+    neograph::llm::RateLimitedProvider::Config cfg;
+    cfg.transient_base_wait_seconds = 0;
+    std::string streamed;
+    const auto completion = retrying_with(vendor, cfg)->complete_stream(
+        params(), [&](const std::string& chunk) { streamed += chunk; });
+    EXPECT_EQ(vendor.calls.load(), 2);
+    EXPECT_EQ(streamed, "partial ");     // once, from the successful attempt
+    EXPECT_EQ(completion.message.content, "partial ");
+}
+
+TEST(RateLimitedProviderStream, RetriesACutStreamWhenNoCallbackObservesIt) {
+    // Without a callback nothing can be duplicated, so the retry is safe.
+    Vendor vendor({{200, sse_body(claude_partial_stream()), {}, "text/event-stream"},
+                   {200, sse_body(claude_full_stream()), {}, "text/event-stream"}});
+    neograph::llm::RateLimitedProvider::Config cfg;
+    cfg.transient_base_wait_seconds = 0;
+    const auto completion = retrying_with(vendor, cfg)->complete_stream(params(), {});
+    EXPECT_EQ(vendor.calls.load(), 2);
+    EXPECT_EQ(completion.message.content, "partial ");
+}
+
 // ─── #307: Anthropic ───
 
 TEST(ProviderFailureClaude, ErrorEventMidStreamIsARetryableError) {

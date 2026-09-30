@@ -38,6 +38,10 @@ namespace neograph::llm {
  *     process — the decorator returns control to the caller, which
  *     can decide whether to keep going.
  *
+ * A streaming call is retried only while no chunk has reached the
+ * caller's callback; once one was delivered the error propagates, because a
+ * retry would replay the stream from its first token as duplicate output.
+ *
  * Non-retryable `ProviderError`s (400, 401, a blocked prompt, ...) and
  * other exceptions pass through untouched.
  *

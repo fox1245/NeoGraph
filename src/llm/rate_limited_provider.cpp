@@ -116,18 +116,26 @@ RateLimitedProvider::complete_async(const CompletionParams& params) {
 ChatCompletion
 RateLimitedProvider::complete_stream(const CompletionParams& params,
                                      const StreamCallback& on_chunk) {
-    // Same contract as complete_async but on the sync streaming path.
-    // Note that if the 429 happens mid-stream (after some tokens have
-    // already been emitted via on_chunk), a retry will re-emit tokens
-    // from the start — callers that assume "each callback invocation
-    // is unique output" need to be aware. In practice HTTP 429 is
-    // returned before any response body, so this case is rare.
+    // Same contract as complete_async but on the sync streaming path, with
+    // one extra rule: a stream is retried only while nothing has reached
+    // `on_chunk`. A retry replays the response from its first token, so once a
+    // chunk was delivered (an `overloaded_error` mid-stream, a cut connection)
+    // retrying would hand the caller duplicate output it cannot tell apart from
+    // new output. After the first delivered chunk the error propagates instead.
+    bool delivered = false;
+    StreamCallback guarded;
+    if (on_chunk) {
+        guarded = [&delivered, &on_chunk](const std::string& chunk) {
+            delivered = true;
+            on_chunk(chunk);
+        };
+    }
     auto start = std::chrono::steady_clock::now();
     for (int attempt = 0;; ++attempt) {
         try {
-            return inner_->complete_stream(params, on_chunk);
+            return inner_->complete_stream(params, guarded ? guarded : on_chunk);
         } catch (const ProviderError& e) {
-            if (!e.retryable() || attempt >= cfg_.max_retries) throw;
+            if (delivered || !e.retryable() || attempt >= cfg_.max_retries) throw;
             int wait = decide_sleep_seconds(e.status(), e.retry_after_seconds(), attempt, cfg_);
             if (wait < 0) throw;
             if (cfg_.max_total_wait_seconds > 0) {

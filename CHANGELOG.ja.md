@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3e0092dd0389e230c0f6d5d3d5491862745c0b8bc2f2ff221c1a3ec60eab6ba5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f1b3edef901c4beec3eca79a7c4c7474c0afe5012bd70a27c20dd24c226c8190 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -45,6 +45,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **`RateLimitedProvider` は呼び出し側がすでに見たストリームを再生しなくなりました。** 再試行は応答を最初のトークンからやり直すため、ストリーム途中の `overloaded_error` や接続断のあとに再試行すると、`on_chunk` コールバックに重複した出力が渡されていました。今はコールバックにチャンクが 1 つも届いていない間（またはコールバックがない場合）だけストリームを再試行し、最初のチャンクが届いたあとはエラーをそのまま伝播します。
 - **`RateLimitedProvider` は 429 以外の一時的なエラーに指数バックオフを使います。** `Retry-After` のない再試行可能な 500、502、503、529、ストリーム内の `overloaded_error` は、以前は rate limit の既定待機（`default_wait_seconds`、30 秒 + 1 秒）を待っていました。今は `transient_base_wait_seconds * 2^試行回数`（既定 1 秒、2 秒、4 秒...、`max_wait_seconds` で上限、0 なら即再試行）だけ待ちます。429 は `default_wait_seconds` と +1 秒の余裕を保ち、正の `Retry-After` は従来どおり最優先で従います。
 - **プロバイダーの失敗は成功した完了ではなく型付きエラーになりました (`SchemaProvider`, `OpenAIProvider`, #307, #312)。** Anthropic の `error` イベント、Responses の `response.failed` / `error` イベントや `status:"failed"` の本文、終端イベントの前に切れたストリーム、Gemini のブロックされたプロンプトと `MALFORMED_FUNCTION_CALL` 終了、OpenRouter のエラーチャンクは、すべて通常の `end_turn` 完了として返され、型付きエラーは HTTP 429 だけでした。`neograph::ProviderError` が `status()`、`retryable()`、ベンダーの `code()`、`request_id()`、`retry_after_seconds()` を持つようになりました（`RateLimitError` はこれを継承）。スキーマが一時的な失敗の集合（`connection.retryable_statuses`、`retryable_codes`）と失敗シグナル（`error` / `fail` イベントアクション、`streaming.error_path`、`streaming.require_terminal_event`、`response.error_path`、`failure_status_path`、`block_reason_path`、`error_finish_reasons`）を宣言し、SSE と WebSocket が共有します。`RateLimitedProvider` は再試行可能なすべての `ProviderError`（500、502、503、529 など）を再試行し、諦めるときは具体的な型を保ちます。エラー本文はメッセージに入る前にアカウント ID・キー・bearer トークンを伏せて切り詰めます。ブロックされた Gemini のプロンプトは `end_turn` ではなく `content_filter` を報告します。
 - **プロバイダの reasoning 項目がツールターンをまたいで保持される（`SchemaProvider`）。**
