@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=baf135a7983ff84442c75f74dc1c3d25620e1a527d683c2c07cd46171987f9ca -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **带有工具调用的响应不再报告 `end_turn` (#307)。** Gemini 会在 `functionCall` 部分旁边返回 `finishReason: STOP`，部分 OpenAI 兼容网关会在 `tool_calls` 旁边返回 `finish_reason: "stop"`，因此请求执行工具的回合在 `ChatCompletion::stop_reason` 中被标示为已结束（实测：`stop=end_turn tool_calls=1`）。现在 `SchemaProvider`（非流式、SSE、WebSocket）和 `OpenAIProvider` 在存在工具调用且厂商原因被规范化为 `end_turn` 时报告 `tool_use`；`max_tokens`、`content_filter` 等更具体的原因保持不变。
 - **Gemini 3 现在接受由其他厂商或模型写成的历史 (#305/#306)。** 从 Claude、OpenAI 迁移到 Gemini 的历史或手工构造的历史，因为工具调用没有 Gemini 签名，会以 HTTP 400（`Function call is missing a thought_signature`）失败。schema 现在可以声明 `reasoning.foreign_signature`，解释器会把它放在没有捕获签名的助手消息的第一个工具调用上（Gemini 只校验一个轮次的第一个调用）。内置 `gemini` schema 声明了 Google 文档中的 `skip_thought_signature_validator`。实测：Claude thinking -> Gemini 3 原本是 400，使用占位符后在 gemini-3.1-flash-lite、3.5-flash 和 3.6/3.7/3.8-flash 上成功，gemini-2.5-flash-lite 也照常接受。已捕获的签名始终优先。
 - **提前结束的 WebSocket 流按 RFC 6455 关闭状态分类，消失的对端会变成带类型的错误。** 在 `response.completed` 之前收到的 Close 帧，对 1001、1011、1012、1013、1014（服务端问题或重启）以及不带状态的 Close 可重试，对 1000、1002、1003、1007、1008（认证/配额/策略）、1009、1015 和应用自定义代码不可重试。没有 Close 帧就消失的对端（代理重置、服务器被杀、TLS 截断）过去会以原始套接字异常的形式泄漏出来，现在是同样可重试的 `stream_truncated` `ProviderError`。调用方取消仍照常传播。每一类状态码都有回环套接字测试覆盖。
 - **操作型 schema 现在报告带类型的失败。** 在任务创建之前提交请求被拒绝（HTTP 4xx/5xx）时，过去会被包装成 `OperationError`，隐藏状态码和 `retryable()`；现在直接抛出 `ProviderError`，因此 `RateLimitedProvider` 可以安全重试。轮询或收尾阶段的失败仍是 `OperationError`（任务已存在，重新执行调用会再次提交），但现在把 `ProviderError` 作为嵌套原因携带（`std::rethrow_if_nested`）。

@@ -1,6 +1,7 @@
 // Schema-configured SSE decoding, independent of HTTP/WebSocket ownership.
 #include <neograph/llm/schema_provider.h>
 
+#include "stop_reason.h"
 #include "usage_policy.h"
 
 #include "reasoning_carry.h"
@@ -555,9 +556,11 @@ ChatCompletion SchemaProvider::finish_stream(StreamParseState& state) const {
     for (auto& [_, tc] : state.tc_map) {
         state.completion.message.tool_calls.push_back(std::move(tc));
     }
-    state.completion.stop_reason = state.observed_stop_reason.empty()
-        ? (state.completion.message.tool_calls.empty() ? resp_.default_stop_reason : "tool_use")
-        : state.observed_stop_reason;
+    state.completion.stop_reason = detail::reconcile_stop_reason(
+        state.observed_stop_reason.empty()
+            ? (state.completion.message.tool_calls.empty() ? resp_.default_stop_reason : "tool_use")
+            : state.observed_stop_reason,
+        !state.completion.message.tool_calls.empty());
     return std::move(state.completion);
 }
 

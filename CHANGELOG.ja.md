@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=baf135a7983ff84442c75f74dc1c3d25620e1a527d683c2c07cd46171987f9ca -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -48,6 +48,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   後に user data として渡せます。
 
 ### 修正
+- **ツール呼び出しを含む応答が `end_turn` を報告しなくなりました (#307)。** Gemini は `functionCall` パートの隣に `finishReason: STOP` を返し、一部の OpenAI 互換ゲートウェイは `tool_calls` の隣に `finish_reason: "stop"` を返すため、ツール実行を求めるターンが終了したものとして `ChatCompletion::stop_reason` に表示されていました（実測: `stop=end_turn tool_calls=1`）。`SchemaProvider`（非ストリーム、SSE、WebSocket）と `OpenAIProvider` は、ツール呼び出しがあり、ベンダーの理由が `end_turn` に正規化される場合に `tool_use` を報告します。`max_tokens`、`content_filter` などより具体的な理由は維持されます。
 - **Gemini 3 が他のベンダーやモデルの作った履歴を受け付けます (#305/#306)。** Claude や OpenAI から Gemini に移った履歴、または手で作った履歴は、ツール呼び出しに Gemini の署名がないため HTTP 400（`Function call is missing a thought_signature`）で失敗していました。スキーマが `reasoning.foreign_signature` を宣言できるようになり、インタープリターはキャプチャされた署名のないアシスタントメッセージの最初のツール呼び出しにその値を入れます（Gemini はターンの最初の呼び出しだけを検証）。組み込みの `gemini` スキーマは Google が文書化した `skip_thought_signature_validator` を宣言します。実測: Claude thinking -> Gemini 3 は 400 でしたが、プレースホルダーを使うと gemini-3.1-flash-lite、3.5-flash、3.6/3.7/3.8-flash で成功し、gemini-2.5-flash-lite もそのまま受け付けます。キャプチャされた署名があれば常にそちらが優先されます。
 - **早期に終わった WebSocket ストリームを RFC 6455 の close ステータスで分類し、消えた相手は型付きエラーになります。** `response.completed` より前の Close フレームは、1001、1011、1012、1013、1014（サーバー側の問題または再起動）とステータスなしの Close では再試行可能、1000、1002、1003、1007、1008（認証/クォータ/ポリシー）、1009、1015 とアプリケーションコードでは再試行不可です。Close フレームなしで消えた相手（プロキシのリセット、サーバー強制終了、TLS 切断）は以前は生のソケット例外として漏れていましたが、今は同じ再試行可能な `stream_truncated` の `ProviderError` です。呼び出し側のキャンセルは従来どおり伝播します。すべてのコード区分をループバックソケットのテストで検証しています。
 - **オペレーション型スキーマが型付きの失敗を報告します。** ジョブが作られる前に送信リクエストが拒否された場合（HTTP 4xx/5xx）は `OperationError` に包まれ、ステータスと `retryable()` が隠れていました。今は `ProviderError` そのものを投げるため、`RateLimitedProvider` が安全に再試行できます。ポーリング/完了処理の失敗はジョブがすでに存在し、呼び出しを再実行すると再送信になるため `OperationError` のままですが、原因の `ProviderError` を入れ子の例外（`std::rethrow_if_nested`）として持ちます。

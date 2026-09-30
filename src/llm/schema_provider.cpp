@@ -9,6 +9,7 @@
 #include <builtin_schemas.h>
 
 #include "provider_error.h"
+#include "stop_reason.h"
 
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
@@ -668,6 +669,8 @@ SchemaProvider::complete_async(const CompletionParams& params)
                 ? resp_.default_stop_reason
                 : "tool_use";
         }
+        completion.stop_reason = detail::reconcile_stop_reason(
+            std::move(completion.stop_reason), !completion.message.tool_calls.empty());
     }
     if (artifact_parser_factory_) {
         completion.artifacts = parse_artifacts(resp_json, &primitive_context);
