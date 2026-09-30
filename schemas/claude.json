@@ -8,8 +8,12 @@
     "auth_prefix": "",
     "api_key_env": "ANTHROPIC_API_KEY",
     "extra_headers": {
-      "anthropic-version": "2023-06-01"
-    }
+      "anthropic-version": "2023-06-01",
+      "anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}",
+      "anthropic-beta": "${ANTHROPIC_BETA?}"
+    },
+    "retryable_statuses": [408, 429, 500, 502, 503, 504, 529],
+    "retryable_codes": ["overloaded_error", "api_error"]
   },
   "request": {
     "model_field": "model",
@@ -23,7 +27,21 @@
     "stream_field": "stream",
     "extra_fields": {},
     "per_call_fields": [
-      "provider"
+      "provider",
+      "thinking",
+      "output_config.effort",
+      "cache_control",
+      "tool_choice"
+    ],
+    "unknown_knob_policy": "error",
+    "rules": [
+      {
+        "omit": "temperature",
+        "when": {"path": "thinking.type", "in": ["enabled", "adaptive"]}
+      },
+      {
+        "require_greater": {"path": "max_tokens", "than": "thinking.budget_tokens"}
+      }
     ]
   },
   "system_prompt": {
@@ -91,6 +109,17 @@
       "text": "$TEXT"
     }
   },
+  "reasoning": {
+    "carry_types": [
+      "thinking",
+      "redacted_thinking"
+    ],
+    "text_field": "thinking",
+    "delta_fields": {
+      "thinking_delta": "thinking",
+      "signature_delta": "signature"
+    }
+  },
   "response": {
     "strategy": "content_array",
     "content_path": "content",
@@ -106,6 +135,8 @@
     "prompt_tokens_field": "input_tokens",
     "completion_tokens_field": "output_tokens",
     "total_tokens_field": "",
+    "prompt_extra_fields": ["cache_read_input_tokens", "cache_creation_input_tokens"],
+    "cached_tokens_path": "cache_read_input_tokens",
     "stop_reason_path": "stop_reason",
     "stop_reason_map": {
       "end_turn": "end_turn",
@@ -122,6 +153,11 @@
       "message_start": {
         "action": "usage",
         "prompt_path": "message.usage.input_tokens",
+        "prompt_extra_paths": [
+          "message.usage.cache_read_input_tokens",
+          "message.usage.cache_creation_input_tokens"
+        ],
+        "cached_path": "message.usage.cache_read_input_tokens",
         "completion_path": "message.usage.output_tokens"
       },
       "content_block_start": {
@@ -146,8 +182,12 @@
       },
       "message_stop": {
         "action": "done"
+      },
+      "error": {
+        "action": "error"
       }
     },
+    "require_terminal_event": true,
     "stop_reason_path": "delta.stop_reason"
   }
 }

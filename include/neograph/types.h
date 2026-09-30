@@ -93,11 +93,14 @@ struct ChatCompletion {
 
     /// Token usage statistics for the completion.
     struct Usage {
-        int prompt_tokens = 0;      ///< Number of tokens in the prompt.
-        int completion_tokens = 0;  ///< Number of tokens in the completion.
+        /// Number of tokens in the prompt, cached prefix included (SchemaProvider
+        /// adds the cached part where a vendor reports it separately).
+        int prompt_tokens = 0;
+        /// Number of tokens the model produced, reasoning included.
+        int completion_tokens = 0;
         int total_tokens = 0;       ///< Total tokens used (prompt + completion).
-        int cached_prompt_tokens = 0; ///< Prompt-token subset served from cache.
-        int reasoning_tokens = 0;   ///< Completion-token subset spent on reasoning.
+        int cached_prompt_tokens = 0; ///< Prompt-token subset served from cache (0 = none reported).
+        int reasoning_tokens = 0;   ///< Completion-token subset spent on reasoning (0 = none reported).
     } usage;
 };
 
@@ -161,13 +164,19 @@ public:
         add_locked(u);
     }
 
-    /// Read the running total. Not a consistent snapshot across the three
-    /// counters under concurrent writes — read it when the run is done.
+    /// Read the running total. Not a consistent snapshot across the counters
+    /// under concurrent writes — read it when the run is done.
+    ///
+    /// `cached_prompt_tokens` and `reasoning_tokens` are subsets of the prompt
+    /// and completion counters and are informational: the model-token budget
+    /// stays total-based.
     ChatCompletion::Usage snapshot() const noexcept {
         ChatCompletion::Usage u;
-        u.prompt_tokens     = public_counter(prompt_.load(std::memory_order_relaxed));
-        u.completion_tokens = public_counter(completion_.load(std::memory_order_relaxed));
-        u.total_tokens      = public_counter(total_.load(std::memory_order_relaxed));
+        u.prompt_tokens        = public_counter(prompt_.load(std::memory_order_relaxed));
+        u.completion_tokens    = public_counter(completion_.load(std::memory_order_relaxed));
+        u.total_tokens         = public_counter(total_.load(std::memory_order_relaxed));
+        u.cached_prompt_tokens = public_counter(cached_.load(std::memory_order_relaxed));
+        u.reasoning_tokens     = public_counter(reasoning_.load(std::memory_order_relaxed));
         return u;
     }
 
@@ -207,6 +216,14 @@ private:
         const long long completion = nonnegative(u.completion_tokens);
         const long long total      = normalized_total(u, prompt, completion);
         add_counters_locked(prompt, completion, total);
+        // Subsets: a vendor cannot have cached more than it was sent, nor
+        // reasoned more than it produced, so a malformed report is clamped.
+        cached_.store(saturating_sum(cached_.load(std::memory_order_relaxed),
+                                     std::min(nonnegative(u.cached_prompt_tokens), prompt)),
+                      std::memory_order_relaxed);
+        reasoning_.store(saturating_sum(reasoning_.load(std::memory_order_relaxed),
+                                        std::min(nonnegative(u.reasoning_tokens), completion)),
+                         std::memory_order_relaxed);
     }
 
     void add_counters_locked(long long prompt,
@@ -231,6 +248,8 @@ private:
     std::atomic<long long> prompt_{0};
     std::atomic<long long> completion_{0};
     std::atomic<long long> total_{0};
+    std::atomic<long long> cached_{0};
+    std::atomic<long long> reasoning_{0};
     long long              reserved_ = 0;
 };
 

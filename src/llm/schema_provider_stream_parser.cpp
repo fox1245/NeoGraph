@@ -1,6 +1,10 @@
 // Schema-configured SSE decoding, independent of HTTP/WebSocket ownership.
 #include <neograph/llm/schema_provider.h>
 
+#include "usage_policy.h"
+
+#include "reasoning_carry.h"
+
 #include <stdexcept>
 #include <utility>
 
@@ -37,6 +41,7 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
 
             try {
                 auto j = json::parse(payload);
+                check_stream_chunk_error(j);
                 if (const auto reason = parse_stream_stop_reason(j); !reason.empty()) {
                     observed_stop_reason = reason;
                 }
@@ -49,14 +54,8 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                 if (!resp_.usage_path.empty()) {
                     auto u = json_path::at_path(j, resp_.usage_path);
                     if (u && u->is_object()) {
-                        int p = u->value(resp_.prompt_tokens_field, 0);
-                        int c = u->value(resp_.completion_tokens_field, 0);
-                        if (p > 0) completion.usage.prompt_tokens = p;
-                        if (c > 0) completion.usage.completion_tokens = c;
-                        if (!resp_.total_tokens_field.empty()) {
-                            int t = u->value(resp_.total_tokens_field, 0);
-                            if (t > 0) completion.usage.total_tokens = t;
-                        }
+                        detail::merge_stream_usage(completion.usage,
+                                                   detail::parse_usage_object(*u, resp_));
                     }
                 }
 
@@ -65,11 +64,21 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                     auto parts = json_path::at_path(j, stream_.delta_parts_path);
                     if (parts && parts->is_array()) {
                         for (const auto& part : *parts) {
+                            // A "thought" part is reasoning, never public content.
+                            const bool is_thought =
+                                !reasoning_.thought_flag_field.empty() &&
+                                part.contains(reasoning_.thought_flag_field) &&
+                                part[reasoning_.thought_flag_field].is_boolean() &&
+                                part[reasoning_.thought_flag_field].get<bool>();
                             if (part.contains(stream_.delta_text_field) &&
                                 part[stream_.delta_text_field].is_string()) {
                                 std::string token = part[stream_.delta_text_field].get<std::string>();
-                                full_content += token;
-                                if (on_chunk) on_chunk(token);
+                                if (is_thought) {
+                                    completion.message.reasoning += token;
+                                } else {
+                                    full_content += token;
+                                    if (on_chunk) on_chunk(token);
+                                }
                             }
                             if (part.contains(stream_.delta_function_call_field)) {
                                 const auto& fc = part[stream_.delta_function_call_field];
@@ -78,6 +87,14 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                                 call.name = fc.value(stream_.delta_tool_call_name_field, "");
                                 if (fc.contains(stream_.delta_tool_call_args_field)) {
                                     call.arguments = fc[stream_.delta_tool_call_args_field].dump();
+                                }
+                                // Signature beside the functionCall, keyed by tool-call id.
+                                if (!reasoning_.signature_field.empty() &&
+                                    part.contains(reasoning_.signature_field)) {
+                                    detail::push_reasoning_detail(completion.message, json{
+                                        {"type", "tool_call_signature"},
+                                        {"tool_call_id", call.id},
+                                        {"signature", part[reasoning_.signature_field]}});
                                 }
                                 tc_map[gemini_tc_index++] = call;
                             }
@@ -109,6 +126,16 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         }
                     }
 
+                    // Opaque provider continuation arrives as fragments of one
+                    // item; merge them and keep the result verbatim.
+                    if (!reasoning_.message_field.empty() &&
+                        delta->contains(reasoning_.message_field)) {
+                        detail::merge_reasoning_fragments(
+                            completion.message.reasoning_details,
+                            (*delta)[reasoning_.message_field],
+                            reasoning_.stream_concat_fields);
+                    }
+
                     // Tool calls (streamed incrementally)
                     if (delta->contains(stream_.tool_calls_field)) {
                         for (const auto& tc : (*delta)[stream_.tool_calls_field]) {
@@ -127,6 +154,9 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         }
                     }
                 }
+            } catch (const ProviderError&) {
+                // A failure the vendor reported is not a malformed chunk.
+                throw;
             } catch (...) {
                 // Skip malformed chunks
             }
@@ -176,24 +206,40 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                 if (action == "ignore") {
                     // noop
                 }
+                else if (action == "error" || action == "fail") {
+                    // Vendor-reported failure (`error` event, `response.failed`):
+                    // never a normal end of turn.
+                    throw_stream_event_error(event_type, j, event_cfg);
+                }
                 else if (action == "usage") {
                     // SSE event dedicated to emitting usage numbers.
                     // Schema declares `prompt_path` / `completion_path`
-                    // / `total_path` relative to the event's JSON
-                    // payload; any that resolves to a non-zero integer
-                    // overwrites the cumulative usage.
-                    auto read_int = [&](const std::string& p) -> int {
-                        if (p.empty()) return 0;
-                        auto v = json_path::at_path(j, p);
-                        if (!v || !v->is_number_integer()) return 0;
-                        return v->template get<int>();
-                    };
-                    int p = read_int(event_cfg.value("prompt_path", ""));
-                    int c = read_int(event_cfg.value("completion_path", ""));
-                    int t = read_int(event_cfg.value("total_path", ""));
-                    if (p > 0) completion.usage.prompt_tokens = p;
-                    if (c > 0) completion.usage.completion_tokens = c;
-                    if (t > 0) completion.usage.total_tokens = t;
+                    // / `total_path` / `cached_path` / `reasoning_path`
+                    // relative to the event's JSON payload, plus
+                    // `prompt_extra_paths` whose values are ADDED to the
+                    // prompt count (Anthropic's cached prefix); any that
+                    // resolves to a non-zero integer overwrites the
+                    // cumulative usage.
+                    ChatCompletion::Usage latest;
+                    latest.prompt_tokens = detail::usage_int_at(j, event_cfg.value("prompt_path", ""));
+                    if (event_cfg.contains("prompt_extra_paths") &&
+                        event_cfg["prompt_extra_paths"].is_array()) {
+                        for (const auto& extra : event_cfg["prompt_extra_paths"]) {
+                            if (extra.is_string()) {
+                                latest.prompt_tokens = detail::saturating_add(
+                                    latest.prompt_tokens,
+                                    detail::usage_int_at(j, extra.get<std::string>()));
+                            }
+                        }
+                    }
+                    latest.completion_tokens =
+                        detail::usage_int_at(j, event_cfg.value("completion_path", ""));
+                    latest.total_tokens = detail::usage_int_at(j, event_cfg.value("total_path", ""));
+                    latest.cached_prompt_tokens =
+                        detail::usage_int_at(j, event_cfg.value("cached_path", ""));
+                    latest.reasoning_tokens =
+                        detail::usage_int_at(j, event_cfg.value("reasoning_path", ""));
+                    detail::merge_stream_usage(completion.usage, latest);
                 }
                 else if (action == "block_start") {
                     // New content block / output item starting.
@@ -213,6 +259,10 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         if (cb.type == tool_type) {
                             cb.id = block->value(id_fld, "");
                             cb.name = block->value(name_fld, "");
+                        }
+                        if (reasoning_.carry_types.count(cb.type) > 0 && block->is_object()) {
+                            cb.carried = true;
+                            cb.raw = *block;
                         }
                         event_blocks.push_back(cb);
                         event_block_index = cb.index;
@@ -243,6 +293,24 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                         std::string args_fld = event_cfg.value("tool_args_field", "partial_json");
                         std::string chunk = delta->value(args_fld, "");
                         cur_block.args += chunk;
+                    }
+                    else if (cur_block.carried && cur_block.raw.is_object()) {
+                        // Extends a carried block (thinking text, signature...).
+                        const auto target = reasoning_.delta_fields.find(delta_type);
+                        if (target != reasoning_.delta_fields.end()) {
+                            const std::string piece = delta->value(target->second, "");
+                            if (!piece.empty()) {
+                                std::string so_far;
+                                if (cur_block.raw.contains(target->second) &&
+                                    cur_block.raw[target->second].is_string()) {
+                                    so_far = cur_block.raw[target->second].get<std::string>();
+                                }
+                                cur_block.raw[target->second] = so_far + piece;
+                                if (target->second == reasoning_.text_field) {
+                                    completion.message.reasoning += piece;
+                                }
+                            }
+                        }
                     }
                 }
                 else if (action == "text_delta") {
@@ -276,6 +344,27 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                             call.arguments = cb.args;
                             tc_map[cb.index] = call;
                         }
+                        if (cb.carried) {
+                            // Prefer the complete item some APIs send with the
+                            // stop event; otherwise keep the accumulated block.
+                            json item = cb.raw;
+                            bool from_event = false;
+                            const std::string final_path = event_cfg.value("final_block_path", "");
+                            if (!final_path.empty()) {
+                                auto final_item = json_path::at_path(j, final_path);
+                                if (final_item && final_item->is_object()) {
+                                    item = *final_item;
+                                    from_event = true;
+                                }
+                            }
+                            if (from_event && !reasoning_.text_field.empty() &&
+                                item.contains(reasoning_.text_field)) {
+                                detail::append_reasoning_text(
+                                    completion.message,
+                                    detail::reasoning_text_of(item[reasoning_.text_field]));
+                            }
+                            detail::push_reasoning_detail(completion.message, std::move(item));
+                        }
                     }
                     event_block_index = -1;
                 }
@@ -298,6 +387,8 @@ bool SchemaProvider::consume_stream_line(StreamParseState& state,
                     }
                     terminal_event_seen = true;
                 }
+            } catch (const ProviderError&) {
+                throw;
             } catch (...) {
                 // Skip malformed
             }
@@ -335,19 +426,7 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
         if (resp_.usage_path.empty()) return;
         auto u = json_path::at_path(container, resp_.usage_path);
         if (!u || !u->is_object()) return;
-        int p = u->value(resp_.prompt_tokens_field, 0);
-        int c = u->value(resp_.completion_tokens_field, 0);
-        if (p > 0) completion.usage.prompt_tokens = p;
-        if (c > 0) completion.usage.completion_tokens = c;
-        if (!resp_.total_tokens_field.empty()) {
-            int t = u->value(resp_.total_tokens_field, 0);
-            if (t > 0) completion.usage.total_tokens = t;
-        }
-        if (completion.usage.total_tokens == 0) {
-            completion.usage.total_tokens =
-                completion.usage.prompt_tokens +
-                completion.usage.completion_tokens;
-        }
+        detail::merge_stream_usage(completion.usage, detail::parse_usage_object(*u, resp_));
     };
 
     // A single frame is a value-level event; `continue` skips that frame.
@@ -358,22 +437,15 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
             observed_stop_reason = reason;
         }
 
-        // Server-side error frames terminate the stream with detail.
-        if (event_type == "error") {
-            std::string err_msg = j.value("message", "");
-            if (err_msg.empty() && j.contains("error") && j["error"].is_object()) {
-                err_msg = j["error"].value("message", "unknown");
-            }
-            throw std::runtime_error(
-                "openai-responses ws error: " + err_msg);
-        }
-
         if (!events_config.contains(event_type)) continue;
         const auto& event_cfg = events_config[event_type];
         const std::string action = event_cfg.value("action", "ignore");
 
         if (action == "ignore") {
             continue;
+        } else if (action == "error" || action == "fail") {
+            // Same schema-declared failure events as the SSE path.
+            throw_stream_event_error(event_type, j, event_cfg);
         } else if (action == "block_start") {
             // Mirrors complete_stream's block_start: openai-responses
             // schema sets block_path="item", tool_call_type="function_call",
@@ -392,6 +464,10 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
                 if (cb.type == tool_type) {
                     cb.id   = block->value(id_fld, "");
                     cb.name = block->value(name_fld, "");
+                }
+                if (reasoning_.carry_types.count(cb.type) > 0 && block->is_object()) {
+                    cb.carried = true;
+                    cb.raw = *block;
                 }
                 event_blocks.push_back(cb);
                 event_block_index = cb.index;
@@ -421,6 +497,25 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
                     call.arguments = cb.args;
                     tc_map[cb.index] = call;
                 }
+                if (cb.carried) {
+                    json item = cb.raw;
+                    bool from_event = false;
+                    const std::string final_path = event_cfg.value("final_block_path", "");
+                    if (!final_path.empty()) {
+                        auto final_item = json_path::at_path(j, final_path);
+                        if (final_item && final_item->is_object()) {
+                            item = *final_item;
+                            from_event = true;
+                        }
+                    }
+                    if (from_event && !reasoning_.text_field.empty() &&
+                        item.contains(reasoning_.text_field)) {
+                        detail::append_reasoning_text(
+                            completion.message,
+                            detail::reasoning_text_of(item[reasoning_.text_field]));
+                    }
+                    detail::push_reasoning_detail(completion.message, std::move(item));
+                }
             }
             event_block_index = -1;
         } else if (action == "done") {
@@ -442,6 +537,20 @@ void SchemaProvider::consume_ws_event(StreamParseState& state, const json& j,
 }
 
 ChatCompletion SchemaProvider::finish_stream(StreamParseState& state) const {
+    if (stream_.require_terminal_event && !state.terminal_event_seen) {
+        // The connection ended (or was cut) before the vendor's terminal
+        // event. What arrived is a fragment, not a finished answer.
+        throw ProviderError(
+            "SchemaProvider (" + provider_name_ +
+                "): stream ended before its terminal event; the response is incomplete",
+            200, true, "stream_truncated");
+    }
+    // A stream may report the parts (Anthropic: input at message_start, output
+    // at message_delta) but never a total; the components are the total.
+    if (state.completion.usage.total_tokens == 0) {
+        state.completion.usage.total_tokens = detail::saturating_add(
+            state.completion.usage.prompt_tokens, state.completion.usage.completion_tokens);
+    }
     state.completion.message.content = std::move(state.full_content);
     for (auto& [_, tc] : state.tc_map) {
         state.completion.message.tool_calls.push_back(std::move(tc));

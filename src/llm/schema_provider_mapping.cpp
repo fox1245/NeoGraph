@@ -1,12 +1,17 @@
 // Schema-driven, network-free request mapping and response decoding.
 #include <neograph/llm/schema_provider.h>
 
+#include "provider_error.h"
+#include "header_template.h"
+#include "reasoning_carry.h"
 #include "temperature_policy.h"
+#include "usage_policy.h"
 
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <stdexcept>
 
@@ -58,7 +63,20 @@ void SchemaProvider::parse_schema()
     if (c.contains("extra_headers") && c["extra_headers"].is_object()) {
         for (const auto& [k, v] : c["extra_headers"].items()) {
             conn_.extra_headers[k] = v.get<std::string>();
+            detail::validate_header_template(k, conn_.extra_headers[k]);
         }
+    }
+    for (const auto& [name, value] : user_config_.extra_headers) {
+        detail::validate_header_name(name);
+        if (detail::has_line_break(value)) {
+            throw std::invalid_argument("SchemaProvider: Config::extra_headers value for '" + name +
+                                        "' contains a line break");
+        }
+    }
+    {
+        const auto policy = detail::parse_retry_policy(c);
+        conn_.retryable_statuses = policy.statuses;
+        conn_.retryable_codes = policy.codes;
     }
 
     // --- Request ---
@@ -122,6 +140,67 @@ void SchemaProvider::parse_schema()
     if (r.contains("per_call_fields") && r["per_call_fields"].is_array()) {
         for (const auto& path : r["per_call_fields"]) {
             if (path.is_string()) req_.per_call_fields.insert(path.get<std::string>());
+        }
+    }
+    {
+        const std::string policy = r.value("unknown_knob_policy", "drop");
+        if (policy != "drop" && policy != "error") {
+            throw std::invalid_argument(
+                "SchemaProvider: request.unknown_knob_policy must be \"drop\" or \"error\"");
+        }
+        req_.unknown_knob_is_error = policy == "error";
+    }
+    if (r.contains("rules")) {
+        if (!r["rules"].is_array()) {
+            throw std::invalid_argument("SchemaProvider: request.rules must be an array");
+        }
+        for (const auto& rule : r["rules"]) {
+            RequestConfig::Rule parsed;
+            const auto path_of = [&rule](const char* key) {
+                if (!rule.contains(key) || !rule[key].is_string() ||
+                    rule[key].template get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        std::string("SchemaProvider: request.rules entry needs a string \"") + key +
+                        "\"");
+                }
+                return rule[key].template get<std::string>();
+            };
+            if (rule.is_object() && rule.contains("omit")) {
+                parsed.kind = RequestConfig::Rule::Kind::Omit;
+                parsed.path = path_of("omit");
+                if (rule.contains("when")) {
+                    const auto& when = rule["when"];
+                    if (!when.is_object() || !when.contains("path") || !when["path"].is_string() ||
+                        !when.contains("in") || !when["in"].is_array()) {
+                        throw std::invalid_argument(
+                            "SchemaProvider: request.rules \"when\" needs a \"path\" string and an "
+                            "\"in\" array of strings");
+                    }
+                    parsed.when_path = when["path"].template get<std::string>();
+                    for (const auto& value : when["in"]) {
+                        if (!value.is_string()) {
+                            throw std::invalid_argument(
+                                "SchemaProvider: request.rules \"when.in\" entries must be strings");
+                        }
+                        parsed.when_in.insert(value.template get<std::string>());
+                    }
+                }
+            } else if (rule.is_object() && rule.contains("require_greater")) {
+                const auto& spec = rule["require_greater"];
+                if (!spec.is_object() || !spec.contains("path") || !spec["path"].is_string() ||
+                    !spec.contains("than") || !spec["than"].is_string()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: request.rules \"require_greater\" needs \"path\" and "
+                        "\"than\" strings");
+                }
+                parsed.kind = RequestConfig::Rule::Kind::RequireGreater;
+                parsed.path = spec["path"].template get<std::string>();
+                parsed.than = spec["than"].template get<std::string>();
+            } else {
+                throw std::invalid_argument(
+                    "SchemaProvider: request.rules entries must hold \"omit\" or \"require_greater\"");
+            }
+            req_.rules.push_back(std::move(parsed));
         }
     }
     // --- System Prompt ---
@@ -266,6 +345,23 @@ void SchemaProvider::parse_schema()
     resp_.prompt_tokens_field = resp.value("prompt_tokens_field", "prompt_tokens");
     resp_.completion_tokens_field = resp.value("completion_tokens_field", "completion_tokens");
     resp_.total_tokens_field = resp.value("total_tokens_field", "total_tokens");
+    resp_.cached_tokens_path = resp.value("cached_tokens_path", "");
+    resp_.reasoning_tokens_path = resp.value("reasoning_tokens_path", "");
+    resp_.completion_includes_reasoning = resp.value("completion_includes_reasoning", true);
+    if (resp.contains("prompt_extra_fields")) {
+        const auto& extras = resp["prompt_extra_fields"];
+        if (!extras.is_array()) {
+            throw std::invalid_argument(
+                "SchemaProvider: response.prompt_extra_fields must be an array of strings");
+        }
+        for (const auto& item : extras) {
+            if (!item.is_string() || item.get<std::string>().empty()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: response.prompt_extra_fields entries must be non-empty strings");
+            }
+            resp_.prompt_extra_fields.push_back(item.get<std::string>());
+        }
+    }
     resp_.stop_reason_path = resp.value("stop_reason_path", "");
     if (resp.contains("stop_reason_map") && resp["stop_reason_map"].is_object()) {
         for (const auto& [raw, normalized] : resp["stop_reason_map"].items()) {
@@ -283,6 +379,96 @@ void SchemaProvider::parse_schema()
         }
     }
     resp_.default_stop_reason = resp.value("default_stop_reason", "unknown");
+
+    // --- Failure signals (all optional; absent = the body is never a failure) ---
+    auto string_set = [](const json& object, const char* key, const char* section) {
+        std::set<std::string> out;
+        if (!object.contains(key)) return out;
+        const auto& list = object[key];
+        if (!list.is_array()) {
+            throw std::invalid_argument(std::string("SchemaProvider: ") + section + "." + key +
+                                        " must be an array of strings");
+        }
+        for (const auto& item : list) {
+            if (!item.is_string() || item.get<std::string>().empty()) {
+                throw std::invalid_argument(std::string("SchemaProvider: ") + section + "." + key +
+                                            " entries must be non-empty strings");
+            }
+            out.insert(item.get<std::string>());
+        }
+        return out;
+    };
+    resp_.error_path = resp.value("error_path", "");
+    resp_.failure_status_path = resp.value("failure_status_path", "");
+    resp_.failure_statuses = string_set(resp, "failure_statuses", "response");
+    resp_.block_reason_path = resp.value("block_reason_path", "");
+    resp_.block_stop_reason = resp.value("block_stop_reason", "content_filter");
+    resp_.error_finish_reasons = string_set(resp, "error_finish_reasons", "response");
+
+    // --- Reasoning carry (optional; absent = reasoning items are ignored) ---
+    reasoning_ = {};
+    if (schema_.contains("reasoning")) {
+        const auto& rj = schema_["reasoning"];
+        if (!rj.is_object()) {
+            throw std::invalid_argument("SchemaProvider: reasoning must be an object");
+        }
+        auto string_field = [&rj](const char* key) {
+            if (!rj.contains(key)) return std::string();
+            if (!rj[key].is_string()) {
+                throw std::invalid_argument(
+                    std::string("SchemaProvider: reasoning.") + key + " must be a string");
+            }
+            return rj[key].get<std::string>();
+        };
+        if (rj.contains("carry_types")) {
+            if (!rj["carry_types"].is_array()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: reasoning.carry_types must be an array of strings");
+            }
+            for (const auto& t : rj["carry_types"]) {
+                if (!t.is_string() || t.get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: reasoning.carry_types entries must be non-empty strings");
+                }
+                reasoning_.carry_types.insert(t.get<std::string>());
+            }
+        }
+        reasoning_.text_field = string_field("text_field");
+        reasoning_.thought_flag_field = string_field("thought_flag_field");
+        reasoning_.signature_field = string_field("signature_field");
+        reasoning_.foreign_signature = string_field("foreign_signature");
+        if (!reasoning_.foreign_signature.empty() && reasoning_.signature_field.empty()) {
+            throw std::invalid_argument(
+                "SchemaProvider: reasoning.foreign_signature requires reasoning.signature_field");
+        }
+        reasoning_.message_field = string_field("message_field");
+        if (rj.contains("delta_fields")) {
+            if (!rj["delta_fields"].is_object()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: reasoning.delta_fields must be an object of strings");
+            }
+            for (auto [delta_type, target] : rj["delta_fields"].items()) {
+                if (!target.is_string() || target.get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: reasoning.delta_fields values must be non-empty strings");
+                }
+                reasoning_.delta_fields[delta_type] = target.get<std::string>();
+            }
+        }
+        if (rj.contains("stream_concat_fields")) {
+            if (!rj["stream_concat_fields"].is_array()) {
+                throw std::invalid_argument(
+                    "SchemaProvider: reasoning.stream_concat_fields must be an array of strings");
+            }
+            for (const auto& f : rj["stream_concat_fields"]) {
+                if (!f.is_string() || f.get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: reasoning.stream_concat_fields entries must be non-empty strings");
+                }
+                reasoning_.stream_concat_fields.insert(f.get<std::string>());
+            }
+        }
+    }
 
     artifact_parser_primitive_name_ = resp.value("artifact_parser", "rules");
     require_primitive(SchemaPrimitiveCategory::ArtifactParser,
@@ -371,6 +557,8 @@ void SchemaProvider::parse_schema()
     stream_.delta_tool_call_args_field = st.value("tool_call_args_field", "args");
     stream_.stop_reason_path = st.value("stop_reason_path", "");
     stream_.stop_reason_status_path = st.value("stop_reason_status_path", "");
+    stream_.error_path = st.value("error_path", "");
+    stream_.require_terminal_event = st.value("require_terminal_event", false);
     if (st.contains("events")) {
         stream_.events_config = st["events"];
     }
@@ -507,6 +695,41 @@ std::string SchemaProvider::build_endpoint(const std::string& model,
     return ep;
 }
 
+namespace {
+// HTTP header names are case-insensitive: replacing must not leave two headers
+// that differ only in case (both would be sent).
+void set_header(std::map<std::string, std::string>& headers, const std::string& name,
+                std::string value) {
+    const auto same = [&name](const std::string& other) {
+        if (other.size() != name.size()) return false;
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                std::tolower(static_cast<unsigned char>(other[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (auto it = headers.begin(); it != headers.end();) {
+        it = same(it->first) ? headers.erase(it) : std::next(it);
+    }
+    headers[name] = std::move(value);
+}
+}  // namespace
+
+std::map<std::string, std::string> SchemaProvider::resolved_extra_headers() const {
+    std::map<std::string, std::string> headers;
+    for (const auto& [name, value] : conn_.extra_headers) {
+        if (auto expanded = detail::expand_header_template(name, value)) {
+            set_header(headers, name, std::move(*expanded));
+        }
+    }
+    for (const auto& [name, value] : user_config_.extra_headers) {
+        set_header(headers, name, value);
+    }
+    return headers;
+}
+
 std::map<std::string, std::string> SchemaProvider::build_headers(
     std::string_view api_key) const {
     std::map<std::string, std::string> headers;
@@ -516,9 +739,10 @@ std::map<std::string, std::string> SchemaProvider::build_headers(
         headers[conn_.auth_header] = conn_.auth_prefix + std::string(api_key);
     }
 
-    // Extra headers (e.g., anthropic-version)
-    for (const auto& [k, v] : conn_.extra_headers) {
-        headers[k] = v;
+    // Extra headers: the schema's (e.g. anthropic-version, with ${ENV}
+    // expanded), then Config::extra_headers, which win.
+    for (auto& [name, value] : resolved_extra_headers()) {
+        set_header(headers, name, std::move(value));
     }
 
     return headers;
@@ -595,11 +819,21 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     tc_arr.push_back(substitute(tool_call_.item_template, vars));
                 }
                 j[tool_call_.field] = tc_arr;
+                if (!reasoning_.message_field.empty() && msg.reasoning_details.is_array() &&
+                    !msg.reasoning_details.empty()) {
+                    j[reasoning_.message_field] = msg.reasoning_details;
+                }
                 break;
             }
             case ToolCallStrategy::CONTENT_ARRAY: {
                 // Claude: content is array of text + tool_use items
                 json content_arr = json::array();
+                // Carried reasoning blocks go first, unmodified.
+                if (msg.reasoning_details.is_array()) {
+                    for (const auto& item : msg.reasoning_details) {
+                        if (detail::is_carried_item(item, reasoning_.carry_types)) content_arr.push_back(item);
+                    }
+                }
                 if (!msg.content.empty()) {
                     std::map<std::string, json> text_vars;
                     text_vars["TEXT"] = msg.content;
@@ -628,6 +862,8 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     text_vars["TEXT"] = msg.content;
                     parts.push_back(substitute(tool_call_.text_item_template, text_vars));
                 }
+                bool signed_call = false;
+                std::optional<std::size_t> first_call_part;
                 for (const auto& tc : msg.tool_calls) {
                     std::map<std::string, json> vars;
                     vars["NAME"] = tc.name;
@@ -637,7 +873,22 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
                     } catch (...) {
                         vars["ARGUMENTS_OBJECT"] = json::object();
                     }
-                    parts.push_back(substitute(tool_call_.item_template, vars));
+                    json part = substitute(tool_call_.item_template, vars);
+                    if (!reasoning_.signature_field.empty()) {
+                        if (auto sig = detail::find_tool_call_signature(msg.reasoning_details, tc.id)) {
+                            part[reasoning_.signature_field] = *sig;
+                            signed_call = true;
+                        }
+                    }
+                    if (!first_call_part) first_call_part = parts.size();
+                    parts.push_back(std::move(part));
+                }
+                // No captured signature anywhere in this turn: the history is
+                // foreign. Only the first call of a turn is validated.
+                if (!signed_call && first_call_part && !reasoning_.foreign_signature.empty()) {
+                    json first = parts[*first_call_part];
+                    first[reasoning_.signature_field] = reasoning_.foreign_signature;
+                    parts[*first_call_part] = std::move(first);
                 }
                 j[msgs_.content_field] = parts;
                 break;
@@ -690,6 +941,10 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
     } else {
         j[msgs_.content_field] = msg.content;
     }
+    if (msg.role == "assistant" && !reasoning_.message_field.empty() &&
+        msg.reasoning_details.is_array() && !msg.reasoning_details.empty()) {
+        j[reasoning_.message_field] = msg.reasoning_details;
+    }
 
     return j;
 }
@@ -716,6 +971,12 @@ json SchemaProvider::serialize_messages(const std::vector<ChatMessage>& messages
             }
 
             if (!msg.tool_calls.empty()) {
+                // Carried reasoning items precede the items they produced.
+                if (msg.reasoning_details.is_array()) {
+                    for (const auto& item : msg.reasoning_details) {
+                        if (detail::is_carried_item(item, reasoning_.carry_types)) arr.push_back(item);
+                    }
+                }
                 // Optional leading text message from the assistant.
                 if (!msg.content.empty()) {
                     json text_msg;
@@ -983,16 +1244,26 @@ json SchemaProvider::build_body(const CompletionParams& params, bool websocket) 
     // `temperature_path` / `max_tokens_path`), so caller can target
     // nested structure (`reasoning.effort`, `thinking.budget_tokens`).
     //
-    // Unknown paths (not in `req_.per_call_fields`) are silently
-    // dropped. The schema, not the caller, owns the contract — same
-    // discipline as `temperature_path` and `max_tokens_path`. This
-    // also means a typo in caller code (`reasonin.effort`) silently
-    // does nothing instead of stamping a malformed key, which is
-    // safer for production.
+    // Unknown paths (not in `req_.per_call_fields`) are never stamped:
+    // the schema, not the caller, owns the contract. What the caller
+    // learns about it is `request.unknown_knob_policy`: "error" (every
+    // built-in schema) throws so a typo like `reasonin.effort` cannot
+    // look like success; "drop" (custom schemas that predate the key)
+    // ignores the key.
     if (params.extra_fields.is_object()) {
         for (const auto& [path, value] : params.extra_fields.items()) {
             if (req_.per_call_fields.count(path)) {
                 json_path::set_path(body, path, value);
+            } else if (req_.unknown_knob_is_error) {
+                std::string declared;
+                for (const auto& key : req_.per_call_fields) {
+                    if (!declared.empty()) declared += ", ";
+                    declared += key;
+                }
+                throw std::invalid_argument(
+                    "SchemaProvider (" + provider_name_ + "): extra_fields key '" + path +
+                    "' is not a declared per-call field; declared keys: " +
+                    (declared.empty() ? std::string("(none)") : declared));
             }
         }
     }
@@ -1021,7 +1292,52 @@ json SchemaProvider::build_body(const CompletionParams& params, bool websocket) 
         json_path::set_path(body, req_.max_tokens_path, max_tokens);
     }
 
+    apply_request_rules(body);
     return body;
+}
+
+namespace {
+// json has no erase; rebuild the parent object without the key.
+void erase_path(json& root, const std::string& path) {
+    const auto dot = path.rfind('.');
+    const std::string parent_path = dot == std::string::npos ? std::string() : path.substr(0, dot);
+    const std::string key = dot == std::string::npos ? path : path.substr(dot + 1);
+    const auto parent = json_path::at_path(root, parent_path);
+    if (!parent || !parent->is_object() || !parent->contains(key.c_str())) return;
+    json rebuilt = json::object();
+    for (const auto& [name, value] : parent->items()) {
+        if (name != key) rebuilt[name] = value;
+    }
+    if (parent_path.empty()) {
+        root = std::move(rebuilt);
+    } else {
+        json_path::set_path(root, parent_path, rebuilt);
+    }
+}
+}  // namespace
+
+void SchemaProvider::apply_request_rules(json& body) const {
+    for (const auto& rule : req_.rules) {
+        if (rule.kind == RequestConfig::Rule::Kind::Omit) {
+            bool applies = rule.when_path.empty();
+            if (!applies) {
+                const auto value = json_path::at_path(body, rule.when_path);
+                applies = value && value->is_string() &&
+                          rule.when_in.count(value->template get<std::string>()) > 0;
+            }
+            if (applies) erase_path(body, rule.path);
+        } else {
+            const auto lhs = json_path::at_path(body, rule.path);
+            const auto rhs = json_path::at_path(body, rule.than);
+            if (lhs && rhs && lhs->is_number_integer() && rhs->is_number_integer() &&
+                lhs->template get<long long>() <= rhs->template get<long long>()) {
+                throw std::invalid_argument(
+                    "SchemaProvider (" + provider_name_ + "): " + rule.path + " (" +
+                    std::to_string(lhs->template get<long long>()) + ") must be greater than " +
+                    rule.than + " (" + std::to_string(rhs->template get<long long>()) + ")");
+            }
+        }
+    }
 }
 
 json SchemaProvider::build_sse_body(const CompletionParams& params) const {
@@ -1051,6 +1367,7 @@ json SchemaProvider::build_ws_body(const CompletionParams& params) const {
 // ============================================================================
 
 ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
+    check_response_failure(resp_json);
     ChatMessage msg;
     msg.role = "assistant";
 
@@ -1076,6 +1393,14 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                     msg.reasoning = (*message)[field].get<std::string>();
                     break;
                 }
+            }
+
+            // Opaque provider continuation (for example OpenRouter
+            // `reasoning_details`), kept verbatim and replayed on this message.
+            if (!reasoning_.message_field.empty() &&
+                message->contains(reasoning_.message_field) &&
+                (*message)[reasoning_.message_field].is_array()) {
+                msg.reasoning_details = (*message)[reasoning_.message_field];
             }
 
             if (message->contains(resp_.tool_calls_field) &&
@@ -1126,6 +1451,11 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                         }
                     }
                     msg.tool_calls.push_back(std::move(call));
+                } else if (reasoning_.carry_types.count(type) > 0) {
+                    detail::push_reasoning_detail(msg, block);
+                    if (!reasoning_.text_field.empty() && block.contains(reasoning_.text_field)) {
+                        detail::append_reasoning_text(msg, detail::reasoning_text_of(block[reasoning_.text_field]));
+                    }
                 }
             }
             msg.content = full_text;
@@ -1166,7 +1496,13 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                     }
                     msg.tool_calls.push_back(std::move(call));
                 }
-                // Other item types (reasoning, web_search_call, etc.) are ignored.
+                else if (reasoning_.carry_types.count(type) > 0) {
+                    detail::push_reasoning_detail(msg, item);
+                    if (!reasoning_.text_field.empty() && item.contains(reasoning_.text_field)) {
+                        detail::append_reasoning_text(msg, detail::reasoning_text_of(item[reasoning_.text_field]));
+                    }
+                }
+                // Other item types (web_search_call, etc.) are ignored.
             }
             msg.content = full_text;
             break;
@@ -1178,9 +1514,19 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
 
             std::string full_text;
             for (const auto& part : *parts) {
+                // A "thought" part is reasoning, not user-visible content.
+                const bool is_thought =
+                    !reasoning_.thought_flag_field.empty() &&
+                    part.contains(reasoning_.thought_flag_field) &&
+                    part[reasoning_.thought_flag_field].is_boolean() &&
+                    part[reasoning_.thought_flag_field].get<bool>();
                 if (part.contains(resp_.text_field) && part[resp_.text_field].is_string()) {
-                    if (!full_text.empty()) full_text += "\n";
-                    full_text += part[resp_.text_field].get<std::string>();
+                    if (is_thought) {
+                        detail::append_reasoning_text(msg, part[resp_.text_field].get<std::string>());
+                    } else {
+                        if (!full_text.empty()) full_text += "\n";
+                        full_text += part[resp_.text_field].get<std::string>();
+                    }
                 }
                 if (part.contains(resp_.function_call_field)) {
                     const auto& fc = part[resp_.function_call_field];
@@ -1190,6 +1536,15 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                     if (fc.contains(resp_.tool_call_args_field)) {
                         const auto& args = fc[resp_.tool_call_args_field];
                         call.arguments = args.dump();
+                    }
+                    // The signature sits beside the functionCall and must be
+                    // echoed on that same part; key it by the tool-call id.
+                    if (!reasoning_.signature_field.empty() &&
+                        part.contains(reasoning_.signature_field)) {
+                        detail::push_reasoning_detail(msg, json{
+                            {"type", "tool_call_signature"},
+                            {"tool_call_id", call.id},
+                            {"signature", part[reasoning_.signature_field]}});
                     }
                     msg.tool_calls.push_back(std::move(call));
                 }
@@ -1263,26 +1618,34 @@ std::vector<GeneratedArtifact> SchemaProvider::parse_artifacts(
 }
 
 ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
-    ChatCompletion::Usage usage;
-    auto u = json_path::at_path(resp_json, resp_.usage_path);
-    if (!u) return usage;
+    const auto u = json_path::at_path(resp_json, resp_.usage_path);
+    if (!u) return {};
+    return detail::parse_usage_object(*u, resp_);
+}
 
-    usage.prompt_tokens = u->value(resp_.prompt_tokens_field, 0);
-    usage.completion_tokens = u->value(resp_.completion_tokens_field, 0);
-    if (!resp_.total_tokens_field.empty()) {
-        usage.total_tokens = u->value(resp_.total_tokens_field, 0);
-    } else {
-        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
-    }
-    return usage;
+// A blocked prompt returns no candidates at all; without this the empty body
+// normalizes to a plain end of turn.
+static bool prompt_blocked(const json& body, const std::string& block_reason_path) {
+    if (block_reason_path.empty()) return false;
+    const auto reason = json_path::at_path(body, block_reason_path);
+    return reason && reason->is_string() && !reason->get<std::string>().empty();
 }
 
 std::string SchemaProvider::parse_stop_reason(const json& resp_json) const {
-    auto map_reason = [](const json& value,
-                         const std::map<std::string, std::string>& mapping,
-                         bool unknown_when_unmapped) {
+    if (prompt_blocked(resp_json, resp_.block_reason_path)) return resp_.block_stop_reason;
+    auto map_reason = [this](const json& value,
+                             const std::map<std::string, std::string>& mapping,
+                             bool unknown_when_unmapped) {
         if (!value.is_string()) return std::string{};
         const auto raw = value.get<std::string>();
+        if (resp_.error_finish_reasons.count(raw) > 0) {
+            // The model failed; a normalized "unknown" stop would let the
+            // agent loop carry on as if it had answered.
+            throw ProviderError(
+                "SchemaProvider (" + provider_name_ + "): generation failed with finish reason '" +
+                    raw + "'",
+                200, false, raw);
+        }
         const auto it = mapping.find(raw);
         if (it != mapping.end()) return it->second;
         return unknown_when_unmapped ? std::string("unknown") : std::string{};
@@ -1304,11 +1667,20 @@ std::string SchemaProvider::parse_stop_reason(const json& resp_json) const {
 }
 
 std::string SchemaProvider::parse_stream_stop_reason(const json& event_json) const {
-    auto map_reason = [](const json& value,
-                         const std::map<std::string, std::string>& mapping,
-                         bool unknown_when_unmapped) {
+    if (prompt_blocked(event_json, resp_.block_reason_path)) return resp_.block_stop_reason;
+    auto map_reason = [this](const json& value,
+                             const std::map<std::string, std::string>& mapping,
+                             bool unknown_when_unmapped) {
         if (!value.is_string()) return std::string{};
         const auto raw = value.get<std::string>();
+        if (resp_.error_finish_reasons.count(raw) > 0) {
+            // The model failed; a normalized "unknown" stop would let the
+            // agent loop carry on as if it had answered.
+            throw ProviderError(
+                "SchemaProvider (" + provider_name_ + "): generation failed with finish reason '" +
+                    raw + "'",
+                200, false, raw);
+        }
         const auto it = mapping.find(raw);
         if (it != mapping.end()) return it->second;
         return unknown_when_unmapped ? std::string("unknown") : std::string{};
@@ -1327,6 +1699,63 @@ std::string SchemaProvider::parse_stream_stop_reason(const json& event_json) con
         }
     }
     return {};
+}
+
+void SchemaProvider::check_response_failure(const json& resp_json) const {
+    if (!resp_json.is_object()) return;
+    const detail::RetryPolicy policy{conn_.retryable_statuses, conn_.retryable_codes};
+    if (!resp_.error_path.empty()) {
+        const auto error = json_path::at_path(resp_json, resp_.error_path);
+        if (error && error->is_string()) {
+            throw ProviderError(
+                "API error (HTTP 200 with error body): " +
+                    detail::redact_and_truncate(error->get<std::string>()),
+                200, false);
+        }
+        if (error && error->is_object()) {
+            detail::throw_embedded_error("API error (HTTP 200 with error body)", 200,
+                                         resp_json, policy, &*error);
+        }
+    }
+    if (!resp_.failure_status_path.empty() && !resp_.failure_statuses.empty()) {
+        const auto status = json_path::at_path(resp_json, resp_.failure_status_path);
+        if (status && status->is_string() &&
+            resp_.failure_statuses.count(status->get<std::string>()) > 0) {
+            const auto value = status->get<std::string>();
+            throw ProviderError(
+                "SchemaProvider (" + provider_name_ + "): response status '" + value + "'",
+                200, false, value);
+        }
+    }
+}
+
+void SchemaProvider::throw_stream_event_error(const std::string& event_type,
+                                              const json& payload,
+                                              const json& event_cfg) const {
+    const detail::RetryPolicy policy{conn_.retryable_statuses, conn_.retryable_codes};
+    const std::string path = event_cfg.value("error_path", "error");
+    std::optional<json> error;
+    if (!path.empty()) error = json_path::at_path(payload, path);
+    const bool fail = event_cfg.value("action", "error") == "fail";
+    const std::string context = std::string(fail ? "response failed" : "stream error event") +
+                                " '" + event_type + "' (" + provider_name_ + ")";
+    detail::throw_embedded_error(context, 200, payload, policy,
+                                 (error && error->is_object()) ? &*error : nullptr);
+}
+
+void SchemaProvider::check_stream_chunk_error(const json& chunk) const {
+    if (stream_.error_path.empty() || !chunk.is_object()) return;
+    const auto error = json_path::at_path(chunk, stream_.error_path);
+    if (!error || !(error->is_object() || error->is_string())) return;
+    const detail::RetryPolicy policy{conn_.retryable_statuses, conn_.retryable_codes};
+    if (error->is_string()) {
+        throw ProviderError(
+            "stream error chunk (" + provider_name_ + "): " +
+                detail::redact_and_truncate(error->get<std::string>()),
+            200, false);
+    }
+    detail::throw_embedded_error("stream error chunk (" + provider_name_ + ")", 200, chunk,
+                                 policy, &*error);
 }
 
 } // namespace neograph::llm

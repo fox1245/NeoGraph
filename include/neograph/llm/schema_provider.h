@@ -56,6 +56,13 @@ namespace neograph::llm {
 
 namespace test_access { class SchemaProviderTestAccess; }  // fwd-decl for friend
 
+/// A failure of an operation-style (submit / poll / finalize) schema after the
+/// job exists, or a malformed operation response. A transport or HTTP failure
+/// while polling or finalizing carries its cause as a nested exception:
+/// `std::rethrow_if_nested(error)` yields the `ProviderError` (status,
+/// retryable, vendor code). It is deliberately not itself retryable, because
+/// re-running the call would submit the job again. A failure of the submission
+/// request itself (no job yet) is thrown as the `ProviderError` directly.
 class NEOGRAPH_API OperationError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -97,6 +104,15 @@ public:
         /// Anthropic-compatible endpoint. Empty values preserve schema fields.
         std::string auth_header_override;
         std::string auth_prefix_override;
+        /// Extra request headers set from code (for example
+        /// `anthropic-workspace-id`, `anthropic-beta`). They are added after the
+        /// schema's `connection.extra_headers` and replace a schema header of
+        /// the same name (names compare case-insensitively). Values are sent
+        /// literally; an unusable name or a value containing a line break is
+        /// rejected when the provider is created. Adding headers does not
+        /// relax the credential rule: credentials are still refused over a
+        /// non-loopback `http://` endpoint.
+        std::map<std::string, std::string> extra_headers;
         /// Drive `complete_stream` over a WebSocket instead of HTTP/SSE.
         /// Currently supported only for the "openai-responses" schema.
         /// This matches OpenAI's WebSocket mode at `/v1/responses`, which
@@ -252,6 +268,13 @@ public:
         std::string api_key_env;
         std::string auth_query_param;
         std::map<std::string, std::string> extra_headers;
+        /// HTTP statuses this vendor documents as transient
+        /// (`connection.retryable_statuses`). A failure with one of these
+        /// becomes a retryable `ProviderError`; 429 is always a `RateLimitError`.
+        std::set<int> retryable_statuses;
+        /// Vendor error codes/types that mark an in-stream or HTTP-200 error
+        /// as transient (`connection.retryable_codes`), e.g. `overloaded_error`.
+        std::set<std::string> retryable_codes;
     };
 
     struct RequestConfig {
@@ -275,11 +298,38 @@ public:
         /// per-call via `CompletionParams::extra_fields`. Schema:
         ///   "request.per_call_fields": ["reasoning.effort", "thinking.budget"]
         /// build_body iterates the caller's `params.extra_fields` map
-        /// and only stamps keys present in this set — unknown keys
-        /// are dropped (schema owns the contract). Empty set = no
+        /// and only stamps keys present in this set; what happens to any
+        /// other key is `unknown_knob_policy` (below). Empty set = no
         /// per-call bindings honoured (legacy default; back-compat
         /// for schemas that don't declare the key).
         std::set<std::string> per_call_fields;
+
+        /// `request.unknown_knob_policy`: what build_body does with a
+        /// `CompletionParams::extra_fields` key the schema does not declare in
+        /// `per_call_fields`. `"drop"` (the default, for schemas written
+        /// before this key existed) ignores it silently; `"error"` throws
+        /// `std::invalid_argument` naming the declared keys, so a typo or an
+        /// unsupported knob cannot look like success. The built-in schemas use
+        /// `"error"`.
+        bool unknown_knob_is_error = false;
+
+        /// `request.rules`: vendor constraints on the finished body.
+        ///   {"omit": "<path>", "when": {"path": "<p>", "in": ["a", "b"]}}
+        ///       drops <path> when the body holds a string at <p> that is one
+        ///       of the listed values (Anthropic rejects `temperature` != 1
+        ///       while thinking is on, so it is left to the server default).
+        ///   {"require_greater": {"path": "<a>", "than": "<b>"}}
+        ///       throws std::invalid_argument when both are integers and
+        ///       body[a] <= body[b] (Anthropic requires max_tokens >
+        ///       thinking.budget_tokens); absent values leave the rule idle.
+        struct Rule {
+            enum class Kind { Omit, RequireGreater } kind = Kind::Omit;
+            std::string path;
+            std::string than;
+            std::string when_path;
+            std::set<std::string> when_in;
+        };
+        std::vector<Rule> rules;
     };
 
     struct SystemPromptConfig {
@@ -357,16 +407,84 @@ public:
         std::string prompt_tokens_field;
         std::string completion_tokens_field;
         std::string total_tokens_field;
+        /// Optional usage fields ADDED to the prompt count (Anthropic reports
+        /// the cached prefix apart from `input_tokens`).
+        std::vector<std::string> prompt_extra_fields;
+        /// Optional path (inside the usage object) of the prompt-token subset
+        /// served from cache -> `Usage::cached_prompt_tokens`.
+        std::string cached_tokens_path;
+        /// Optional path of the completion-token subset spent on reasoning
+        /// -> `Usage::reasoning_tokens`.
+        std::string reasoning_tokens_path;
+        /// False when the vendor's completion counter excludes reasoning
+        /// (Gemini); reasoning is then added so `completion_tokens` is
+        /// everything the model produced.
+        bool completion_includes_reasoning = true;
         std::string stop_reason_path;
         std::map<std::string, std::string> stop_reason_map;
         std::string stop_reason_status_path;
         std::map<std::string, std::string> stop_reason_status_map;
         std::string default_stop_reason = "unknown";
+        /// Optional `response.error_path`: dotted path of an error object that
+        /// marks a response as a failure even though the HTTP status was 200
+        /// (gateways, `status: "failed"` bodies). Present -> `ProviderError`.
+        std::string error_path;
+        /// Optional `response.failure_status_path` + `failure_statuses`: a
+        /// body whose status field holds one of these values (`failed`,
+        /// `cancelled`) is a failure, never an empty successful completion.
+        std::string failure_status_path;
+        std::set<std::string> failure_statuses;
+        /// Optional `response.block_reason_path`: present and non-empty means
+        /// the prompt was blocked; the completion reports `block_stop_reason`
+        /// instead of a normal end of turn.
+        std::string block_reason_path;
+        std::string block_stop_reason = "content_filter";
+        /// Optional `response.error_finish_reasons`: raw vendor finish reasons
+        /// that mean the model failed (not "stopped"); they throw a
+        /// non-retryable `ProviderError` carrying the reason as its code.
+        std::set<std::string> error_finish_reasons;
         struct ArtifactRule {
             std::string items_path, type_path, type, match_path, kind;
             std::string mime_type, mime_path, base64_path, url_path, file_id_path, metadata_path;
         };
         std::vector<ArtifactRule> artifacts;
+    };
+
+    /// Optional `reasoning` schema section: which provider reasoning items a
+    /// response carries verbatim into `ChatMessage::reasoning_details` and
+    /// replays on the assistant message that produced them. The interpreter
+    /// knows no vendor names; every field below is data declared per schema.
+    struct ReasoningConfig {
+        /// Block/item `type` values (content[] / output[] entries) kept
+        /// verbatim, in wire order. Replayed in front of the tool calls.
+        std::set<std::string> carry_types;
+        /// Field of a carried item holding readable text (a string, or an
+        /// array of objects with a `text` string) for `ChatMessage::reasoning`.
+        std::string text_field;
+        /// Part-style: a part whose boolean field of this name is true is
+        /// reasoning, not user-visible content.
+        std::string thought_flag_field;
+        /// Part-style: sibling field of a functionCall part carrying an opaque
+        /// signature that must be echoed on the same part when replayed.
+        std::string signature_field;
+        /// Part-style, optional: value placed in `signature_field` on the first
+        /// tool call of an assistant message that carries no captured
+        /// signature -- a history that came from another vendor or model, or
+        /// was built by hand. The API validates the signature and would answer
+        /// HTTP 400 without one; the vendor documents this placeholder as a
+        /// last resort that lowers quality for that turn. Absent = never invent
+        /// a signature.
+        std::string foreign_signature;
+        /// Chat-style: assistant message field holding an opaque array that is
+        /// captured verbatim and replayed on the assistant message.
+        std::string message_field;
+        /// Streaming, event style: maps a delta `type` to the field of the
+        /// carried block it extends (string values are concatenated), for
+        /// example `thinking_delta` -> `thinking`, `signature_delta` -> `signature`.
+        std::map<std::string, std::string> delta_fields;
+        /// Streaming, chat style: fields of `message_field` fragments that are
+        /// concatenated when fragments of one item (same type + index) arrive.
+        std::set<std::string> stream_concat_fields;
     };
 
     struct StreamConfig {
@@ -389,6 +507,14 @@ public:
         std::string delta_tool_call_args_field;
         std::string stop_reason_path;
         std::string stop_reason_status_path;
+        /// Optional `streaming.error_path`: dotted path checked in every
+        /// data chunk (SSE_DATA); an object there is an in-stream error.
+        std::string error_path;
+        /// `streaming.require_terminal_event`: the stream is only complete if
+        /// its terminal event (`done` action / done signal) arrived. EOF
+        /// without one throws a retryable `ProviderError` instead of
+        /// returning the partial output as a finished answer.
+        bool require_terminal_event = false;
         json events_config;
     };
 
@@ -460,6 +586,7 @@ public:
     ToolResultConfig tool_result_;
     ImageConfig image_;
     ResponseConfig resp_;
+    ReasoningConfig reasoning_;
     StreamConfig stream_;
     struct OperationConfig {
         std::string id_path, done_path, error_path, result_path;
@@ -477,6 +604,8 @@ public:
     json serialize_messages(const std::vector<ChatMessage>& messages) const;
     json serialize_tools(const std::vector<ChatTool>& tools) const;
     json serialize_single_message(const ChatMessage& msg) const;
+    // Applies the schema's `request.rules` to a finished request body.
+    void apply_request_rules(json& body) const;
 
     // Per-request value-level streaming decoder state. No sockets or
     // executors: callers can feed fixture lines independently of transport.
@@ -484,6 +613,10 @@ public:
         struct EventBlock {
             std::string type, id, name, args;
             int index = -1;
+            /// Set for blocks whose type the schema carries verbatim; `raw`
+            /// accumulates the block (start payload + deltas) until it stops.
+            bool carried = false;
+            json raw;
         };
         ChatCompletion completion;
         SchemaPrimitiveRequestContext primitive_context;
@@ -501,6 +634,21 @@ public:
     void consume_ws_event(StreamParseState& state, const json& event,
                           const StreamCallback& on_chunk) const;
     ChatCompletion finish_stream(StreamParseState& state) const;
+
+    // Throws a typed ProviderError when a non-stream body (HTTP 200) is a
+    // failure per the schema's `response.error_path` / `failure_status_*`.
+    void check_response_failure(const json& resp_json) const;
+    // Throws the typed error described by a stream event whose schema action
+    // is `error` or `fail` (SSE and WebSocket share it).
+    [[noreturn]] void throw_stream_event_error(const std::string& event_type,
+                                              const json& payload,
+                                              const json& event_cfg) const;
+    // Throws when `error_path` of a chunk holds an error object.
+    void check_stream_chunk_error(const json& chunk) const;
+    // Retry classification for HTTP failures of this provider's schema.
+    [[noreturn]] void throw_http_failure(int status, const std::string& body,
+                                         int retry_after_seconds,
+                                         const std::string& request_id) const;
 
     // Owns HTTP/1.1 vs HTTP/2 selection and operation-local cancellation
     // for both chat completions and schema-described JSON endpoints.
@@ -538,6 +686,9 @@ public:
 
     std::string build_endpoint(const std::string& model, bool streaming,
                                std::string_view api_key) const;
+    // The schema's `connection.extra_headers` with `${ENV}` / `${ENV?}`
+    // expanded (see header_template.h), then `Config::extra_headers` on top.
+    std::map<std::string, std::string> resolved_extra_headers() const;
     std::map<std::string, std::string> build_headers(
         std::string_view api_key) const;
     std::string get_api_key() const;
@@ -565,6 +716,11 @@ class SchemaProviderTestAccess {
     static json build_body(const SchemaProvider& sp,
                            const CompletionParams& params) {
         return sp.build_body(params);
+    }
+
+    static std::map<std::string, std::string> build_headers(const SchemaProvider& sp,
+                                                           std::string_view api_key) {
+        return sp.build_headers(api_key);
     }
 
     static json build_sse_body(const SchemaProvider& sp,
@@ -603,7 +759,8 @@ class SchemaProviderTestAccess {
             if (state.terminal_event_seen) break;
         }
         if (!state.terminal_event_seen) {
-            throw std::runtime_error("openai-responses ws: server closed before response.completed");
+            throw ProviderError("openai-responses ws: server closed before response.completed",
+                                0, true, "stream_truncated");
         }
         return sp.finish_stream(state);
     }

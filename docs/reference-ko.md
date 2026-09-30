@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=e71dbdfd271fbd28aafc3d554a63bfb92e8e3fd7393db5e4f9b8cf3cae1f758d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fd68914f16f52207e7f28ecc4dcdba6e3a0666cc1187486831f8abce51e61af4 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2770,6 +2770,28 @@ HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / S
 비교하므로 `openai/o4-mini`는 `o4*`와 일치), `SchemaProvider`는 해당 모델에서
 `temperature`를 생략합니다. 이 목록을 선언하지 않은 사용자 정의 스키마는 항상
 `temperature`를 보내므로, 해당 모델을 대상으로 한다면 내장 스키마의 목록을 복사하세요.
+
+**프로바이더 reasoning 항목:** reasoning 모델은 도구 루프의 다음 요청에 함께 보내야 하는
+항목을 반환합니다: Anthropic `thinking` 블록(`signature` 포함), OpenAI Responses
+`reasoning` 항목, Gemini 3 `thoughtSignature`, OpenRouter `reasoning_details`. 스키마는
+선택적인 최상위 `reasoning` 섹션으로 이를 선언합니다: `carry_types`(원문 그대로
+`ChatMessage::reasoning_details`에 보관했다가, 그것을 만든 어시스턴트 메시지의 도구 호출
+앞에 다시 보내는 블록/항목의 `type` 값), `text_field`(`ChatMessage::reasoning`용 읽을 수
+있는 텍스트의 위치), `thought_flag_field`·`signature_field`(Gemini 방식의 part),
+`message_field`(채팅 방식의 불투명 배열), 스트리밍용 `delta_fields`·`stream_concat_fields`.
+대상 스키마가 선언하지 않은 `type`의 항목은 다시 보내지 않으므로, 프로바이더를 오가는
+히스토리도 유효하게 유지됩니다. reasoning 텍스트는 `content`에 나타나지 않습니다. 이
+섹션이 없는 스키마는 이전처럼 reasoning 항목을 무시합니다.
+
+**배포마다 달라지는 요청 헤더:** 스키마의 `connection.extra_headers` 값은 `api_key_env`처럼 요청마다 읽는 환경 변수를 참조할 수 있습니다. `${NAME}`은 설정되어 있고 비어 있지 않아야 하며(아니면 변수 이름을 알리며 요청이 실패하고 빈 헤더를 보내지 않습니다), `${NAME?}`은 변수가 없거나 비어 있으면 헤더 전체를 생략합니다. 내장 `claude` 스키마는 `"anthropic-workspace-id": "${ANTHROPIC_WORKSPACE_ID?}"`(Anthropic 다중 워크스페이스 API 키는 이 헤더가 없으면 HTTP 400)와 `"anthropic-beta": "${ANTHROPIC_BETA?}"`를 선언합니다. `SchemaProvider::Config::extra_headers`는 코드에서 헤더를 설정하며, 스키마 헤더 뒤에 추가되고 같은 이름의 스키마 헤더를 대체하며(이름은 대소문자를 구분하지 않으므로 두 표기가 함께 전송되지 않음) 그대로 전송됩니다. 잘못된 헤더 이름, 형식이 틀린 `${...}`, 줄바꿈이 들어 있는 값(또는 확장된 환경 변수 값)은 거부됩니다. 헤더가 스키마에서 오든 `Config`에서 오든 자격 증명은 루프백이 아닌 `http://` 엔드포인트로는 여전히 거부됩니다.
+
+**호출별 요청 노브:** `CompletionParams::extra_fields`는 한 번의 호출에 대해 본문 경로를 값에 매핑하며, 스키마가 `request.per_call_fields`에 나열한 경로만 받아들여집니다. 내장 스키마의 선언: `claude`는 `thinking`, `output_config.effort`, `cache_control`, `tool_choice`, `provider`; `gemini`는 `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`, `safetySettings`, `toolConfig`; `openai_responses`는 `reasoning.effort`, `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`, `provider`; `openai`(chat / OpenRouter)는 `reasoning_effort`, `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`, `provider`. 그 밖의 키는 `request.unknown_knob_policy`가 결정합니다. `"error"`(모든 내장 스키마)는 선언된 키를 이름으로 알려 주는 `std::invalid_argument`를 던져 오타나 지원하지 않는 노브가 성공처럼 보이지 않게 하고, `"drop"`(이 키가 생기기 전에 작성된 커스텀 스키마의 기본값)은 무시합니다. `request.rules`는 완성된 본문에 대한 벤더 제약을 표현합니다. `{"omit": path, "when": {"path": p, "in": [...]}}`는 필드를 제거하고, `{"require_greater": {"path": a, "than": b}}`는 둘 다 정수이고 `a <= b`이면 요청을 보내기 전에 거부합니다. `claude` 스키마는 이를 HTTP 400으로 돌아오는 Anthropic 규칙 두 가지에 씁니다. `thinking.type`이 `enabled` 또는 `adaptive`이면 `temperature`를 서버 기본값에 맡기고, `max_tokens`는 `thinking.budget_tokens`보다 커야 합니다.
+
+**토큰 사용량:** `ChatCompletion::Usage`는 `prompt_tokens`, `completion_tokens`, `total_tokens`와 부분집합인 `cached_prompt_tokens`(캐시에서 제공된 프롬프트 토큰), `reasoning_tokens`(추론에 쓴 완성 토큰)를 담습니다. 벤더마다 기본 카운터에 무엇이 포함되는지 다르므로 매핑은 `response`의 스키마 데이터입니다. `prompt_extra_fields`(프롬프트 수에 더하는 사용량 필드; Anthropic은 `input_tokens`에 캐시된 접두부를 포함하지 않으므로 스키마가 `cache_read_input_tokens`와 `cache_creation_input_tokens`를 나열), `cached_tokens_path`, `reasoning_tokens_path`, 그리고 완성 카운터가 추론을 제외하는 곳(Gemini의 `candidatesTokenCount`와 `thoughtsTokenCount`)의 `completion_includes_reasoning: false`. 스트리밍 `usage` 이벤트는 대응하는 `prompt_extra_paths`, `cached_path`, `reasoning_path`를 받고, 합계를 보고하지 않는 스트림은 프롬프트 + 완성으로 계산합니다. 비스트림, SSE, WebSocket 경로와 네이티브 `OpenAIProvider`가 모두 같은 매핑을 읽습니다. `UsageAccumulator`, `RunResult::usage`, `Agent::usage()`도 부분집합을 합산하며(부모 카운터로 클램프), 모델 토큰 예산은 계속 합계 기준입니다.
+
+**벤더나 모델이 바뀐 히스토리:** 항목은 대상 스키마가 그 `type`을 선언한 경우에만 재전송되므로, 프로바이더 사이를 옮겨 다닌 히스토리도 유효하게 유지됩니다. 출처의 reasoning은 버려지고 엉뚱한 API로 보내지지 않습니다. 하나의 비호환이 남아 있습니다. Gemini 3는 모델 턴마다 첫 `functionCall`의 `thoughtSignature`를 검증하고, 자신이 서명하지 않은 호출에는 HTTP 400을 돌려줍니다. Claude, OpenAI, 또는 손으로 만든 히스토리의 모든 호출이 여기에 해당합니다. 스키마는 `reasoning.foreign_signature`(`signature_field` 필요)를 선언할 수 있고, 캡처된 서명이 없는 어시스턴트 메시지의 첫 도구 호출에 그 값이 들어갑니다. 내장 `gemini` 스키마는 Google이 문서화한 자리표시자 `skip_thought_signature_validator`를 선언하며, 벤더는 이를 그 턴의 품질을 낮추는 최후의 수단이라고 설명합니다. 이 키가 없는 스키마는 서명을 만들어 내지 않습니다.
+
+**프로바이더 실패 처리:** 실패가 완료된 답변처럼 보여서는 안 됩니다. 오류는 타입이 있습니다. `neograph::ProviderError`는 `status()`, `retryable()`, 벤더 `code()`, `request_id()`(`request-id` / `x-request-id` 헤더, 없으면 본문의 `request_id`), `retry_after_seconds()`를 담고, `RateLimitError`(HTTP 429)는 `ProviderError`이면서 자기 타입을 유지합니다. 어떤 실패가 일시적인지는 스키마 데이터입니다. `connection.retryable_statuses`(기본 408/429/500/502/503/504, 내장 `claude` 스키마는 529 추가)와 `connection.retryable_codes`(스트림 안 오류를 일시적으로 분류하는 `overloaded_error` 같은 벤더 코드). `RateLimitedProvider`는 재시도 가능한 오류만 재시도합니다. 벤더 본문은 예외 메시지에 넣기 전에 계정/사용자 ID, API 키, bearer 토큰을 가리고 1 KiB로 자릅니다. 2xx 응답 안의 실패 신호는 스키마에 선언하며 SSE와 WebSocket이 공유합니다. 스트림 이벤트 액션 `error`/`fail`(`error_path`가 오류 객체 위치, 예: Anthropic `error`, Responses `error`·`response.failed`), `streaming.error_path`(데이터 청크 안의 오류 객체), `streaming.require_terminal_event`(종료 이벤트 전에 스트림이 끝나면 코드 `stream_truncated`인 재시도 가능 `ProviderError`), `response.error_path`, `response.failure_status_path` + `failure_statuses`(`status:"failed"` 본문), `response.block_reason_path`(차단된 프롬프트는 `block_stop_reason`, 기본 `content_filter`로 보고), `response.error_finish_reasons`(모델 실패를 뜻하는 원본 finish reason). 이 키가 없는 스키마의 신호 처리는 기존과 같습니다.
 
 **Usage:**
 

@@ -6,7 +6,9 @@
 
 #include <builtin_schemas.h>
 
+#include "provider_error.h"
 #include "temperature_policy.h"
+#include "usage_policy.h"
 
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
@@ -42,6 +44,71 @@ bool model_omits_temperature(std::string_view model) {
             json::parse(it->second).value("request", json::object()));
     }();
     return detail::model_matches_any(model, unsupported);
+}
+
+// Which statuses / codes are transient is declared once, in the built-in
+// `openai` schema (`connection.retryable_*`), and shared with SchemaProvider.
+const detail::RetryPolicy& retry_policy() {
+    static const detail::RetryPolicy policy = [] {
+        const auto& schemas = builtin::schemas();
+        const auto  it      = schemas.find("openai");
+        if (it == schemas.end()) return detail::RetryPolicy{};
+        return detail::parse_retry_policy(
+            json::parse(it->second).value("connection", json::object()));
+    }();
+    return policy;
+}
+
+// Token-usage mapping (cached / reasoning counters included) is declared once,
+// in the built-in `openai` schema's `response` section, and shared with
+// SchemaProvider.
+struct UsageSpec {
+    std::string prompt_tokens_field{"prompt_tokens"};
+    std::string completion_tokens_field{"completion_tokens"};
+    std::string total_tokens_field{"total_tokens"};
+    std::vector<std::string> prompt_extra_fields;
+    std::string cached_tokens_path;
+    std::string reasoning_tokens_path;
+    bool completion_includes_reasoning = true;
+};
+
+const UsageSpec& usage_spec() {
+    static const UsageSpec spec = [] {
+        UsageSpec out;
+        const auto& schemas = builtin::schemas();
+        const auto  it      = schemas.find("openai");
+        if (it == schemas.end()) return out;
+        const auto response = json::parse(it->second).value("response", json::object());
+        out.prompt_tokens_field     = response.value("prompt_tokens_field", out.prompt_tokens_field);
+        out.completion_tokens_field = response.value("completion_tokens_field", out.completion_tokens_field);
+        out.total_tokens_field      = response.value("total_tokens_field", out.total_tokens_field);
+        out.cached_tokens_path      = response.value("cached_tokens_path", "");
+        out.reasoning_tokens_path   = response.value("reasoning_tokens_path", "");
+        out.completion_includes_reasoning = response.value("completion_includes_reasoning", true);
+        if (response.contains("prompt_extra_fields") && response["prompt_extra_fields"].is_array()) {
+            for (const auto& field : response["prompt_extra_fields"]) {
+                if (field.is_string()) out.prompt_extra_fields.push_back(field.get<std::string>());
+            }
+        }
+        return out;
+    }();
+    return spec;
+}
+
+std::string request_id_of(const async::HttpResponse& response) {
+    for (const char* name : {"x-request-id", "request-id"}) {
+        const auto value = response.get_header(name);
+        if (!value.empty()) return std::string(value);
+    }
+    return {};
+}
+
+std::string request_id_of(const httplib::Result& res) {
+    if (!res) return {};
+    for (const char* name : {"x-request-id", "request-id"}) {
+        if (res->has_header(name)) return res->get_header_value(name);
+    }
+    return {};
 }
 
 }  // namespace
@@ -245,14 +312,10 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
         res = co_await std::move(request);
     }
 
-    if (res.status == 429) {
-        throw RateLimitError("API error (HTTP 429): " + res.body,
-                             parse_retry_after_seconds(res.retry_after));
-    }
-
     if (res.status != 200) {
-        throw std::runtime_error("API error (HTTP " + std::to_string(res.status) +
-                                 "): " + res.body);
+        detail::throw_http_error(res.status, res.body,
+                                 parse_retry_after_seconds(res.retry_after),
+                                 request_id_of(res), retry_policy());
     }
 
     auto resp_json = json::parse(res.body);
@@ -260,12 +323,8 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     // a top-level {"error": {...}} body instead of a non-2xx status. Surface
     // that as an API error rather than an opaque JSON lookup failure.
     if (resp_json.is_object() && resp_json.contains("error")) {
-        const std::string message = "API error (HTTP 200 with error body): " + res.body;
-        const auto&       error   = resp_json["error"];
-        if (error.is_object() && error.value("code", 0) == 429) {
-            throw RateLimitError(message);
-        }
-        throw std::runtime_error(message);
+        detail::throw_embedded_error("API error (HTTP 200 with error body)", 200, resp_json,
+                                     retry_policy());
     }
     if (!resp_json.is_object() || !resp_json.contains("choices") ||
         !resp_json["choices"].is_array() || resp_json["choices"].empty()) {
@@ -282,10 +341,7 @@ asio::awaitable<ChatCompletion> OpenAIProvider::complete_async(const CompletionP
     }
 
     if (resp_json.contains("usage")) {
-        auto u                             = resp_json["usage"];
-        completion.usage.prompt_tokens     = u.value("prompt_tokens", 0);
-        completion.usage.completion_tokens = u.value("completion_tokens", 0);
-        completion.usage.total_tokens      = u.value("total_tokens", 0);
+        completion.usage = detail::parse_usage_object(resp_json["usage"], usage_spec());
     }
 
     co_return completion;
@@ -403,7 +459,7 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                 }
 
                 if (j.is_object() && j.contains("error")) {
-                    throw std::runtime_error("API stream error: " + payload);
+                    detail::throw_embedded_error("API stream error", 200, j, retry_policy());
                 }
 
                 // The final chunk (after include_usage=true) has
@@ -411,12 +467,11 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
                 // it before falling through to per-choice delta
                 // handling.
                 if (j.contains("usage") && !j["usage"].is_null()) {
-                    auto u                             = j["usage"];
-                    completion.usage.prompt_tokens     = u.value("prompt_tokens", 0);
-                    completion.usage.completion_tokens = u.value("completion_tokens", 0);
-                    completion.usage.total_tokens =
-                        u.value("total_tokens", completion.usage.prompt_tokens +
-                                                    completion.usage.completion_tokens);
+                    completion.usage = detail::parse_usage_object(j["usage"], usage_spec());
+                    if (completion.usage.total_tokens == 0) {
+                        completion.usage.total_tokens = detail::saturating_add(
+                            completion.usage.prompt_tokens, completion.usage.completion_tokens);
+                    }
                 }
 
                 if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
@@ -469,8 +524,11 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     if (stream_error) std::rethrow_exception(stream_error);
 
     if (response_status != 0 && response_status != 200) {
-        throw std::runtime_error("API error (HTTP " + std::to_string(response_status) +
-                                 "): " + error_body);
+        detail::throw_http_error(response_status, error_body,
+                                 res ? parse_retry_after_seconds(
+                                           res->get_header_value("Retry-After"))
+                                     : -1,
+                                 request_id_of(res), retry_policy());
     }
 
     if (!res && !(terminal_event_seen && response_status == 200 &&
@@ -483,8 +541,9 @@ ChatCompletion OpenAIProvider::complete_stream(const CompletionParams& params,
     }
 
     if (res && res->status != 200) {
-        throw std::runtime_error("API error (HTTP " + std::to_string(res->status) +
-                                 "): " + res->body);
+        detail::throw_http_error(res->status, res->body,
+                                 parse_retry_after_seconds(res->get_header_value("Retry-After")),
+                                 request_id_of(res), retry_policy());
     }
 
     completion.message.content = full_content;

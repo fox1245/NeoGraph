@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=47d522afc346fa4c8325357dc9ad2a21a1fbf5b9e202f2e97f72eca0eab0f507 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a600530170a5993c23c8e0e21ef97e0641dfe8334c29217f12b9dd8e8ee70c04 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 新增
+- **随部署变化的请求头 (#310)。** `SchemaProvider::Config::extra_headers` 可以从代码添加或替换请求头（名称不区分大小写，值按字面使用，拒绝换行），schema 的请求头值也可以引用环境变量：`${NAME}`（必需；变量缺失时请求失败并点名该变量）和 `${NAME?}`（未设置时省略整个请求头）。内置 `claude` schema 声明了 `anthropic-workspace-id: ${ANTHROPIC_WORKSPACE_ID?}` 和 `anthropic-beta: ${ANTHROPIC_BETA?}`，因此可以使用 Anthropic 多工作区 API 密钥（缺少工作区请求头会返回 HTTP 400）以及 interleaved thinking 等 beta 功能。凭据仍然不会发送到非回环的 `http://` 端点。
+- **逐次调用的请求旋钮、诊断与厂商规则 (#309)。** 过去每次调用只能设置 `provider` 和 `reasoning.effort`，其他 `extra_fields` 键都被静默丢弃（实测：`extra_fields.thinking` 从未到达网络），因此拼写错误和不支持的旋钮看起来像成功。现在内置 schema 声明各厂商接受的旋钮（`claude`：`thinking`、`output_config.effort`、`cache_control`、`tool_choice`；`gemini`：`thinkingConfig.*`、`safetySettings`、`toolConfig`；`openai_responses`：`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`；`openai`：`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`），`request.unknown_knob_policy: "error"` 让其他键抛出点名已声明键的 `std::invalid_argument`（自定义 schema 除非选择加入，否则保持 `"drop"`）。新的 `request.rules`（`omit`/`when`、`require_greater`）表达厂商约束：`claude` schema 现在在 thinking 为 `enabled`/`adaptive` 时把 `temperature` 交给服务端（此前任何非 1 的值都是 HTTP 400），并在发送前拒绝 `max_tokens <= thinking.budget_tokens`。
+- **缓存与推理 token 用量 (#308)。** `ChatCompletion::Usage::cached_prompt_tokens` 和 `reasoning_tokens` 早已存在，但没有任何解析器填充它们，因此所有提供方都是 0；`UsageAccumulator` 会丢弃它们，Anthropic 的提示数也漏掉了整个已缓存前缀（实测：`input_tokens=3` 旁边是 `cache_read_input_tokens=9818`）。现在 schema 声明映射（`response.prompt_extra_fields`、`cached_tokens_path`、`reasoning_tokens_path`、`completion_includes_reasoning`；usage 事件使用 `prompt_extra_paths`、`cached_path`、`reasoning_path`），非流式、SSE、WebSocket 路径和原生 `OpenAIProvider` 以相同方式读取。Anthropic 的 `cache_read=900` / `creation=300` / `input=12` 现在报告为 `prompt=1212, cached=900`；Gemini 的补全数包含 thought（可见 3 + thought 266 = 269）；从不报告总数的流（Anthropic）按提示 + 补全计算。`UsageAccumulator`、`RunResult::usage` 和 `Agent::usage()` 会累加这些子集，模型 token 预算仍以总数为准。
 - **按所有者作用域划分的实验性活动 Program 启动。** C++ `ProgramRuntime`
   和 Python `LocalProgramHost` 在新运行时只选择一次已批准的不可变激活记录，
   同时返回所选激活记录和固定于对应版本的句柄。回滚仅影响后续启动。
@@ -40,6 +43,25 @@ NeoGraph 的所有显著变更均记录在本文件中。
   receipt，并在完整的 Human/AI/Tool 时间顺序历史之后作为 user data 传递。
 
 ### 修复
+- **Gemini 3 现在接受由其他厂商或模型写成的历史 (#305/#306)。** 从 Claude、OpenAI 迁移到 Gemini 的历史或手工构造的历史，因为工具调用没有 Gemini 签名，会以 HTTP 400（`Function call is missing a thought_signature`）失败。schema 现在可以声明 `reasoning.foreign_signature`，解释器会把它放在没有捕获签名的助手消息的第一个工具调用上（Gemini 只校验一个轮次的第一个调用）。内置 `gemini` schema 声明了 Google 文档中的 `skip_thought_signature_validator`。实测：Claude thinking -> Gemini 3 原本是 400，使用占位符后在 gemini-3.1-flash-lite、3.5-flash 和 3.6/3.7/3.8-flash 上成功，gemini-2.5-flash-lite 也照常接受。已捕获的签名始终优先。
+- **提前结束的 WebSocket 流按 RFC 6455 关闭状态分类，消失的对端会变成带类型的错误。** 在 `response.completed` 之前收到的 Close 帧，对 1001、1011、1012、1013、1014（服务端问题或重启）以及不带状态的 Close 可重试，对 1000、1002、1003、1007、1008（认证/配额/策略）、1009、1015 和应用自定义代码不可重试。没有 Close 帧就消失的对端（代理重置、服务器被杀、TLS 截断）过去会以原始套接字异常的形式泄漏出来，现在是同样可重试的 `stream_truncated` `ProviderError`。调用方取消仍照常传播。每一类状态码都有回环套接字测试覆盖。
+- **操作型 schema 现在报告带类型的失败。** 在任务创建之前提交请求被拒绝（HTTP 4xx/5xx）时，过去会被包装成 `OperationError`，隐藏状态码和 `retryable()`；现在直接抛出 `ProviderError`，因此 `RateLimitedProvider` 可以安全重试。轮询或收尾阶段的失败仍是 `OperationError`（任务已存在，重新执行调用会再次提交），但现在把 `ProviderError` 作为嵌套原因携带（`std::rethrow_if_nested`）。
+- **`RateLimitedProvider` 不再重放调用方已经看到的流。** 重试会从第一个 token 重新开始响应，因此在流中途遇到 `overloaded_error` 或连接中断后重试，会把重复的输出交给 `on_chunk` 回调。现在只有在没有任何数据块到达回调时（或没有回调时）才会重试流；第一个数据块送达之后，错误会直接向上传播。
+- **`RateLimitedProvider` 对非 429 的暂时性错误使用指数退避。** 没有 `Retry-After` 的可重试 500、502、503、529 或流内 `overloaded_error`，以前会等待限流默认值（`default_wait_seconds`，30 秒 + 1 秒）。现在等待 `transient_base_wait_seconds * 2^尝试次数`（默认 1 秒、2 秒、4 秒...，以 `max_wait_seconds` 为上限，0 表示立即重试）。429 仍使用 `default_wait_seconds` 和 +1 秒余量，正的 `Retry-After` 仍然优先遵循。
+- **提供方失败现在是带类型的错误,而不是成功的完成 (`SchemaProvider`, `OpenAIProvider`, #307, #312)。** Anthropic 的 `error` 事件、Responses 的 `response.failed` / `error` 事件或 `status:"failed"` 正文、在终止事件之前被切断的流、Gemini 被拦截的提示和 `MALFORMED_FUNCTION_CALL` 结束、以及 OpenRouter 的错误数据块，过去都会作为正常的 `end_turn` 完成返回，只有 HTTP 429 是带类型的错误。现在 `neograph::ProviderError` 携带 `status()`、`retryable()`、厂商 `code()`、`request_id()` 和 `retry_after_seconds()`（`RateLimitError` 继承自它）。schema 声明暂时性失败集合（`connection.retryable_statuses`、`retryable_codes`）和失败信号（`error` / `fail` 事件动作、`streaming.error_path`、`streaming.require_terminal_event`、`response.error_path`、`failure_status_path`、`block_reason_path`、`error_finish_reasons`），SSE 与 WebSocket 共用。`RateLimitedProvider` 会重试所有可重试的 `ProviderError`（500、502、503、529 等），放弃时保留具体类型；错误正文在进入消息前会隐去账户 ID、密钥和 bearer 令牌并被截断。被拦截的 Gemini 提示现在报告 `content_filter`，而不是 `end_turn`。
+- **提供方 reasoning 条目在工具轮次之间得以保留（`SchemaProvider`）。** 此前 reasoning
+  状态在轮次之间被丢弃：Gemini 3 工具循环以 HTTP 400（`Function call is missing a
+  thought_signature`）失败，OpenAI Responses 模型从头重新推理（reasoning 条目被忽略），
+  Anthropic 的 `thinking` 块与 OpenRouter 的 `reasoning_details` 丢失，Gemini 的 thought
+  part 还泄漏到 `content` 与流中。schema 现可声明 `reasoning` 部分（`carry_types`、
+  `text_field`、`thought_flag_field`、`signature_field`、`message_field`、`delta_fields`、
+  `stream_concat_fields`）；解释器将这些条目原样保存到 `ChatMessage::reasoning_details`
+  （非流式、SSE 与 WebSocket；OpenRouter 的片段按 index 合并），并在生成它的助手消息的
+  工具调用之前重放，丢弃目标 schema 未声明类型的条目。内置的 `claude`、
+  `openai_responses`、`gemini`、`openai` schema 已声明，`openai` 流现在也读取
+  `delta.reasoning`。实测：Gemini 3 第二轮成功（去掉条目的对照仍返回 400），Anthropic
+  thinking、OpenAI Responses（`gpt-5-mini`、`o4-mini`）与 OpenRouter 的循环（含流式）重放
+  均无错误。`ReasoningCarry*` 覆盖此项（#305、#306）。
 - **A2A 客户端支持 A2A 1.0 线路格式(与 a2a-sdk 1.0 及以上互通)。**
   `example_a2a_client` 对随附的 Python A2A 服务器(`27_a2a_server.py`,a2a-sdk 1.1.5)
   发现成功,但 `message/send` 以 `-32602 Invalid params` 失败:客户端始终发送 0.3 请求体

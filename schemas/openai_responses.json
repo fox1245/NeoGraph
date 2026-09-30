@@ -7,7 +7,9 @@
     "auth_header": "Authorization",
     "auth_prefix": "Bearer ",
     "api_key_env": "OPENAI_API_KEY",
-    "extra_headers": {}
+    "extra_headers": {},
+    "retryable_statuses": [408, 429, 500, 502, 503, 504],
+    "retryable_codes": ["server_error"]
   },
   "request": {
     "model_field": "model",
@@ -24,8 +26,16 @@
     },
     "per_call_fields": [
       "provider",
-      "reasoning.effort"
-    ]
+      "reasoning.effort",
+      "reasoning.summary",
+      "store",
+      "include",
+      "previous_response_id",
+      "parallel_tool_calls",
+      "text.verbosity",
+      "truncation"
+    ],
+    "unknown_knob_policy": "error"
   },
   "system_prompt": {
     "strategy": "top_level",
@@ -77,6 +87,12 @@
       "text": "$TEXT"
     }
   },
+  "reasoning": {
+    "carry_types": [
+      "reasoning"
+    ],
+    "text_field": "summary"
+  },
   "response": {
     "strategy": "output_array",
     "output_path": "output",
@@ -102,6 +118,8 @@
     "prompt_tokens_field": "input_tokens",
     "completion_tokens_field": "output_tokens",
     "total_tokens_field": "total_tokens",
+    "cached_tokens_path": "input_tokens_details.cached_tokens",
+    "reasoning_tokens_path": "output_tokens_details.reasoning_tokens",
     "stop_reason_path": "incomplete_details.reason",
     "stop_reason_status_path": "status",
     "stop_reason_map": {
@@ -111,7 +129,10 @@
     "stop_reason_status_map": {
       "incomplete": "unknown"
     },
-    "default_stop_reason": "end_turn"
+    "default_stop_reason": "end_turn",
+    "error_path": "error",
+    "failure_status_path": "status",
+    "failure_statuses": ["failed", "cancelled"]
   },
   "streaming": {
     "format": "sse_events",
@@ -156,7 +177,8 @@
       },
       "response.output_item.done": {
         "action": "block_stop",
-        "tool_call_type": "function_call"
+        "tool_call_type": "function_call",
+        "final_block_path": "item"
       },
       "response.completed": {
         "action": "done"
@@ -166,8 +188,16 @@
       },
       "response.incomplete": {
         "action": "done"
+      },
+      "response.failed": {
+        "action": "fail",
+        "error_path": "response.error"
+      },
+      "error": {
+        "action": "error"
       }
     },
+    "require_terminal_event": true,
     "stop_reason_path": "response.incomplete_details.reason",
     "stop_reason_status_path": "response.status"
   }
