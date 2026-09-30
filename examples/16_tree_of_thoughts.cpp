@@ -47,17 +47,24 @@ static ChatCompletion ask(Provider& p,
     // This is a reasoning puzzle: the model legitimately reasons for
     // thousands of tokens (a 2048-token cap, or effort=low, left every expand
     // call without visible text), and occasionally reasons without bound
-    // (observed: >130 s, no visible text). Allow a generous budget but bound
-    // the worst case, and retry the rare call that spent it all thinking.
+    // (observed: >130 s, no visible text) or stalls until the HTTP timeout.
+    // Allow a generous budget but bound the worst case, and retry a call that
+    // spent it all thinking or timed out rather than abort a ~45-call search.
     params.max_tokens = 8192;
     params.messages.push_back({"system", system});
     params.messages.push_back({"user",   user});
-    ChatCompletion reply = p.complete(params);
-    for (int retry = 0; retry < 2 && reply.message.content.empty() &&
-                        reply.stop_reason == "max_tokens"; ++retry) {
-        reply = p.complete(params);
+    constexpr int kAttempts = 3;
+    for (int attempt = 1;; ++attempt) {
+        try {
+            ChatCompletion reply = p.complete(params);
+            const bool spent_budget_thinking =
+                reply.message.content.empty() && reply.stop_reason == "max_tokens";
+            if (!spent_budget_thinking || attempt == kAttempts) return reply;
+        } catch (const std::exception& e) {
+            if (attempt == kAttempts) throw;
+            std::cerr << "  (call failed: " << e.what() << " — retrying)\n";
+        }
     }
-    return reply;
 }
 
 // Ask the LLM to propose N continuations of `current_state`.
