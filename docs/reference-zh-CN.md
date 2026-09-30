@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8793f9637cd5b8ee610111b32a5d5597c8a7fc290b19535ede8e5afa7d6c05a3 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8cb84cef6fe5557e225d000975a9f20f8e607f60c4be0b39f9739812e70e8b81 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2700,6 +2700,8 @@ Gemini 3 的 `thoughtSignature`、OpenRouter 的 `reasoning_details`。schema �
 流式传输的 `delta_fields` 与 `stream_concat_fields`。目标 schema 未声明的 `type` 的条目不会被
 重放，因此在不同提供方之间流转的历史仍然有效。reasoning 文本不会出现在 `content` 中。
 没有该部分的 schema 与以前一样忽略 reasoning 条目。
+
+**逐次调用的请求旋钮:** `CompletionParams::extra_fields` 为单次调用把请求体路径映射到值，只有 schema 在 `request.per_call_fields` 中列出的路径才会被接受。内置 schema 的声明：`claude` 为 `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`provider`；`gemini` 为 `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`、`safetySettings`、`toolConfig`；`openai_responses` 为 `reasoning.effort`、`reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`provider`；`openai`（chat / OpenRouter）为 `reasoning_effort`、`reasoning`、`include_reasoning`、`usage`、`models`、`response_format`、`provider`。其他键由 `request.unknown_knob_policy` 决定：`"error"`（所有内置 schema）抛出点名已声明键的 `std::invalid_argument`，让拼写错误或不支持的旋钮不会看起来像成功；`"drop"`（该键出现之前编写的自定义 schema 的默认值）则忽略。`request.rules` 表达对最终请求体的厂商约束：`{"omit": path, "when": {"path": p, "in": [...]}}` 删除字段，`{"require_greater": {"path": a, "than": b}}` 在两者都是整数且 `a <= b` 时于发送前拒绝请求。`claude` schema 用它们处理两条否则会返回 HTTP 400 的 Anthropic 规则：当 `thinking.type` 为 `enabled` 或 `adaptive` 时 `temperature` 交给服务端默认值，且 `max_tokens` 必须大于 `thinking.budget_tokens`。
 
 **Token 用量:** `ChatCompletion::Usage` 携带 `prompt_tokens`、`completion_tokens`、`total_tokens`，以及子集 `cached_prompt_tokens`（由缓存提供的提示 token）和 `reasoning_tokens`（用于推理的补全 token）。各厂商对基础计数器包含什么并不一致，因此映射是 `response` 中的 schema 数据：`prompt_extra_fields`（加到提示数上的用量字段；Anthropic 的 `input_tokens` 不含已缓存前缀，所以其 schema 列出 `cache_read_input_tokens` 和 `cache_creation_input_tokens`）、`cached_tokens_path`、`reasoning_tokens_path`，以及补全计数器不含推理时（Gemini 的 `candidatesTokenCount` 与 `thoughtsTokenCount`）使用的 `completion_includes_reasoning: false`。流式 `usage` 事件接受对应的 `prompt_extra_paths`、`cached_path` 和 `reasoning_path`；从不报告总数的流按提示 + 补全计算。非流式、SSE、WebSocket 路径以及原生 `OpenAIProvider` 都读取同一份映射。`UsageAccumulator`、`RunResult::usage` 和 `Agent::usage()` 同样累加这些子集（钳制在父计数器以内），模型 token 预算仍以总数为准。
 

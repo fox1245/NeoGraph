@@ -26,8 +26,16 @@
     },
     "per_call_fields": [
       "provider",
-      "reasoning.effort"
-    ]
+      "reasoning.effort",
+      "reasoning.summary",
+      "store",
+      "include",
+      "previous_response_id",
+      "parallel_tool_calls",
+      "text.verbosity",
+      "truncation"
+    ],
+    "unknown_knob_policy": "error"
   },
   "system_prompt": {
     "strategy": "top_level",

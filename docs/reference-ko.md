@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8793f9637cd5b8ee610111b32a5d5597c8a7fc290b19535ede8e5afa7d6c05a3 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8cb84cef6fe5557e225d000975a9f20f8e607f60c4be0b39f9739812e70e8b81 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2782,6 +2782,8 @@ HTTP 400으로 응답합니다(OpenAI 추론 모델과 `gpt-6*`, Claude Opus / S
 대상 스키마가 선언하지 않은 `type`의 항목은 다시 보내지 않으므로, 프로바이더를 오가는
 히스토리도 유효하게 유지됩니다. reasoning 텍스트는 `content`에 나타나지 않습니다. 이
 섹션이 없는 스키마는 이전처럼 reasoning 항목을 무시합니다.
+
+**호출별 요청 노브:** `CompletionParams::extra_fields`는 한 번의 호출에 대해 본문 경로를 값에 매핑하며, 스키마가 `request.per_call_fields`에 나열한 경로만 받아들여집니다. 내장 스키마의 선언: `claude`는 `thinking`, `output_config.effort`, `cache_control`, `tool_choice`, `provider`; `gemini`는 `generationConfig.thinkingConfig.{thinkingBudget,thinkingLevel,includeThoughts}`, `safetySettings`, `toolConfig`; `openai_responses`는 `reasoning.effort`, `reasoning.summary`, `store`, `include`, `previous_response_id`, `parallel_tool_calls`, `text.verbosity`, `truncation`, `provider`; `openai`(chat / OpenRouter)는 `reasoning_effort`, `reasoning`, `include_reasoning`, `usage`, `models`, `response_format`, `provider`. 그 밖의 키는 `request.unknown_knob_policy`가 결정합니다. `"error"`(모든 내장 스키마)는 선언된 키를 이름으로 알려 주는 `std::invalid_argument`를 던져 오타나 지원하지 않는 노브가 성공처럼 보이지 않게 하고, `"drop"`(이 키가 생기기 전에 작성된 커스텀 스키마의 기본값)은 무시합니다. `request.rules`는 완성된 본문에 대한 벤더 제약을 표현합니다. `{"omit": path, "when": {"path": p, "in": [...]}}`는 필드를 제거하고, `{"require_greater": {"path": a, "than": b}}`는 둘 다 정수이고 `a <= b`이면 요청을 보내기 전에 거부합니다. `claude` 스키마는 이를 HTTP 400으로 돌아오는 Anthropic 규칙 두 가지에 씁니다. `thinking.type`이 `enabled` 또는 `adaptive`이면 `temperature`를 서버 기본값에 맡기고, `max_tokens`는 `thinking.budget_tokens`보다 커야 합니다.
 
 **토큰 사용량:** `ChatCompletion::Usage`는 `prompt_tokens`, `completion_tokens`, `total_tokens`와 부분집합인 `cached_prompt_tokens`(캐시에서 제공된 프롬프트 토큰), `reasoning_tokens`(추론에 쓴 완성 토큰)를 담습니다. 벤더마다 기본 카운터에 무엇이 포함되는지 다르므로 매핑은 `response`의 스키마 데이터입니다. `prompt_extra_fields`(프롬프트 수에 더하는 사용량 필드; Anthropic은 `input_tokens`에 캐시된 접두부를 포함하지 않으므로 스키마가 `cache_read_input_tokens`와 `cache_creation_input_tokens`를 나열), `cached_tokens_path`, `reasoning_tokens_path`, 그리고 완성 카운터가 추론을 제외하는 곳(Gemini의 `candidatesTokenCount`와 `thoughtsTokenCount`)의 `completion_includes_reasoning: false`. 스트리밍 `usage` 이벤트는 대응하는 `prompt_extra_paths`, `cached_path`, `reasoning_path`를 받고, 합계를 보고하지 않는 스트림은 프롬프트 + 완성으로 계산합니다. 비스트림, SSE, WebSocket 경로와 네이티브 `OpenAIProvider`가 모두 같은 매핑을 읽습니다. `UsageAccumulator`, `RunResult::usage`, `Agent::usage()`도 부분집합을 합산하며(부모 카운터로 클램프), 모델 토큰 예산은 계속 합계 기준입니다.
 

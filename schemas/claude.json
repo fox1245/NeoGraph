@@ -25,7 +25,21 @@
     "stream_field": "stream",
     "extra_fields": {},
     "per_call_fields": [
-      "provider"
+      "provider",
+      "thinking",
+      "output_config.effort",
+      "cache_control",
+      "tool_choice"
+    ],
+    "unknown_knob_policy": "error",
+    "rules": [
+      {
+        "omit": "temperature",
+        "when": {"path": "thinking.type", "in": ["enabled", "adaptive"]}
+      },
+      {
+        "require_greater": {"path": "max_tokens", "than": "thinking.budget_tokens"}
+      }
     ]
   },
   "system_prompt": {

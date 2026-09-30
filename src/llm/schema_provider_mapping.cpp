@@ -133,6 +133,67 @@ void SchemaProvider::parse_schema()
             if (path.is_string()) req_.per_call_fields.insert(path.get<std::string>());
         }
     }
+    {
+        const std::string policy = r.value("unknown_knob_policy", "drop");
+        if (policy != "drop" && policy != "error") {
+            throw std::invalid_argument(
+                "SchemaProvider: request.unknown_knob_policy must be \"drop\" or \"error\"");
+        }
+        req_.unknown_knob_is_error = policy == "error";
+    }
+    if (r.contains("rules")) {
+        if (!r["rules"].is_array()) {
+            throw std::invalid_argument("SchemaProvider: request.rules must be an array");
+        }
+        for (const auto& rule : r["rules"]) {
+            RequestConfig::Rule parsed;
+            const auto path_of = [&rule](const char* key) {
+                if (!rule.contains(key) || !rule[key].is_string() ||
+                    rule[key].template get<std::string>().empty()) {
+                    throw std::invalid_argument(
+                        std::string("SchemaProvider: request.rules entry needs a string \"") + key +
+                        "\"");
+                }
+                return rule[key].template get<std::string>();
+            };
+            if (rule.is_object() && rule.contains("omit")) {
+                parsed.kind = RequestConfig::Rule::Kind::Omit;
+                parsed.path = path_of("omit");
+                if (rule.contains("when")) {
+                    const auto& when = rule["when"];
+                    if (!when.is_object() || !when.contains("path") || !when["path"].is_string() ||
+                        !when.contains("in") || !when["in"].is_array()) {
+                        throw std::invalid_argument(
+                            "SchemaProvider: request.rules \"when\" needs a \"path\" string and an "
+                            "\"in\" array of strings");
+                    }
+                    parsed.when_path = when["path"].template get<std::string>();
+                    for (const auto& value : when["in"]) {
+                        if (!value.is_string()) {
+                            throw std::invalid_argument(
+                                "SchemaProvider: request.rules \"when.in\" entries must be strings");
+                        }
+                        parsed.when_in.insert(value.template get<std::string>());
+                    }
+                }
+            } else if (rule.is_object() && rule.contains("require_greater")) {
+                const auto& spec = rule["require_greater"];
+                if (!spec.is_object() || !spec.contains("path") || !spec["path"].is_string() ||
+                    !spec.contains("than") || !spec["than"].is_string()) {
+                    throw std::invalid_argument(
+                        "SchemaProvider: request.rules \"require_greater\" needs \"path\" and "
+                        "\"than\" strings");
+                }
+                parsed.kind = RequestConfig::Rule::Kind::RequireGreater;
+                parsed.path = spec["path"].template get<std::string>();
+                parsed.than = spec["than"].template get<std::string>();
+            } else {
+                throw std::invalid_argument(
+                    "SchemaProvider: request.rules entries must hold \"omit\" or \"require_greater\"");
+            }
+            req_.rules.push_back(std::move(parsed));
+        }
+    }
     // --- System Prompt ---
     auto s = schema_["system_prompt"];
 
@@ -1138,16 +1199,26 @@ json SchemaProvider::build_body(const CompletionParams& params, bool websocket) 
     // `temperature_path` / `max_tokens_path`), so caller can target
     // nested structure (`reasoning.effort`, `thinking.budget_tokens`).
     //
-    // Unknown paths (not in `req_.per_call_fields`) are silently
-    // dropped. The schema, not the caller, owns the contract — same
-    // discipline as `temperature_path` and `max_tokens_path`. This
-    // also means a typo in caller code (`reasonin.effort`) silently
-    // does nothing instead of stamping a malformed key, which is
-    // safer for production.
+    // Unknown paths (not in `req_.per_call_fields`) are never stamped:
+    // the schema, not the caller, owns the contract. What the caller
+    // learns about it is `request.unknown_knob_policy`: "error" (every
+    // built-in schema) throws so a typo like `reasonin.effort` cannot
+    // look like success; "drop" (custom schemas that predate the key)
+    // ignores the key.
     if (params.extra_fields.is_object()) {
         for (const auto& [path, value] : params.extra_fields.items()) {
             if (req_.per_call_fields.count(path)) {
                 json_path::set_path(body, path, value);
+            } else if (req_.unknown_knob_is_error) {
+                std::string declared;
+                for (const auto& key : req_.per_call_fields) {
+                    if (!declared.empty()) declared += ", ";
+                    declared += key;
+                }
+                throw std::invalid_argument(
+                    "SchemaProvider (" + provider_name_ + "): extra_fields key '" + path +
+                    "' is not a declared per-call field; declared keys: " +
+                    (declared.empty() ? std::string("(none)") : declared));
             }
         }
     }
@@ -1176,7 +1247,52 @@ json SchemaProvider::build_body(const CompletionParams& params, bool websocket) 
         json_path::set_path(body, req_.max_tokens_path, max_tokens);
     }
 
+    apply_request_rules(body);
     return body;
+}
+
+namespace {
+// json has no erase; rebuild the parent object without the key.
+void erase_path(json& root, const std::string& path) {
+    const auto dot = path.rfind('.');
+    const std::string parent_path = dot == std::string::npos ? std::string() : path.substr(0, dot);
+    const std::string key = dot == std::string::npos ? path : path.substr(dot + 1);
+    const auto parent = json_path::at_path(root, parent_path);
+    if (!parent || !parent->is_object() || !parent->contains(key.c_str())) return;
+    json rebuilt = json::object();
+    for (const auto& [name, value] : parent->items()) {
+        if (name != key) rebuilt[name] = value;
+    }
+    if (parent_path.empty()) {
+        root = std::move(rebuilt);
+    } else {
+        json_path::set_path(root, parent_path, rebuilt);
+    }
+}
+}  // namespace
+
+void SchemaProvider::apply_request_rules(json& body) const {
+    for (const auto& rule : req_.rules) {
+        if (rule.kind == RequestConfig::Rule::Kind::Omit) {
+            bool applies = rule.when_path.empty();
+            if (!applies) {
+                const auto value = json_path::at_path(body, rule.when_path);
+                applies = value && value->is_string() &&
+                          rule.when_in.count(value->template get<std::string>()) > 0;
+            }
+            if (applies) erase_path(body, rule.path);
+        } else {
+            const auto lhs = json_path::at_path(body, rule.path);
+            const auto rhs = json_path::at_path(body, rule.than);
+            if (lhs && rhs && lhs->is_number_integer() && rhs->is_number_integer() &&
+                lhs->template get<long long>() <= rhs->template get<long long>()) {
+                throw std::invalid_argument(
+                    "SchemaProvider (" + provider_name_ + "): " + rule.path + " (" +
+                    std::to_string(lhs->template get<long long>()) + ") must be greater than " +
+                    rule.than + " (" + std::to_string(rhs->template get<long long>()) + ")");
+            }
+        }
+    }
 }
 
 json SchemaProvider::build_sse_body(const CompletionParams& params) const {

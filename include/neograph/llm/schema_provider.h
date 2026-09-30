@@ -289,11 +289,38 @@ public:
         /// per-call via `CompletionParams::extra_fields`. Schema:
         ///   "request.per_call_fields": ["reasoning.effort", "thinking.budget"]
         /// build_body iterates the caller's `params.extra_fields` map
-        /// and only stamps keys present in this set — unknown keys
-        /// are dropped (schema owns the contract). Empty set = no
+        /// and only stamps keys present in this set; what happens to any
+        /// other key is `unknown_knob_policy` (below). Empty set = no
         /// per-call bindings honoured (legacy default; back-compat
         /// for schemas that don't declare the key).
         std::set<std::string> per_call_fields;
+
+        /// `request.unknown_knob_policy`: what build_body does with a
+        /// `CompletionParams::extra_fields` key the schema does not declare in
+        /// `per_call_fields`. `"drop"` (the default, for schemas written
+        /// before this key existed) ignores it silently; `"error"` throws
+        /// `std::invalid_argument` naming the declared keys, so a typo or an
+        /// unsupported knob cannot look like success. The built-in schemas use
+        /// `"error"`.
+        bool unknown_knob_is_error = false;
+
+        /// `request.rules`: vendor constraints on the finished body.
+        ///   {"omit": "<path>", "when": {"path": "<p>", "in": ["a", "b"]}}
+        ///       drops <path> when the body holds a string at <p> that is one
+        ///       of the listed values (Anthropic rejects `temperature` != 1
+        ///       while thinking is on, so it is left to the server default).
+        ///   {"require_greater": {"path": "<a>", "than": "<b>"}}
+        ///       throws std::invalid_argument when both are integers and
+        ///       body[a] <= body[b] (Anthropic requires max_tokens >
+        ///       thinking.budget_tokens); absent values leave the rule idle.
+        struct Rule {
+            enum class Kind { Omit, RequireGreater } kind = Kind::Omit;
+            std::string path;
+            std::string than;
+            std::string when_path;
+            std::set<std::string> when_in;
+        };
+        std::vector<Rule> rules;
     };
 
     struct SystemPromptConfig {
@@ -568,6 +595,8 @@ public:
     json serialize_messages(const std::vector<ChatMessage>& messages) const;
     json serialize_tools(const std::vector<ChatTool>& tools) const;
     json serialize_single_message(const ChatMessage& msg) const;
+    // Applies the schema's `request.rules` to a finished request body.
+    void apply_request_rules(json& body) const;
 
     // Per-request value-level streaming decoder state. No sockets or
     // executors: callers can feed fixture lines independently of transport.

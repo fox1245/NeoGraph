@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eaff119675e6e044d0e05d65cfccbe0f95da47b62e6f5e07b01d47170652c99c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8b27d42665ba32812c74df47ddd0d656efbdf962e787880a334a5a1382fbdbd8 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **呼び出しごとのリクエストノブ、診断、ベンダー規則 (#309)。** 呼び出しごとに設定できたのは `provider` と `reasoning.effort` だけで、他の `extra_fields` キーは黙って捨てられていました（実測: `extra_fields.thinking` は wire に届かない）。そのためタイプミスや未対応のノブが成功に見えました。組み込みスキーマが各ベンダーの受け付けるノブを宣言し（`claude`: `thinking`、`output_config.effort`、`cache_control`、`tool_choice`、`gemini`: `thinkingConfig.*`、`safetySettings`、`toolConfig`、`openai_responses`: `reasoning.summary`、`store`、`include`、`previous_response_id`、`parallel_tool_calls`、`text.verbosity`、`truncation`、`openai`: `reasoning`、`include_reasoning`、`usage`、`models`、`response_format`）、`request.unknown_knob_policy: "error"` はそれ以外のキーに宣言済みキーを名指しする `std::invalid_argument` を投げさせます（カスタムスキーマはオプトインしない限り `"drop"` のまま）。新しい `request.rules`（`omit`/`when`、`require_greater`）がベンダー制約を表します。`claude` スキーマは thinking が `enabled`/`adaptive` の間 `temperature` をサーバーに任せ（1 以外は HTTP 400 でした）、`max_tokens <= thinking.budget_tokens` をリクエスト前に拒否します。
 - **キャッシュ／推論トークンの使用量 (#308)。** `ChatCompletion::Usage::cached_prompt_tokens` と `reasoning_tokens` はありましたが、どのパーサーも埋めておらず全プロバイダーで 0 でした。`UsageAccumulator` はそれらを捨て、Anthropic のプロンプト数はキャッシュ済みの先頭部分全体を欠いていました（実測: `input_tokens=3` に対し `cache_read_input_tokens=9818`）。スキーマがマッピング（`response.prompt_extra_fields`、`cached_tokens_path`、`reasoning_tokens_path`、`completion_includes_reasoning`。usage イベントは `prompt_extra_paths`、`cached_path`、`reasoning_path`）を宣言し、非ストリーム、SSE、WebSocket の各経路とネイティブの `OpenAIProvider` が同じように読みます。Anthropic の `cache_read=900` / `creation=300` / `input=12` は `prompt=1212, cached=900` と報告され、Gemini の補完数は thought を含み（可視 3 + thought 266 = 269）、合計を報告しないストリーム（Anthropic）はプロンプト + 補完になります。`UsageAccumulator`、`RunResult::usage`、`Agent::usage()` は部分集合を合算し、モデルトークン予算は引き続き合計基準です。
 - **所有者スコープの実験的なアクティブ Program 起動。** C++ の
   `ProgramRuntime` と Python の `LocalProgramHost` は、新規実行時に

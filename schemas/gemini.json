@@ -20,7 +20,15 @@
     "max_tokens_required": false,
     "max_tokens_default": -1,
     "stream_field": "",
-    "extra_fields": {}
+    "extra_fields": {},
+    "per_call_fields": [
+      "generationConfig.thinkingConfig.thinkingBudget",
+      "generationConfig.thinkingConfig.thinkingLevel",
+      "generationConfig.thinkingConfig.includeThoughts",
+      "safetySettings",
+      "toolConfig"
+    ],
+    "unknown_knob_policy": "error"
   },
   "system_prompt": {
     "strategy": "top_level_parts",
