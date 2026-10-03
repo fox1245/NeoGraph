@@ -100,16 +100,3 @@ TEST(TypedGraphEvent, MalformedPayloadFallsBackToRawEvent) {
         GraphEvent{GraphEvent::Type::NODE_START, "__send__", json{{"sends", malformed_sends}}});
     EXPECT_TRUE(std::holds_alternative<RawGraphEvent>(malformed_dispatch));
 }
-
-TEST(TypedGraphEvent, AdapterPreservesExistingCallbackSurface) {
-    bool saw_token = false;
-    auto callback  = adapt_typed_stream([&](const TypedGraphEvent& event) {
-        if (const auto* token = std::get_if<LlmTokenEvent>(&event)) {
-            saw_token = token->token == "chunk";
-        }
-    });
-
-    callback(GraphEvent{GraphEvent::Type::LLM_TOKEN, "model", json("chunk")});
-    EXPECT_TRUE(saw_token);
-    EXPECT_FALSE(static_cast<bool>(adapt_typed_stream({})));
-}

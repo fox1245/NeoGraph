@@ -14,43 +14,53 @@
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>
+#include "provider_example_support.h"
+#include <json/json.h>
 
 #include <iostream>
 #include <string>
 
-// Mock Provider: returns different responses per step
+// Approval changes graph control flow, never the tool-call/result history.
 class OrderProvider : public neograph::Provider {
-    int call_count_ = 0;
+    std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
 public:
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        neograph::ChatCompletion result;
-        result.message.role = "assistant";
-
-        if (call_count_++ == 0) {
-            // Step 1: tool call (order analysis)
-            result.message.tool_calls = {{
-                "call_001", "analyze_order",
-                R"({"item": "MacBook Pro", "quantity": 1, "price": 2500000})"
-            }};
-        } else {
-            // Step 2: final response
-            result.message.content =
-                "Your order has been confirmed.\n"
-                "- Product: MacBook Pro\n"
-                "- Quantity: 1\n"
-                "- Amount: 2,500,000 KRW\n"
-                "Payment has been completed. Thank you!";
-        }
-        return result;
+    neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
+        auto history = std::make_shared<const std::vector<sp::Message>>(
+            examples::request_messages(request));
+        return prepare_local(client_, std::move(request),
+            [history](const neograph::PreparedProviderRequest& prepared,
+                      const std::function<void(const sp::Event&)>& observer)
+                -> asio::awaitable<sp::runtime::Result> {
+                bool confirmed = false;
+                for (const auto& message : *history)
+                    for (const auto& part : message.parts)
+                        if (const auto* tool = std::get_if<sp::ToolResult>(&part))
+                            confirmed |= tool->tool_use_id == "call_001";
+                sp::Completion completion;
+                sp::Message reply;
+                if (confirmed) {
+                    reply.parts.emplace_back(sp::Text{
+                        "Your order has been confirmed.\n"
+                        "- Product: MacBook Pro\n- Quantity: 1\n"
+                        "- Amount: 2,500,000 KRW\n"
+                        "Payment has been completed. Thank you!"});
+                    completion.stop.kind = sp::StopKind::EndTurn;
+                } else {
+                    auto parsed = sp::json::parse(
+                        R"({"item":"MacBook Pro","quantity":1,"price":2500000})");
+                    reply.parts.emplace_back(sp::ToolCall{
+                        "call_001", "analyze_order", sp::ToolCallKind::ClientExecuted,
+                        std::make_shared<const sp::json::Document>(
+                            std::get<sp::json::Document>(std::move(parsed)))});
+                    completion.stop.kind = sp::StopKind::ToolUse;
+                }
+                completion.messages.push_back(std::move(reply));
+                if (prepared.mode() == neograph::ProviderMode::Stream)
+                    examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
     }
-
-    neograph::ChatCompletion complete_stream(
-        const neograph::CompletionParams& p, const neograph::StreamCallback& cb) override {
-        auto r = complete(p);
-        if (cb && !r.message.content.empty()) cb(r.message.content);
-        return r;
-    }
-
+    std::string_view family() const noexcept override { return "openai.chat"; }
     std::string get_name() const override { return "order_mock"; }
 };
 
@@ -96,6 +106,7 @@ int main() {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = "fixture-order";
 
     // Checkpoint store (in-memory)
     auto store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
@@ -130,10 +141,9 @@ int main() {
     // === Second run: resume after approval ===
     std::cout << "=== Phase 2: Resume after approval ===\n\n";
 
-    auto resumed = engine->resume(
-        "order-001",
-        neograph::json("Approved")
-    );
+    // Null resume approves the paused node without inserting a user turn
+    // between the pending assistant tool call and its result.
+    auto resumed = engine->resume("order-001", neograph::json(nullptr));
 
     std::cout << "Execution trace: ";
     for (const auto& n : resumed.execution_trace) std::cout << n << " → ";

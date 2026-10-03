@@ -115,10 +115,12 @@ public:
      * @code
      * class MyNode : public GraphNode {
      *     asio::awaitable<NodeOutput> run(NodeInput in) override {
-     *         auto messages = in.state.get_messages();
-     *         auto reply = co_await provider_->complete_async({...});
+     *         auto request = make_provider_request(*provider_, model_, in.state.get_provider_messages());
+     *         auto outcome = co_await provider_->invoke_async(std::move(request));
+     *         record_usage(in.ctx, outcome);
+     *         outcome_or_throw(outcome);
      *         NodeOutput out;
-     *         out.writes.push_back({"messages", json::array({reply})});
+     *         out.writes.push_back(provider_messages_write(outcome));
      *         co_return out;
      *     }
      *     std::string get_name() const override { return "my_node"; }
@@ -202,13 +204,8 @@ public:
      */
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
-    /// Unified ``run`` override. Builds completion params,
-    /// calls ``provider_->complete_async`` (or ``complete_stream_async``
-    /// when ``in.stream_cb`` is non-null and bridges per-token events
-    /// to GraphEvent), writes the assistant message to the
-    /// ``messages`` channel. Passes ``in.ctx.cancel_token`` directly
-    /// into ``params.cancel_token`` so cancellation reaches the LLM
-    /// HTTP socket without the legacy thread-local smuggling.
+    /// Dispatch the owned typed request and retain every ordered returned message.
+    /// Streaming observers receive complete typed events; LLM_TOKEN is display only.
     asio::awaitable<NodeOutput> run(NodeInput in) override;
 
     std::string get_name() const override { return name_; }
@@ -220,8 +217,9 @@ private:
     std::vector<Tool*>       tools_;
     std::string              model_;
     std::string              instructions_;
+    ProviderControls controls_;
 
-    CompletionParams build_params(const GraphState& state) const;
+    ProviderRequest build_params(const GraphState& state) const;
 };
 
 /**
@@ -293,9 +291,7 @@ private:
     std::string               prompt_;
     std::vector<std::string>  valid_routes_;
 
-    /// Shared setup: returns (params, route_tail_callback) common to
-    /// the streaming and non-streaming execute paths.
-    CompletionParams build_params(const GraphState& state) const;
+    ProviderRequest build_params(const GraphState& state) const;
     std::vector<ChannelWrite> route_from(const std::string& intent) const;
 };
 

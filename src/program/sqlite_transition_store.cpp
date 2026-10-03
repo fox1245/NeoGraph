@@ -1703,7 +1703,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
-    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication)) {
+    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication, expected_lease)) {
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
@@ -1913,6 +1913,24 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
+    if (publication.recorded_replay_source) {
+        const auto& receipt = *publication.recorded_replay_source;
+        const auto lineage = load_current_lineage_head(
+            impl_->db, owner_scope, publication.recorded_replay_source_lineage->lineage_id());
+        const auto source = load_head(impl_->db, owner_scope, receipt.run_id);
+        const auto contexts = load_context_publication_history(
+            impl_->db, owner_scope, receipt.run_id);
+        if (current || !lineage || !source ||
+            has_blocking_hook_obligation(load_hook_outbox_heads(
+                impl_->db, owner_scope, receipt.run_id, source->run_record)) ||
+            !is_valid_program_runtime_context_clone(
+                contexts, publication.run_record, publication.context_publication) ||
+            !is_valid_program_recorded_replay_allocation(
+                publication, *lineage, source->run_record)) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
 
     const auto& migration_plan = current ? current->migration_plan : publication.migration_plan;
     if (current)
@@ -1945,6 +1963,10 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     if (publication.fork_source_lineage) {
         update_lineage_head(impl_->db, *publication.fork_source_lineage);
         insert_lineage_history(impl_->db, *publication.fork_source_lineage);
+    }
+    if (publication.recorded_replay_source_lineage) {
+        update_lineage_head(impl_->db, *publication.recorded_replay_source_lineage);
+        insert_lineage_history(impl_->db, *publication.recorded_replay_source_lineage);
     }
     if (safe_point_capsule) insert_graph_migration_capsule(impl_->db, *safe_point_capsule);
     if (next_lease)

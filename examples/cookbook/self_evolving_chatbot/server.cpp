@@ -20,13 +20,14 @@
 //   ./build/cookbook_self_evolving_chatbot
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../provider_example_support.h"
 #include <cppdotenv/dotenv.hpp>
 
 #include <cctype>
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -132,10 +133,14 @@ make_topology_registry() {
 
 class CompileCache {
     std::shared_mutex mu_;
-    std::unordered_map<size_t, std::shared_ptr<GraphEngine>> cache_;
+    using Key = std::pair<std::shared_ptr<Provider>, std::string>;
+    std::map<Key, std::shared_ptr<GraphEngine>> cache_;
 public:
-    std::shared_ptr<GraphEngine> get_or_compile(const json& def, const NodeContext& ctx) {
-        size_t key = std::hash<std::string>{}(def.dump());
+    std::shared_ptr<GraphEngine> get_or_compile(
+        const std::string& customer_id, const json& def, const NodeContext& ctx) {
+        // Pin the exact provider capability and every captured request origin.
+        Key key{ctx.provider, json::array({customer_id, def, ctx.model,
+            ctx.instructions, ctx.extra_config, ctx.provider_name}).dump()};
         {
             std::shared_lock lk(mu_);
             if (auto it = cache_.find(key); it != cache_.end()) return it->second;
@@ -143,8 +148,7 @@ public:
         auto raw = GraphEngine::build(def, EngineConfig{.node_context = ctx});
         std::shared_ptr<GraphEngine> engine(raw.release());
         std::unique_lock lk(mu_);
-        cache_.emplace(key, engine);
-        return engine;
+        return cache_.emplace(std::move(key), engine).first->second;
     }
     std::size_t size() { std::shared_lock lk(mu_); return cache_.size(); }
 };
@@ -159,7 +163,8 @@ public:
 static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
     const std::vector<json>& history,
-    const std::string& current_topology)
+    const std::string& current_topology,
+    UsageAccumulator& usage)
 {
     std::string hist_str;
     for (const auto& m : history) {
@@ -169,9 +174,10 @@ static std::string llm_judge_topology(
         hist_str += "- " + role + ": " + content + "\n";
     }
 
-    neograph::CompletionParams p;
-    p.model = "~deepseek/deepseek-v4-flash-latest";
-    p.messages.push_back({
+    // A separate optimizer role consumes an explicit portable text summary,
+    // not the answering model's native continuation authority.
+    std::vector<sp::Message> messages;
+    messages.push_back(portable_message({
         "system",
         "You are a chatbot harness optimizer. Given a conversation history "
         "and the current topology, decide which topology fits the user best. "
@@ -183,18 +189,19 @@ static std::string llm_judge_topology(
         "multiple angles / comprehensive views.\n"
         "Respond with EXACTLY one word: simple OR reflexive OR fanout. "
         "No punctuation, no explanation."
-    });
-    p.messages.push_back({
+    }));
+    messages.push_back(portable_message({
         "user",
         "Current topology: " + current_topology +
         "\n\nConversation so far:\n" + hist_str +
         "\nBest topology for THIS user (one word):"
-    });
+    }));
 
-    // complete() 는 v1.0 에서 deprecated (invoke() 로 통합 예정). 데모
-    // 는 sync 단순성 위해 그대로 사용 — 1 turn 마다 1 judge call.
-    auto result = provider->complete(p);
-    std::string raw = result.message.content;
+    auto result = provider->invoke(make_provider_request(
+        *provider, "~deepseek/deepseek-v4-flash-latest", std::move(messages)));
+    usage.add(outcome_usage(*result));
+    result = outcome_or_throw(std::move(result));
+    std::string raw = outcome_text(*result);
     // 소문자 + 첫 단어 추출
     std::string word;
     for (char c : raw) {
@@ -215,7 +222,8 @@ struct CustomerRecord {
     std::string topology_name;
     json        topology_def;
     std::string system_prompt;
-    std::vector<json> history;     // session memory (per-customer, demo 단순화)
+    std::vector<sp::Message> native_history; // Authoritative in-memory answering history.
+    std::vector<json> history;              // Portable final-text observations for the judge.
     std::vector<std::pair<int, std::string>> evolution_log;  // (turn, topology)
 };
 
@@ -241,12 +249,7 @@ int main() {
         return 1;
     }
 
-    neograph::llm::OpenAIProvider::Config cfg;
-    cfg.api_key = api_key;
-    cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
+    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat");
 
     NodeFactory::instance().register_type("merge",
         [](const std::string& name, const json&, const NodeContext&) {
@@ -279,6 +282,7 @@ int main() {
     auto t_start = std::chrono::steady_clock::now();
     int main_llm_calls = 0;
     int judge_llm_calls = 0;
+    auto reported_usage = std::make_shared<UsageAccumulator>();
 
     for (size_t turn = 0; turn < user_messages.size(); ++turn) {
         const std::string& umsg = user_messages[turn];
@@ -291,19 +295,18 @@ int main() {
         ctx.provider = provider;
         ctx.model = "~deepseek/deepseek-v4-flash-latest";
         ctx.instructions = alice.system_prompt;
-        auto engine = cache.get_or_compile(alice.topology_def, ctx);
+        auto engine = cache.get_or_compile(alice.id, alice.topology_def, ctx);
 
-        // history 누적해서 input 으로 전달.
-        std::vector<json> input_msgs = alice.history;
-        input_msgs.push_back({{"role", "user"}, {"content", umsg}});
+        auto answering_history = alice.native_history;
+        answering_history.push_back(portable_message({"user", umsg}));
 
         RunConfig rcfg;
         rcfg.thread_id = "alice__main";
-        rcfg.input = {{"messages", json::array()}};
-        for (const auto& m : input_msgs)
-            rcfg.input["messages"].push_back(m);
+        rcfg.usage = reported_usage;
+        rcfg.provider_messages = std::move(answering_history);
 
         auto result = engine->run(rcfg);
+        alice.native_history = std::move(result.native_messages);
         auto out_msgs = result.output["channels"]["messages"]["value"];
 
         // 마지막 assistant 응답 추출.
@@ -328,7 +331,7 @@ int main() {
         // (b) LLM judge — 다음 turn 의 topology 결정.
         std::cout << "[Evaluating harness fit...] ";
         std::string suggested = llm_judge_topology(
-            provider, alice.history, alice.topology_name);
+            provider, alice.history, alice.topology_name, *reported_usage);
         judge_llm_calls += 1;
         std::cout << "judge → " << suggested << "\n";
 
@@ -354,6 +357,8 @@ int main() {
     std::cout << "Main LLM calls:       " << main_llm_calls << "\n";
     std::cout << "Judge LLM calls:      " << judge_llm_calls << "\n";
     std::cout << "Total LLM calls:      " << (main_llm_calls + judge_llm_calls) << "\n";
+    std::cout << "Reported usage:      " << usage_to_json(reported_usage->snapshot()).dump() << "\n";
+    std::cout << "Monetary charge:     unknown (not inferred from call counts)\n";
     std::cout << "Wall time:            " << total_s << " s\n";
     std::cout << "Peak RSS:             " << peak_rss_kb() << " KB ("
               << peak_rss_kb() / 1024.0 << " MB)\n";

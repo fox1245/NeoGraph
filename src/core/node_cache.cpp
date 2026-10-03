@@ -1,4 +1,5 @@
 #include <neograph/graph/node_cache.h>
+#include "canonical_json.h"
 
 #include <cstdint>
 #include <string>
@@ -156,11 +157,9 @@ void NodeCache::evict_one_locked() {
     ++evictions_;
 }
 
-// FNV-1a 64-bit over the canonical JSON dump. nlohmann::json sorts
-// object keys at dump time when given the default settings, so the
-// same logical state produces the same string every time.
+// FNV-1a over canonical channel/native inputs; object insertion order is irrelevant.
 std::string hash_state_for_cache(const json& state_value) {
-    const std::string canon = state_value.dump();
+    const std::string canon = detail::canonical_json_bytes(state_value);
     std::uint64_t h = 0xcbf29ce484222325ULL;
     constexpr std::uint64_t prime = 0x100000001b3ULL;
     for (unsigned char c : canon) {

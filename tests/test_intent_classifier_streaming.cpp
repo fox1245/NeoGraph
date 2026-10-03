@@ -1,19 +1,9 @@
-// IntentClassifierNode used to override only execute() — never
-// execute_stream(). Callers running a graph in streaming mode
-// therefore saw LLM_TOKEN events from every LLMCallNode but none
-// from IntentClassifier, even though both are plain LLM calls. The
-// fix adds a proper execute_stream override that routes through the
-// provider's streaming API and emits tokens.
-//
-// This test pins the new behaviour with a scripted provider that
-// delivers three tokens to the StreamCallback; the test asserts
-// every token surfaced as an LLM_TOKEN event on the GraphStreamCallback.
-//
-// PR 9a: this test now drives ``IntentClassifierNode::run`` with
-// and without a streaming sink to compare both code paths.
+// Intent classification forwards typed text deltas to graph token events and
+// chooses the same route in collect and stream modes.
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/async/run_sync.h>
+#include "fixtures/typed_provider.h"
 
 #include <atomic>
 #include <string>
@@ -24,35 +14,24 @@ using namespace neograph::graph;
 
 namespace {
 
-class TokenStreamingProvider : public Provider {
+class TokenStreamingProvider : public test::LocalProvider {
 public:
     explicit TokenStreamingProvider(std::vector<std::string> tokens,
                                     std::string final_output)
-        : tokens_(std::move(tokens)), final_output_(std::move(final_output)) {}
-
-    ChatCompletion complete(const CompletionParams&) override {
-        ChatCompletion c;
-        c.message.role = "assistant";
-        c.message.content = final_output_;
-        return c;
-    }
-
-    ChatCompletion complete_stream(const CompletionParams&,
-                                   const StreamCallback& on_chunk) override {
-        for (const auto& t : tokens_) {
-            if (on_chunk) on_chunk(t);
-        }
-        ChatCompletion c;
-        c.message.role = "assistant";
-        c.message.content = final_output_;
-        return c;
-    }
-
-    std::string get_name() const override { return "token-streamer"; }
-
-private:
-    std::vector<std::string> tokens_;
-    std::string              final_output_;
+        : LocalProvider([tokens = std::move(tokens), final_output = std::move(final_output)](
+              ProviderRequest, const PreparedProviderRequest& prepared,
+              const EventCallback& on_event) -> asio::awaitable<sp::runtime::Result> {
+            if (prepared.mode() == ProviderMode::Stream && on_event) {
+                on_event(sp::Begin{"classification"});
+                on_event(sp::MessageBegin{{0}, {}, sp::Role::Assistant});
+                on_event(sp::PartBegin{{0}, {0}, sp::PartKind::Text});
+                for (const auto& token : tokens)
+                    on_event(sp::PartDelta{{0}, {sp::PartKind::Text, token}});
+                on_event(sp::PartSeal{{0}, {}});
+                on_event(sp::MessageSeal{{0}});
+            }
+            co_return test::success(final_output);
+        }, "token-streamer") {}
 };
 
 } // namespace

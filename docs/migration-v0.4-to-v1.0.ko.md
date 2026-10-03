@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=d2b0e6c51e07b5877e07c5768ade91ce2129fec5f6441f92c7f7b8feae6026b9 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=47da3b0da6a1a0469315657c9eb8079b216d0c51eafce0bed090d91fc5c3c7b5 -->
 # 이전 안내: 기존 8 가상 함수 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -18,7 +18,7 @@ NeoGraph v0.4는 노드 진입점을 단일 `run(NodeInput) -> awaitable<NodeOut
 | 기존 가상 함수 | 이전된 형태 |
 |---|---|
 | `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;` (동기 본문) |
-| `execute_async(state)` | `co_return co_await provider->complete_async(...);` 같은 네이티브 비동기 |
+| `execute_async(state)` | `co_await provider->invoke_async(std::move(request));` 같은 네이티브 비동기 |
 | `execute_stream(state, cb)` | `if (in.stream_cb) (*in.stream_cb)(event); co_return NodeOutput{...};` |
 | `execute_stream_async(state, cb)` | 위 + 네이티브 비동기 (`co_await ...`) |
 | `execute_full(state)` | `NodeOutput out; out.writes=...; out.command=...; co_return out;` |
@@ -87,70 +87,83 @@ public:
 
 ### 사례 2 — 비동기 LLM 노드 (`execute_async` 이전)
 
-**옛:**
 ```cpp
-class TalkNode : public GraphNode {
-    std::shared_ptr<Provider> prov_;
-public:
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override {
-        auto reply = co_await prov_->complete_async({
-            .messages = state.get_messages(),
-            .model    = "gpt-mock",
-        });
-        co_return std::vector<ChannelWrite>{
-            {"reply", json(reply.message.content)}
-        };
-    }
-    std::string get_name() const override { return "talk"; }
-};
-```
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
 
-**새:**
-```cpp
-class TalkNode : public GraphNode {
-    std::shared_ptr<Provider> prov_;
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto reply = co_await prov_->complete_async({
-            .messages = in.state.get_messages(),
-            .model    = "gpt-mock",
-        });
-        NodeOutput out;
-        out.writes.push_back({"reply", json(reply.message.content)});
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
-    std::string get_name() const override { return "talk"; }
+    std::string get_name() const override { return "chat"; }
 };
 ```
 
 ### 사례 3 — 스트리밍 노드 (`execute_stream` 이전)
 
-**옛:**
-```cpp
-std::vector<ChannelWrite>
-execute_stream(const GraphState& state, const GraphStreamCallback& cb) override {
-    auto reply = prov_->complete_stream(params, [&](const std::string& chunk) {
-        cb({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
-    });
-    return {ChannelWrite{"reply", json(reply.message.content)}};
-}
-```
+공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
 
-**새:**
 ```cpp
-asio::awaitable<NodeOutput> run(NodeInput in) override {
-    // in.stream_cb is a pointer — null means the caller does not want streaming.
-    auto on_chunk = [&](const std::string& chunk) {
-        if (in.stream_cb) {
-            (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
-        }
-    };
-    auto reply = prov_->complete_stream(params, on_chunk);
-    NodeOutput out;
-    out.writes.push_back({"reply", json(reply.message.content)});
-    co_return out;
-}
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+
+class StreamingChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
+public:
+    StreamingChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages(), {}, {},
+            neograph::ProviderMode::Stream);
+        request.on_event = [sink = in.stream_cb](const sp::Event& event) {
+            if (!sink) return;
+            const auto* delta = std::get_if<sp::PartDelta>(&event);
+            if (delta && delta->payload.kind == sp::PartKind::Text &&
+                delta->payload.channel == sp::DeltaChannel::Content)
+                (*sink)({neograph::graph::GraphEvent::Type::LLM_TOKEN,
+                         "chat", neograph::json(std::string(delta->payload.bytes))});
+        };
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
+        co_return out;
+    }
+    std::string get_name() const override { return "chat"; }
+};
 ```
 
 ### 사례 4 — Command / Send를 사용하는 노드 (`execute_full` 이전)
@@ -260,135 +273,122 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 ---
 
-# 이전 2: `Provider` 호환성 정책과 새 명시적 요청 API (v0.9+)
+# 이전 2: typed lossless Provider 전환 (필수 재컴파일)
 
-기존 `Provider::complete*` 네 메서드와 콜백 기반 `invoke()`는 제거 계획이 없는 안정된 API이다. 기존 구현과 호출자는 이전할 필요가 없다. 그러나 새 `Provider` 구현은 `CompletionProvider::do_invoke()`만 재정의하고, 새 직접 호출은 `invoke_request(CompletionRequest)`를 사용해야 한다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 불안정 `0.0.0`, interface revision 3 / shared ABI 3이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 현재 runtime/archive는 Linux/POSIX이며 Windows·macOS·WASM runtime 검증을 뜻하지 않는다. Python provider binding/wrapper는 유예되었고 이 C++ 변경으로 포팅되지 않는다.
 
-## 기존 vs 권장 새 호출 패턴
+Fresh installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer가 pass했다. Interface/ABI 선언만과 실제 package 결과는 별개이며 더 넓은 platform이나 stable release를 주장하지 않는다.
 
-| 안정된 호환 API | `CompletionProvider` 직접 사용 시 권장 API |
-|---|---|
-| `complete(params)` | `run_sync(invoke_request(CompletionRequest::collect(params)))` |
-| `complete_async(params)` | `co_await invoke_request(CompletionRequest::collect(params))` |
-| `complete_stream(params, on_chunk)` | `run_sync(invoke_request(CompletionRequest::stream(params, on_chunk)))` |
-| `complete_stream_async(params, on_chunk)` | `co_await invoke_request(CompletionRequest::stream(params, on_chunk))` |
-
-`CompletionRequest`는 콜백 존재와 전송 모드를 분리한다. 따라서 콜백이 없어도 `CompletionRequest::stream(params)`는 명시적으로 스트리밍 전송을 요청한다. `Provider&` 또는 `Provider*`만 보유한 코드는 기존 `complete*` 메서드를 그대로 사용할 수 있다.
-
-## 사례별 변환
-
-### 사용자 코드에서 Provider 호출
+공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
 
 ```cpp
-// Stable compatible API — continues to be supported
-auto completion = co_await provider->complete_async(params);
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <neograph/controlled_provider.h>
+
+// Public operation signatures (the only virtual operation is prepare).
+// ProviderRequest owns the SDK request variant, mode, options and observer.
+// invoke[_async](request) = prepare once, then dispatch the same handle.
+// dispatch[_async](prepared) returns sp::runtime::Result.
 ```
+
+### ProviderRequest / ProviderControls
 
 ```cpp
-// New code using `CompletionProvider` directly — mode is explicit
-auto completion = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result call_provider(
+    neograph::Provider& provider, std::string model,
+    std::vector<sp::Message> history,
+    std::function<void(const sp::Event&)> observer) {
+    neograph::ProviderControls controls;
+    controls.max_output_tokens = 128;  // optional caller-selected wire cap
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history), {},
+        std::move(controls), neograph::ProviderMode::Stream);
+    request.on_event = std::move(observer);
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));  // owns Completion or Failure
+}
 ```
 
-### 사용자 정의 Provider 하위 클래스
+### PreparedProviderRequest / ProviderBudgetClaim
+`prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
 
-기존 `Provider` 하위 클래스는 계속 작동한다. 새 구현은 `CompletionProvider`를 상속하고 `do_invoke()`만 구현해야 한다. 기존 `Provider` vtable과 Python `complete()` 계약은 변경되지 않는다.
+선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
+
+
+공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, native continuation, 전체 wire envelope, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
+
+실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
+### SchemaProvider
+
+`SchemaProvider`는 승인된 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택적 `SchemaProvider::Defaults`를 받는다. descriptor는 closed/versioned 데이터 admission이지 요청/응답 interpreter나 임의 primitive registry가 아니다. credential은 공개 descriptor가 아니라 runtime options에 둔다. Defaults는 typed OpenRouter routing과 Responses 보관(`responses_store`)만 포함하고 후자는 Responses에만 유효하다. Hosted OpenRouter routing·retention·JSON 형식은 선언된 typed 제어다. Images, Veo, Decisions는 별도 NeoGraph typed client와 별도 승인을 쓰며 SDK chat grant를 물려받지 않는다.
 
 ```cpp
-// Old pattern — async-native provider
-class MyProvider : public neograph::Provider {
-public:
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override {
-        // ... HTTP call ...
-        co_return result;
-    }
+#include <neograph/llm/schema_provider.h>
+#include <descriptor/descriptor.h>
+#include <stdexcept>
+#include <variant>
 
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override {
-        // ... SSE call ...
-        return result;
-    }
-
-    std::string get_name() const override { return "my"; }
-};
+std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
+    std::string_view descriptor_json, std::string api_key) {
+    auto loaded = sp::descriptor::load(descriptor_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument(error->message);
+    sp::runtime::Options options;
+    options.api_key = std::move(api_key);
+    neograph::llm::SchemaProvider::Defaults defaults;
+    return std::make_shared<neograph::llm::SchemaProvider>(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+        std::move(options), std::move(defaults));
+}
 ```
 
-```cpp
-// New pattern — transport mode is decoupled from callback presence
-class MyProvider : public neograph::CompletionProvider {
-public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        if (request.streaming()) {
-            // Uses SSE/WS transport even without callback.
-            // With callback, invokes request.on_chunk()(token) per token.
-        } else {
-            // ... HTTP call ...
-        }
-        co_return result;
-    }
+### Native 기록 / 예산
 
-    std::string get_name() const override { return "my"; }
-};
-```
+`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
 
-새 호출자는 모드를 명시적으로 지정.
+**Standalone bank journal 수정 — 현재 계약 개정; 실제 runtime 증거는 아래.** Owner-approved protocol은 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish해야 한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주면 안 된다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능해야 한다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain/pristine archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 standalone obligation을 대체할 수 없다. Program/external-bank journal 소유는 유지된다. 이는 요구 계약이다. 실제 currency/custody 증거와 instrumentation 한계는 아래에 있으며 stable released API 보장은 아니다.
 
-```cpp
-auto full = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
+**현재 선언; 통합 runtime 증거는 아래:** `<neograph/graph/checkpoint.h>`는 `owner_scope`, logical `thread_id`, private backend `storage_thread_id`, `graph_identity`, `original_ceiling`, `original_deadline_ticks`, `deadline_clock_identity`를 가진 `ManagedBudgetLeaseScope`를 선언한다. `OwnedManagedBudgetLease`는 read-only `scope()`, `actor_id()`, 불변 `bank_generation()`, `revision()`, `head_checkpoint_id()`, `head_commitment()`를 노출하며 공개 authority-import constructor가 없다. `ManagedBudgetEffectReceipt`는 `active()`, `effect_id()`, `claim_amount()`, `request_digest()`를 노출하고 default receipt는 권한을 주지 않는다. `CheckpointStore`는 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`, `begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`, `settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`, `publish_managed_budget_checkpoint(lease, checkpoint)`, `release_managed_budget_lease(lease)`와 `_async` counterpart를 선언한다. Sync `CheckpointStoreCore`와 `AsyncCheckpointStore`는 각각 해당 variant를 제공한다. `managed_budget_checkpoint_commitment(checkpoint)`는 bank JSON뿐 아니라 전체 영속 checkpoint를 결합한다. 이 선언은 backend CAS·currency 안전성·installed ABI 호환성·실제 성공 runtime 경로를 입증하지 않는다.
 
-auto streamed = co_await provider.invoke_request(
-    CompletionRequest::stream(params, on_chunk));
+**실제 InMemory shared-bank fork는 유지되었으며 실제 증명 완료.** 원래 실제 C++ fork는 ONE original financial journal과 trusted current branch head를 쓰며 grant를 복제하지 않는다. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 및 `_async`는 authentic current source/full commitment와 실제 same-bank native C++ pointer를 요구하고 durable standalone fork는 명시적 unsupported로 남는다. `OwnedManagedBudgetLease::scope()`와 original owner/thread/graph, ceiling, deadline/clock, generation은 불변이다. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()`는 execution branch를 별도로 선택하며 `GraphState::budget_original_thread_id()`는 원래 financial bank를 가리킨다. 정확한 selected-branch head CAS와 global actor/revision은 canonical current counter, pending effect, burned identity에 대해 모든 branch를 직렬화한다. Original/fork branch는 보충 없이 계속 사용할 수 있다. Stale snapshot·checkpoint copy·imported JSON은 alias를 발급하거나 head를 되돌릴 수 없다. 원래 root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank 증명은 변경하지 않은 test_graph_engine.cpp:810–913에서 PASSED했다. Saved original ceiling30은 effective fork ceiling20과 별개이며 widening31과 JSON-only restore는 거부해야 한다. Unbounded reported observation은 사실 data이지 finite grant가 아니다. 입증된 zero-effect lease만 unchanged head를 release할 수 있고 unknown/pending effect는 obligation을 유지한다.
 
-// Can explicitly request streaming transport even without observing tokens.
-auto streamed_without_observer = co_await provider.invoke_request(
-    CompletionRequest::stream(params));
-```
+**현재 release-error 계약; 실제 suite/probe는 아래.** `<neograph/graph/engine.h>`의 `graph::ManagedBudgetLeaseReleaseError`는 `ProviderOutcomeError`를 상속한다. `cause()`는 원래 execution exception을 보존하고 `release_error()`는 보조 durable lease-disposition 실패를 노출한다. `outcome()`은 실제 SDK 증거가 있으면 보존하고 SDK outcome이 없으면 null이다. Release 실패는 결과를 만들거나 재dispatch를 허용할 수 없다. Closed `_neograph_managed_budget_scope` metadata는 원래 logical scope/cap/deadline clock/generation을 설명하지만 backend CAS 권한이 아닌 data이다.
 
-기존 네 가상 함수와 `invoke(params, on_chunk)`는 계속 지원된다. `CompletionProvider` 최종 어댑터는 모든 기존 진입점을 `do_invoke()`로 한 번 연결하여 상호 재귀를 방지한다.
+**Archive-owner/retention 계약; 실제 suite/probe는 아래.** Finite standalone root 또는 authenticated finite source만 실제 설정된 `sp::NativeArchive::owner_scope()`에서 생략된 original owner를 상속한다. Unbounded/plain owner metadata 의미는 바뀌지 않는다. 명시적으로 충돌하는 archive owner는 lease acquire 전에 거부한다. `CheckpointStore::retains_native_checkpoint() const noexcept`와 대응 Core/Async storage capability는 기본 false이며 실제 InMemory backend만 true로 override하고 wrapper는 실제 retention을 위임해야 한다. 이 read-only 설명은 정당한 unleased/plain/unbounded C++ native checkpoint custody를 허용하되 spending credit이나 native replay authority를 주지 않는다. Leased custody는 JSON flag나 추측한 store type 대신 실제 store-issued receipt를 사용한다.
 
-## 자동 취소 전파
+**Native-custody pre-I/O gate; 실제 suite/probe는 아래.** Managed effect begin은 pending-effect/slot/held-window 변경 전에 실제 결합된 NativeArchive 또는 실제 local store-issued private C++ retention capability를 요구한다. Private capability는 JSON에서 import하거나 wire로 전달하지 않는다. C++ sidecar는 경계를 넘을 수 없으므로 remote backend가 InMemory여도 gRPC는 실제 client·server archive를 요구한다. Archive가 finite source owner를 제공하지 않으면 원래 anonymous owner scope는 빈 값으로 유지하고 실제 archive binding은 original scope와 일치해야 한다. Financial head/lease 증거만으로 native-custody readiness를 증명하지 않는다.
 
-취소가 필요하면 `CompletionParams::cancel_token`을 지정. 내부 엔진 노드는 `RunContext` 토큰을 params의 제공자에게 전달. 스레드-로컬 암시적 전파 경로는 더 이상 사용되지 않는다.
+진단 JSON은 문법상 유효한 duplicate-key 문서를 포함해 원래 raw byte를 보존하지만 실행 가능한 요청/config admission은 중복을 계속 거부한다. 원래 non-2xx 응답 JSON은 두 번째 손실 parse 없이 `http.error` 증거에 남는다. named SSE error는 뒤의 정상 stream close보다 우선한다. 진단/provider metadata는 무관한 작은 error-text cap이 아니라 승인된 source extent로 제한된다.
 
-```cpp
-// Node body inside engine — both cancel identically
-co_await provider->invoke(params, nullptr);                    // OK
-neograph::async::run_sync(provider->invoke(params, nullptr));  // OK
-```
+`ProviderRequest::observer_limits`는 host-only이다. 명시한 `max_events`·`max_bytes`는 양수여야 하며 승인된 SDK 전달 상한을 낮출 수만 있다. `provider-request/v3` digest는 실제 limit, mode, encoded body, retry policy와 모든 semantic descriptor binding을 결합한다. Bridge는 queued·draining batch 전체에서 실제 PMR vector/map capacity와 소유 event/document byte를 계산하며 queue mutex 밖에서 cancellation을 요청한다. 이름이 `messages`인 Generic channel을 chat으로 강제 변환하지 않는다. native `history` channel을 `messages`에 mapping하면 JSON에서 native 권한을 만드는 대신 C++ sidecar를 보존한다.
 
-그래프 밖의 직접 호출자(예: `Agent` 사용자 코드)도 동일한 패턴을 따른다 — 명시적 cancel_token 없이는 취소를 받을 수 없다(이전과 동일).
+`ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Provider retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다.
 
-## 이전하지 않으면 어떻게 되는가
+`ProgramFailure`는 live `provider_outcome`·`provider_cause`를 보존한다. Canonical factual SDK witness는 실제 archive custody를 owner/run/version/bundle/operation/attempt에 결합하며 Runtime은 복구 실패를 노출하기 전에 설정된 custody를 즉시 복원한다. 공개 data-only `ProgramResult::create()`는 미리 채운 witness로 우회할 수 없고 unresolved parsed seal은 실행 결과가 아니다. 프로세스 재시작 후 원래 exception pointer는 없으므로 `provider_cause == nullptr`이며 text에서 재생성하지 않는다. 영속화할 수 없는 실패는 serialize/publish/replay할 수 없다.
 
-조치가 필요하지 않다:
-- 기존 가상 함수 재정의와 직접 호출은 계속 작동.
-- Provider 관련 `-Wdeprecated-declarations` 경고는 더 이상 발생하지 않음.
-- 호환성 및 보안 수정은 기존 API에도 적용.
+`RecordedBindingSet`는 source-bound move-only data이지 caller가 제공하는 dispatcher가 아니다. 신뢰된 Catalog `recorded_capability_binder`는 실제 영속 source event를 독립적으로 읽어 captured-only capability를 materialize한다. `ProgramRuntime::replay_recorded()`는 원래 selected-source permission을 검사한 뒤 실제 남은 bank를 durable CAS로 이전한다. inherited spend는 새 model grant가 아니다. 구 `start_recorded` 갱신 API는 제거되었다. InMemory/File/SQLite/PostgreSQL Program store는 실행 내내 정확하고 불변인 owned lease를 보존하며 expiry로 갱신하지 않는다. Controlled JavaScript도 underlying capability manifest를 검사하고 정확한 completed command 결과를 소비하며 external effect를 재dispatch하지 않는다.
 
-기존 API 제거 계획은 없다. 그러나 새 기능은 명시적 요청 계약에만 추가될 수 있으므로, 새 기능 구현 시 `CompletionProvider`가 바람직하다.
+**Recorded-control causal fix는 full suite에서 실제 증명 완료.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Reservation은 첫 새 Core checkpoint를 거부했던 일반 Running→Running transition 대신 인증된 settlement transition을 선택한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다. 기존 Recorded CPU/Memory await/handoff scenario는 full suite에서 pass했다. Remote TSan coverage 한계는 아래에 명시한다.
 
-## 자동 변환 가능한가?
+**유료 관측 완료; 보편적 qualification은 아님.** 원래 `SPQUAL1` base630/1000000 microUSD는 불변이다. 같은 원래 ledger의 ONE hash-chained `A`가 승인 extension480/3000000을 받아 aggregate1110/4000000이 된다. Calls/spent/hold/settlement는 누적이며 새 grant ID/header/reset은 없다. 정확한 declaration byte/file identity와 original authorization/baseline/catalog/activation/ledger-prefix hash/totals는 고정되고 삭제·교체·변경은 fail closed한다. 최종 canonical ledger는 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000이다. Spent+held US$1.725786은 LOCAL catalogue meter이지 invoice가 아니다. 기록된 five-family60-pair baseline은600 request를 완료했다: Chat60/60, Responses60/60, Messages60/60, Generate56/60(incorrect-vision SSE4개), Interactions57/60(incorrect-vision buffered1개/SSE2개). 합계293/300 pair이며300/300은 아니다. 다른 old600 financial record는 보존하되 완전한 behavioral proof는 아니다. 이전 M5/media one-shot cohort는 그대로다. 이전 Google3-round prerequisite의 invalid-tool2개/unreadable-positive1개 실패 상태를 유지한다. 추가 유료 호출은 승인되지 않는다. 최종 SDK 증거와 native-axis 한계는 baseline 성공과 별개다. 이전 activation/reopen smoke는 두 번 reopen한 calls610/spent219159/held751233 및 SDK meter/canary/vision4-test19.38초 pass로 보존한다. 이는 범위가 정해진 이전 checkpoint이지 최종 ledger totals가 아니다. 이전 검증된 Chat60-pair cohort의 실제 attempt120,UpperBound charge120,UnknownHold 없음도 보존한다.
 
-호출 지점은 단순한 패턴을 따른다:
+**Native-axis 관측은 cryptographic 검증·native consumption/equivalence가 아니다.** Generate는 mutation/omission/duplication을 받아들였다. Interactions는 isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission, duplication을 받아들였다. 모든 thought/signature 제거는 generic400을 반환했고 THOUGHT item을 유지한 채 모든 signature field를 제거해도 generic400이었다. 마지막 capture에는 local encoded-original retention control만 있고 same-capture server positive는 없었다. 이전 positive cohort는 실제 증거다. 이는 aggregate-carrier-absence boundary만 입증하며 issuer/signature 검증이나 vendor consumption을 입증하지 않는다. 실제 report: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`. Prerequisite-failed/not-run/negative-inconclusive 상태는 사실 그대로 유지한다. Thought-only/carrier-only omission은 다른 carrier가 남아 있는 상태에서 받아들여졌다. Issuer-validation/native-consumption 주장을 강화하지 않는다.
 
-```bash
-# Review with dry-run
-grep -rnE '->complete(_async|_stream|_stream_async)?\(' your/code
+**실제 통합 증명과 남은 한계.** 최신 Core full run:2242 test, 실패0,skip16(RAM process-loss 비적용14개/live-credential gate2개),130.17초. `PgNestedJsonRoundTrips`는 duplicate key/order/null metadata,blob,residual을 정확히 보존하며0.18초 pass했다. 변경하지 않은 원래 shared-bank fork와 기존 Recorded CPU/Memory await/handoff scenario가 pass했다. 실제 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe는 plain과 ASan+UBSan에서 pass했다. LOCAL Memory/SQLite/PostgreSQL TSan scope는7개 pass,warning0이다. System Abseil/Protobuf를 포함한 full mixed gRPC TSan은 exit66,dependency/generated-RPC stack에 race warning402개였다. 이는 instrumentation/coverage 한계이지 proven false positive가 아니다. Remote TSan/race-free를 주장하지 않으며 warning을 suppress하지 않는다. Installed find_package Program C++/C ABI/dualQuickJS3 consumer는 pass했다. Fresh installed NeoGraph/SchemaProvider typed consumer는 실제 HTTP request2개,coroutine 시작 전 provider 소멸,native/tool replay,refusal,known-zero/raw 보존,실제 LinkedMismatch 거부를 pass했다. Browser Alice/Bob isolation·generation2 replacement를 실제 시각 검증했고 PostgreSQL Program Chat black-box6개는18.989초 pass했다. 최신 SDK26/26은 실패0,74.07초 pass했다. 최종 ReleaseGraph16설정 ×fresh process3회/48기록은38.29초,실패0,모든 actual protocol/owned-outcome check pass로 완료했다. NeoGraph `benchmarks/provider-cutover-final-results.json`과 `benchmarks/provider-cutover-final-summary.json`은 별도의 최종 cohort를 보존한다. 측정 중 compiler/유료 model은 실행하지 않았고 historical cohort는 그대로이며 semantic/resource equivalence를 주장하지 않는다. Unstable SDK/ABI3는 stable release나 더 넓은 platform qualification이 아니다.
 
-# Then manually edit case-by-case (refer to the mapping table above).
-```
+**최소 유료 증거(2026-10-03)는 광범위 qualification이 아니다.** 별도로 승인한 one-shot 세 호출 결과: Images—JPEG 1개, 1024×1024, 360685 byte, input/output/total token 19/1408/1427, 실제 시각 검사; Veo—MP4 1개, 1280×720, 4초, 437737 byte, generation 1회와 status GET 3회, usage nullable, Chromium decode·시각 검사; Decisions—`typesafe/jev-1.13`, probability 0.93, input/output token 283/21, total 미상, API 보고 비용 USD 0.000011886. Image USD 0.0336 base + text/thinking, Veo USD 0.20은 catalog 예상이지 invoice가 아니다. 최소 image smoke에서는 가격대별 내역을 수집하지 않았다. 결과는 one-shot 권한을 갱신하거나 재실행을 승인하지 않는다.
 
-기존 `Provider` 하위 클래스를 단일 `CompletionProvider::do_invoke()`로 병합하는 것은 선택 사항이며, 얽힌 로직 때문에 수동 편집이 필요하다.
+완료된 chat pair는 downstream vendor의 native-continuation 소비를 입증하지 않는다.
 
-## 관련 문서 / 이슈
+Stage 3(2026-04) 설계와 당시 측정 테스트 수는 역사로 보존한다. provider 호환/crossover 결정은 아래 typed lossless 전환으로 대체되었으며 과거 설계 기록은 현재 provider API가 아니다.
 
-- [`include/neograph/graph/node.h`](../include/neograph/graph/node.h) — 새 `run(NodeInput)` 가상 함수의 인라인 docstring (예제 포함)
-- [ROADMAP_v1.md](../ROADMAP_v1.md) — Candidate 1 (GraphNode 8-가상-함수 평탄화)의 상세 설계 노트
-- [troubleshooting.md](troubleshooting.md) — 실제 이전 중 만나는 컴파일 오류와 런타임 차이
-- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — Provider 메서드 구현 경로와 영구 호환성 정책 결정 기록
+- [ABI_POLICY.md](ABI_POLICY.md)
+- [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
+- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — historical decision; superseded provider compatibility policy.
 
 ---
 
@@ -451,6 +451,8 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 상세 측정은 ROADMAP_v1.md 성능 섹션 참조 (별도 추가).
+
+> Stage 3(2026-04) 설계와 당시 측정 테스트 수는 역사로 보존한다. provider 호환/crossover 결정은 아래 typed lossless 전환으로 대체되었으며 과거 설계 기록은 현재 provider API가 아니다.
 
 ---
 

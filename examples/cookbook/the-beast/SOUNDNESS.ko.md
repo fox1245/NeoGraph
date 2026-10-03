@@ -1,6 +1,14 @@
 <!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=b9f9924f38084a242500a0f3af09153dba35415c1f1e158a2d18a158745273af -->
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
 
+## 타입 제공자 전환 — 증거의 경계
+
+전환된 C++ 작성/수정 경로는 타입 `ProviderRequest`, `sp::Message` 이력 및 전체 불변 `sp::Outcome`을 사용하고 반환된 모든 네이티브 메시지/파트를 보존한다. 텍스트 추출은 후보 JSON/Python 파싱용이며 네이티브 대화 이력을 대체하지 않는다. 컴파일·파싱·초기화 진단은 그 메시지 뒤에 추가한다. 의미적 수정은 프로그램별 시도 한도로 제한된다(라이브 작성 3회, Forge 서버 생성 2회). 전송 재시도나 무제한 진화가 아니다.
+
+비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 네이티브 Python 서버 실행은 별도의 로컬 신뢰 경계이며 유예된 Python 제공자 바인딩과 다르다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
+
+아래 콘솔·벤치·fuzz·라이브 실행 결과는 모두 과거 증거이며 타입 전환 실행 결과가 아니다. 일관성 게이트는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. 소스 대조 문서화만 했으며 빌드·테스트·벤치·라이브 실행은 하지 않았다. Python 제공자 바인딩은 유예되었고 프로토콜 클라이언트는 그대로다.
+
 # Coherence Gate의 건전성 — 공식 동반자
 
 

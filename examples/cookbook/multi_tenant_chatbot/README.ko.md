@@ -1,6 +1,18 @@
 <!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ko source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
 # 멀티테넌트 챗봇 서버
 
+## 현재 소스 경계와 과거 측정
+
+C++ mock/live는 타입 SDK 요청과 전체 불변 Outcome을 사용합니다. engine cache identity는
+tenant/topology 및 캡처된 provider/model/host instruction에 연결됩니다. 신뢰 host의
+tenant 선택, quota/store 경계, thread 격리는 유지됩니다. portable JSON 요약은 native authority가 아닙니다.
+아래 수치/실행 기록은 과거 자료이며 새 전환의 실행 또는 live pass가 아닙니다.
+live binary는 **1,000 request / 32 worker**를 고정하며 저비용 small-smoke flag가 없습니다.
+단일 호출 검증으로 실행하지 마세요. live 키/네트워크와 별도 승인된 상당한 provider 비용이 필요합니다.
+가격이나 zero-error를 보장하지 않습니다. 키/prompt/artifact는 비공개이며 raw native payload를 공개하지 않습니다.
+provider retry는 한 명시적 layer, 기본 off이며 현재 public API에 예전 throttle-provider wrapper는 없습니다.
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **하나의 프로세스가 N명의 고객에게 각기 다른 N개의 에이전트 토폴로지로 동시에 서비스를 제공합니다.** 측정값: 1000개의 동시 실제 OpenAI 호출 / 6명의 고객 / 3개의 토폴로지 / **최대 29MB / 오류 0건**.
@@ -104,7 +116,7 @@ cmake --build build --target cookbook_multi_tenant_live
 핵심 수치:
 
 - **동시 진행 중인 1000개 LLM 코루틴 + 커넥션 메모리 비용 ≈ 29 MB**. 100 req → 1000 req 증가 +7 MB ⇒ 추가 커넥션당 약 8 KB. asio 코루틴 + httplib SSL 커넥션 풀의 조합.
-- **1000 동시 요청 시 오류 0건** — NG는 재시도 없이 rate-limit / 네트워크 지터 / TLS 핸드셰이크 지터를 원활히 흡수. 공급자 측 스로틀은 `RateLimitedProvider` 래퍼로 강화 가능.
+- 과거 1000 요청 실행의 오류 0건 기록은 현재 reliability 보장이 아닙니다.
 - **캐시 적중률 99.4%** — 토폴로지 수가 동일하면 고객이 많아져도 적중률 유지. **1,000명 고객 시나리오에서 메모리도 약 30MB 유지**.
 
 ## LangGraph 비교 — 실제 의미

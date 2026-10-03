@@ -4,11 +4,32 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/validator.h>
 #include <neograph/json.h>
+#include <neograph/types.h>
+
+#include <iostream>
+#include <memory>
 
 #include <stdexcept>
 #include <string>
 
 namespace neograph::cookbook::beast {
+
+// Report every dispatched author/repair attempt, including early-error exits.
+// Provider nullable counters are separate from any reservation or monetary bill.
+class UsageReport {
+    std::shared_ptr<UsageAccumulator> usage_;
+public:
+    explicit UsageReport(std::shared_ptr<UsageAccumulator> usage)
+        : usage_(std::move(usage)) {}
+    ~UsageReport() noexcept {
+        try {
+            std::cout << "Reported usage: " << usage_to_json(usage_->snapshot()).dump() << "\n"
+                      << "Monetary charge: unknown (not inferred from token counts)\n";
+        } catch (...) {
+            // Reporting cannot replace a provider/compiler failure during unwinding.
+        }
+    }
+};
 
 /** Result of the strict Core schema → compiler/validator gate sequence. */
 struct HarnessVerdict {

@@ -4,6 +4,7 @@
 #include <cppdotenv/dotenv.hpp>
 #include <httplib.h>
 
+#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +41,10 @@ int main(int argc, char** argv) {
                 options.mock = true;
             else if (arg == "--db")
                 options.database = value();
+            else if (arg == "--native-archive-dir")
+                options.native_archive_directory = value();
+            else if (arg == "--descriptor-policy")
+                options.descriptor_policy_file = value();
             else if (arg == "--session")
                 options.session = value();
             else if (arg == "--model")
@@ -54,8 +59,14 @@ int main(int argc, char** argv) {
                 options.max_tokens = std::stoul(value());
             else if (arg == "--max-calls")
                 options.max_calls = std::stoul(value());
-            else if (arg == "--max-output-tokens")
-                options.max_output_tokens = std::stoul(value());
+            else if (arg == "--max-output-tokens") {
+                const auto text = value();
+                const auto parsed = std::from_chars(text.data(), text.data() + text.size(),
+                                                    options.max_output_tokens);
+                if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
+                    !options.max_output_tokens)
+                    throw std::invalid_argument("Invalid max-output-tokens");
+            }
             else if (arg == "--provider-timeout-seconds")
                 options.provider_timeout_seconds = std::stoul(value());
             else if (arg == "--reasoning-effort") {
@@ -79,6 +90,10 @@ int main(int argc, char** argv) {
                        "--model overrides OPENROUTER_MODEL; live default: z-ai/glm-5.3-flash.\n"
                        "--max-output-tokens 4096 bounds each model completion.\n"
                        "--provider-timeout-seconds 120 sets the per-call timeout (1..120).\n"
+                       "--native-archive-dir PATH selects host-private native custody; defaults "
+                       "to DB_PATH.native (independent key, never from model JSON).\n"
+                       "--descriptor-policy PATH admits a host-owned model/control policy with "
+                       "the embedded SDK codec resource snapshot; default: built-in policy.\n"
                        "GLM 5.3 Flash chat defaults to low reasoning effort; --reasoning-effort "
                        "default omits the override.\n"
                        "--script JSON_FILE runs [{tenant,request_id,message,force_swap?}, ...].\n"

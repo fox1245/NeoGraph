@@ -40,7 +40,7 @@ namespace neograph::graph {
  *                           the model to respond with a JSON array of steps.
  * @param executor_prompt    System prompt for the single-step executor.
  * @param responder_prompt   System prompt for the final synthesis phase.
- * @param model              Model name. Empty falls back to the provider default.
+ * @param model              Required admitted model identity.
  * @param max_step_iterations Max tool-call iterations inside the executor per step
  *                           (safety bound on the inner ReAct loop).
  * @return A compiled GraphEngine.
@@ -52,6 +52,6 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
     const std::string& executor_prompt,
     const std::string& responder_prompt,
     const std::string& model = "",
-    int max_step_iterations = 5);
+    int max_step_iterations = 5, ProviderControls controls = {});
 
 } // namespace neograph::graph

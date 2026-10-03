@@ -100,6 +100,14 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+/** Exact source custody for a recorded replay; this is not a fresh dispatch grant. */
+struct ProgramRecordedReplaySource {
+    std::string run_id;
+    std::string run_record_id;
+    std::string journal_head;
+    std::string lineage_head_id;
+};
+
 struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     ProgramRunRecord                      run_record;
     ProgramJournalRecord                  journal_record;
@@ -121,9 +129,17 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     /// Immutable hook outbox heads appended atomically with this transition.
     std::vector<HookOutboxEntry>               hook_outbox_entries;
     std::vector<ProgramChildSynthesisRecord>   child_synthesis_records;
+    /// First-publication-only CAS allocation of retained replay work authority.
+    std::optional<ProgramRecordedReplaySource> recorded_replay_source;
+    std::optional<ProgramRunLineage> recorded_replay_source_lineage;
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
 };
+
+NEOGRAPH_PROGRAM_API bool is_valid_program_recorded_replay_allocation(
+    const ProgramTransitionPublication& publication,
+    const ProgramRunLineage& previous_source_lineage,
+    const ProgramRunRecord& source_run);
 
 enum class ProgramTransitionPublishResult : std::uint8_t {
     Published,

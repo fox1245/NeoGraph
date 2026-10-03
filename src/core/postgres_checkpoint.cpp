@@ -15,6 +15,7 @@
 // to escape than building a Postgres text-array literal manually.
 
 #include <neograph/graph/postgres_checkpoint.h>
+#include "managed_budget_journal.h"
 
 #include <libpq-fe.h>
 
@@ -44,6 +45,7 @@
 #include <deque>
 #include <exception>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -86,6 +88,10 @@ struct PgResult {
 // A broken connection error — used to signal the with_conn retry path.
 struct BrokenConnection : std::runtime_error {
     explicit BrokenConnection(const std::string& what) : std::runtime_error(what) {}
+};
+
+struct JournalConnectionFailure : std::runtime_error {
+    explicit JournalConnectionFailure(const std::string& what) : std::runtime_error(what) {}
 };
 
 // Is this a recoverable connection-failure error? Mirrors libpqxx's
@@ -266,10 +272,10 @@ json extract_channel_versions(const json& channel_values) {
     json out = json::object();
     if (!channel_values.is_object()) return out;
     if (!channel_values.contains("channels")) return out;
-    json chs = channel_values["channels"];
+    const auto& chs = channel_values.at("channels");
     if (!chs.is_object()) return out;
-    for (auto [name, ch] : chs.items()) {
-        if (ch.is_object() && ch.contains("version")) {
+    for (const auto& [name, ch] : chs.items()) {
+        if (checkpoint_channel_blob_eligible(ch)) {
             out[name] = ch["version"];
         }
     }
@@ -300,7 +306,7 @@ int64_t now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-// ── Schema DDL (unchanged) ────────────────────────────────────────────
+// ── Schema DDL and once-only retained-envelope migration ──────────────
 
 constexpr const char* kSchemaDDL = R"SQL(
 CREATE TABLE IF NOT EXISTS neograph_checkpoints (
@@ -317,8 +323,15 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoints (
     step               BIGINT  NOT NULL DEFAULT 0,
     timestamp_ms       BIGINT  NOT NULL DEFAULT 0,
     schema_version     INT     NOT NULL DEFAULT 2,
+    checkpoint_shape   JSONB,
+    metadata_text      TEXT,
+    checkpoint_shape_text TEXT,
     PRIMARY KEY (thread_id, checkpoint_id)
 );
+
+ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape JSONB;
+ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS metadata_text TEXT;
+ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape_text TEXT;
 
 CREATE INDEX IF NOT EXISTS neograph_checkpoints_recent
     ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
@@ -328,8 +341,11 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_blobs (
     channel    TEXT   NOT NULL,
     version    BIGINT NOT NULL,
     blob_data  JSONB  NOT NULL,
+    blob_text  TEXT,
     PRIMARY KEY (thread_id, channel, version)
 );
+
+ALTER TABLE neograph_checkpoint_blobs ADD COLUMN IF NOT EXISTS blob_text TEXT;
 
 CREATE TABLE IF NOT EXISTS neograph_checkpoint_writes (
     thread_id            TEXT   NOT NULL,
@@ -345,8 +361,31 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_writes (
     timestamp_ms         BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, parent_checkpoint_id, task_id, seq)
 );
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_obligations (
+    thread_id TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_migrations (
+    migration_id TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_heads (
+    thread_id TEXT PRIMARY KEY,
+    head_json JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_effects (
+    thread_id TEXT NOT NULL,
+    bank_generation TEXT NOT NULL,
+    effect_id TEXT NOT NULL,
+    effect_json JSONB NOT NULL,
+    PRIMARY KEY (thread_id, bank_generation, effect_id)
+);
+
 )SQL";
 
+// Obligations, migration markers, heads and effects outlive drop_schema.
 constexpr const char* kDropDDL = R"SQL(
 DROP TABLE IF EXISTS neograph_checkpoint_writes;
 DROP TABLE IF EXISTS neograph_checkpoint_blobs;
@@ -370,18 +409,27 @@ DROP TABLE IF EXISTS neograph_checkpoints;
 constexpr const char* kSqlSaveAll = R"SQL(
 WITH blob_ins AS (
     INSERT INTO neograph_checkpoint_blobs
-        (thread_id, channel, version, blob_data)
-    SELECT t, c, v, b::jsonb
+        (thread_id, channel, version, blob_data, blob_text)
+    SELECT t, c, v, b::jsonb, b
       FROM jsonb_to_recordset($1::jsonb) AS x(t text, c text, v bigint, b text)
-    ON CONFLICT (thread_id, channel, version) DO NOTHING
+    ON CONFLICT (thread_id, channel, version) DO UPDATE
+        SET blob_text = EXCLUDED.blob_text
+        WHERE neograph_checkpoint_blobs.blob_text IS NULL
+          AND neograph_checkpoint_blobs.blob_data = EXCLUDED.blob_data
+    RETURNING 1
+), obligation_ins AS (
+    INSERT INTO neograph_checkpoint_managed_budget_obligations (thread_id)
+    SELECT $2 WHERE $15::boolean
+    ON CONFLICT (thread_id) DO NOTHING
     RETURNING 1
 )
 INSERT INTO neograph_checkpoints
     (thread_id, checkpoint_id, parent_id, current_node, next_nodes,
      interrupt_phase, barrier_state, channel_versions, global_version,
-     metadata, step, timestamp_ms, schema_version)
+     metadata, step, timestamp_ms, schema_version, checkpoint_shape,
+     metadata_text, checkpoint_shape_text)
 VALUES ($2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::jsonb, $10,
-        $11::jsonb, $12, $13, $14)
+        $11::text::jsonb, $12, $13, $14, $16::text::jsonb, $11::text, $16::text)
 ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET
     parent_id        = EXCLUDED.parent_id,
     current_node     = EXCLUDED.current_node,
@@ -393,14 +441,126 @@ ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET
     metadata         = EXCLUDED.metadata,
     step             = EXCLUDED.step,
     timestamp_ms     = EXCLUDED.timestamp_ms,
-    schema_version   = EXCLUDED.schema_version
+    schema_version   = EXCLUDED.schema_version,
+    checkpoint_shape = EXCLUDED.checkpoint_shape,
+    metadata_text    = EXCLUDED.metadata_text,
+    checkpoint_shape_text = EXCLUDED.checkpoint_shape_text
 )SQL";
+
+constexpr const char* kSqlRequiresManagedBudget =
+    "SELECT 1 FROM neograph_checkpoint_managed_budget_obligations WHERE thread_id = $1";
+
+// The transaction-scoped namespace lock also serializes a missing head's first
+// insertion. A hash collision merely serializes unrelated threads.
+constexpr const char* kSqlJournalLock =
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
+constexpr const char* kSqlJournalHead =
+    "SELECT head_json FROM neograph_checkpoint_managed_budget_heads "
+    "WHERE thread_id = $1 FOR UPDATE";
+constexpr const char* kSqlJournalWriteHead =
+    "INSERT INTO neograph_checkpoint_managed_budget_heads (thread_id, head_json) "
+    "VALUES ($1, $2::jsonb) ON CONFLICT (thread_id) "
+    "DO UPDATE SET head_json = EXCLUDED.head_json";
+constexpr const char* kSqlJournalEffect =
+    "SELECT effect_json FROM neograph_checkpoint_managed_budget_effects "
+    "WHERE thread_id = $1 AND bank_generation = $2 AND effect_id = $3 FOR UPDATE";
+constexpr const char* kSqlJournalWriteEffect =
+    "INSERT INTO neograph_checkpoint_managed_budget_effects "
+    "(thread_id, bank_generation, effect_id, effect_json) VALUES ($1, $2, $3, $4::jsonb) "
+    "ON CONFLICT (thread_id, bank_generation, effect_id) "
+    "DO UPDATE SET effect_json = EXCLUDED.effect_json";
+constexpr const char* kSqlJournalObligation =
+    "INSERT INTO neograph_checkpoint_managed_budget_obligations (thread_id) "
+    "VALUES ($1) ON CONFLICT (thread_id) DO NOTHING";
+
+using Journal = detail::ManagedBudgetJournalAccess;
+
+json journal_row(PGresult* result) {
+    return PQntuples(result) == 0 ? json() : parse_jsonb_text(col_text(result, 0, 0));
+}
+
+std::string journal_key(const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    if (!lease) throw std::invalid_argument("Managed budget operation requires an owned lease");
+    return Journal::storage_key(lease->scope());
+}
+
+template <typename Fn>
+auto journal_transaction(pg_conn* c, const std::string& key, Fn&& operation) {
+    try {
+        (void)exec_sql(c, "BEGIN");
+        (void)exec_params(c, kSqlJournalLock, {key});
+        auto result = operation();
+        (void)exec_sql(c, "COMMIT");
+        return result;
+    } catch (const BrokenConnection& error) {
+        // A lost COMMIT response must never replay a bank mutation.
+        throw JournalConnectionFailure(
+            std::string("Managed budget transaction outcome uncertain: ") + error.what());
+    } catch (...) {
+        const auto error = std::current_exception();
+        try { (void)exec_sql(c, "ROLLBACK"); } catch (...) {}
+        std::rethrow_exception(error);
+    }
+}
+
+void journal_write_head(pg_conn* c, const std::string& key, const json& head) {
+    (void)exec_params(c, kSqlJournalWriteHead, {key, head.dump()});
+    (void)exec_params(c, kSqlJournalObligation, {key});
+}
 
 // Selector used by load_latest / load_by_id / list.
 constexpr const char* kSelectCols =
     "thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
     "interrupt_phase, barrier_state, channel_versions, global_version, "
-    "metadata, step, timestamp_ms, schema_version";
+    "metadata, metadata_text, step, timestamp_ms, schema_version, "
+    "checkpoint_shape, checkpoint_shape_text";
+
+// JSONB is a query projection, not authenticated custody: it reorders object
+// members and collapses duplicate keys. Never fall back when raw text exists
+// but is invalid. Old JSONB-only rows still need genuine archive verification.
+json stored_json(PGresult* result, int row, const char* raw_name, const char* projection_name) {
+    const auto raw_column = col_idx(result, raw_name);
+    if (!PQgetisnull(result, row, raw_column))
+        return json::parse(col_text(result, row, raw_column));
+    return parse_jsonb_text(col_text(result, row, col_idx(result, projection_name)));
+}
+
+constexpr const char* kSqlRetainedMigration =
+    "INSERT INTO neograph_checkpoint_managed_budget_migrations (migration_id) "
+    "VALUES ('retained-provider-finite-scope/v2') ON CONFLICT (migration_id) DO NOTHING "
+    "RETURNING migration_id";
+constexpr const char* kSqlRetainedMetadata =
+    "SELECT thread_id, metadata, metadata_text FROM neograph_checkpoints";
+
+bool retained_row_requires_obligation(PGresult* result, int row) {
+    try {
+        Checkpoint checkpoint;
+        checkpoint.metadata = stored_json(result, row, "metadata_text", "metadata");
+        restore_checkpoint_storage_envelope(checkpoint);
+        return Journal::checkpoint_requires_obligation(checkpoint);
+    } catch (const std::exception&) {
+        return true; // Malformed retained custody is denial-only evidence.
+    }
+}
+
+void initialize_schema(pg_conn* connection) {
+    (void)exec_sql(connection, kSchemaDDL);
+    // Marker and backfill commit together. Concurrent initializers serialize
+    // on the marker; existing obligations and journal heads remain untouched.
+    journal_transaction(connection, "neograph:retained-provider-finite-scope/v2", [&] {
+        auto marker = exec_sql(connection, kSqlRetainedMigration);
+        if (PQntuples(marker) != 0) {
+            auto retained = exec_sql(connection, kSqlRetainedMetadata);
+            for (int row = 0; row < PQntuples(retained); ++row)
+                if (retained_row_requires_obligation(retained, row))
+                    (void)exec_params(connection, kSqlJournalObligation,
+                                      {col_text(retained, row, col_idx(retained, "thread_id"))});
+        }
+        return true;
+    });
+}
+
+asio::awaitable<void> initialize_schema_async(pg_conn* connection);
 
 // Row → Checkpoint-shell converter. `r` is a PGresult holding one row;
 // caller passes `row = 0` for single-row results or iterates.
@@ -415,7 +575,7 @@ Checkpoint row_to_shell(PGresult* r, int row) {
     cp.interrupt_phase = parse_checkpoint_phase(col_text(r, row, col_idx(r, "interrupt_phase")));
     cp.barrier_state =
         barrier_state_from_json(parse_jsonb_text(col_text(r, row, col_idx(r, "barrier_state"))));
-    cp.metadata       = parse_jsonb_text(col_text(r, row, col_idx(r, "metadata")));
+    cp.metadata       = stored_json(r, row, "metadata_text", "metadata");
     cp.step           = col_i64(r, row, col_idx(r, "step"));
     cp.timestamp      = col_i64(r, row, col_idx(r, "timestamp_ms"));
     cp.schema_version = col_int(r, row, col_idx(r, "schema_version"));
@@ -425,6 +585,7 @@ Checkpoint row_to_shell(PGresult* r, int row) {
 struct LoadedShell {
     Checkpoint cp;
     json       channel_versions;
+    json       checkpoint_shape;
     int64_t    global_version = 0;
 };
 
@@ -432,6 +593,7 @@ LoadedShell row_to_loaded(PGresult* r, int row) {
     LoadedShell ls;
     ls.cp               = row_to_shell(r, row);
     ls.channel_versions = parse_jsonb_text(col_text(r, row, col_idx(r, "channel_versions")));
+    ls.checkpoint_shape = stored_json(r, row, "checkpoint_shape_text", "checkpoint_shape");
     ls.global_version   = col_i64(r, row, col_idx(r, "global_version"));
     return ls;
 }
@@ -453,13 +615,13 @@ std::map<std::string, json> fetch_blobs(pg_conn*           c,
     }
 
     const char* sql =
-        "SELECT blob_data FROM neograph_checkpoint_blobs "
+        "SELECT blob_data, blob_text FROM neograph_checkpoint_blobs "
         "WHERE thread_id = $1 AND channel = $2 AND version = $3";
     for (size_t i = 0; i < names.size(); ++i) {
         std::vector<std::string> params{thread_id, names[i], std::to_string(versions[i])};
         auto                     res = exec_params(c, sql, params);
         if (PQntuples(res) > 0) {
-            out.emplace(names[i], parse_jsonb_text(col_text(res, 0, 0)));
+            out.emplace(names[i], stored_json(res, 0, "blob_text", "blob_data"));
         }
     }
     return out;
@@ -469,7 +631,58 @@ Checkpoint finish_load(pg_conn* c, LoadedShell ls) {
     auto blobs           = fetch_blobs(c, ls.cp.thread_id, ls.channel_versions);
     ls.cp.channel_values = materialize_channel_values(ls.channel_versions, blobs,
                                                       static_cast<uint64_t>(ls.global_version));
+    if (!ls.checkpoint_shape.is_null())
+        restore_checkpoint_storage_shape(ls.cp, ls.checkpoint_shape, blobs);
+    restore_checkpoint_storage_envelope(ls.cp);
     return ls.cp;
+}
+
+std::vector<std::string> checkpoint_save_params(const Checkpoint& cp) {
+    const auto metadata = checkpoint_storage_metadata(cp);
+    json payload = json::array();
+    if (cp.channel_values.is_object() && cp.channel_values.contains("channels")) {
+        const auto& channels = cp.channel_values.at("channels");
+        if (channels.is_object()) {
+            for (const auto& [name, channel] : channels.items()) {
+                if (!checkpoint_channel_blob_eligible(channel))
+                    continue;
+                payload.push_back(json{{"t", cp.thread_id}, {"c", name},
+                    {"v", channel.at("version").get<int64_t>()},
+                    {"b", to_jsonb_text(channel.at("value"))}});
+            }
+        }
+    }
+    const auto versions = extract_channel_versions(cp.channel_values);
+    int64_t global_version = 0;
+    if (cp.channel_values.is_object() && cp.channel_values.contains("global_version")) {
+        const auto& value = cp.channel_values.at("global_version");
+        if (value.is_number_unsigned()) {
+            const auto version = value.get<uint64_t>();
+            if (version <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+                global_version = static_cast<int64_t>(version);
+        } else if (value.is_number_integer()) {
+            const auto version = value.get<int64_t>();
+            if (version >= 0) global_version = version;
+        }
+    }
+    return {payload.dump(), cp.thread_id, cp.id, cp.parent_id, cp.current_node,
+        to_jsonb_text(next_nodes_to_json(cp.next_nodes)), to_string(cp.interrupt_phase),
+        to_jsonb_text(barrier_state_to_json(cp.barrier_state)), versions.dump(),
+        std::to_string(global_version), to_jsonb_text(metadata), std::to_string(cp.step),
+        std::to_string(cp.timestamp), std::to_string(cp.schema_version),
+        Journal::checkpoint_requires_obligation(cp) ? "true" : "false",
+        checkpoint_storage_shape(cp).dump()};
+}
+
+void journal_check_source(pg_conn* c, const std::string& key,
+                          const std::string& id, const std::string& commitment) {
+    if (id.empty()) return;
+    const auto sql = std::string("SELECT ") + kSelectCols +
+        " FROM neograph_checkpoints WHERE thread_id = $1 AND checkpoint_id = $2 FOR UPDATE";
+    auto result = exec_params(c, sql.c_str(), {key, id});
+    if (PQntuples(result) != 1 ||
+        managed_budget_checkpoint_commitment(finish_load(c, row_to_loaded(result, 0))) != commitment)
+        throw std::runtime_error("Managed budget source checkpoint is missing or changed");
 }
 
 // Wrap a raw connection URL open + status check, throwing on failure.
@@ -575,7 +788,7 @@ PostgresCheckpointStore::~PostgresCheckpointStore() {
 void PostgresCheckpointStore::ensure_schema() {
     // Direct call on slot 0 — only invoked at construction (and from
     // drop_schema below), so no contention to worry about.
-    exec_sql(pool_[0]->raw, kSchemaDDL);
+    initialize_schema(pool_[0]->raw);
 }
 
 void PostgresCheckpointStore::drop_schema() {
@@ -586,7 +799,7 @@ void PostgresCheckpointStore::drop_schema() {
     std::unique_lock lock(pool_mutex_);
     if (!pool_[0]) rebuild_slot(0);
     exec_sql(pool_[0]->raw, kDropDDL);
-    exec_sql(pool_[0]->raw, kSchemaDDL);
+    initialize_schema(pool_[0]->raw);
     // No prepared statements to re-register — the libpq rewrite sends
     // save_all via PQexecParams every time, so DROP can't invalidate
     // a cached plan.
@@ -675,7 +888,7 @@ size_t PostgresCheckpointStore::waiter_count_for_test() {
 void PostgresCheckpointStore::rebuild_slot(size_t idx) {
     pool_[idx].reset();
     auto fresh = open_conn(conn_str_);
-    exec_sql(fresh->raw, kSchemaDDL);
+    initialize_schema(fresh->raw);
     pool_[idx] = std::move(fresh);
     reconnect_count_.fetch_add(1, std::memory_order_relaxed);
 }
@@ -683,7 +896,7 @@ void PostgresCheckpointStore::rebuild_slot(size_t idx) {
 asio::awaitable<void> PostgresCheckpointStore::rebuild_slot_async(size_t idx) {
     pool_[idx].reset();
     auto fresh = co_await open_conn_async(conn_str_);
-    co_await              exec_sql_async(fresh->raw, kSchemaDDL);
+    co_await initialize_schema_async(fresh->raw);
     pool_[idx] = std::move(fresh);
     reconnect_count_.fetch_add(1, std::memory_order_relaxed);
 }
@@ -706,6 +919,10 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
 
     try {
         return fn(pool_[idx]->raw);
+    } catch (const JournalConnectionFailure&) {
+        // Quarantine without replay; the next independent operation rebuilds.
+        pool_[idx].reset();
+        throw;
     } catch (const BrokenConnection&) {
         // Reconnection: open the replacement into a local first, then
         // hand it to the pool only after both open_conn AND the schema
@@ -717,7 +934,7 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
         // next acquirer hits the same broken conn and triggers
         // another reconnect attempt, naturally retrying the recovery.
         auto fresh = open_conn(conn_str_);  // throws → original slot intact
-        exec_sql(fresh->raw, kSchemaDDL);   // throws → original slot intact
+        initialize_schema(fresh->raw);    // throws → original slot intact
         pool_[idx] = std::move(fresh);
         reconnect_count_.fetch_add(1, std::memory_order_relaxed);
         return fn(pool_[idx]->raw);
@@ -727,53 +944,12 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
 // ── save() ────────────────────────────────────────────────────────────
 
 void PostgresCheckpointStore::save(const Checkpoint& cp) {
+    const auto params = checkpoint_save_params(cp);
     with_conn([&](pg_conn* c) {
-        // Build the blob payload as a jsonb array. Each element:
-        //   {"t": thread, "c": channel, "v": version, "b": "<json text>"}
-        // jsonb_to_recordset on the PG side unpacks it into (text,
-        // text, bigint, text) rows and b::jsonb coerces back to jsonb.
-        // Empty object list is valid — PG produces zero rows and the
-        // blob INSERT becomes a no-op.
-        json payload = json::array();
-        if (cp.channel_values.is_object() && cp.channel_values.contains("channels")) {
-            json chs = cp.channel_values["channels"];
-            if (chs.is_object()) {
-                for (auto [name, ch] : chs.items()) {
-                    if (!ch.is_object() || !ch.contains("version")) continue;
-                    if (!ch.contains("value")) continue;
-                    json row;
-                    row["t"] = cp.thread_id;
-                    row["c"] = name;
-                    row["v"] = ch["version"].get<int64_t>();
-                    row["b"] = to_jsonb_text(ch["value"]);
-                    payload.push_back(std::move(row));
-                }
-            }
-        }
-
-        json    channel_versions = extract_channel_versions(cp.channel_values);
-        int64_t global_version   = 0;
-        if (cp.channel_values.is_object() && cp.channel_values.contains("global_version")) {
-            global_version = cp.channel_values["global_version"].get<int64_t>();
-        }
-
-        std::vector<std::string> params{
-            payload.dump(),                                          // $1  blobs jsonb
-            cp.thread_id,                                            // $2
-            cp.id,                                                   // $3
-            cp.parent_id,                                            // $4
-            cp.current_node,                                         // $5
-            to_jsonb_text(next_nodes_to_json(cp.next_nodes)),        // $6
-            std::string(to_string(cp.interrupt_phase)),              // $7
-            to_jsonb_text(barrier_state_to_json(cp.barrier_state)),  // $8
-            to_jsonb_text(channel_versions),                         // $9
-            std::to_string(global_version),                          // $10
-            to_jsonb_text(cp.metadata),                              // $11
-            std::to_string(cp.step),                                 // $12
-            std::to_string(cp.timestamp),                            // $13
-            std::to_string(cp.schema_version),                       // $14
-        };
-        (void)exec_params(c, kSqlSaveAll, params);
+        journal_transaction(c, cp.thread_id, [&] {
+            (void)exec_params(c, kSqlSaveAll, params);
+            return true;
+        });
     });
 }
 
@@ -819,15 +995,113 @@ std::vector<Checkpoint> PostgresCheckpointStore::list(const std::string& thread_
 
 void PostgresCheckpointStore::delete_thread(const std::string& thread_id) {
     with_conn([&](pg_conn* c) {
-        // Order: writes → blobs → checkpoints. No FKs declared, but
-        // this order makes the intent obvious and matches the
-        // referential dependency direction.
-        (void)exec_params(c, "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1",
-                          {thread_id});
-        (void)exec_params(c, "DELETE FROM neograph_checkpoint_blobs WHERE thread_id = $1",
-                          {thread_id});
-        (void)exec_params(c, "DELETE FROM neograph_checkpoints WHERE thread_id = $1", {thread_id});
+        journal_transaction(c, thread_id, [&] {
+            (void)exec_params(c, "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1",
+                              {thread_id});
+            (void)exec_params(c, "DELETE FROM neograph_checkpoint_blobs WHERE thread_id = $1",
+                              {thread_id});
+            (void)exec_params(c, "DELETE FROM neograph_checkpoints WHERE thread_id = $1", {thread_id});
+            return true;
+        });
     });
+}
+
+bool PostgresCheckpointStore::requires_managed_budget(const std::string& thread_id) {
+    return with_conn([&](pg_conn* c) {
+        auto res = exec_params(c, kSqlRequiresManagedBudget, {thread_id});
+        return PQntuples(res) != 0;
+    });
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> PostgresCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment) {
+    const auto key = Journal::storage_key(scope);
+    auto committed = with_conn([&](pg_conn* c) {
+        return journal_transaction(c, key, [&] {
+            auto head = journal_row(exec_params(c, kSqlJournalHead, {key}));
+            auto obligation = exec_params(c, kSqlRequiresManagedBudget, {key});
+            journal_check_source(c, key, expected_checkpoint_id, expected_checkpoint_commitment);
+            auto lease = Journal::acquire(head, PQntuples(obligation) != 0, scope,
+                                          expected_checkpoint_id, expected_checkpoint_commitment);
+            journal_write_head(c, key, head);
+            return std::make_pair(std::move(lease), std::move(head));
+        });
+    });
+    Journal::refresh(committed.first, committed.second);
+    return std::move(committed.first);
+}
+
+ManagedBudgetEffectReceipt PostgresCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) {
+    const auto key = journal_key(lease);
+    auto committed = with_conn([&](pg_conn* c) {
+        return journal_transaction(c, key, [&] {
+            auto head = journal_row(exec_params(c, kSqlJournalHead, {key}));
+            auto effect = journal_row(exec_params(c, kSqlJournalEffect,
+                {key, lease->bank_generation(), effect_id}));
+            auto receipt = Journal::begin(head, effect, lease, effect_id,
+                                          exact_claim_amount, prepared_request_digest);
+            (void)exec_params(c, kSqlJournalWriteEffect,
+                {key, lease->bank_generation(), effect_id, effect.dump()});
+            journal_write_head(c, key, head);
+            return std::make_pair(std::move(receipt), std::move(head));
+        });
+    });
+    Journal::refresh(lease, committed.second);
+    return std::move(committed.first);
+}
+
+void PostgresCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& effect,
+    sp::runtime::Result genuine_outcome, const UsageAccumulator::AuthoritySnapshot& authority) {
+    const auto key = journal_key(lease);
+    auto head = with_conn([&](pg_conn* c) {
+        return journal_transaction(c, key, [&] {
+            auto candidate = journal_row(exec_params(c, kSqlJournalHead, {key}));
+            auto stored = journal_row(exec_params(c, kSqlJournalEffect,
+                {key, lease->bank_generation(), effect.effect_id()}));
+            Journal::settle(candidate, stored, lease, effect, std::move(genuine_outcome), authority);
+            (void)exec_params(c, kSqlJournalWriteEffect,
+                {key, lease->bank_generation(), effect.effect_id(), stored.dump()});
+            journal_write_head(c, key, candidate);
+            return candidate;
+        });
+    });
+    Journal::refresh(lease, head);
+}
+
+void PostgresCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    const auto key = journal_key(lease);
+    const auto params = checkpoint_save_params(checkpoint);
+    auto head = with_conn([&](pg_conn* c) {
+        return journal_transaction(c, key, [&] {
+            auto candidate = journal_row(exec_params(c, kSqlJournalHead, {key}));
+            journal_check_source(c, key, lease->head_checkpoint_id(), lease->head_commitment());
+            Journal::publish(candidate, lease, checkpoint);
+            (void)exec_params(c, kSqlSaveAll, params);
+            journal_check_source(c, key, checkpoint.id, managed_budget_checkpoint_commitment(checkpoint));
+            journal_write_head(c, key, candidate);
+            return candidate;
+        });
+    });
+    Journal::refresh(lease, head);
+}
+
+void PostgresCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    const auto key = journal_key(lease);
+    auto head = with_conn([&](pg_conn* c) {
+        return journal_transaction(c, key, [&] {
+            auto candidate = journal_row(exec_params(c, kSqlJournalHead, {key}));
+            Journal::release(candidate, lease);
+            journal_write_head(c, key, candidate);
+            return candidate;
+        });
+    });
+    Journal::refresh(lease, head);
 }
 
 // ── Pending writes ────────────────────────────────────────────────────
@@ -835,6 +1109,7 @@ void PostgresCheckpointStore::delete_thread(const std::string& thread_id) {
 void PostgresCheckpointStore::put_writes(const std::string&  thread_id,
                                          const std::string&  parent_checkpoint_id,
                                          const PendingWrite& write) {
+    if (write.native_result) throw std::invalid_argument("Native pending writes require explicit archive serialization");
     with_conn([&](pg_conn* c) {
         // seq allocation + INSERT must be in one transaction so
         // concurrent puts on the same parent don't collide on seq.
@@ -1392,7 +1667,7 @@ asio::awaitable<Checkpoint> finish_load_async(pg_conn* c, LoadedShell ls) {
         std::vector<std::string> params{ls.cp.thread_id, ls.channel_versions.dump()};
         auto                     result =
             co_await             exec_params_async(c,
-                                                   "SELECT b.channel, b.blob_data "
+                                                   "SELECT b.channel, b.blob_data, b.blob_text "
                                                                "FROM neograph_checkpoint_blobs AS b "
                                                                "JOIN jsonb_each_text($2::jsonb) AS cv(channel, version) "
                                                                "  ON b.channel = cv.channel "
@@ -1400,12 +1675,104 @@ asio::awaitable<Checkpoint> finish_load_async(pg_conn* c, LoadedShell ls) {
                                                                "WHERE b.thread_id = $1",
                                                    params);
         for (int row = 0; row < PQntuples(result); ++row) {
-            blobs.emplace(col_text(result, row, 0), parse_jsonb_text(col_text(result, row, 1)));
+            blobs.emplace(col_text(result, row, 0), stored_json(result, row, "blob_text", "blob_data"));
         }
     }
     ls.cp.channel_values = materialize_channel_values(ls.channel_versions, blobs,
                                                       static_cast<uint64_t>(ls.global_version));
+    if (!ls.checkpoint_shape.is_null())
+        restore_checkpoint_storage_shape(ls.cp, ls.checkpoint_shape, blobs);
+    restore_checkpoint_storage_envelope(ls.cp);
     co_return std::move(ls.cp);
+}
+
+template <typename Fn>
+auto journal_transaction_async(pg_conn* c, const std::string& key, Fn& operation)
+    -> decltype(operation()) {
+    const std::vector<std::string> params{key};
+    std::exception_ptr error;
+    try {
+        co_await exec_sql_async(c, "BEGIN");
+        (void)co_await exec_params_async(c, kSqlJournalLock, params);
+        auto result = co_await operation();
+        co_await exec_sql_async(c, "COMMIT");
+        co_return std::move(result);
+    } catch (const QueryNotDrained& uncertain) {
+        throw QueryNotDrained{uncertain.cause, false};
+    } catch (const BrokenConnection&) {
+        // Never replay an operation whose COMMIT acknowledgement may be lost.
+        throw QueryNotDrained{std::current_exception(), false};
+    } catch (...) {
+        error = std::current_exception();
+    }
+    // The exchange drained, so rollback can itself use native async I/O.
+    try {
+        co_await exec_sql_async(c, "ROLLBACK");
+    } catch (...) {
+        throw QueryNotDrained{error, false};
+    }
+    std::rethrow_exception(error);
+}
+
+asio::awaitable<void> initialize_schema_async(pg_conn* connection) {
+    co_await exec_sql_async(connection, kSchemaDDL);
+    const std::string migration_key = "neograph:retained-provider-finite-scope/v2";
+    auto migration = [&]() -> asio::awaitable<bool> {
+        const std::vector<std::string> no_params;
+        auto marker = co_await exec_params_async(connection, kSqlRetainedMigration, no_params);
+        if (PQntuples(marker) != 0) {
+            auto retained = co_await exec_params_async(connection, kSqlRetainedMetadata, no_params);
+            for (int row = 0; row < PQntuples(retained); ++row) {
+                if (!retained_row_requires_obligation(retained, row)) continue;
+                const std::vector<std::string> thread{
+                    col_text(retained, row, col_idx(retained, "thread_id"))};
+                (void)co_await exec_params_async(connection, kSqlJournalObligation, thread);
+            }
+        }
+        co_return true;
+    };
+    (void)co_await journal_transaction_async(connection, migration_key, migration);
+}
+
+asio::awaitable<json> journal_read_head_async(pg_conn* c, const std::string& key) {
+    const std::vector<std::string> params{key};
+    auto result = co_await exec_params_async(c, kSqlJournalHead, params);
+    co_return journal_row(result);
+}
+
+asio::awaitable<json> journal_read_effect_async(pg_conn* c, const std::string& key,
+    const std::string& generation, const std::string& id) {
+    const std::vector<std::string> params{key, generation, id};
+    auto result = co_await exec_params_async(c, kSqlJournalEffect, params);
+    co_return journal_row(result);
+}
+
+asio::awaitable<void> journal_write_head_async(pg_conn* c, const std::string& key,
+                                              const json& head) {
+    const std::vector<std::string> head_params{key, head.dump()};
+    const std::vector<std::string> obligation_params{key};
+    (void)co_await exec_params_async(c, kSqlJournalWriteHead, head_params);
+    (void)co_await exec_params_async(c, kSqlJournalObligation, obligation_params);
+}
+
+asio::awaitable<void> journal_write_effect_async(pg_conn* c, const std::string& key,
+    const std::string& generation, const std::string& id, const json& effect) {
+    const std::vector<std::string> params{key, generation, id, effect.dump()};
+    (void)co_await exec_params_async(c, kSqlJournalWriteEffect, params);
+}
+
+asio::awaitable<void> journal_check_source_async(pg_conn* c, const std::string& key,
+    const std::string& id, const std::string& commitment) {
+    if (id.empty()) co_return;
+    const auto sql = std::string("SELECT ") + kSelectCols +
+        " FROM neograph_checkpoints WHERE thread_id = $1 AND checkpoint_id = $2 FOR UPDATE";
+    const std::vector<std::string> params{key, id};
+    auto result = co_await exec_params_async(c, sql.c_str(), params);
+    if (PQntuples(result) != 1)
+        throw std::runtime_error("Managed budget source checkpoint is missing or changed");
+    const auto checkpoint = co_await finish_load_async(c, row_to_loaded(result, 0));
+    if (managed_budget_checkpoint_commitment(checkpoint) != commitment)
+        throw std::runtime_error("Managed budget source checkpoint is missing or changed");
 }
 
 }  // namespace
@@ -1537,52 +1904,14 @@ auto PostgresCheckpointStore::with_conn_async(Fn& fn) -> decltype(fn(std::declva
 // ── Async method overrides ────────────────────────────────────────────
 
 asio::awaitable<void> PostgresCheckpointStore::save_async(const Checkpoint& cp) {
-    // GCC-13 ICE workaround: build all the params outside the
-    // coroutine-awaitable lambda captured below. Nested brace-init
-    // inside a coroutine body trips build_special_member_call.
-    json payload = json::array();
-    if (cp.channel_values.is_object() && cp.channel_values.contains("channels")) {
-        json chs = cp.channel_values["channels"];
-        if (chs.is_object()) {
-            for (auto [name, ch] : chs.items()) {
-                if (!ch.is_object() || !ch.contains("version")) continue;
-                if (!ch.contains("value")) continue;
-                json row;
-                row["t"] = cp.thread_id;
-                row["c"] = name;
-                row["v"] = ch["version"].get<int64_t>();
-                row["b"] = to_jsonb_text(ch["value"]);
-                payload.push_back(std::move(row));
-            }
-        }
-    }
-
-    json    channel_versions = extract_channel_versions(cp.channel_values);
-    int64_t global_version   = 0;
-    if (cp.channel_values.is_object() && cp.channel_values.contains("global_version")) {
-        global_version = cp.channel_values["global_version"].get<int64_t>();
-    }
-
-    std::vector<std::string> params{
-        payload.dump(),
-        cp.thread_id,
-        cp.id,
-        cp.parent_id,
-        cp.current_node,
-        to_jsonb_text(next_nodes_to_json(cp.next_nodes)),
-        std::string(to_string(cp.interrupt_phase)),
-        to_jsonb_text(barrier_state_to_json(cp.barrier_state)),
-        to_jsonb_text(channel_versions),
-        std::to_string(global_version),
-        to_jsonb_text(cp.metadata),
-        std::to_string(cp.step),
-        std::to_string(cp.timestamp),
-        std::to_string(cp.schema_version),
-    };
+    const auto params = checkpoint_save_params(cp);
 
     auto operation = [&](pg_conn* c) -> asio::awaitable<void> {
-        (void)co_await exec_params_async(c, kSqlSaveAll, params);
-        co_return;
+        auto mutation = [&]() -> asio::awaitable<bool> {
+            (void)co_await exec_params_async(c, kSqlSaveAll, params);
+            co_return true;
+        };
+        (void)co_await journal_transaction_async(c, cp.thread_id, mutation);
     };
     co_await with_conn_async(operation);
 }
@@ -1642,21 +1971,140 @@ asio::awaitable<std::vector<Checkpoint>> PostgresCheckpointStore::list_async(
 asio::awaitable<void> PostgresCheckpointStore::delete_thread_async(const std::string& thread_id) {
     std::vector<std::string> params{thread_id};
     auto                     operation = [&, params](pg_conn* c) -> asio::awaitable<void> {
-        (void)co_await exec_params_async(
-            c, "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1", params);
-        (void)co_await exec_params_async(
-            c, "DELETE FROM neograph_checkpoint_blobs WHERE thread_id = $1", params);
-        (void)co_await exec_params_async(c, "DELETE FROM neograph_checkpoints WHERE thread_id = $1",
-                                                             params);
-        co_return;
+        auto mutation = [&]() -> asio::awaitable<bool> {
+            (void)co_await exec_params_async(
+                c, "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1", params);
+            (void)co_await exec_params_async(
+                c, "DELETE FROM neograph_checkpoint_blobs WHERE thread_id = $1", params);
+            (void)co_await exec_params_async(
+                c, "DELETE FROM neograph_checkpoints WHERE thread_id = $1", params);
+            co_return true;
+        };
+        (void)co_await journal_transaction_async(c, thread_id, mutation);
     };
     co_await with_conn_async(operation);
+}
+
+asio::awaitable<bool> PostgresCheckpointStore::requires_managed_budget_async(std::string thread_id) {
+    std::vector<std::string> params{std::move(thread_id)};
+    auto operation = [&](pg_conn* c) -> asio::awaitable<bool> {
+        auto res = co_await exec_params_async(c, kSqlRequiresManagedBudget, params);
+        co_return PQntuples(res) != 0;
+    };
+    co_return co_await with_conn_async(operation);
+}
+
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
+PostgresCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment) {
+    using Acquired = std::pair<std::shared_ptr<OwnedManagedBudgetLease>, json>;
+    const auto key = Journal::storage_key(scope);
+    const std::vector<std::string> params{key};
+    auto operation = [&](pg_conn* c) -> asio::awaitable<Acquired> {
+        auto mutation = [&]() -> asio::awaitable<Acquired> {
+            auto head = co_await journal_read_head_async(c, key);
+            auto obligation = co_await exec_params_async(c, kSqlRequiresManagedBudget, params);
+            co_await journal_check_source_async(c, key, expected_checkpoint_id,
+                                                expected_checkpoint_commitment);
+            auto lease = Journal::acquire(head, PQntuples(obligation) != 0, scope,
+                                          expected_checkpoint_id, expected_checkpoint_commitment);
+            co_await journal_write_head_async(c, key, head);
+            co_return std::make_pair(std::move(lease), std::move(head));
+        };
+        co_return co_await journal_transaction_async(c, key, mutation);
+    };
+    auto committed = co_await with_conn_async(operation);
+    Journal::refresh(committed.first, committed.second);
+    co_return std::move(committed.first);
+}
+
+asio::awaitable<ManagedBudgetEffectReceipt> PostgresCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest) {
+    using Begun = std::pair<ManagedBudgetEffectReceipt, json>;
+    const auto key = journal_key(lease);
+    auto operation = [&](pg_conn* c) -> asio::awaitable<Begun> {
+        auto mutation = [&]() -> asio::awaitable<Begun> {
+            auto head = co_await journal_read_head_async(c, key);
+            auto effect = co_await journal_read_effect_async(c, key, lease->bank_generation(), effect_id);
+            auto receipt = Journal::begin(head, effect, lease, effect_id,
+                                          exact_claim_amount, prepared_request_digest);
+            co_await journal_write_effect_async(c, key, lease->bank_generation(), effect_id, effect);
+            co_await journal_write_head_async(c, key, head);
+            co_return std::make_pair(std::move(receipt), std::move(head));
+        };
+        co_return co_await journal_transaction_async(c, key, mutation);
+    };
+    auto committed = co_await with_conn_async(operation);
+    Journal::refresh(lease, committed.second);
+    co_return std::move(committed.first);
+}
+
+asio::awaitable<void> PostgresCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    const auto key = journal_key(lease);
+    auto operation = [&](pg_conn* c) -> asio::awaitable<json> {
+        auto mutation = [&]() -> asio::awaitable<json> {
+            auto head = co_await journal_read_head_async(c, key);
+            auto stored = co_await journal_read_effect_async(c, key, lease->bank_generation(),
+                                                           effect.effect_id());
+            Journal::settle(head, stored, lease, effect, std::move(genuine_outcome), authority);
+            co_await journal_write_effect_async(c, key, lease->bank_generation(), effect.effect_id(), stored);
+            co_await journal_write_head_async(c, key, head);
+            co_return head;
+        };
+        co_return co_await journal_transaction_async(c, key, mutation);
+    };
+    const auto head = co_await with_conn_async(operation);
+    Journal::refresh(lease, head);
+}
+
+asio::awaitable<void> PostgresCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
+    const auto key = journal_key(lease);
+    const auto params = checkpoint_save_params(checkpoint);
+    const auto commitment = managed_budget_checkpoint_commitment(checkpoint);
+    auto operation = [&](pg_conn* c) -> asio::awaitable<json> {
+        auto mutation = [&]() -> asio::awaitable<json> {
+            auto head = co_await journal_read_head_async(c, key);
+            const auto source_id = lease->head_checkpoint_id();
+            const auto source_commitment = lease->head_commitment();
+            co_await journal_check_source_async(c, key, source_id, source_commitment);
+            Journal::publish(head, lease, checkpoint);
+            (void)co_await exec_params_async(c, kSqlSaveAll, params);
+            co_await journal_check_source_async(c, key, checkpoint.id, commitment);
+            co_await journal_write_head_async(c, key, head);
+            co_return head;
+        };
+        co_return co_await journal_transaction_async(c, key, mutation);
+    };
+    const auto head = co_await with_conn_async(operation);
+    Journal::refresh(lease, head);
+}
+
+asio::awaitable<void> PostgresCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    const auto key = journal_key(lease);
+    auto operation = [&](pg_conn* c) -> asio::awaitable<json> {
+        auto mutation = [&]() -> asio::awaitable<json> {
+            auto head = co_await journal_read_head_async(c, key);
+            Journal::release(head, lease);
+            co_await journal_write_head_async(c, key, head);
+            co_return head;
+        };
+        co_return co_await journal_transaction_async(c, key, mutation);
+    };
+    const auto head = co_await with_conn_async(operation);
+    Journal::refresh(lease, head);
 }
 
 asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
     const std::string&  thread_id,
     const std::string&  parent_checkpoint_id,
     const PendingWrite& write) {
+    if (write.native_result) throw std::invalid_argument("Native pending writes require explicit archive serialization");
     // Build params outside the coroutine lambda (GCC 13 ICE avoidance).
     std::vector<std::string> insert_params{
         thread_id,

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/runtime-history-record-v2.schema.json",
+  "title": "NeoGraph RuntimeHistoryRecord full-message stored value v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "feed_id", "sequence", "message_id", "trust", "message"],
+  "properties": {
+    "format": { "const": "neograph-runtime-history-record" },
+    "storage_schema_version": { "const": 2 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "feed_id": { "$ref": "#/$defs/token" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "message_id": { "$ref": "#/$defs/token" },
+    "trust": { "enum": ["untrusted_input", "model_output", "tool_output", "developer", "host_policy"] },
+    "message": { "$ref": "provider-message-v2.schema.json" },
+    "source_payload": {},
+    "source_media_type": { "$ref": "#/$defs/token" },
+    "predecessor_id": { "$ref": "#/$defs/sha256" },
+    "native_archive_reference": { "type": "string", "pattern": "^spna2:[0-9a-f]{64}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "sequence": { "const": 1 } }, "required": ["sequence"] },
+      "then": { "not": { "required": ["predecessor_id"] } },
+      "else": { "required": ["predecessor_id"] }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "untrusted_input" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": 2 } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "model_output" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": 3 } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "tool_output" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": 4 } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "developer" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "enum": [0, 1] } } } } }
+    },
+    {
+      "if": { "properties": { "trust": { "const": "host_policy" } }, "required": ["trust"] },
+      "then": { "properties": { "message": { "properties": { "role": { "const": 0 } } } } }
+    },
+    {
+      "if": { "properties": { "message": { "properties": { "native": { "const": true } }, "required": ["native"] } }, "required": ["message"] },
+      "then": { "required": ["native_archive_reference"] }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$" }
+  }
+}

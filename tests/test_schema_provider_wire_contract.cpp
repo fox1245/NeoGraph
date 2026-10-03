@@ -1,430 +1,147 @@
-// Offline wire-contract coverage for the bundled JSON SchemaProvider schemas.
-//
-// These tests deliberately stop at request-body construction and response
-// parsing. They make provider-specific ToolCalling and vision differences
-// executable without spending API credits or depending on a live endpoint.
-
 #include <gtest/gtest.h>
-
-#include <neograph/llm/schema_provider.h>
-
+#include "fixtures/typed_wire_peer.h"
 #include <array>
-#include <filesystem>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <vector>
 
-using neograph::ChatMessage;
-using neograph::ChatTool;
-using neograph::CompletionParams;
-using neograph::json;
-using neograph::llm::SchemaProvider;
-using neograph::llm::test_access::SchemaProviderTestAccess;
-
+using namespace neograph;
+namespace wire = neograph::test::wire;
 namespace {
-
-std::unique_ptr<SchemaProvider> provider_for(const std::string& schema) {
-    SchemaProvider::Config config;
-    config.schema_path = schema;
-    config.api_key = "wire-contract-test-key";
-    config.default_model = "wire-contract-test-model";
-    config.base_url_override = "http://127.0.0.1:1";
-    config.allow_insecure_loopback = true;
-    return SchemaProvider::create(config);
+constexpr std::array<const char*, 5> families = {"openai.chat", "anthropic.messages", "openai.responses", "google.generate", "google.interactions"};
+void add_weather_tool(ProviderRequest& request) {
+    const auto schema = test::document(R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+    std::visit([&](auto& payload) {
+        using T = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<T, sp::messages::Request>) payload.tools.push_back({"lookup_weather", "Weather lookup", schema, "", {}});
+        else if constexpr (std::is_same_v<T, sp::responses::Request>) payload.tools.push_back({"lookup_weather", "Weather lookup", schema, true});
+        else payload.tools.push_back({"lookup_weather", "Weather lookup", schema});
+    }, request.payload);
+}
 }
 
-ChatTool weather_tool() {
-    ChatTool tool;
-    tool.name = "lookup_weather";
-    tool.description = "Look up the current weather for a city.";
-    tool.parameters = {
-        {"type", "object"},
-        {"properties", {
-            {"city", {{"type", "string"}}}
-        }},
-        {"required", {"city"}}
-    };
-    return tool;
-}
-
-CompletionParams params_with_tool() {
-    CompletionParams params;
-    params.model = "wire-contract-test-model";
-    ChatMessage message;
-    message.role = "user";
-    message.content = "What is the weather in Seoul?";
-    params.messages.push_back(std::move(message));
-    params.tools.push_back(weather_tool());
-    return params;
-}
-
-CompletionParams params_with_image(const std::string& image_url) {
-    CompletionParams params;
-    params.model = "wire-contract-test-model";
-    ChatMessage message;
-    message.role = "user";
-    message.content = "Describe this image.";
-    message.image_urls.push_back(image_url);
-    params.messages.push_back(std::move(message));
-    return params;
-}
-
-json openai_tool_response() {
-    json response;
-    response["choices"] = json::array();
-    json choice;
-    choice["message"]["role"] = "assistant";
-    choice["message"]["content"] = nullptr;
-    choice["message"]["tool_calls"] = json::array();
-    json tool_call;
-    tool_call["id"] = "call_1";
-    tool_call["type"] = "function";
-    tool_call["function"]["name"] = "lookup_weather";
-    tool_call["function"]["arguments"] = R"({"city":"Seoul"})";
-    choice["message"]["tool_calls"].push_back(std::move(tool_call));
-    choice["finish_reason"] = "tool_calls";
-    response["choices"].push_back(std::move(choice));
-    return response;
-}
-
-json claude_tool_response() {
-    json response;
-    response["role"] = "assistant";
-    response["content"] = json::array();
-    response["content"].push_back(
-        {{"type", "text"}, {"text", "I will check that."}});
-    json tool_use;
-    tool_use["type"] = "tool_use";
-    tool_use["id"] = "toolu_1";
-    tool_use["name"] = "lookup_weather";
-    tool_use["input"]["city"] = "Seoul";
-    response["content"].push_back(std::move(tool_use));
-    response["stop_reason"] = "tool_use";
-    return response;
-}
-
-json gemini_tool_response() {
-    json response;
-    response["candidates"] = json::array();
-    json candidate;
-    candidate["content"]["parts"] = json::array();
-    candidate["content"]["parts"].push_back(
-        {{"text", "I will check that."}});
-    json function_call;
-    function_call["name"] = "lookup_weather";
-    function_call["args"]["city"] = "Seoul";
-    candidate["content"]["parts"].push_back(
-        {{"functionCall", std::move(function_call)}});
-    candidate["finishReason"] = "STOP";
-    response["candidates"].push_back(std::move(candidate));
-    return response;
-}
-
-}  // namespace
-
-TEST(SchemaProviderWireContract, ToolDefinitionsMatchBundledProviderSchemas) {
-    const std::array<std::string, 3> schemas = {"openai", "claude", "gemini"};
-
-    for (const auto& schema : schemas) {
-        SCOPED_TRACE(schema);
-        auto provider = provider_for(schema);
-        ASSERT_NE(provider, nullptr);
-
-        const json body = SchemaProviderTestAccess::build_body(
-            *provider, params_with_tool());
-        ASSERT_TRUE(body.contains("tools")) << body.dump();
-        ASSERT_EQ(body["tools"].size(), 1U) << body.dump();
-
-        const auto& tool = body["tools"][0];
-        if (schema == "openai") {
+TEST(SchemaProviderWireContract, TypedToolsEncodeAcrossAllFiveFamiliesBeforeDispatch) {
+    for (auto family : families) {
+        SCOPED_TRACE(family);
+        auto provider = wire::provider(family, "http://127.0.0.1:1");
+        auto request = wire::request(family);
+        add_weather_tool(request);
+        auto prepared = provider->prepare(std::move(request));
+        ASSERT_TRUE(prepared.valid());
+        const auto body = json::parse(std::string(prepared.encoded_body()));
+        EXPECT_EQ(prepared.model(), "fixture-model");
+        if (std::string_view(family) == "google.generate") {
+            EXPECT_FALSE(body.contains("model"));
+            ASSERT_NE(prepared.admitted_descriptor(), nullptr);
+            EXPECT_EQ(prepared.admitted_descriptor()->path(false), "/v1beta/models/fixture-model:generateContent");
+            EXPECT_EQ(prepared.admitted_descriptor()->path(true), "/v1beta/models/fixture-model:streamGenerateContent?alt=sse");
+        } else {
+            EXPECT_EQ(body.at("model"), "fixture-model");
+        }
+        ASSERT_EQ(body.at("tools").size(), 1u);
+        auto tool = body.at("tools").at(0);
+        std::string schema_member = "parameters";
+        if (std::string_view(family) == "openai.chat") {
             EXPECT_EQ(tool.at("type"), "function");
-            EXPECT_EQ(tool.at("function").at("name"), "lookup_weather");
-            EXPECT_EQ(tool.at("function").at("description"),
-                      "Look up the current weather for a city.");
-            EXPECT_EQ(tool.at("function").at("parameters").at("type"),
-                      "object");
-        } else if (schema == "claude") {
-            EXPECT_EQ(tool.at("name"), "lookup_weather");
-            EXPECT_EQ(tool.at("description"),
-                      "Look up the current weather for a city.");
-            EXPECT_EQ(tool.at("input_schema").at("type"), "object");
+            tool = tool.at("function");
+        } else if (std::string_view(family) == "anthropic.messages") {
+            schema_member = "input_schema";
+        } else if (std::string_view(family) == "google.generate") {
+            ASSERT_EQ(tool.at("functionDeclarations").size(), 1u);
+            tool = tool.at("functionDeclarations").at(0);
+            schema_member = "parametersJsonSchema";
         } else {
-            ASSERT_TRUE(tool.contains("function_declarations"));
-            ASSERT_EQ(tool["function_declarations"].size(), 1U);
-            const auto& declaration = tool["function_declarations"][0];
-            EXPECT_EQ(declaration.at("name"), "lookup_weather");
-            EXPECT_EQ(declaration.at("description"),
-                      "Look up the current weather for a city.");
-            EXPECT_EQ(declaration.at("parameters").at("type"), "object");
+            EXPECT_EQ(tool.at("type"), "function");
         }
+        EXPECT_EQ(tool.at("name"), "lookup_weather");
+        EXPECT_EQ(tool.at("description"), "Weather lookup");
+        EXPECT_EQ(tool.at(schema_member).at("properties").at("city").at("type"), "string");
+        EXPECT_EQ(tool.at(schema_member).at("required"), json::array({"city"}));
+        EXPECT_EQ(prepared.family(), family);
     }
 }
 
-TEST(SchemaProviderWireContract, ToolResponsesNormalizeAcrossProviders) {
-    struct Case {
-        const char* schema;
-        json (*response)();
+TEST(SchemaProviderWireContract, TypedToolResponsesRemainOwnedAcrossProviders) {
+    struct Case { const char* family; const char* response; const char* id; };
+    const std::array cases = {
+        Case{"openai.chat", R"({"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"lookup_weather","arguments":"{\"city\":\"Seoul\"}"}}]},"finish_reason":"tool_calls"}]})", "call-1"},
+        Case{"anthropic.messages", R"({"id":"msg-1","type":"message","model":"fixture-model","role":"assistant","content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"tool-1","name":"lookup_weather","input":{"city":"Seoul"}}],"stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":2}})", "tool-1"},
+        Case{"google.generate", R"({"candidates":[{"content":{"role":"model","parts":[{"text":"checking"},{"functionCall":{"id":"gemini-1","name":"lookup_weather","args":{"city":"Seoul"}}}]},"finishReason":"STOP"}]})", "gemini-1"}
     };
-    const std::array<Case, 3> cases = {{
-        {"openai", &openai_tool_response},
-        {"claude", &claude_tool_response},
-        {"gemini", &gemini_tool_response},
-    }};
-
-    for (const auto& test_case : cases) {
-        SCOPED_TRACE(test_case.schema);
-        auto provider = provider_for(test_case.schema);
-        ASSERT_NE(provider, nullptr);
-
-        const ChatMessage message = SchemaProviderTestAccess::parse_response(
-            *provider, test_case.response());
-        ASSERT_EQ(message.tool_calls.size(), 1U);
-        EXPECT_EQ(message.tool_calls[0].name, "lookup_weather");
-        ASSERT_FALSE(message.tool_calls[0].arguments.empty());
-        EXPECT_EQ(json::parse(message.tool_calls[0].arguments).at("city"),
-                  "Seoul");
-
-        if (std::string(test_case.schema) == "openai") {
-            EXPECT_EQ(message.tool_calls[0].id, "call_1");
-        } else if (std::string(test_case.schema) == "claude") {
-            EXPECT_EQ(message.tool_calls[0].id, "toolu_1");
-        } else {
-            EXPECT_FALSE(message.tool_calls[0].id.empty());
-        }
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.family);
+        sp::runtime::Result result;
+        { const auto response = std::string_view(item.family) == "openai.chat"
+              ? wire::chat_envelope(json::parse(item.response)).dump() : std::string(item.response);
+          wire::Peer peer(response); auto provider = wire::provider(item.family, peer.origin());
+          auto request = wire::request(item.family);
+          add_weather_tool(request);
+          result = provider->invoke(std::move(request)); }
+        ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+        const auto& completion = test::completion(result);
+        std::vector<sp::ToolCall> calls;
+        for (const auto& message : completion.messages) for (const auto& part : message.parts)
+            if (const auto* call = std::get_if<sp::ToolCall>(&part)) calls.push_back(*call);
+        ASSERT_EQ(calls.size(), 1u);
+        EXPECT_EQ(calls[0].name, "lookup_weather");
+        EXPECT_EQ(calls[0].id, item.id);
+        ASSERT_TRUE(calls[0].input);
+        EXPECT_EQ(calls[0].input->root().get("city").as_string(), "Seoul");
     }
 }
 
-TEST(SchemaProviderWireContract, ChoicesMessagePreservesGlmReasoningWithToolCall) {
-    auto provider = provider_for("openai");
-    const json response = {
-        {"choices", json::array({{
-            {"message", {
-                {"role", "assistant"},
-                {"content", nullptr},
-                {"reasoning_content", "Need the approved lookup."},
-                {"tool_calls", json::array({{
-                    {"id", "call_glm_1"},
-                    {"type", "function"},
-                    {"function", {{"name", "lookup_weather"},
-                                  {"arguments", R"({"city":"Seoul"})"}}}
-                }})}
-            }},
-            {"finish_reason", "tool_calls"}
-        }})}
-    };
-    const auto message = SchemaProviderTestAccess::parse_response(*provider, response);
-    EXPECT_EQ(message.role, "assistant");
-    EXPECT_TRUE(message.content.empty());
-    EXPECT_EQ(message.reasoning, "Need the approved lookup.");
-    ASSERT_EQ(message.tool_calls.size(), 1U);
-    EXPECT_EQ(message.tool_calls[0].id, "call_glm_1");
-    EXPECT_EQ(message.tool_calls[0].name, "lookup_weather");
-    EXPECT_EQ(json::parse(message.tool_calls[0].arguments).at("city"), "Seoul");
-}
-
-TEST(SchemaProviderWireContract, ReasoningFieldsFollowExternalSchema) {
-    const auto path = std::filesystem::path(__FILE__).parent_path() /
-                      "fixtures" / "schema_reasoning_alias.json";
-    auto provider = provider_for(path.string());
-    const json response = {
-        {"choices", json::array({{
-            {"message", {{"role", "assistant"},
-                         {"content", "done"},
-                         {"reasoning", "legacy value"},
-                         {"reasoning_content", "legacy alias"},
-                         {"private_thought", "schema-selected value"}}}
-        }})}
-    };
-    const auto message = SchemaProviderTestAccess::parse_response(*provider, response);
-    EXPECT_EQ(message.content, "done");
-    EXPECT_EQ(message.reasoning, "schema-selected value");
-}
-
-TEST(SchemaProviderWireContract, DataUrlVisionUsesEachProviderWireShape) {
-    const std::array<std::string, 3> schemas = {"openai", "claude", "gemini"};
-    const std::string image_url = "data:image/png;base64,AA==";
-
-    for (const auto& schema : schemas) {
-        SCOPED_TRACE(schema);
-        auto provider = provider_for(schema);
-        ASSERT_NE(provider, nullptr);
-
-        const json body = SchemaProviderTestAccess::build_body(
-            *provider, params_with_image(image_url));
-        const auto& messages = schema == "gemini"
-            ? body.at("contents")
-            : body.at("messages");
-        const auto& parts = messages.at(0).at(
-            schema == "gemini" ? "parts" : "content");
-        ASSERT_EQ(parts.size(), 2U) << body.dump();
-
-        if (schema == "openai") {
-            EXPECT_EQ(parts[1].at("type"), "image_url");
-            EXPECT_EQ(parts[1].at("image_url").at("url"), image_url);
-        } else if (schema == "claude") {
-            EXPECT_EQ(parts[1].at("type"), "image");
-            EXPECT_EQ(parts[1].at("source").at("type"), "base64");
-            EXPECT_EQ(parts[1].at("source").at("media_type"), "image/png");
-            EXPECT_EQ(parts[1].at("source").at("data"), "AA==");
-        } else {
-            EXPECT_EQ(parts[1].at("inline_data").at("mime_type"), "image/png");
-            EXPECT_EQ(parts[1].at("inline_data").at("data"), "AA==");
-        }
+TEST(SchemaProviderWireContract, CanonicalInlineVisionRetainsOrderAcrossFamilies) {
+    const auto bytes = std::make_shared<const std::string>("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=");
+    for (auto family : families) {
+        SCOPED_TRACE(family);
+        auto provider = wire::provider(family, "http://127.0.0.1:1");
+        auto request = wire::request(family);
+        set_provider_request_messages(request, {sp::Message{"", sp::Role::User,
+            {sp::Text{"before-image"}, sp::Image{"image/png", bytes}, sp::Text{"after-image"}}}});
+        const auto prepared = provider->prepare(std::move(request));
+        ASSERT_TRUE(prepared.valid());
+        const auto body = std::string(prepared.encoded_body());
+        const auto first = body.find("before-image"), image = body.find(*bytes), last = body.find("after-image");
+        ASSERT_NE(first, std::string::npos); ASSERT_NE(image, std::string::npos); ASSERT_NE(last, std::string::npos);
+        EXPECT_LT(first, image); EXPECT_LT(image, last);
     }
 }
 
-TEST(SchemaProviderWireContract, RemoteVisionUrlUsesDeclaredRepresentation) {
-    const std::string remote_url = "https://example.invalid/image.png";
-
-    {
-        auto provider = provider_for("openai");
-        ASSERT_NE(provider, nullptr);
-        const json body = SchemaProviderTestAccess::build_body(
-            *provider, params_with_image(remote_url));
-        EXPECT_EQ(body.at("messages").at(0).at("content").at(1)
-                      .at("image_url").at("url"),
-                  remote_url);
-    }
-
-    {
-        auto provider = provider_for("claude");
-        ASSERT_NE(provider, nullptr);
-        const json body = SchemaProviderTestAccess::build_body(
-            *provider, params_with_image(remote_url));
-        const auto& source = body.at("messages").at(0).at("content").at(1)
-                                 .at("source");
-        EXPECT_EQ(source.at("type"), "url");
-        EXPECT_EQ(source.at("url"), remote_url);
-    }
-
-    {
-        auto provider = provider_for("gemini");
-        ASSERT_NE(provider, nullptr);
-        EXPECT_THROW(
-            SchemaProviderTestAccess::build_body(
-                *provider, params_with_image(remote_url)),
-            std::invalid_argument);
-    }
+TEST(SchemaProviderWireContract, InvalidInlineVisionRejectsBeforeAnyWireActivity) {
+    wire::Peer peer(wire::chat_response());
+    auto provider = wire::provider("openai.chat", peer.origin());
+    auto request = wire::request();
+    std::get<sp::chat::Request>(request.payload).canonical_messages[0].parts.push_back(
+        sp::Image{"image/png", std::make_shared<const std::string>("not base64")});
+    const auto prepared = provider->prepare(std::move(request));
+    ASSERT_FALSE(prepared.valid()); ASSERT_NE(prepared.error(), nullptr);
+    EXPECT_EQ(prepared.error()->kind, sp::ErrorKind::InvalidRequest);
+    EXPECT_EQ(peer.state->entered, 0u);
 }
 
-TEST(SchemaProviderWireContract, StreamingRequestShapesAreNetworkFree) {
-    CompletionParams params;
-    params.model = "gpt-4o";
-    params.messages.push_back(ChatMessage{.role = "user", .content = "hello"});
-    const auto openai = provider_for("openai");
-    ASSERT_NE(openai, nullptr);
-    const auto chat = SchemaProviderTestAccess::build_body(*openai, params);
-    const auto sse = SchemaProviderTestAccess::build_sse_body(*openai, params);
-    EXPECT_FALSE(chat.contains("stream"));
-    EXPECT_FALSE(chat.contains("stream_options"));
-    EXPECT_EQ(sse.at("stream"), true);
-    EXPECT_EQ(sse.at("stream_options").at("include_usage"), true);
-    EXPECT_EQ(sse.at("temperature"), chat.at("temperature"));
-
-    const auto gemini = provider_for("gemini");
-    ASSERT_NE(gemini, nullptr);
-    const auto gemini_sse = SchemaProviderTestAccess::build_sse_body(*gemini, params);
-    EXPECT_FALSE(gemini_sse.contains("stream_options"));
-
-    const auto responses = provider_for("openai_responses");
-    ASSERT_NE(responses, nullptr);
-    const auto ws = SchemaProviderTestAccess::build_ws_body(*responses, params);
-    EXPECT_EQ(ws.at("type"), "response.create");
-    EXPECT_FALSE(ws.contains("temperature"));
-    EXPECT_FALSE(ws.contains("stream"));
-    EXPECT_FALSE(ws.contains("background"));
-    EXPECT_EQ(ws.at("input").at(0).at("content"), "hello");
+TEST(SchemaProviderWireContract, StreamingRequestPreparationDoesNotDispatch) {
+    wire::Peer peer(wire::chat_sse(), true);
+    auto provider = wire::provider("openai.chat", peer.origin());
+    auto collect = provider->prepare(wire::request());
+    auto stream = provider->prepare(wire::request("openai.chat", ProviderMode::Stream));
+    ASSERT_TRUE(collect.valid()); ASSERT_TRUE(stream.valid());
+    const auto body = json::parse(std::string(stream.encoded_body()));
+    EXPECT_EQ(body.at("stream"), true);
+    EXPECT_EQ(body.at("stream_options").at("include_usage"), true);
+    EXPECT_EQ(peer.state->entered, 0u);
+    EXPECT_EQ(test::text(provider->dispatch(std::move(stream))), "pong");
+    EXPECT_EQ(peer.state->entered, 1u);
 }
 
-TEST(SchemaProviderWireContract, OfflineSseDataDecodingPreservesUsageReasoningAndToolDeltas) {
-    auto provider = provider_for("openai");
-    ASSERT_NE(provider, nullptr);
-    std::vector<std::string> chunks;
-    const auto result = SchemaProviderTestAccess::parse_stream_lines(
-        *provider, {
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\",\"reasoning_content\":\"private \",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null}]}",
-            "data: {\"choices\":[{\"delta\":{\"content\":\" world\",\"reasoning_content\":\"thought\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Seoul\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}",
-            "data: [DONE]",
-            "data: {\"choices\":[{\"delta\":{\"content\":\" ignored\"}}]}"
-        }, [&](const std::string& chunk) { chunks.push_back(chunk); });
-    EXPECT_EQ(chunks, (std::vector<std::string>{"Hello", " world"}));
-    EXPECT_EQ(result.message.content, "Hello world");
-    EXPECT_EQ(result.message.reasoning, "private thought");
-    ASSERT_EQ(result.message.tool_calls.size(), 1U);
-    EXPECT_EQ(result.message.tool_calls[0].id, "call_1");
-    EXPECT_EQ(result.message.tool_calls[0].name, "weather");
-    EXPECT_EQ(json::parse(result.message.tool_calls[0].arguments).at("city"), "Seoul");
-    EXPECT_EQ(result.usage.prompt_tokens, 11);
-    EXPECT_EQ(result.usage.total_tokens, 14);
-    EXPECT_EQ(result.stop_reason, "tool_use");
-}
-
-TEST(SchemaProviderWireContract, OfflineClaudeAndGeminiSseFixtures) {
-    auto claude = provider_for("claude");
-    ASSERT_NE(claude, nullptr);
-    std::string emitted;
-    const auto claude_result = SchemaProviderTestAccess::parse_stream_lines(
-        *claude, {
-            "event: message_start",
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}",
-            "event: content_block_start",
-            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"weather\"}}",
-            "event: content_block_delta",
-            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Seoul\\\"}\"}}",
-            "event: content_block_stop",
-            "data: {\"type\":\"content_block_stop\"}",
-            "event: message_delta",
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":4}}",
-            "event: message_stop",
-            "data: {\"type\":\"message_stop\"}"
-        }, [&](const std::string& token) { emitted += token; });
-    EXPECT_TRUE(emitted.empty());
-    ASSERT_EQ(claude_result.message.tool_calls.size(), 1U);
-    EXPECT_EQ(claude_result.message.tool_calls[0].id, "toolu_1");
-    EXPECT_EQ(json::parse(claude_result.message.tool_calls[0].arguments).at("city"), "Seoul");
-    EXPECT_EQ(claude_result.usage.prompt_tokens, 9);
-    EXPECT_EQ(claude_result.usage.completion_tokens, 4);
-    EXPECT_EQ(claude_result.stop_reason, "tool_use");
-
-    auto gemini = provider_for("gemini");
-    ASSERT_NE(gemini, nullptr);
-    const auto gemini_result = SchemaProviderTestAccess::parse_stream_lines(
-        *gemini, {
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"},{\"functionCall\":{\"name\":\"weather\",\"args\":{\"city\":\"Seoul\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":2,\"totalTokenCount\":9}}"
-        }, [&](const std::string& token) { emitted += token; });
-    EXPECT_EQ(emitted, "Hi");
-    EXPECT_EQ(gemini_result.message.content, "Hi");
-    ASSERT_EQ(gemini_result.message.tool_calls.size(), 1U);
-    EXPECT_EQ(gemini_result.message.tool_calls[0].name, "weather");
-    EXPECT_EQ(gemini_result.usage.total_tokens, 9);
-    EXPECT_EQ(gemini_result.stop_reason, "end_turn");
-}
-
-TEST(SchemaProviderWireContract, OfflineWebSocketEventsStopAtDoneAndRejectErrors) {
-    auto provider = provider_for("openai_responses");
-    ASSERT_NE(provider, nullptr);
-    std::vector<std::string> tokens;
-    const auto result = SchemaProviderTestAccess::parse_ws_events(
-        *provider, {
-            {{"type", "response.output_item.added"},
-             {"item", {{"type", "function_call"}, {"call_id", "call_ws"}, {"name", "weather"}}}},
-            {{"type", "response.function_call_arguments.delta"}, {"delta", R"({"city":)"}},
-            {{"type", "response.function_call_arguments.delta"}, {"delta", R"("Seoul"})"}},
-            {{"type", "response.output_item.done"}},
-            {{"type", "response.completed"},
-             {"response", {{"usage", {{"input_tokens", 8}, {"output_tokens", 3}, {"total_tokens", 11}}}}}},
-            {{"type", "error"}, {"message", "must not be reached"}}
-        }, [&](const std::string& token) { tokens.push_back(token); });
-    EXPECT_TRUE(tokens.empty());
-    ASSERT_EQ(result.message.tool_calls.size(), 1U);
-    EXPECT_EQ(result.message.tool_calls[0].id, "call_ws");
-    EXPECT_EQ(json::parse(result.message.tool_calls[0].arguments).at("city"), "Seoul");
-    EXPECT_EQ(result.usage.total_tokens, 11);
-    EXPECT_EQ(result.stop_reason, "tool_use");
-    EXPECT_THROW(SchemaProviderTestAccess::parse_ws_events(
-        *provider, {{{"type", "error"}, {"message", "rejected"}}}),
-        std::runtime_error);
+TEST(SchemaProviderWireContract, ChatReasoningAndClientToolRemainDistinctOwnedParts) {
+    wire::Peer peer(wire::chat_envelope(json::parse(R"({"choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":"Need the approved lookup.","tool_calls":[{"id":"call-glm","type":"function","function":{"name":"lookup_weather","arguments":"{\"city\":\"Seoul\"}"}}]},"finish_reason":"tool_calls"}]})")).dump());
+    auto provider = wire::provider("openai.chat", peer.origin());
+    const auto result = provider->invoke(wire::request());
+    ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+    const auto& completion = test::completion(result);
+    ASSERT_EQ(completion.messages.size(), 1u);
+    ASSERT_EQ(completion.messages[0].parts.size(), 2u);
+    EXPECT_EQ(std::get<sp::Thinking>(completion.messages[0].parts[0]).text, "Need the approved lookup.");
+    const auto& call = std::get<sp::ToolCall>(completion.messages[0].parts[1]);
+    EXPECT_EQ(call.id, "call-glm"); EXPECT_EQ(call.name, "lookup_weather");
+    EXPECT_EQ(call.input->root().get("city").as_string(), "Seoul");
+    EXPECT_EQ(completion.stop.kind, sp::StopKind::ToolUse);
+    EXPECT_TRUE(test::text(result).empty());
 }

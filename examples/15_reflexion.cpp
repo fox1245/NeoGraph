@@ -36,7 +36,7 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -79,16 +79,16 @@ static std::string last_n_nonempty_lines(const std::string& text, int n) {
     return out;
 }
 
-static ChatCompletion ask(Provider& p,
-                          const std::string& system,
-                          const std::string& user,
-                          float temperature = 0.7f) {
-    CompletionParams params;
-    params.model = "~deepseek/deepseek-v4-flash-latest";
-    params.temperature = temperature;
-    params.messages.push_back({"system", system});
-    params.messages.push_back({"user",   user});
-    return p.complete(params);
+static sp::runtime::Result ask(Provider& p,
+                               const std::string& system,
+                               const std::string& user,
+                               float temperature = 0.7f) {
+    ProviderControls controls;
+    controls.temperature = temperature;
+    return p.invoke(make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest",
+        {examples::message(sp::Role::System, system), examples::message(sp::Role::User, user)},
+        {}, std::move(controls)));
 }
 
 int main() {
@@ -102,13 +102,7 @@ int main() {
         return 1;
     }
 
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "openai_responses";
-    cfg.api_key = api_key;
-    cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = llm::SchemaProvider::create(cfg);
+    auto provider = examples::make_openrouter_provider(api_key);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 15: Reflexion (self-correction)     ║\n"
@@ -175,6 +169,9 @@ int main() {
     std::deque<std::string> mem;          // Bounded reflection buffer.
     const size_t MEM_OMEGA = 3;           // Paper's Ω ≈ 1–3.
     const int MAX_ITER = 6;
+    // Keep complete outcomes, including non-text parts and nullable usage.
+    std::vector<std::shared_ptr<const sp::Outcome>> outcomes;
+    outcomes.reserve(MAX_ITER * 3);
 
     for (int i = 1; i <= MAX_ITER; ++i) {
         std::cout << "── Iteration " << i << " ──────────────────────────────────────\n";
@@ -196,18 +193,20 @@ int main() {
                         "lessons. Output exactly three lines, no commentary.";
         }
 
-        auto gen = ask(*provider, generator_sys, gen_user, 0.8f);
+        auto gen = examples::require_outcome(ask(*provider, generator_sys, gen_user, 0.8f));
+        outcomes.push_back(gen);
         // Stronger models sometimes leak reasoning into the reply even when
         // told not to. Trust the last 3 non-empty lines — that's the haiku.
-        draft = last_n_nonempty_lines(gen.message.content, 3);
+        draft = last_n_nonempty_lines(examples::visible_text(*gen), 3);
 
         std::cout << "[actor]\n" << draft << "\n\n";
 
         // 2. EVALUATOR — score the trajectory.
-        auto crit = ask(*provider, critic_sys,
+        auto crit = examples::require_outcome(ask(*provider, critic_sys,
             "Task constraints:\n" + task + "\n\nPoem to evaluate:\n" + draft,
-            0.1f);
-        critique = crit.message.content;
+            0.1f));
+        outcomes.push_back(crit);
+        critique = examples::visible_text(*crit);
 
         std::cout << "[evaluator]\n" << critique << "\n\n";
 
@@ -221,14 +220,15 @@ int main() {
 
         // 3. SELF-REFLECTION — distil (draft, critique) into a lesson and
         //    push it into the bounded mem buffer. The next Actor iteration
-        //    sees these lessons; the raw critique is discarded after this
-        //    point. This is the structural difference from Self-Refine.
-        auto refl = ask(*provider, reflector_sys,
+        //    sees these lessons, not the raw critique. Complete outcomes stay
+        //    owned separately; only the prompt's memory is bounded by Ω.
+        auto refl = examples::require_outcome(ask(*provider, reflector_sys,
             "Failed attempt:\n" + draft +
             "\n\nEvaluator's critique:\n" + critique +
             "\n\nWrite your reflection.",
-            0.4f);
-        std::string lesson = refl.message.content;
+            0.4f));
+        outcomes.push_back(refl);
+        std::string lesson = examples::visible_text(*refl);
         // Keep the reflection compact — single paragraph.
         if (lesson.size() > 400) lesson.resize(400);
 

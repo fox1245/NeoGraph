@@ -41,32 +41,18 @@ namespace neograph::history {
  * @param messages Conversation history.
  * @return Estimated token count.
  */
-NEOGRAPH_API int estimate_tokens(const std::vector<ChatMessage>& messages);
+NEOGRAPH_API int estimate_tokens(const std::vector<sp::Message>& messages);
 
-/**
- * @brief Repair OpenAI-invalid tool pairings in place.
- *
- * Drops, in a single pass:
- *  - an assistant message's `tool_calls` entries that have no following
- *    matching role=="tool" response (the response was sliced off);
- *    if that empties `tool_calls` and `content` is also empty, the
- *    assistant message itself is removed, and
- *  - a role=="tool" message whose `tool_call_id` has no preceding
- *    assistant `tool_calls` entry (an orphaned response).
- *
- * Idempotent: running it twice is a no-op on the second pass. Call it
- * after any operation that windows/truncates a history (including
- * @ref compact_history, which calls it internally on its output).
- *
- * @param[in,out] messages History to repair.
- */
-NEOGRAPH_API void sanitize_tool_calls(std::vector<ChatMessage>& messages);
+/// Validate client-executed tool pairings without editing any message or part.
+/// Orphan results, duplicate IDs, and unmatched calls throw std::invalid_argument.
+NEOGRAPH_API void sanitize_tool_calls(std::vector<sp::Message>& messages);
 
 /// Result of @ref compact_history.
 struct CompactedHistory {
     std::string summary;             ///< LLM summary of the compacted span ("" if none).
-    std::vector<ChatMessage> recent; ///< Leading system (if any) + summary-as-system + last N.
+    std::vector<sp::Message> recent; ///< Full original messages outside the summarized text-only prefix.
     bool compacted = false;          ///< true iff a summary was produced.
+    sp::runtime::Result summary_outcome; ///< Full immutable summary response, including failure.
 };
 
 /**
@@ -75,17 +61,9 @@ struct CompactedHistory {
  * If `estimate_tokens(messages) <= max_tokens`, returns the history
  * unchanged (`compacted == false`, `recent == messages`). Otherwise:
  *
- *  1. A leading system message (if present) is preserved verbatim.
- *  2. The last `recent_keep` messages are kept verbatim.
- *  3. Everything in between is rendered to text and summarized via one
- *     `provider.invoke(params, nullptr)` call (temperature 0.2).
- *  4. The result is `[system?] + [summary-as-system] + [last N]`, then
- *     run through @ref sanitize_tool_calls so a cut that lands mid
- *     tool-pair can't produce an API-invalid list.
- *
- * If the summary call yields empty content, falls back to dropping the
- * old span entirely (system + last N) rather than throwing — a degraded
- * but valid history beats a hard failure mid-conversation.
+ * Only an unsealed, text-only prefix is eligible for summarization. Every
+ * non-text part and native replay group remains intact in recent. Empty
+ * summaries leave the input unchanged; typed failures retain their full outcome.
  *
  * `messages` is taken by value so the caller's vector is untouched.
  *
@@ -97,7 +75,7 @@ struct CompactedHistory {
  * @return Awaitable yielding the (possibly) compacted history.
  */
 NEOGRAPH_API asio::awaitable<CompactedHistory> compact_history(
-    std::vector<ChatMessage> messages,
+    std::vector<sp::Message> messages,
     Provider& provider,
     std::string model,
     int max_tokens = 12000,
@@ -106,7 +84,7 @@ NEOGRAPH_API asio::awaitable<CompactedHistory> compact_history(
 /** Controlled variant: summary instructions and rendered source are explicit
  * host slots; admitted RAW history remains the authoritative conversation. */
 NEOGRAPH_API asio::awaitable<CompactedHistory> compact_history(
-    std::vector<ChatMessage> messages,
+    std::vector<sp::Message> messages,
     Provider& provider,
     std::shared_ptr<::neograph::RuntimeInterpositionController> controller,
     std::string model,

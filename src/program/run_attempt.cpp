@@ -1,11 +1,13 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/diagnostic.h>
+#include <neograph/program/sqlite_provider_call_broker.h>
 
 #include "canonical_json.h"
 #include "core_progress.h"
 #include "javascript.h"
 #include "run_control.h"
+#include "provider_failure.h"
 #include <asio/as_tuple.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/co_spawn.hpp>
@@ -127,6 +129,9 @@ public:
     void delete_thread(const std::string& thread_id) override {
         inner_->delete_thread(thread_id);
     }
+    bool requires_managed_budget(const std::string& thread_id) override {
+        return inner_->requires_managed_budget(thread_id);
+    }
 
     asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint) override {
         validate(checkpoint);
@@ -156,6 +161,88 @@ public:
     }
     asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
         co_await inner_->delete_thread_async(thread_id);
+    }
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
+        co_return co_await inner_->requires_managed_budget_async(std::move(thread_id));
+    }
+
+    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override {
+        if (!expected_checkpoint_id.empty()) {
+            validate_source(load_by_id(expected_checkpoint_id), expected_checkpoint_id,
+                            expected_checkpoint_commitment);
+        }
+        return inner_->acquire_managed_budget_lease(
+            scope, expected_checkpoint_id, expected_checkpoint_commitment);
+    }
+    asio::awaitable<std::shared_ptr<graph::OwnedManagedBudgetLease>>
+    acquire_managed_budget_lease_async(graph::ManagedBudgetLeaseScope scope,
+        std::string expected_checkpoint_id, std::string expected_checkpoint_commitment) override {
+        if (!expected_checkpoint_id.empty()) {
+            auto source = co_await load_by_id_async(expected_checkpoint_id);
+            validate_source(source, expected_checkpoint_id, expected_checkpoint_commitment);
+        }
+        co_return co_await inner_->acquire_managed_budget_lease_async(
+            std::move(scope), std::move(expected_checkpoint_id),
+            std::move(expected_checkpoint_commitment));
+    }
+    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override {
+        return inner_->begin_managed_budget_effect(
+            lease, effect_id, exact_claim_amount, prepared_request_digest);
+    }
+    asio::awaitable<graph::ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest) override {
+        co_return co_await inner_->begin_managed_budget_effect_async(
+            std::move(lease), std::move(effect_id), exact_claim_amount,
+            std::move(prepared_request_digest));
+    }
+    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override {
+        inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority);
+    }
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) override {
+        co_await inner_->settle_managed_budget_effect_async(
+            std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
+    }
+    void publish_managed_budget_checkpoint(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::Checkpoint& checkpoint) override {
+        validate(checkpoint);
+        inner_->publish_managed_budget_checkpoint(lease, checkpoint);
+    }
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::Checkpoint checkpoint) override {
+        validate(checkpoint);
+        co_await inner_->publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
+    }
+    void release_managed_budget_lease(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) override {
+        inner_->release_managed_budget_lease(lease);
+    }
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease) override {
+        co_await inner_->release_managed_budget_lease_async(std::move(lease));
+    }
+    bool retains_native_checkpoint() const noexcept override {
+        return inner_->retains_native_checkpoint();
+    }
+    void publish_managed_budget_fork(const graph::Checkpoint& source,
+                                    const graph::Checkpoint& forked) override {
+        validate(source);
+        validate(forked);
+        inner_->publish_managed_budget_fork(source, forked);
+    }
+    asio::awaitable<void> publish_managed_budget_fork_async(
+        graph::Checkpoint source, graph::Checkpoint forked) override {
+        validate(source);
+        validate(forked);
+        co_await inner_->publish_managed_budget_fork_async(std::move(source), std::move(forked));
     }
 
     void put_writes(const std::string& thread_id,
@@ -199,6 +286,15 @@ private:
     }
     void validate(const std::optional<graph::Checkpoint>& checkpoint) const {
         if (checkpoint) validate(*checkpoint);
+    }
+    void validate_source(const std::optional<graph::Checkpoint>& checkpoint,
+                         const std::string& expected_checkpoint_id,
+                         const std::string& expected_checkpoint_commitment) const {
+        if (!checkpoint || checkpoint->id != expected_checkpoint_id ||
+            graph::managed_budget_checkpoint_commitment(*checkpoint) != expected_checkpoint_commitment) {
+            throw std::runtime_error("Exact managed budget source changed before acquisition");
+        }
+        validate(*checkpoint);
     }
 
     std::shared_ptr<graph::CheckpointStore> inner_;
@@ -743,7 +839,8 @@ struct JavaScriptRecordedCommandResult {
     std::vector<std::string>      execution_trace;
 };
 
-JavaScriptRecordedCommandResult decode_javascript_command_result(const json& value) {
+JavaScriptRecordedCommandResult decode_javascript_command_result(
+    const json& value, const RunControl& control) {
     if (!value.is_object()) {
         throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
                                  "Recorded JavaScript command terminal result is not an object");
@@ -804,6 +901,20 @@ JavaScriptRecordedCommandResult decode_javascript_command_result(const json& val
                                         failure.at("core_node").get<std::string>(),
                                         static_cast<std::uint32_t>(attempts),
                                         detail::owned_json_copy(failure.at("witness"))};
+        if (detail::has_provider_outcome(*result.failure)) {
+            const auto& custody = result.failure->witness.at("provider_outcome_custody");
+            const auto& observed_attempt = custody.at("attempt");
+            if (!observed_attempt.is_number_unsigned() || observed_attempt.get<std::uint64_t>() == 0)
+                throw std::invalid_argument("Recorded provider outcome has no original attempt custody");
+            const auto source_run = control.recorded_replay
+                ? control.recorded_replay->source_run_id : control.run_id;
+            detail::restore_provider_failure(
+                *result.failure,
+                detail::provider_failure_custody(
+                    control.owner_scope, source_run, control.program_version_id, control.bundle_id,
+                    result.failure->operation_id, observed_attempt.get<std::uint64_t>()),
+                control.native_history_archive);
+        }
     }
     if (result.status != ProgramTerminalStatus::Completed && !result.failure) {
         throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
@@ -853,18 +964,91 @@ public:
                            std::string   message,
                            std::string   core_node               = {},
                            std::uint32_t attempts                = 0,
-                           bool          checkpoint_incompatible = false)
+                           bool          checkpoint_incompatible = false,
+                           std::exception_ptr cause = {})
         : std::runtime_error(std::move(message)),
           operation_id(std::move(operation_id)),
           core_node(std::move(core_node)),
           attempts(attempts),
-          checkpoint_incompatible(checkpoint_incompatible) {}
+          checkpoint_incompatible(checkpoint_incompatible), cause(std::move(cause)) {}
 
     std::string   operation_id;
     std::string   core_node;
     std::uint32_t attempts                = 0;
     bool          checkpoint_incompatible = false;
+    std::exception_ptr cause;
 };
+
+sp::runtime::Result provider_outcome_in(std::exception_ptr cause) {
+    while (cause) {
+        try {
+            std::rethrow_exception(cause);
+        } catch (const ProviderFailure& error) {
+            return error.outcome();
+        } catch (const ProviderOutcomeError& error) {
+            return error.outcome();
+        } catch (const graph::NodeExecutionError& error) {
+            cause = error.cause();
+        } catch (const NestedOperationFailure& error) {
+            cause = error.cause;
+        } catch (...) {
+            return {};
+        }
+    }
+    return {};
+}
+
+json provider_error_witness(const std::exception_ptr& cause) {
+    if (!cause) return nullptr;
+    try {
+        std::rethrow_exception(cause);
+    } catch (const ProviderFailure& error) {
+        return json{{"kind", "provider_failure"},
+                    {"message", safe_failure_message(error.what())}};
+    } catch (const ProgramProviderOutcomePersistenceError& error) {
+        json witness{{"kind", "program_provider_persistence"},
+                     {"message", safe_failure_message(error.what())},
+                     {"cause", provider_error_witness(error.cause())}};
+        if (error.observer_error())
+            witness["observer"] = provider_error_witness(error.observer_error());
+        return witness;
+    } catch (const ProviderObserverError& error) {
+        return json{{"kind", "provider_observer"},
+                    {"error_kind", static_cast<std::uint64_t>(error.error_kind())},
+                    {"message", safe_failure_message(error.what())},
+                    {"cause", provider_error_witness(error.cause())}};
+    } catch (const ProviderOutcomeError& error) {
+        json witness{{"kind", "provider_outcome"}, {"message", safe_failure_message(error.what())},
+                     {"cause", provider_error_witness(error.cause())}};
+        if (const auto* nested = dynamic_cast<const std::nested_exception*>(&error);
+            nested && nested->nested_ptr())
+            witness["secondary"] = provider_error_witness(nested->nested_ptr());
+        return witness;
+    } catch (const graph::NodeExecutionError& error) {
+        return json{{"kind", "node"}, {"message", safe_failure_message(error.what())},
+                    {"cause", provider_error_witness(error.cause())}};
+    } catch (const NestedOperationFailure& error) {
+        return json{{"kind", "operation"}, {"message", safe_failure_message(error.what())},
+                    {"cause", provider_error_witness(error.cause)}};
+    } catch (const std::exception& error) {
+        json witness{{"kind", "exception"}, {"message", safe_failure_message(error.what())}};
+        if (const auto* nested = dynamic_cast<const std::nested_exception*>(&error);
+            nested && nested->nested_ptr())
+            witness["cause"] = provider_error_witness(nested->nested_ptr());
+        return witness;
+    } catch (...) {
+        return json{{"kind", "non_standard_exception"}};
+    }
+}
+
+void retain_provider_failure(ProgramFailure& failure, const std::exception_ptr& cause) {
+    if (auto outcome = provider_outcome_in(cause)) {
+        failure.provider_outcome = std::move(outcome);
+        failure.provider_cause = cause;
+        if (!failure.witness.is_object()) failure.witness = json::object();
+        failure.witness["provider_error"] = provider_error_witness(cause);
+    }
+}
 
 [[noreturn]] void throw_runtime_diagnostic(std::string code, std::string message, json witness) {
     Diagnostic diagnostic;
@@ -987,10 +1171,19 @@ std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexc
 
 bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::string_view message) {
     if (cause == CancellationCause::None) return false;
+    auto provider_outcome = outcome.failure ? std::move(outcome.failure->provider_outcome)
+                                           : sp::runtime::Result{};
+    auto provider_cause = outcome.failure ? std::move(outcome.failure->provider_cause)
+                                         : std::exception_ptr{};
+    json causal_witness = json::object();
+    if (outcome.failure && outcome.failure->witness.is_object() &&
+        outcome.failure->witness.contains("provider_error"))
+        causal_witness["provider_error"] = std::move(outcome.failure->witness["provider_error"]);
     if (cause == CancellationCause::EventSink) {
         outcome.status = ProgramTerminalStatus::Failed;
         outcome.failure = ProgramFailure{"P_EVENT_SINK", safe_failure_message(std::string(message)),
-                                         "root", "", 0, json::object()};
+                                         "root", "", 0, std::move(causal_witness),
+                                         std::move(provider_outcome), std::move(provider_cause)};
         return true;
     }
     outcome.status  = cause == CancellationCause::Timeout ? ProgramTerminalStatus::TimedOut
@@ -1001,7 +1194,7 @@ bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::str
         "root",
         "",
         0,
-        json::object()};
+        std::move(causal_witness), std::move(provider_outcome), std::move(provider_cause)};
     return true;
 }
 
@@ -1137,6 +1330,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     const auto               started_at            = control->started_at;
     const auto               deadline              = control->deadline;
     auto                     usage                 = std::make_shared<UsageAccumulator>();
+    if (control->recorded_replay) {
+        usage->restore_authority(std::move(control->recorded_replay->provider_authority));
+        usage->seal_observation();
+    }
     auto                     core_progress         = std::make_shared<AttemptCoreProgress>();
     std::uint64_t            operation_count       = 0;
     std::uint64_t            dynamic_compile_count = 0;
@@ -1165,6 +1362,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         try {
             const auto latest = control->transitions->latest(control->owner_scope, control->run_id);
             if (!latest || !has_resource_reservation(latest->inflight_reservation)) return;
+            if (terminal.failure && terminal.failure->provider_outcome) {
+                // Publication failed after a known provider outcome. Retain
+                // its evidence and all still-held command authority.
+                terminal.remaining_budget = latest->remaining_budget;
+                terminal.status = ProgramTerminalStatus::Failed;
+                terminal.interrupt.reset();
+                return;
+            }
             terminal.status = ProgramTerminalStatus::AmbiguousEffect;
             terminal.failure.reset();
             terminal.interrupt = ProgramInterrupt{
@@ -1423,8 +1628,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 config.stream_mode        = graph::StreamMode::ALL;
                 config.cancel_token       = operation_token;
                 config.usage              = usage;
-                config.model_token_budget = control->granted_budget.model_tokens;
+                config.model_token_budget = control->recorded_replay
+                    ? control->invocation.budget.model_tokens : control->granted_budget.model_tokens;
                 config.budget_exhausted   = control->budget_exhausted;
+                config.native_history_archive = control->native_history_archive;
 
                 graph::RunMetadata metadata;
                 metadata.deadline    = deadline;
@@ -2286,8 +2493,26 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
                                        "Program operation cancelled before dispatch", operation_id);
             }
+            const ProgramOperationEvent coordinate{
+                std::string(to_string(op)),
+                detail::sha256_identity("program-operation-input/v1",
+                                       detail::canonical_json_bytes(state))};
+            if (control->recorded_replay) {
+                std::lock_guard lock(plan_mutex);
+                const auto found_coordinate =
+                    control->recorded_replay->operations.find(operation_id);
+                if (found_coordinate == control->recorded_replay->operations.end() ||
+                    found_coordinate->second.empty() ||
+                    found_coordinate->second.front() != coordinate)
+                    co_return plan_failure(ProgramTerminalStatus::Failed,
+                        "P_REPLAY_COORDINATES", "Operation has no exact captured source coordinate",
+                        operation_id);
+                found_coordinate->second.pop_front();
+            }
             if (op != ProgramOperationKind::CallCore) {
-                if (auto failure = charge_operation(operation_id)) co_return std::move(*failure);
+                if (!control->recorded_replay)
+                    if (auto failure = charge_operation(operation_id)) co_return std::move(*failure);
+                control->emit(operation_id, ProgramEventKind::OperationStarted, coordinate);
             }
             if (op == ProgramOperationKind::CallCore) {
                 std::optional<std::string> resume;
@@ -2296,7 +2521,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (resume_id) {
                         resume = std::move(resume_id);
                         resume_id.reset();
-                    } else {
+                    } else if (!control->recorded_replay) {
                         if (operation_count >= control->granted_budget.max_program_operations)
                             co_return plan_failure(ProgramTerminalStatus::BudgetExhausted,
                                                    "P_PROGRAM_OPERATION_BUDGET",
@@ -2305,6 +2530,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         ++operation_count;
                     }
                 }
+                control->emit(operation_id, ProgramEventKind::OperationStarted, coordinate);
                 // Concurrency is a run-wide resource, not merely a property of
                 // the immediate parallel node.  Nested parallel/race plans can
                 // otherwise pass their local branch-count checks and dispatch
@@ -2341,21 +2567,21 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         !checkpoint_is_available(*control, *resume_checkpoint_for_error);
                     throw NestedOperationFailure(operation_id, error.what(), error.node_name(),
                                                  static_cast<std::uint32_t>(error.attempts()),
-                                                 checkpoint_incompatible);
+                                                 checkpoint_incompatible, error.cause());
                 } catch (const std::exception& error) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
                     const bool checkpoint_incompatible =
                         resume_checkpoint_for_error &&
                         !checkpoint_is_available(*control, *resume_checkpoint_for_error);
                     throw NestedOperationFailure(operation_id, error.what(), {}, 0,
-                                                 checkpoint_incompatible);
+                                                 checkpoint_incompatible, std::current_exception());
                 } catch (...) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
                     const bool checkpoint_incompatible =
                         resume_checkpoint_for_error &&
                         !checkpoint_is_available(*control, *resume_checkpoint_for_error);
                     throw NestedOperationFailure(operation_id, "Unknown Core failure", {}, 0,
-                                                 checkpoint_incompatible);
+                                                 checkpoint_incompatible, std::current_exception());
                 }
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
 
@@ -2447,11 +2673,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             attempt_result.status == ProgramTerminalStatus::TimedOut ||
                             attempt_result.status == ProgramTerminalStatus::BudgetExhausted)
                             co_return attempt_result;
+                        if (attempt_result.failure && attempt_result.failure->provider_outcome)
+                            co_return attempt_result;
                         last_result = std::move(attempt_result);
                     } catch (const graph::CancelledException&) {
                         throw;
                     } catch (const NestedOperationFailure& error) {
-                        if (error.checkpoint_incompatible) throw;
+                        if (error.checkpoint_incompatible || provider_outcome_in(error.cause)) throw;
                         if (attempt + 1 == maximum) {
                             auto terminal = plan_failure(ProgramTerminalStatus::Failed,
                                                          "P_RUNTIME_CORE_FAILURE", error.what(),
@@ -2461,6 +2689,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             co_return terminal;
                         }
                     } catch (const graph::NodeExecutionError& error) {
+                        if (provider_outcome_in(error.cause())) throw;
                         if (attempt + 1 == maximum) {
                             auto terminal =
                                 plan_failure(ProgramTerminalStatus::Failed,
@@ -2470,6 +2699,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             co_return terminal;
                         }
                     } catch (const std::exception& error) {
+                        if (provider_outcome_in(std::current_exception())) throw;
                         if (attempt + 1 == maximum) {
                             auto terminal =
                                 plan_failure(ProgramTerminalStatus::Failed,
@@ -3456,11 +3686,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                          "P_RUNTIME_CORE_FAILURE", error.what());
                         result.failure->core_node = error.node_name();
                         result.failure->attempts  = static_cast<std::uint32_t>(error.attempts());
+                        retain_provider_failure(*result.failure, error.cause());
                         co_return result;
                     } catch (const std::exception& error) {
                         active_concurrency.fetch_sub(1, std::memory_order_relaxed);
-                        co_return fail(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
-                                       error.what());
+                        auto result = fail(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
+                                           error.what());
+                        retain_provider_failure(*result.failure, std::current_exception());
+                        co_return result;
                     } catch (...) {
                         active_concurrency.fetch_sub(1, std::memory_order_relaxed);
                         co_return fail(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
@@ -3541,7 +3774,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     };
                     auto       await_state         = std::make_shared<AwaitState>();
                     const auto completion_executor = asio::make_strand(executor);
-                    await_state->timer             = std::make_shared<asio::steady_timer>(executor);
+                    await_state->timer =
+                        std::make_shared<asio::steady_timer>(completion_executor);
                     await_state->timer->expires_after(std::chrono::milliseconds(*timeout));
                     await_state->completion =
                         std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
@@ -3568,9 +3802,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     await_state->completion->try_send(asio::error_code(), 1);
                             }));
                     asio::co_spawn(
-                        executor,
+                        completion_executor,
                         [await_state, completion_executor, scope,
                          awaited_token]() -> asio::awaitable<void> {
+                            {
+                                std::lock_guard lock(await_state->mutex);
+                                if (await_state->finished) co_return;
+                            }
                             asio::error_code error;
                             co_await         await_state->timer->async_wait(
                                 asio::redirect_error(asio::use_awaitable, error));
@@ -3593,11 +3831,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         },
                         asio::detached);
 
-                    const auto [completion_error, ignored] =
-                        co_await await_state->completion->async_receive(
-                            asio::as_tuple(asio::use_awaitable));
-                    (void)completion_error;
-                    (void)ignored;
+                    co_await asio::co_spawn(
+                        completion_executor,
+                        [await_state]() -> asio::awaitable<void> {
+                            const auto [error, ignored] =
+                                co_await await_state->completion->async_receive(
+                                    asio::as_tuple(asio::use_awaitable));
+                            (void)error;
+                            (void)ignored;
+                        },
+                        asio::use_awaitable);
                     std::optional<PlanExecution> awaited_result;
                     std::exception_ptr           awaited_error;
                     bool                         timed_out = false;
@@ -4011,8 +4254,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             "P_JS_COMMAND_JOURNAL_MISMATCH",
                             "Exact Core resume checkpoint did not match its pending command");
                     }
-                    const auto recorded_commands = control->transitions->load_javascript_commands(
-                        control->owner_scope, control->run_id);
+                    const auto durable_commands = control->recorded_replay
+                        ? std::vector<ProgramJavaScriptCommandJournalEntry>{}
+                        : control->transitions->load_javascript_commands(control->owner_scope, control->run_id);
+                    const auto& recorded_commands = control->recorded_replay
+                        ? control->recorded_replay->commands : durable_commands;
                     for (std::size_t index = 0; index < recorded_commands.size(); ++index) {
                         const auto& recorded = recorded_commands[index];
                         if (recorded.bundle_id() != control->bundle_id ||
@@ -4054,10 +4300,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto command_value = *step.command;
                 const auto ordinal       = ++command_sequence;
                 const auto operation_id  = javascript_command_operation_id(ordinal);
-                const auto effect_id =
+                auto effect_id =
                     javascript_command_effect_identity(*control, ordinal, command_value);
-                const auto prior_commands = control->transitions->load_javascript_commands(
-                    control->owner_scope, control->run_id);
+                const auto durable_prior_commands = control->recorded_replay
+                    ? std::vector<ProgramJavaScriptCommandJournalEntry>{}
+                    : control->transitions->load_javascript_commands(control->owner_scope, control->run_id);
+                const auto& prior_commands = control->recorded_replay
+                    ? control->recorded_replay->commands : durable_prior_commands;
                 bool       child_resume_authorized      = false;
                 auto       child_recovery_mode = ChildRecoveryMode::None;
                 const auto can_resume_child = [&] {
@@ -4080,6 +4329,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto prior = std::find_if(
                     prior_commands.rbegin(), prior_commands.rend(),
                     [&](const auto& entry) { return entry.command_ordinal() == ordinal; });
+                if (control->recorded_replay) {
+                    if (prior == prior_commands.rend() || !prior->completed() ||
+                        !prior->effect_identity())
+                        throw_runtime_diagnostic("P_REPLAY_EVIDENCE_REQUIRED",
+                            "Recorded replay cannot dispatch an uncaptured command");
+                }
                 bool      exact_resume_authorized = false;
                 bool      checkpoint_resume_authorized = false;
                 RunBudget resource_reservation;
@@ -4102,8 +4357,88 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                       .coordinate_id()}});
                     }
                     if (prior->completed()) {
-                        const auto recorded =
-                            decode_javascript_command_result(*prior->terminal_result());
+                        auto recorded =
+                            decode_javascript_command_result(*prior->terminal_result(), *control);
+                        if (control->recorded_replay) {
+                            const auto durable_before_dispatch =
+                                control->transitions->load(control->owner_scope, control->run_id);
+                            if (!durable_before_dispatch)
+                                throw_runtime_diagnostic("P_REPLAY_COMMAND",
+                                    "Captured command lost its running snapshot before replay");
+                            CommandBudgetReservation reservation{
+                                durable_before_dispatch->remaining_budget(), RunBudget{}};
+                            // Replay owns new CPU work, not new provider or Program currency.
+                            // Its measured command settlement must also authenticate any
+                            // newly produced Core checkpoint in the same result CAS.
+                            reservation.reservation.wall_time_ms =
+                                reservation.remaining.wall_time_ms;
+                            reservation.reservation.max_core_steps =
+                                reservation.remaining.max_core_steps;
+                            reservation.remaining.wall_time_ms = 0;
+                            reservation.remaining.max_core_steps = 0;
+                            const auto pending = control->publish_javascript_command(
+                                ordinal, command_value, effect_id, std::nullopt,
+                                reservation.remaining, reservation.reservation);
+                            if (pending != ProgramTransitionPublishResult::Published &&
+                                pending != ProgramTransitionPublishResult::AlreadyPresent)
+                                throw_runtime_diagnostic("P_REPLAY_COMMAND",
+                                    "Captured command target coordinate lost its CAS");
+                            // If result publication fails, the owned work stays spent;
+                            // do not refund its reservation or invent an external effect.
+                            unreconciled_javascript_remaining = reservation.remaining;
+                            const auto core_before = core_progress->steps();
+                            PlanExecution replayed;
+                            if (recorded.status == ProgramTerminalStatus::Completed &&
+                                (command_value.kind() == JavaScriptCommandKind::CallCore ||
+                                 command_value.kind() == JavaScriptCommandKind::Checkpoint)) {
+                                replayed = co_await execute_command(
+                                    command_value, operation_id, control->cancel_token,
+                                    root_scope, 0, false, false);
+                                if (replayed.status != recorded.status || replayed.output != recorded.output)
+                                    throw_runtime_diagnostic("P_REPLAY_OUTCOME",
+                                        "Captured Core replay differs from its exact source observation");
+                            } else {
+                                replayed.status = recorded.status;
+                                replayed.output = std::move(recorded.output);
+                                replayed.failure = std::move(recorded.failure);
+                                replayed.execution_trace = std::move(recorded.execution_trace);
+                            }
+                            if (replayed.failure && replayed.failure->provider_outcome)
+                                detail::persist_provider_failure(
+                                    *replayed.failure,
+                                    detail::provider_failure_custody(
+                                        control->owner_scope, control->run_id, control->program_version_id,
+                                        control->bundle_id, replayed.failure->operation_id, control->attempt),
+                                    control->native_history_archive);
+                            ProgramUsage replay_work;
+                            replay_work.wall_time_ms = elapsed_ms(started_at);
+                            replay_work.core_steps = core_progress->steps();
+                            replay_work.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
+                            auto remaining = settle_budget(control->granted_budget, replay_work);
+                            auto command_work = replay_work;
+                            command_work.wall_time_ms = subtract_saturated(
+                                replay_work.wall_time_ms, settled_javascript_wall_time_ms);
+                            command_work.core_steps = subtract_saturated(
+                                replay_work.core_steps, core_before);
+                            const auto completed = control->publish_javascript_command(
+                                ordinal, command_value, effect_id,
+                                javascript_command_terminal_result(replayed, to_string(replayed.status), command_work),
+                                remaining, RunBudget{});
+                            if (completed != ProgramTransitionPublishResult::Published &&
+                                completed != ProgramTransitionPublishResult::AlreadyPresent)
+                                throw_runtime_diagnostic("P_REPLAY_COMMAND",
+                                    "Captured command result lost its exact target CAS");
+                            unreconciled_javascript_remaining = remaining;
+                            settled_javascript_wall_time_ms = replay_work.wall_time_ms;
+                            result.execution_trace.insert(result.execution_trace.end(),
+                                replayed.execution_trace.begin(), replayed.execution_trace.end());
+                            if (replayed.status != ProgramTerminalStatus::Completed)
+                                co_return replayed;
+                            if (command_value.kind() == JavaScriptCommandKind::Checkpoint)
+                                co_await control->hold_latest_handoff_if_requested(ordinal);
+                            response = std::move(replayed.output);
+                            continue;
+                        }
                         result.execution_trace.insert(result.execution_trace.end(),
                                                       recorded.execution_trace.begin(),
                                                       recorded.execution_trace.end());
@@ -4282,6 +4617,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     command_result =
                         plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
                                      error.what(), operation_id);
+                    retain_provider_failure(*command_result.failure, std::current_exception());
                 } catch (...) {
                     command_result =
                         plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
@@ -4314,6 +4650,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return command_result;
                 }
 
+                if (command_result.failure && command_result.failure->provider_outcome) {
+                    try {
+                        detail::persist_provider_failure(
+                            *command_result.failure,
+                            detail::provider_failure_custody(
+                                control->owner_scope, control->run_id, control->program_version_id,
+                                control->bundle_id, command_result.failure->operation_id,
+                                control->attempt),
+                            control->native_history_archive);
+                    } catch (...) {
+                        std::throw_with_nested(ProviderOutcomeError(
+                            "Program command provider evidence could not be persisted",
+                            command_result.failure->provider_outcome,
+                            command_result.failure->provider_cause));
+                    }
+                }
                 const auto terminal_result = javascript_command_terminal_result(
                     command_result, to_string(command_result.status), command_usage);
                 auto durable = control->transitions->load(control->owner_scope, control->run_id);
@@ -4406,13 +4758,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             plan_result.failure && !plan_result.failure->message.empty()
                 ? plan_result.failure->message
                 : std::string("Program attempt was cancelled");
+        outcome.failure = std::move(plan_result.failure);
         if (apply_terminal_cause(outcome, terminal_cause, cancellation_message)) {
         } else if (plan_result.status != ProgramTerminalStatus::Completed) {
             outcome.status    = plan_result.status;
             outcome.interrupt = std::move(plan_result.interrupt);
-            outcome.failure   = std::move(plan_result.failure);
         } else if (outcome.usage.core_steps > control->granted_budget.max_core_steps ||
-                   outcome.usage.model_tokens > control->granted_budget.model_tokens ||
+                   (!control->recorded_replay &&
+                    outcome.usage.model_tokens > control->granted_budget.model_tokens) ||
                    outcome.usage.wall_time_ms > control->granted_budget.wall_time_ms) {
             outcome.status = ProgramTerminalStatus::BudgetExhausted;
         } else {
@@ -4467,6 +4820,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         if (outcome.failure) {
             outcome.failure->operation_id = error.operation_id;
             outcome.failure->core_node    = error.core_node;
+            retain_provider_failure(*outcome.failure, error.cause);
         }
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
@@ -4484,6 +4838,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } catch (const graph::NodeExecutionError& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
+        retain_provider_failure(*outcome.failure, error.cause());
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
@@ -4513,6 +4868,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         apply_durable_javascript_disposition(outcome);
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
+        retain_provider_failure(*outcome.failure, std::current_exception());
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
@@ -4559,7 +4915,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         subtract_saturated(control->granted_budget.max_dynamic_compiles, dynamic_compile_count));
 
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
-        control->cancellation_cause() == CancellationCause::None) {
+        control->cancellation_cause() == CancellationCause::None &&
+        !(outcome.failure && outcome.failure->provider_outcome)) {
         outcome.status = ProgramTerminalStatus::BudgetExhausted;
         outcome.failure.reset();
     }
@@ -4574,6 +4931,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 *checkpoint_id, graph::CHECKPOINT_SCHEMA_VERSION};
         }
     }
+    if (control->recorded_replay) {
+        // Provider accounting is inherited once; playback is not new provider
+        // spend. Only actual new replay CPU/Core work consumes this envelope.
+        outcome.remaining_budget.model_tokens = control->granted_budget.model_tokens;
+        if (!control->materialized->bundle.control_source()) {
+            for (const auto& [operation, coordinates] : control->recorded_replay->operations) {
+                if (!coordinates.empty()) {
+                    outcome.status = ProgramTerminalStatus::Failed;
+                    outcome.failure = ProgramFailure{"P_REPLAY_COORDINATES",
+                        "Recorded replay did not consume every captured operation coordinate",
+                        operation, "", 0, json::object()};
+                    break;
+                }
+            }
+        }
+    }
+    outcome.provider_budget_authority = usage->authority_snapshot();
     cancel_deadline_timer(control->deadline_executor, std::move(timer));
     control->complete(std::move(outcome));
     co_return;

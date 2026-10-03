@@ -16,7 +16,7 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/mcp/client.h>
 #include <neograph/graph/react_graph.h>
 
@@ -72,31 +72,28 @@ int main(int argc, char** argv) {
     }
 
     // --- LLM ---
-    neograph::llm::OpenAIProvider::Config cfg;
-    cfg.api_key = api_key;
-    cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
-        neograph::llm::OpenAIProvider::create(cfg);
+        examples::make_openrouter_provider(api_key);
 
     auto engine = neograph::graph::create_react_graph(
         provider, std::move(tools),
         "You are an agent with tools from two different MCP servers. "
-        "Use whichever tools are appropriate.");
+        "Use whichever tools are appropriate.", examples::openrouter_model);
 
     neograph::graph::RunConfig run;
-    run.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", question}}
-    })}};
+    run.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
+    run.on_provider_event = [](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+            delta && delta->payload.kind == sp::PartKind::Text &&
+            delta->payload.channel == sp::DeltaChannel::Content)
+            std::cout << delta->payload.bytes << std::flush;
+    };
 
     std::cout << "\nUser: " << question << "\n\nAssistant: \n";
 
     auto result = engine->run_stream(run,
         [](const neograph::graph::GraphEvent& e) {
-            if (e.type == neograph::graph::GraphEvent::Type::LLM_TOKEN)
-                std::cout << e.data.get<std::string>() << std::flush;
-            else if (e.type == neograph::graph::GraphEvent::Type::NODE_START &&
+            if (e.type == neograph::graph::GraphEvent::Type::NODE_START &&
                      e.node_name == "tools")
                 std::cout << "\n[tool call...]\n";
         });

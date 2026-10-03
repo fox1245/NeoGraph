@@ -299,7 +299,7 @@ RuntimeInstructionPlan RuntimeInstructionController::submit_and_plan(
     history.sequence = request.sequence;
     history.message_id = instruction.id();
     history.trust = RuntimeTrustClass::Developer;
-    history.message = {"system", request.text};
+    history.message = {"", sp::Role::System, {sp::Text{request.text}}};
     history.source_payload = detail::parse_json_strict(instruction.serialize_canonical());
     history.source_media_type =
         "application/vnd.neograph.runtime-developer-instruction+json";

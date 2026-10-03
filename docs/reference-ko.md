@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=9c7535abce2e7379b543aa224c27595799979906c32c59c01a2a6cabef43a4da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=976c9b048dbd0cb5fcef306e22f4155d5e496ae10e5ed4b846c8d8ab575023b2 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -7,11 +7,11 @@
 완전한 참조 문서가 아니다. 실제 에이전트를 만들 때 만나게 될 모듈을
 기초 타입 → 제공자/도구 인터페이스 → 그래프 타입 → 엔진 → 체크포인트 저장소 →
 provider/tool interfaces → graph types → engine → checkpoint store →
-다중 LLM → MCP 순서로 살펴본다. 아래 모양은 master
-HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 모듈은
+다중 LLM → MCP 순서로 살펴본다. provider 절은 typed 전환을 설명하며
+공개 헤더가 기준이다. 다만 다음 모듈은
 (`neograph::a2a`, `neograph::acp`, `neograph::async`,
 `SqliteCheckpointStore`, `PostgresCheckpointStore`,
-`RateLimitedProvider`, `NodeCache`, `AsyncTool`, `create_deep_research_graph`)
+`NodeCache`, `AsyncTool`, `create_deep_research_graph`)
 이 투어에서 다루지 않는 **헤더 공개 API를 포함한다**.
 
 > **위의 모든 모듈을 포함해 타입별 전체 API 표면을 보려면, 아래에 연결된
@@ -30,18 +30,23 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
 | LLM | `neograph::llm` | LLM 제공자 구현과 Agent | [§12](#12-llm-module) | [Agent](../include/neograph/llm/agent.h) |
 | MCP | `neograph::mcp` | Model Context Protocol 클라이언트 | [§13](#13-mcp-module) | [MCPClient](../include/neograph/mcp/client.h) |
 | 유틸리티 | `neograph::util` | 동시성 유틸리티 | [§14](#14-util-module) | [RequestQueue](../include/neograph/util/request_queue.h) |
-| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | _헤더 전용_ | [A2AClient](../include/neograph/a2a/client.h) |
-| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _헤더 전용_ | [ACPServer](../include/neograph/acp/server.h) |
-| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _헤더 전용_ | [WsClient](../include/neograph/async/ws_client.h) |
+| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | [공개 헤더](../include/neograph/) | [A2AClient](../include/neograph/a2a/client.h) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | [공개 헤더](../include/neograph/) | [ACPServer](../include/neograph/acp/server.h) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | [공개 헤더](../include/neograph/) | [WsClient](../include/neograph/async/ws_client.h) |
 
-세 개의 "_헤더 전용_" 모듈은 최근 감사와 프로토콜 브리지 작업에서 추가되었습니다.
-`include/neograph/{a2a,acp,async}/` 아래에 전체 헤더가 있고 ctest 제품군으로
-검증하지만, 전용 설명을 작성하는 일은 공개 헤더 링크로 대신하고 있습니다. 모듈의
-규모가 크고(A2A만 해도 클래스 약 5개, types 모듈, caller 노드로 구성됩니다), 새
-모듈은 한두 번의 릴리스 동안 계속 바뀌는 경우가 많아 직접 작성한 개요를 유지하기
-어렵기 때문입니다.
+추가 모듈은 `include/neograph/{a2a,acp,async}/` 공개 헤더를 제공한다. 개별 서술 안내는 유예되었으므로 정확한 계약은 헤더를 참조한다. 파일 존재는 현재 통합 검증을 뜻하지 않는다.
 
 **편의 헤더:** `#include <neograph/neograph.h>`에는 전체 핵심 API와 그래프 엔진 API가 포함된다.
+
+SchemaProvider는 `NEOGRAPH_BUILD_LLM=OFF`여도 필수 외부 C++ 의존성이다. Core도 소유 typed provider 계약을 공개한다. SDK runtime 패키지를 설치하고 설치 prefix를 `SCHEMAPROVIDER_PREFIX`로 지정한다. 아래 configure는 `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`를 사용한다. 또는 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`로 checkout을 명시한다. 추측한 sibling checkout이나 구 bundled interpreter를 자동 선택하지 않는다. 현재 SDK runtime/archive는 Linux/POSIX이며 의존성 없음·OpenSSL 불필요·native Windows/macOS·WASM runtime을 약속하지 않는다.
+
+SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
+
+```cmake
+find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(NeoGraph CONFIG REQUIRED)
+target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
+```
 
 ---
 
@@ -51,13 +56,12 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
   - [ToolCall](#toolcall)
   - [ChatMessage](#chatmessage)
   - [ChatTool](#chattool)
-  - [ChatCompletion](#chatcompletion)
-  - [Helper Functions](#helper-functions)
+  - [Owned Outcome](#owned-outcome)
+  - [Portable projections](#portable-projections)
   - [ADL Serialization](#adl-serialization)
 - [2. Provider Interface](#2-provider-interface)
-  - [StreamCallback](#streamcallback)
-  - [CompletionParams](#completionparams)
-  - [Provider](#provider)
+  - [ProviderRequest / ProviderControls](#providerrequest--providercontrols)
+  - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
 - [4. Graph Types](#4-graph-types)
@@ -111,7 +115,6 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
   - [Built-in Registrations](#built-in-registrations)
 - [11. React Graph](#11-react-graph)
 - [12. LLM Module](#12-llm-module)
-  - [OpenAIProvider](#openaiprovider)
   - [SchemaProvider](#schemaprovider)
   - [Agent](#agent)
   - [json_path Utilities](#json_path-utilities)
@@ -199,72 +202,58 @@ struct ChatTool {
 | `description` | `std::string` | Description shown to the LLM to explain the tool's purpose |
 | `parameters` | `json` | JSON Schema object describing accepted parameters |
 
-### ChatCompletion
+### Owned Outcome
 
-Result of a single LLM completion call.
+공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, native continuation, 전체 wire envelope, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
 
-```cpp
-struct ChatCompletion {
-    ChatMessage message;   // The assistant's response message
-    std::string stop_reason = "unknown";
-    struct Usage {
-        int prompt_tokens = 0;      // Tokens in the prompt
-        int completion_tokens = 0;  // Tokens in the completion
-        int total_tokens = 0;       // Total tokens used
-    } usage;
-};
-```
+### Portable projections
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `message` | `ChatMessage` | The assistant's response (may include tool calls) |
-| `stop_reason` | `std::string` | Normalized provider completion reason: `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `content_filter`, `refusal`, or `unknown` |
-| `usage.prompt_tokens` | `int` | Number of tokens in the input prompt |
-| `usage.completion_tokens` | `int` | Number of tokens in the generated completion |
-| `usage.total_tokens` | `int` | Total tokens consumed (prompt + completion) |
 
-`stop_reason` was added to the public C++ struct. Recompile applications and
-shared-library consumers when upgrading to this release because the struct's
-binary layout changed.
+실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
+`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
 
-### Helper Functions
+**Standalone bank journal 수정 — 현재 계약 개정; 실제 runtime 증거는 아래.** Owner-approved protocol은 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish해야 한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주면 안 된다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능해야 한다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain/pristine archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 standalone obligation을 대체할 수 없다. Program/external-bank journal 소유는 유지된다. 이는 요구 계약이다. 실제 currency/custody 증거와 instrumentation 한계는 아래에 있으며 stable released API 보장은 아니다.
 
-#### `messages_to_json`
+**현재 선언; 통합 runtime 증거는 아래:** `<neograph/graph/checkpoint.h>`는 `owner_scope`, logical `thread_id`, private backend `storage_thread_id`, `graph_identity`, `original_ceiling`, `original_deadline_ticks`, `deadline_clock_identity`를 가진 `ManagedBudgetLeaseScope`를 선언한다. `OwnedManagedBudgetLease`는 read-only `scope()`, `actor_id()`, 불변 `bank_generation()`, `revision()`, `head_checkpoint_id()`, `head_commitment()`를 노출하며 공개 authority-import constructor가 없다. `ManagedBudgetEffectReceipt`는 `active()`, `effect_id()`, `claim_amount()`, `request_digest()`를 노출하고 default receipt는 권한을 주지 않는다. `CheckpointStore`는 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`, `begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`, `settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`, `publish_managed_budget_checkpoint(lease, checkpoint)`, `release_managed_budget_lease(lease)`와 `_async` counterpart를 선언한다. Sync `CheckpointStoreCore`와 `AsyncCheckpointStore`는 각각 해당 variant를 제공한다. `managed_budget_checkpoint_commitment(checkpoint)`는 bank JSON뿐 아니라 전체 영속 checkpoint를 결합한다. 이 선언은 backend CAS·currency 안전성·installed ABI 호환성·실제 성공 runtime 경로를 입증하지 않는다.
 
-Converts a message vector to the OpenAI-compatible JSON wire format. Handles tool call
-messages, tool result messages, and multi-modal (vision) messages with appropriate structure.
+**실제 InMemory shared-bank fork는 유지되었으며 실제 증명 완료.** 원래 실제 C++ fork는 ONE original financial journal과 trusted current branch head를 쓰며 grant를 복제하지 않는다. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 및 `_async`는 authentic current source/full commitment와 실제 same-bank native C++ pointer를 요구하고 durable standalone fork는 명시적 unsupported로 남는다. `OwnedManagedBudgetLease::scope()`와 original owner/thread/graph, ceiling, deadline/clock, generation은 불변이다. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()`는 execution branch를 별도로 선택하며 `GraphState::budget_original_thread_id()`는 원래 financial bank를 가리킨다. 정확한 selected-branch head CAS와 global actor/revision은 canonical current counter, pending effect, burned identity에 대해 모든 branch를 직렬화한다. Original/fork branch는 보충 없이 계속 사용할 수 있다. Stale snapshot·checkpoint copy·imported JSON은 alias를 발급하거나 head를 되돌릴 수 없다. 원래 root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank 증명은 변경하지 않은 test_graph_engine.cpp:810–913에서 PASSED했다. Saved original ceiling30은 effective fork ceiling20과 별개이며 widening31과 JSON-only restore는 거부해야 한다. Unbounded reported observation은 사실 data이지 finite grant가 아니다. 입증된 zero-effect lease만 unchanged head를 release할 수 있고 unknown/pending effect는 obligation을 유지한다.
 
-```cpp
-json messages_to_json(const std::vector<ChatMessage>& messages);
-```
+**현재 release-error 계약; 실제 suite/probe는 아래.** `<neograph/graph/engine.h>`의 `graph::ManagedBudgetLeaseReleaseError`는 `ProviderOutcomeError`를 상속한다. `cause()`는 원래 execution exception을 보존하고 `release_error()`는 보조 durable lease-disposition 실패를 노출한다. `outcome()`은 실제 SDK 증거가 있으면 보존하고 SDK outcome이 없으면 null이다. Release 실패는 결과를 만들거나 재dispatch를 허용할 수 없다. Closed `_neograph_managed_budget_scope` metadata는 원래 logical scope/cap/deadline clock/generation을 설명하지만 backend CAS 권한이 아닌 data이다.
 
-**Returns:** A `json` array where each element is a properly formatted message object.
+**Archive-owner/retention 계약; 실제 suite/probe는 아래.** Finite standalone root 또는 authenticated finite source만 실제 설정된 `sp::NativeArchive::owner_scope()`에서 생략된 original owner를 상속한다. Unbounded/plain owner metadata 의미는 바뀌지 않는다. 명시적으로 충돌하는 archive owner는 lease acquire 전에 거부한다. `CheckpointStore::retains_native_checkpoint() const noexcept`와 대응 Core/Async storage capability는 기본 false이며 실제 InMemory backend만 true로 override하고 wrapper는 실제 retention을 위임해야 한다. 이 read-only 설명은 정당한 unleased/plain/unbounded C++ native checkpoint custody를 허용하되 spending credit이나 native replay authority를 주지 않는다. Leased custody는 JSON flag나 추측한 store type 대신 실제 store-issued receipt를 사용한다.
 
-#### `tools_to_json`
+**Native-custody pre-I/O gate; 실제 suite/probe는 아래.** Managed effect begin은 pending-effect/slot/held-window 변경 전에 실제 결합된 NativeArchive 또는 실제 local store-issued private C++ retention capability를 요구한다. Private capability는 JSON에서 import하거나 wire로 전달하지 않는다. C++ sidecar는 경계를 넘을 수 없으므로 remote backend가 InMemory여도 gRPC는 실제 client·server archive를 요구한다. Archive가 finite source owner를 제공하지 않으면 원래 anonymous owner scope는 빈 값으로 유지하고 실제 archive binding은 original scope와 일치해야 한다. Financial head/lease 증거만으로 native-custody readiness를 증명하지 않는다.
 
-Converts tool definitions to the OpenAI-compatible JSON wire format, wrapping each tool
-in a `{type: "function", function: {...}}` envelope.
+진단 JSON은 문법상 유효한 duplicate-key 문서를 포함해 원래 raw byte를 보존하지만 실행 가능한 요청/config admission은 중복을 계속 거부한다. 원래 non-2xx 응답 JSON은 두 번째 손실 parse 없이 `http.error` 증거에 남는다. named SSE error는 뒤의 정상 stream close보다 우선한다. 진단/provider metadata는 무관한 작은 error-text cap이 아니라 승인된 source extent로 제한된다.
+
+`ProviderRequest::observer_limits`는 host-only이다. 명시한 `max_events`·`max_bytes`는 양수여야 하며 승인된 SDK 전달 상한을 낮출 수만 있다. `provider-request/v3` digest는 실제 limit, mode, encoded body, retry policy와 모든 semantic descriptor binding을 결합한다. Bridge는 queued·draining batch 전체에서 실제 PMR vector/map capacity와 소유 event/document byte를 계산하며 queue mutex 밖에서 cancellation을 요청한다. 이름이 `messages`인 Generic channel을 chat으로 강제 변환하지 않는다. native `history` channel을 `messages`에 mapping하면 JSON에서 native 권한을 만드는 대신 C++ sidecar를 보존한다.
+
+`ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Provider retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다.
+
+`ProgramFailure`는 live `provider_outcome`·`provider_cause`를 보존한다. Canonical factual SDK witness는 실제 archive custody를 owner/run/version/bundle/operation/attempt에 결합하며 Runtime은 복구 실패를 노출하기 전에 설정된 custody를 즉시 복원한다. 공개 data-only `ProgramResult::create()`는 미리 채운 witness로 우회할 수 없고 unresolved parsed seal은 실행 결과가 아니다. 프로세스 재시작 후 원래 exception pointer는 없으므로 `provider_cause == nullptr`이며 text에서 재생성하지 않는다. 영속화할 수 없는 실패는 serialize/publish/replay할 수 없다.
+
+`RecordedBindingSet`는 source-bound move-only data이지 caller가 제공하는 dispatcher가 아니다. 신뢰된 Catalog `recorded_capability_binder`는 실제 영속 source event를 독립적으로 읽어 captured-only capability를 materialize한다. `ProgramRuntime::replay_recorded()`는 원래 selected-source permission을 검사한 뒤 실제 남은 bank를 durable CAS로 이전한다. inherited spend는 새 model grant가 아니다. 구 `start_recorded` 갱신 API는 제거되었다. InMemory/File/SQLite/PostgreSQL Program store는 실행 내내 정확하고 불변인 owned lease를 보존하며 expiry로 갱신하지 않는다. Controlled JavaScript도 underlying capability manifest를 검사하고 정확한 completed command 결과를 소비하며 external effect를 재dispatch하지 않는다.
+
+**Recorded-control causal fix는 full suite에서 실제 증명 완료.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Reservation은 첫 새 Core checkpoint를 거부했던 일반 Running→Running transition 대신 인증된 settlement transition을 선택한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다. 기존 Recorded CPU/Memory await/handoff scenario는 full suite에서 pass했다. Remote TSan coverage 한계는 아래에 명시한다.
+
+**유료 관측 완료; 보편적 qualification은 아님.** 원래 `SPQUAL1` base630/1000000 microUSD는 불변이다. 같은 원래 ledger의 ONE hash-chained `A`가 승인 extension480/3000000을 받아 aggregate1110/4000000이 된다. Calls/spent/hold/settlement는 누적이며 새 grant ID/header/reset은 없다. 정확한 declaration byte/file identity와 original authorization/baseline/catalog/activation/ledger-prefix hash/totals는 고정되고 삭제·교체·변경은 fail closed한다. 최종 canonical ledger는 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000이다. Spent+held US$1.725786은 LOCAL catalogue meter이지 invoice가 아니다. 기록된 five-family60-pair baseline은600 request를 완료했다: Chat60/60, Responses60/60, Messages60/60, Generate56/60(incorrect-vision SSE4개), Interactions57/60(incorrect-vision buffered1개/SSE2개). 합계293/300 pair이며300/300은 아니다. 다른 old600 financial record는 보존하되 완전한 behavioral proof는 아니다. 이전 M5/media one-shot cohort는 그대로다. 이전 Google3-round prerequisite의 invalid-tool2개/unreadable-positive1개 실패 상태를 유지한다. 추가 유료 호출은 승인되지 않는다. 최종 SDK 증거와 native-axis 한계는 baseline 성공과 별개다. 이전 activation/reopen smoke는 두 번 reopen한 calls610/spent219159/held751233 및 SDK meter/canary/vision4-test19.38초 pass로 보존한다. 이는 범위가 정해진 이전 checkpoint이지 최종 ledger totals가 아니다. 이전 검증된 Chat60-pair cohort의 실제 attempt120,UpperBound charge120,UnknownHold 없음도 보존한다.
+
+**Native-axis 관측은 cryptographic 검증·native consumption/equivalence가 아니다.** Generate는 mutation/omission/duplication을 받아들였다. Interactions는 isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission, duplication을 받아들였다. 모든 thought/signature 제거는 generic400을 반환했고 THOUGHT item을 유지한 채 모든 signature field를 제거해도 generic400이었다. 마지막 capture에는 local encoded-original retention control만 있고 same-capture server positive는 없었다. 이전 positive cohort는 실제 증거다. 이는 aggregate-carrier-absence boundary만 입증하며 issuer/signature 검증이나 vendor consumption을 입증하지 않는다. 실제 report: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`. Prerequisite-failed/not-run/negative-inconclusive 상태는 사실 그대로 유지한다. Thought-only/carrier-only omission은 다른 carrier가 남아 있는 상태에서 받아들여졌다. Issuer-validation/native-consumption 주장을 강화하지 않는다.
+
+**실제 통합 증명과 남은 한계.** 최신 Core full run:2242 test, 실패0,skip16(RAM process-loss 비적용14개/live-credential gate2개),130.17초. `PgNestedJsonRoundTrips`는 duplicate key/order/null metadata,blob,residual을 정확히 보존하며0.18초 pass했다. 변경하지 않은 원래 shared-bank fork와 기존 Recorded CPU/Memory await/handoff scenario가 pass했다. 실제 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe는 plain과 ASan+UBSan에서 pass했다. LOCAL Memory/SQLite/PostgreSQL TSan scope는7개 pass,warning0이다. System Abseil/Protobuf를 포함한 full mixed gRPC TSan은 exit66,dependency/generated-RPC stack에 race warning402개였다. 이는 instrumentation/coverage 한계이지 proven false positive가 아니다. Remote TSan/race-free를 주장하지 않으며 warning을 suppress하지 않는다. Installed find_package Program C++/C ABI/dualQuickJS3 consumer는 pass했다. Fresh installed NeoGraph/SchemaProvider typed consumer는 실제 HTTP request2개,coroutine 시작 전 provider 소멸,native/tool replay,refusal,known-zero/raw 보존,실제 LinkedMismatch 거부를 pass했다. Browser Alice/Bob isolation·generation2 replacement를 실제 시각 검증했고 PostgreSQL Program Chat black-box6개는18.989초 pass했다. 최신 SDK26/26은 실패0,74.07초 pass했다. 최종 ReleaseGraph16설정 ×fresh process3회/48기록은38.29초,실패0,모든 actual protocol/owned-outcome check pass로 완료했다. NeoGraph `benchmarks/provider-cutover-final-results.json`과 `benchmarks/provider-cutover-final-summary.json`은 별도의 최종 cohort를 보존한다. 측정 중 compiler/유료 model은 실행하지 않았고 historical cohort는 그대로이며 semantic/resource equivalence를 주장하지 않는다. Unstable SDK/ABI3는 stable release나 더 넓은 platform qualification이 아니다.
+
+**최소 유료 증거(2026-10-03)는 광범위 qualification이 아니다.** 별도로 승인한 one-shot 세 호출 결과: Images—JPEG 1개, 1024×1024, 360685 byte, input/output/total token 19/1408/1427, 실제 시각 검사; Veo—MP4 1개, 1280×720, 4초, 437737 byte, generation 1회와 status GET 3회, usage nullable, Chromium decode·시각 검사; Decisions—`typesafe/jev-1.13`, probability 0.93, input/output token 283/21, total 미상, API 보고 비용 USD 0.000011886. Image USD 0.0336 base + text/thinking, Veo USD 0.20은 catalog 예상이지 invoice가 아니다. 최소 image smoke에서는 가격대별 내역을 수집하지 않았다. 결과는 one-shot 권한을 갱신하거나 재실행을 승인하지 않는다.
+
+완료된 chat pair는 downstream vendor의 native-continuation 소비를 입증하지 않는다.
 
 ```cpp
-json tools_to_json(const std::vector<ChatTool>& tools);
+#include <neograph/types.h>
+
+neograph::json observe_result(const sp::runtime::Result& result) {
+    if (!result) throw std::invalid_argument("Missing provider outcome");
+    return neograph::outcome_projection_json(*result);
+}
 ```
-
-**Returns:** A `json` array of tool definitions.
-
-#### `parse_response_message`
-
-Parses a single choice object from an OpenAI-format API response into a `ChatMessage`.
-Extracts the assistant's content and any tool calls from the `message` field.
-
-```cpp
-ChatMessage parse_response_message(const json& choice);
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `choice` | `const json&` | A single element from the `choices` array (must contain a `message` field) |
-
-**Returns:** A `ChatMessage` with role, content, and any tool calls populated.
 
 ### ADL Serialization
 
@@ -286,141 +275,66 @@ of missing fields.
 
 ## 2. Provider Interface
 
-**Headers:** `<neograph/provider.h>`, `<neograph/completion_provider.h>`
-**Namespace:** `neograph`
-
-The abstract interface for LLM backends. Implement this to add support for any LLM API.
-
-> **Writing a new Provider implementation?** Derive from
-> `CompletionProvider` and implement `do_invoke()`. Existing `Provider`
-> subclasses and `complete*` callers remain supported with no removal planned.
-> See [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider).
-
-### StreamCallback
-
-Type alias for the streaming token callback.
+공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
 
 ```cpp
-using StreamCallback = std::function<void(const std::string& chunk)>;
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <neograph/controlled_provider.h>
+
+// Public operation signatures (the only virtual operation is prepare).
+// ProviderRequest owns the SDK request variant, mode, options and observer.
+// invoke[_async](request) = prepare once, then dispatch the same handle.
+// dispatch[_async](prepared) returns sp::runtime::Result.
 ```
 
-Called once per token (or chunk) during streaming completion. The `chunk` parameter
-contains the incremental text fragment.
-
-### CompletionParams
-
-Parameters for a single LLM completion request.
+### ProviderRequest / ProviderControls
 
 ```cpp
-struct CompletionParams {
-    std::string model;                // Model identifier (e.g. "gpt-4o")
-    std::vector<ChatMessage> messages; // Conversation history
-    std::vector<ChatTool> tools;      // Available tools (empty = no tool use)
-    float temperature = 0.7f;         // Sampling temperature
-    int max_tokens = -1;              // Max tokens to generate (-1 = provider default)
-};
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result call_provider(
+    neograph::Provider& provider, std::string model,
+    std::vector<sp::Message> history,
+    std::function<void(const sp::Event&)> observer) {
+    neograph::ProviderControls controls;
+    controls.max_output_tokens = 128;  // optional caller-selected wire cap
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history), {},
+        std::move(controls), neograph::ProviderMode::Stream);
+    request.on_event = std::move(observer);
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));  // owns Completion or Failure
+}
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `model` | `std::string` | `""` | Model to use. If empty, the provider's default model is used |
-| `messages` | `std::vector<ChatMessage>` | | Conversation messages in chronological order |
-| `tools` | `std::vector<ChatTool>` | `{}` | Tools available for the LLM to call. Empty disables tool use |
-| `temperature` | `float` | `0.7f` | Sampling temperature (0.0 = deterministic, higher = more random) |
-| `max_tokens` | `int` | `-1` | Maximum tokens to generate. `-1` lets the provider decide |
+### PreparedProviderRequest / ProviderBudgetClaim
+`prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
 
-### Provider
+선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
 
-Stable compatibility base class for LLM providers. Existing implementations and
-callers may continue to use this interface. New implementations should prefer
-`CompletionProvider` below.
+`provider_failure_proves_not_sent(Failure)`는 완전하고 모순 없는 NotSent 근거를 요구한다. 상태 코드·누락 사용량·관측자/영속 예외만으로 비용 0이나 예산 갱신을 증명하지 않는다.
 
 ```cpp
-class Provider {
-public:
-    virtual ~Provider() = default;
+#include <neograph/controlled_provider.h>
 
-    // Synchronous completion. Default body bridges to complete_async via
-    // run_sync — backends that override the async peer get sync for
-    // free, and vice versa. Override at least one side.
-    virtual ChatCompletion complete(const CompletionParams& params);
-
-    // Async completion (asio coroutine). Default body co_returns
-    // complete(params).
-    virtual asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params);
-
-    // Streaming completion (sync). Default emits the collected result once.
-    virtual ChatCompletion complete_stream(const CompletionParams& params,
-                                           const StreamCallback& on_chunk);
-
-    // Async streaming peer. The default runs complete_stream on a worker
-    // thread and delivers callbacks on the awaiting executor.
-    virtual asio::awaitable<ChatCompletion>
-    complete_stream_async(const CompletionParams& params,
-                          const StreamCallback& on_chunk);
-
-    // Stable callback-selected compatibility entry point.
-    virtual asio::awaitable<ChatCompletion>
-    invoke(const CompletionParams& params,
-           StreamCallback on_chunk = nullptr);
-
-    // Only pure virtual on this interface — every backend must name
-    // itself.
-    virtual std::string get_name() const = 0;
-};
+sp::runtime::Result dispatch_admitted(
+    neograph::ControlledProvider& gateway, std::string owner_scope,
+    std::string dispatch_id, const neograph::ContextAssemblyReceipt& assembly,
+    neograph::PreparedProviderRequest prepared,
+    neograph::ProviderDispatchBudget budget) {
+    auto claim = neograph::reserve_provider_dispatch(prepared, std::move(budget));
+    return gateway.dispatch_prepared(
+        std::move(owner_scope), std::move(dispatch_id), assembly,
+        std::move(prepared), std::move(claim));
+}
 ```
 
-| Method | Description |
-|--------|-------------|
-| `complete(params)` | Blocking completion. Default-bridges to `complete_async` via `neograph::async::run_sync`. |
-| `complete_async(params)` | Coroutine peer. Default `co_return complete(params)`. |
-| `complete_stream(params, on_chunk)` | Streaming completion. Calls `on_chunk` per chunk, returns the assembled `ChatCompletion`. |
-| `complete_stream_async(params, on_chunk)` | Async streaming peer (Round 4). Same `on_chunk` semantics. |
-| `invoke(params, on_chunk)` | Callback-selected compatibility entry point used by existing engine code. |
-| `get_name()` | Human-readable provider identifier (only pure virtual). |
 
-**Override-at-least-one-side contract**: each `(sync, async)` pair
-defaults to the other; overriding neither yields infinite mutual
-recursion at call time. Same shape as `CheckpointStore`'s sync↔async
-bridge below.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 불안정 `0.0.0`, interface revision 3 / shared ABI 3이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 현재 runtime/archive는 Linux/POSIX이며 Windows·macOS·WASM runtime 검증을 뜻하지 않는다. Python provider binding/wrapper는 유예되었고 이 C++ 변경으로 포팅되지 않는다.
 
-These methods have no planned removal and no deprecation warnings. Compatibility
-and security fixes continue to apply; new capabilities may be exposed only through
-the explicit request API.
-
-### CompletionProvider
-
-Recommended base class for new C++ provider implementations. It preserves every
-`Provider` entry point through final adapters while giving implementations one
-request-mode-aware override.
-
-```cpp
-class MyProvider : public neograph::CompletionProvider {
-public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        if (request.streaming()) {
-            // Use the streaming transport even when no observer is attached.
-            // If present, request.on_chunk() receives incremental text.
-        } else {
-            // Use the collect transport.
-        }
-        co_return result;
-    }
-
-    std::string get_name() const override { return "my-provider"; }
-};
-```
-
-New direct calls should make transport mode explicit:
-
-```cpp
-auto full = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
-auto streamed = co_await provider.invoke_request(
-    CompletionRequest::stream(params, on_chunk));
-```
+Fresh installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer가 pass했다. Interface/ABI 선언만과 실제 package 결과는 별개이며 더 넓은 platform이나 stable release를 주장하지 않는다.
 
 ---
 
@@ -731,6 +645,7 @@ LLM provider, tools, and configuration.
 
 ```cpp
 struct NodeContext {
+    ProviderControls provider_controls;
     std::shared_ptr<Provider> provider;   // LLM provider
     ToolSet                  tools;      // Owned fixed collection of tools
     std::string               model;      // Model override (empty = provider default)
@@ -936,7 +851,7 @@ using NodeOutput = NodeResult;  // writes + optional Command + optional Sends
 | Member | Description |
 |--------|-------------|
 | `in.state` | Read-only `GraphState`. Use `in.state.get(channel)` for reads |
-| `in.ctx.cancel_token` | Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `ctx.cancel_token->is_cancelled()` for your own loops |
+| `in.ctx.cancel_token` | Pass to `provider.invoke(std::move(request))` so an LLM HTTP socket aborts on cancel, or poll `ctx.cancel_token->is_cancelled()` for your own loops |
 | `in.ctx.step` | Current super-step index |
 | `in.ctx.thread_id` | Mirrors `RunConfig::thread_id` |
 | `in.stream_cb` | Streaming sink; if non-null, emit `LLM_TOKEN` events through it. Null on non-streaming runs |
@@ -964,18 +879,32 @@ public:
 Async-native LLM call:
 
 ```cpp
-class ChatNode : public neograph::graph::GraphNode {
-    std::shared_ptr<Provider> provider_;
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        CompletionParams params;
-        params.messages    = in.state.get_messages();
-        params.cancel_token = in.ctx.cancel_token;  // cancel propagates
-        auto reply = co_await provider_->complete_async(params);
-        NodeOutput out;
-        json msg;
-        to_json(msg, reply.message);
-        out.writes.push_back({"messages", json::array({msg})});
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
     std::string get_name() const override { return "chat"; }
@@ -1192,7 +1121,7 @@ struct RunContext {
 
 | Field | Description |
 |-------|-------------|
-| `cancel_token` | The active token. Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
+| `cancel_token` | The active token. Pass to `ProviderRequest::cancel_token` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
 | `usage` | Shared token-accounting sink populated by the engine |
 | `deadline` | C++ `RunMetadata`의 선택적 절대 deadline |
 | `trace_id` | C++ `RunMetadata`의 선택적 trace correlator |
@@ -1208,7 +1137,7 @@ struct RunContext {
 Cooperative cancel primitive shared between caller and engine. Construct
 via `std::make_shared<CancelToken>()`, hand to `RunConfig.cancel_token`,
 and call `cancel()` from any thread to abort the in-flight run —
-including the LLM HTTP socket if a node is mid-`provider.complete_async`.
+including the LLM HTTP socket if a node is mid-`provider.invoke_async`.
 Each engine run forks its own operation child, so one parent can safely cancel
 multiple concurrent runs without sharing an asio cancellation slot.
 
@@ -1238,7 +1167,7 @@ Each child token has its own `cancellation_signal`; the parent's
 `cancel()` cascades to every live child. This is the structural
 replacement for the v0.3.x `add_cancel_hook` list (deprecated, removed
 in v1.0). Concurrent nested scopes — a multi-Send fan-out where every
-worker calls `provider.complete(params)` simultaneously — each
+worker calls `provider.invoke(std::move(request))` simultaneously — each
 `fork()` once and never overwrite each other's slot.
 
 ```cpp
@@ -1254,15 +1183,21 @@ auto fut_b = std::async(std::launch::async, [&] { return engine->run(cfg_b); });
 // User hits stop in the UI:
 parent->cancel();   // cascades to every fork() child, every run aborts
 
-// Inside a node — pass the child to provider.complete so the HTTP
+// Inside a RuntimeInterpositionConsumer node, pass cancellation in the owned request.
 // socket aborts on parent cancel without you doing any wiring:
 asio::awaitable<NodeOutput> run(NodeInput in) override {
-    CompletionParams params;
-    params.messages    = in.state.get_messages();
-    params.cancel_token = in.ctx.cancel_token;   // engine forks for you
-    auto reply = co_await provider_->complete_async(params);
+    auto request = neograph::make_provider_request(
+        *provider_, model_, in.state.get_provider_messages());
+    request.cancel_token = in.ctx.cancel_token;
+    request.options.deadline = in.ctx.deadline;
+    auto reply = co_await neograph::graph::observe_provider_result(
+        in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+            neograph::graph::provider_call_broker(in.ctx),
+            neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+    neograph::graph::record_usage(in.ctx, reply);
+    neograph::outcome_or_throw(reply);
     NodeOutput out;
-    /* ... */
+    out.writes.push_back(neograph::graph::provider_messages_write(reply));
     co_return out;
 }
 ```
@@ -1281,6 +1216,9 @@ Result returned after graph execution completes or is interrupted.
 
 ```cpp
 struct RunResult {
+    sp::Usage usage;
+    std::vector<sp::Message> native_messages;
+    std::vector<sp::runtime::Result> provider_outcomes;
     json        output;                          // Final serialized state
     bool        interrupted       = false;       // True if execution was paused (HITL)
     std::string interrupt_node;                  // Node that caused the interrupt
@@ -1298,6 +1236,7 @@ struct RunResult {
 };
 ```
 
+`RunResult::usage`는 nullable provider 보고이며 지출 bank가 아니다. `native_messages`는 실제 typed 기록을, `provider_outcomes`는 각 소유 Completion/Failure를 보존한다. JSON `output`은 portable projection이다. 전체 입력 기록은 `RunConfig::provider_messages`, typed 이벤트는 `on_provider_event`를 사용한다. 영속 native checkpoint/receipt custody에는 `native_history_archive`가 필요하지만 메모리 sidecar에는 필요하지 않다.
 | Field | Type | Description |
 |-------|------|-------------|
 | `output` | `json` | 모든 채널의 직렬화된 최종 상태 |
@@ -1706,7 +1645,7 @@ checkpoint flows, or stub pieces in tests.
 
 **Header:** `<neograph/graph/compiler.h>`
 
-Pure JSON → value-type translation. No runtime dependencies — the
+Pure JSON → value-type translation. No provider dispatch during compilation; the installed Core target still requires SchemaProvider runtime — the
 resulting `CompiledGraph` is a movable bundle you can inspect or
 construct by hand in tests.
 
@@ -2387,6 +2326,7 @@ std::cout << schema.dump(2) << "\n";
 
 ## 10.5. Observability — OpenTelemetry + OpenInference
 
+> 아래 Python provider/wrapper 예시는 과거 기록이며 typed C++ 계약으로 포팅되지 않았다. 현재 provider 지침이 아니다. C++ 변경은 Python binding을 구현하거나 검증하지 않는다. C++ 관측자는 기존 공개 텍스트/scalar/nullable count만 내보내며 raw native 상태를 내보내지 않는다.
 **Module:** `neograph_engine.tracing` (OTel-shape) +
 `neograph_engine.openinference` (LLM-shape)
 **Since:** OTel layer in v0.3.x; OpenInference layer in **v0.6.0**.
@@ -2479,6 +2419,8 @@ trace-IDs (the v0.6.0 contextvar-propagation fix).
 
 ### `OpenInferenceProvider` — wraps any `Provider`
 
+> **과거 Python-only 예시.** 아래 Python Provider/OpenInference wrapper는 현재 C++ typed 전환에서 port/qualification하지 않았다. 새 `ProviderRequest`/owned-outcome 계약의 호환 bridge가 아니다.
+
 ```python
 class OpenInferenceProvider(Provider):
     def __init__(self, inner: Provider, tracer: Any,
@@ -2524,6 +2466,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
 from neograph_engine.llm import OpenAIProvider
+import os
 import neograph_engine as ng
 
 provider = TracerProvider()
@@ -2532,7 +2475,7 @@ provider.add_span_processor(
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("my-app")
 
-inner = OpenAIProvider(api_key="sk-...")
+inner = OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"])
 wrapped = OpenInferenceProvider(inner, tracer)
 ctx = ng.NodeContext(provider=wrapped)
 engine = ng.GraphEngine.compile(graph_def, ctx)
@@ -2649,232 +2592,47 @@ resume via pending-writes.
 
 ## 12. LLM Module
 
-### OpenAIProvider
-
-**Header:** `<neograph/llm/openai_provider.h>`
-**Namespace:** `neograph::llm`
-
-Provider implementation for the OpenAI API and OpenAI-compatible endpoints.
-
-```cpp
-class OpenAIProvider : public Provider {
-public:
-    struct Config {
-        std::string api_key;                          // API key
-        std::string base_url = "https://api.openai.com"; // API base URL
-        std::string default_model = "gpt-4o-mini";    // Default model
-        int timeout_seconds = 60;                     // HTTP timeout
-    };
-
-    static std::unique_ptr<OpenAIProvider> create(const Config& config);
-
-    ChatCompletion complete(const CompletionParams& params) override;
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override;
-    std::string get_name() const override;  // Returns "openai"
-};
-```
-
-**Config fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_key` | `std::string` | | OpenAI API key |
-| `base_url` | `std::string` | `"https://api.openai.com"` | Base URL. Override for Azure, local models, or compatible APIs |
-| `default_model` | `std::string` | `"gpt-4o-mini"` | Model used when `CompletionParams::model` is empty |
-| `timeout_seconds` | `int` | `60` | HTTP request timeout |
-
-**Usage:**
-
-```cpp
-auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = "sk-...",
-    .default_model = "gpt-4o"
-});
-```
-
 ### SchemaProvider
 
-**Header:** `<neograph/llm/schema_provider.h>`
-**Namespace:** `neograph::llm`
-
-A schema-driven provider that supports multiple LLM APIs through JSON configuration
-files. Instead of hardcoding API-specific logic, `SchemaProvider` reads a schema that
-describes how to format requests, parse responses, and handle streaming for any API.
+`SchemaProvider`는 승인된 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택적 `SchemaProvider::Defaults`를 받는다. descriptor는 closed/versioned 데이터 admission이지 요청/응답 interpreter나 임의 primitive registry가 아니다. credential은 공개 descriptor가 아니라 runtime options에 둔다. Defaults는 typed OpenRouter routing과 Responses 보관(`responses_store`)만 포함하고 후자는 Responses에만 유효하다. Hosted OpenRouter routing·retention·JSON 형식은 선언된 typed 제어다. Images, Veo, Decisions는 별도 NeoGraph typed client와 별도 승인을 쓰며 SDK chat grant를 물려받지 않는다.
 
 ```cpp
-class SchemaProvider : public Provider {
-public:
-    struct Config {
-        std::string schema_path;       // Schema name or file path
-        std::string api_key;           // API key (overrides env var)
-        std::string default_model = "gpt-4o-mini";
-        int         timeout_seconds = 60;
-        std::string base_url_override;  // Overrides schema's connection.base_url
-        bool        use_websocket = false;  // OpenAI Responses /v1/responses WS mode
-        bool        prefer_libcurl = false; // Switch HTTP transport to libcurl HTTP/2
-    };
+#include <neograph/llm/schema_provider.h>
+#include <descriptor/descriptor.h>
+#include <stdexcept>
+#include <variant>
 
-    static std::unique_ptr<SchemaProvider> create(const Config& config);
-    static std::shared_ptr<Provider>       create_shared(const Config& config);
-
-    ChatCompletion complete(const CompletionParams& params) override;
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override;
-    asio::awaitable<json> request_json_async(
-        const json& body, int timeout_seconds = -1,
-        std::shared_ptr<graph::CancelToken> cancel_token = {});
-    json request_json(const json& body, int timeout_seconds = -1);
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override;
-    std::string get_name() const override;
-};
+std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
+    std::string_view descriptor_json, std::string api_key) {
+    auto loaded = sp::descriptor::load(descriptor_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument(error->message);
+    sp::runtime::Options options;
+    options.api_key = std::move(api_key);
+    neograph::llm::SchemaProvider::Defaults defaults;
+    return std::make_shared<neograph::llm::SchemaProvider>(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+        std::move(options), std::move(defaults));
+}
 ```
-
-**Config fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `schema_path` | `std::string` | | Built-in schema name or path to a custom schema JSON file |
-| `api_key` | `std::string` | | API key. If empty, falls back to the env var specified in the schema |
-| `default_model` | `std::string` | `"gpt-4o-mini"` | Default model identifier |
-| `timeout_seconds` | `int` | `60` | HTTP timeout |
-| `base_url_override` | `std::string` | `""` | If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints. |
-| `use_websocket` | `bool` | `false` | Drive `complete_stream` over `wss://` instead of HTTP/SSE. Currently supported only for the `"openai_responses"` schema (matches OpenAI's WebSocket mode at /v1/responses). |
-| `prefer_libcurl` | `bool` | `false` | Switch the non-streaming HTTP transport to libcurl (HTTP/2 + multiplexing + Cloudflare-friendly fingerprint). Build-time gated on `NEOGRAPH_USE_LIBCURL`. |
-
-**Built-in schemas:**
-
-| Name | API | Notes |
-|------|-----|-------|
-| `"openai"` | OpenAI | Same behavior as `OpenAIProvider` |
-| `"claude"` | Anthropic Claude | Uses SSE event-based streaming |
-| `"gemini"` | Google Gemini | Uses function declarations format |
-| `"openrouter_decisions"` | OpenRouter Typesafe/Jev | Raw JSON `POST /api/alpha/decisions`; Chat Completions 대신 `request_json()` 사용 |
-
-**Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
-describing any API's request/response format.
-
-**Usage:**
-
-```cpp
-// Using a built-in schema
-auto claude = neograph::llm::SchemaProvider::create({
-    .schema_path = "claude",
-    .api_key = "sk-ant-...",
-    .default_model = "claude-sonnet-4-20250514"
-});
-
-// Using a custom schema file
-auto custom = neograph::llm::SchemaProvider::create({
-    .schema_path = "/path/to/my_provider.json",
-    .api_key = "...",
-    .default_model = "my-model-v1"
-});
-```
-
-**Raw JSON 엔드포인트:** `SchemaProvider`는 응답을 `ChatCompletion`으로
-강제 변환하지 않고도 스키마의 연결·인증 계약을 사용할 수 있습니다. 기본 제공
-`openrouter_decisions` 스키마는 Chat Completions와 별도인 OpenRouter
-Typesafe/Jev의 alpha Decisions 엔드포인트를 가리킵니다. 자세한 wire contract는
-[OpenRouter Decisions API reference](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request)를
-참조하세요.
-
-```cpp
-auto decisions = neograph::llm::SchemaProvider::create({
-    .schema_path = "openrouter_decisions",
-    .api_key = "sk-or-v1-...",
-    .default_model = "~typesafe/jev-latest"
-});
-
-const neograph::json result = decisions->request_json({
-    {"model", "~typesafe/jev-latest"},
-    {"questions", {
-        {"topology", {
-            {"criteria", {"keep", "expand", "contract"}},
-            {"instructions", "Should the next branch expand?"},
-            {"type", "choice"}
-        }}
-    }},
-    {"state", {{"topology_version", 3}}}
-});
-```
-
-`request_json_async()`는 선택적인 `CancelToken`을 받고 디코딩된 JSON 응답을
-반환합니다. 이 메서드는 토폴로지 변경이나 권한을 자동으로 부여하지 않으므로,
-호출자가 Jev의 `answers`를 자체적인 제한된 selector 정책으로 검증해야 합니다.
-
-**Internal strategy enums** (documented for custom schema authors):
-
-The schema file configures the following strategies:
-
-| Strategy | Options | Description |
-|----------|---------|-------------|
-| System prompt | `IN_MESSAGES`, `TOP_LEVEL`, `TOP_LEVEL_PARTS` | How the system prompt is placed in the request |
-| Tool calls | `TOOL_CALLS_ARRAY`, `CONTENT_ARRAY`, `PARTS_ARRAY` | How tool calls appear in assistant messages |
-| Tool results | `FLAT`, `CONTENT_ARRAY`, `PARTS_ARRAY` | How tool results are formatted |
-| Tool defs | `FUNCTION`, `NONE`, `FUNCTION_DECLARATIONS` | How tool definitions are wrapped |
-| Response | `CHOICES_MESSAGE`, `CONTENT_ARRAY`, `CANDIDATES_PARTS` | How responses are parsed |
-| Streaming | `SSE_DATA`, `SSE_EVENTS` | Streaming format |
 
 ### Agent
 
-**Header:** `<neograph/llm/agent.h>`
-**Namespace:** `neograph::llm`
-
-A simple agent that runs an LLM tool-use loop: call the LLM, execute any tool calls,
-feed results back, and repeat until the LLM responds with text only.
+`Agent::run`, `run_stream`, `complete`는 전체 `sp::runtime::Result`를 반환하고 `std::vector<sp::Message>`를 받는다. `run_stream`은 실제 매 turn에서 typed event를 받으며 표시를 위해 답을 버리고 재요청하지 않는다. `outcomes()`는 각 결과를 보존하고 `usage()`는 nullable 보고를 제공한다. 모델은 호출자가 명시적으로 선택한다.
 
 ```cpp
-class Agent {
-public:
-    Agent(std::shared_ptr<Provider> provider,
-          std::vector<std::unique_ptr<Tool>> tools,
-          const std::string& instructions = "",
-          const std::string& model = "");
+#include <neograph/llm/agent.h>
+#include <neograph/llm/schema_provider.h>
 
-    // Run the tool loop, returns the final text response
-    std::string run(std::vector<ChatMessage>& messages,
-                    int max_iterations = 10);
-
-    // Streaming variant: streams final response tokens
-    std::string run_stream(std::vector<ChatMessage>& messages,
-                           const StreamCallback& on_chunk,
-                           int max_iterations = 10);
-
-    // Single completion (no tool loop)
-    ChatCompletion complete(const std::vector<ChatMessage>& messages);
-};
-```
-
-| Constructor Parameter | Type | Description |
-|-----------------------|------|-------------|
-| `provider` | `std::shared_ptr<Provider>` | LLM provider to use |
-| `tools` | `std::vector<std::unique_ptr<Tool>>` | Tools available to the agent (ownership transferred) |
-| `instructions` | `std::string` | System prompt prepended to messages |
-| `model` | `std::string` | Model override (empty uses provider default) |
-
-| Method | Description |
-|--------|-------------|
-| `run(messages, max_iterations)` | Runs the full tool-use loop. Mutates `messages` in place with the full conversation. Returns the final assistant text response |
-| `run_stream(messages, on_chunk, max_iterations)` | Same as `run()` but streams the final response tokens via `on_chunk`. Tool-use iterations are not streamed |
-| `complete(messages)` | Single LLM call without tool loop. Useful for one-shot completions |
-
-**Usage:**
-
-```cpp
-auto provider = neograph::llm::OpenAIProvider::create({.api_key = "sk-..."});
-
-std::vector<std::unique_ptr<neograph::Tool>> tools;
-tools.push_back(std::make_unique<WeatherTool>());
-
-neograph::llm::Agent agent(provider, std::move(tools),
-                            "You are a helpful weather assistant.");
-
-std::vector<neograph::ChatMessage> messages;
-messages.push_back({"user", "What's the weather in Seoul?"});
-
-std::string response = agent.run(messages);
+sp::runtime::Result run_agent(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model, std::vector<std::unique_ptr<neograph::Tool>> tools,
+    std::vector<sp::Message>& history) {
+    auto provider = std::make_shared<neograph::llm::SchemaProvider>(
+        std::move(descriptor), std::move(options));
+    neograph::llm::Agent agent(provider, std::move(tools), "", model);
+    return agent.run(history);
+}
 ```
 
 ### json_path Utilities
@@ -2883,7 +2641,7 @@ std::string response = agent.run(messages);
 **Namespace:** `neograph::llm::json_path`
 
 Utility functions for navigating and manipulating JSON values using dot-separated
-path strings. Used internally by `SchemaProvider` but available for general use.
+path strings. Available for general JSON use; not the typed SDK request/response codec.
 
 ```cpp
 namespace json_path {
@@ -3134,36 +2892,24 @@ if (!accepted) {
 
 ### Minimal ReAct Agent
 
-The simplest way to use NeoGraph -- a ReAct agent with tools:
+
 
 ```cpp
-#include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
 #include <neograph/graph/react_graph.h>
+#include <neograph/llm/schema_provider.h>
 
-int main() {
-    auto provider = neograph::llm::OpenAIProvider::create({
-        .api_key = std::getenv("OPENAI_API_KEY"),
-        .default_model = "gpt-4o"
-    });
-
-    std::vector<std::unique_ptr<neograph::Tool>> tools;
-    tools.push_back(std::make_unique<WeatherTool>());
-
+neograph::graph::RunResult run_react(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model, std::vector<std::unique_ptr<neograph::Tool>> tools,
+    neograph::graph::RunConfig config) {
+    auto provider = std::make_shared<neograph::llm::SchemaProvider>(
+        std::move(descriptor), std::move(options));
     auto engine = neograph::graph::create_react_graph(
-        provider, std::move(tools),
-        "You are a helpful assistant with access to weather data."
-    );
-
-    neograph::graph::RunConfig config;
-    config.input = {{"messages", json::array({
-        {{"role", "user"}, {"content", "What's the weather in Tokyo?"}}
-    })}};
-
-    auto result = engine->run(config);
-    // result.output contains the final state with all messages
+        provider, std::move(tools), "", model);
+    return engine->run(config);
 }
 ```
+
 
 ### Custom Graph with Conditional Routing
 
@@ -3171,15 +2917,16 @@ Building a graph with conditional edges:
 
 ```cpp
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include <neograph/llm/schema_provider.h>
 
 using namespace neograph::graph;
 using json = nlohmann::json;
 
-int main() {
-    auto provider = neograph::llm::OpenAIProvider::create({
-        .api_key = std::getenv("OPENAI_API_KEY")
-    });
+void run_custom_graph(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model) {
+    auto provider = std::make_shared<neograph::llm::SchemaProvider>(
+        std::move(descriptor), std::move(options));
 
     std::vector<std::unique_ptr<neograph::Tool>> tools;
     tools.push_back(std::make_unique<SearchTool>());
@@ -3209,7 +2956,7 @@ int main() {
     auto store = std::make_shared<InMemoryCheckpointStore>();
     EngineConfig engine_config;
     engine_config.node_context.provider = provider;
-    engine_config.node_context.model = "gpt-4o";
+    engine_config.node_context.model = model;
     engine_config.node_context.instructions = "You are a helpful assistant.";
     engine_config.checkpoint_store = store;
     EngineResources resources{.tools = ToolSet(std::move(tools))};
@@ -3332,75 +3079,51 @@ jumps directly to the specified `goto_node`, bypassing normal edge routing.
 
 ### SchemaProvider Multi-LLM Support
 
-Using `SchemaProvider` to switch between LLM providers:
+`SchemaProvider`는 승인된 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택적 `SchemaProvider::Defaults`를 받는다. descriptor는 closed/versioned 데이터 admission이지 요청/응답 interpreter나 임의 primitive registry가 아니다. credential은 공개 descriptor가 아니라 runtime options에 둔다. Defaults는 typed OpenRouter routing과 Responses 보관(`responses_store`)만 포함하고 후자는 Responses에만 유효하다. Hosted OpenRouter routing·retention·JSON 형식은 선언된 typed 제어다. Images, Veo, Decisions는 별도 NeoGraph typed client와 별도 승인을 쓰며 SDK chat grant를 물려받지 않는다.
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
+#include <descriptor/descriptor.h>
+#include <stdexcept>
+#include <variant>
 
-// OpenAI
-auto openai = neograph::llm::SchemaProvider::create({
-    .schema_path = "openai",
-    .api_key = std::getenv("OPENAI_API_KEY"),
-    .default_model = "gpt-4o"
-});
-
-// Anthropic Claude
-auto claude = neograph::llm::SchemaProvider::create({
-    .schema_path = "claude",
-    .api_key = std::getenv("ANTHROPIC_API_KEY"),
-    .default_model = "claude-sonnet-4-20250514"
-});
-
-// Google Gemini
-auto gemini = neograph::llm::SchemaProvider::create({
-    .schema_path = "gemini",
-    .api_key = std::getenv("GEMINI_API_KEY"),
-    .default_model = "gemini-2.0-flash"
-});
-
-// All three implement the same Provider interface
-// Use any of them interchangeably with Agent or GraphEngine
-neograph::llm::Agent agent(claude, std::move(tools), "You are helpful.");
-```
-
-### MCP Tool Integration
-
-Connecting to an MCP server and using its tools:
-
-```cpp
-#include <neograph/mcp/client.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/llm/agent.h>
-
-int main() {
-    // Connect to MCP server
-    neograph::mcp::MCPClient mcp("http://localhost:3000");
-    if (!mcp.initialize()) {
-        std::cerr << "Failed to connect to MCP server\n";
-        return 1;
-    }
-
-    // Discover tools from server
-    auto tools = mcp.get_tools();
-    std::cout << "Discovered " << tools.size() << " tools\n";
-
-    // Use discovered tools with an Agent
-    auto provider = neograph::llm::OpenAIProvider::create({
-        .api_key = std::getenv("OPENAI_API_KEY")
-    });
-
-    neograph::llm::Agent agent(provider, std::move(tools),
-                                "You have access to remote tools via MCP.");
-
-    std::vector<neograph::ChatMessage> messages;
-    messages.push_back({"user", "Use the available tools to help me."});
-
-    std::string response = agent.run(messages);
-    std::cout << response << "\n";
+std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
+    std::string_view descriptor_json, std::string api_key) {
+    auto loaded = sp::descriptor::load(descriptor_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument(error->message);
+    sp::runtime::Options options;
+    options.api_key = std::move(api_key);
+    neograph::llm::SchemaProvider::Defaults defaults;
+    return std::make_shared<neograph::llm::SchemaProvider>(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+        std::move(options), std::move(defaults));
 }
 ```
 
----
+
+### MCP Tool Integration
+
+`Agent::run`, `run_stream`, `complete`는 전체 `sp::runtime::Result`를 반환하고 `std::vector<sp::Message>`를 받는다. `run_stream`은 실제 매 turn에서 typed event를 받으며 표시를 위해 답을 버리고 재요청하지 않는다. `outcomes()`는 각 결과를 보존하고 `usage()`는 nullable 보고를 제공한다. 모델은 호출자가 명시적으로 선택한다.
+
+```cpp
+#include <neograph/mcp/client.h>
+#include <neograph/llm/agent.h>
+#include <neograph/llm/schema_provider.h>
+
+sp::runtime::Result run_mcp_agent(
+    neograph::mcp::MCPClient& mcp,
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model, std::vector<sp::Message>& history) {
+    mcp.initialize("neograph-example");
+    auto tools = mcp.get_tools();
+    auto provider = std::make_shared<neograph::llm::SchemaProvider>(
+        std::move(descriptor), std::move(options));
+    neograph::llm::Agent agent(provider, std::move(tools), "", model);
+    return agent.run(history);
+}
+```
+
 
 ## Beyond this tour
 
@@ -3438,13 +3161,7 @@ with per-session single-flight + `-32000` backpressure.
 ### `neograph::async` — HTTP/SSE/WS helpers
 
 **Header:** `<neograph/async/{conn_pool,http_client,sse_parser,ws_client,curl_h2_pool,run_sync}.h>`
-Coroutine-based HTTP/1.1 client + ConnPool with safe-method-only
-stale-idle retry (RFC 7231 §4.2.2 — POST etc. rethrow rather than
-silently double-apply); `SseEventParser` for OpenAI/Claude
-streaming; `WsClient` for OpenAI Responses WebSocket; libcurl
-`CurlH2Pool` for HTTP/2 + multiplexing on Cloudflare-fronted
-endpoints; `run_sync` for awaitable→sync bridges in the engine
-defaults.
+일반 NeoGraph HTTP/SSE/WebSocket helper는 비-provider 통합에서 사용할 수 있다. SchemaProvider의 transport·codec·retry 권한이 아니다. typed chat-family 호출은 SDK runtime과 `ProviderMode`를 사용하며 구 Responses WebSocket provider 경로와 descriptor stream parser는 제거되었다.
 
 **공개 헤더:** [`include/neograph/async/`](../include/neograph/async/).
 
@@ -3468,10 +3185,7 @@ edge / single-host deployments.
 
 ### Other public surface not in this tour
 
-- **`neograph::llm::RateLimitedProvider`** — wraps any `Provider`
-  with retry on 429 + Retry-After honour + capped exponential
-  backoff + max-total-wait gate (Round 5).
-  [헤더](../include/neograph/llm/rate_limited_provider.h).
+- 선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
 - **`neograph::AsyncTool`** — `Tool` peer that exposes
   `execute_async(json)` for tools whose work is naturally
   coroutine-shaped (HTTP fetch, MCP call). Sync `execute()` is

@@ -21,10 +21,59 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <unordered_set>
+#include <unordered_map>
 #include <string_view>
 #include <chrono>
 
 namespace neograph::graph {
+class NativeGraphCheckpoint;
+struct NodeResult;
+struct ChannelWrite;
+namespace detail { class ManagedBudgetJournalAccess; }
+
+struct ManagedBudgetLeaseScope {
+    std::string owner_scope;
+    std::string thread_id;
+    std::string storage_thread_id;
+    std::string graph_identity;
+    std::uint64_t original_ceiling = 0;
+    std::optional<std::int64_t> original_deadline_ticks;
+    std::string deadline_clock_identity;
+};
+
+/// Store-issued ownership; JSON or an archived observation cannot create it.
+class NEOGRAPH_API OwnedManagedBudgetLease final {
+public:
+    const ManagedBudgetLeaseScope& scope() const noexcept;
+    const std::string& actor_id() const noexcept;
+    const std::string& bank_generation() const noexcept;
+    std::uint64_t revision() const noexcept;
+    std::string head_checkpoint_id() const;
+    std::string head_commitment() const;
+    const std::string& execution_thread_id() const noexcept;
+    const std::string& execution_storage_thread_id() const noexcept;
+private:
+    struct Impl;
+    explicit OwnedManagedBudgetLease(std::shared_ptr<Impl> impl);
+    std::shared_ptr<Impl> impl_;
+    friend class detail::ManagedBudgetJournalAccess;
+};
+
+/// Actual write-ahead claim, bound to one original generation and owned actor.
+class NEOGRAPH_API ManagedBudgetEffectReceipt final {
+public:
+    ManagedBudgetEffectReceipt() = default;
+    bool active() const noexcept;
+    const std::string& effect_id() const;
+    std::uint64_t claim_amount() const;
+    const std::string& request_digest() const;
+private:
+    struct Impl;
+    explicit ManagedBudgetEffectReceipt(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+    friend class detail::ManagedBudgetJournalAccess;
+};
 
 /// Current Checkpoint layout version. Bump whenever the on-wire schema
 /// changes in a way that would break a naive load of an older blob.
@@ -113,6 +162,9 @@ struct Checkpoint {
     /// consumer.
     std::map<std::string, std::set<std::string>> barrier_state;
     json        metadata;          ///< User-defined metadata.
+    /// Original trusted C++ custody only; never reconstructed from checkpoint JSON.
+    std::shared_ptr<const NativeGraphCheckpoint> native_history;
+    std::shared_ptr<const std::vector<ChannelWrite>> native_subgraph_writes;
     int64_t     step;              ///< Super-step number.
     int64_t     timestamp;         ///< Unix epoch milliseconds.
     /// Layout version of this record. Persistent CheckpointStore impls
@@ -129,6 +181,12 @@ struct Checkpoint {
      */
     static NEOGRAPH_API std::string generate_id();
 };
+
+NEOGRAPH_API std::string managed_budget_checkpoint_commitment(const Checkpoint& checkpoint);
+NEOGRAPH_API bool checkpoint_channel_blob_eligible(const json& channel);
+NEOGRAPH_API json checkpoint_storage_shape(const Checkpoint& checkpoint);
+NEOGRAPH_API void restore_checkpoint_storage_shape(Checkpoint& checkpoint, const json& shape,
+    const std::map<std::string, json>& blobs);
 
 /**
  * @brief Successful node writes recorded within an in-progress super-step.
@@ -155,7 +213,12 @@ struct PendingWrite {
     json        sends;          ///< Serialized Send vector (json array of {target_node, input}); empty if none.
     int64_t     step;           ///< Super-step number this write belongs to.
     int64_t     timestamp;      ///< Unix epoch milliseconds at record time.
+    std::shared_ptr<const NodeResult> native_result;
 };
+
+/// Preserve the complete durable provider-state envelope without changing store schemas.
+NEOGRAPH_API json checkpoint_storage_metadata(const Checkpoint& checkpoint);
+NEOGRAPH_API void restore_checkpoint_storage_envelope(Checkpoint& checkpoint);
 
 /**
  * @brief Mandatory synchronous operations for a sync-only backend.
@@ -174,6 +237,26 @@ public:
     virtual std::vector<Checkpoint> list(const std::string& thread_id,
                                          int limit = 100) = 0;
     virtual void delete_thread(const std::string& thread_id) = 0;
+
+    /// A persistent denial obligation, never authority to spend or restore.
+    /// Unsupported backends fail explicitly; absence must not be guessed.
+    virtual bool requires_managed_budget(const std::string& thread_id);
+    virtual std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment);
+    virtual ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest);
+    virtual void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority);
+    virtual void publish_managed_budget_checkpoint(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint);
+    virtual void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
+    /// Storage retention only; never currency or native replay authority.
+    virtual bool retains_native_checkpoint() const noexcept { return false; }
+    virtual void publish_managed_budget_fork(
+        const Checkpoint& authenticated_source, const Checkpoint& genuine_shared_bank_fork);
 };
 
 /**
@@ -195,6 +278,24 @@ public:
     list_async(const std::string& thread_id, int limit = 100) = 0;
     virtual asio::awaitable<void>
     delete_thread_async(const std::string& thread_id) = 0;
+
+    virtual asio::awaitable<bool> requires_managed_budget_async(std::string thread_id);
+    virtual asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+        std::string expected_checkpoint_commitment);
+    virtual asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest);
+    virtual asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority);
+    virtual asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint);
+    virtual asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease);
+    virtual bool retains_native_checkpoint() const noexcept { return false; }
+    virtual asio::awaitable<void> publish_managed_budget_fork_async(
+        Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork);
 };
 
 /**
@@ -383,6 +484,46 @@ public:
     virtual asio::awaitable<void> clear_writes_async(
         const std::string& thread_id,
         const std::string& parent_checkpoint_id);
+
+    /// Whether this trusted checkpoint namespace/thread has ever held an
+    /// active standalone managed bank. Saving stripped state or deleting
+    /// checkpoints must not clear the obligation. This flag grants no currency;
+    /// the original complete bank must still authenticate before restoration.
+    /// Unsupported backends throw rather than authorize an absent bank.
+    virtual bool requires_managed_budget(const std::string& thread_id);
+    virtual asio::awaitable<bool> requires_managed_budget_async(std::string thread_id);
+
+    virtual std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment);
+    virtual asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+        std::string expected_checkpoint_commitment);
+    virtual ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest);
+    virtual asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest);
+    virtual void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority);
+    virtual asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority);
+    virtual void publish_managed_budget_checkpoint(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint);
+    virtual asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint);
+    virtual void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
+    virtual asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease);
+    /// Describes real local C++ custody, not a financial admission/grant.
+    virtual bool retains_native_checkpoint() const noexcept { return false; }
+    virtual void publish_managed_budget_fork(
+        const Checkpoint& authenticated_source, const Checkpoint& genuine_shared_bank_fork);
+    virtual asio::awaitable<void> publish_managed_budget_fork_async(
+        Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork);
 };
 
 /**
@@ -476,6 +617,24 @@ public:
         const std::string& thread_id,
         const std::string& parent_checkpoint_id) override;
 
+    bool requires_managed_budget(const std::string& thread_id) override;
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override;
+    std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override;
+    ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override;
+    void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) override;
+    void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease) override;
+    bool retains_native_checkpoint() const noexcept override { return true; }
+    void publish_managed_budget_fork(
+        const Checkpoint& authenticated_source, const Checkpoint& genuine_shared_bank_fork) override;
+
     /**
      * @brief Get the total number of stored checkpoints (test helper).
      * @return Total checkpoint count across all threads.
@@ -521,6 +680,23 @@ private:
     std::map<std::tuple<std::string, std::string, uint64_t>, json> blobs_;
     // Keyed by (thread_id, parent_checkpoint_id) → ordered list of pending writes
     std::map<std::pair<std::string, std::string>, std::vector<PendingWrite>> pending_;
+    std::unordered_set<std::string> managed_budget_obligations_;
+    std::unordered_map<std::string, json> managed_budget_journals_;
+    std::map<std::tuple<std::string, std::string, std::string>, json> managed_budget_effects_;
+    std::map<std::tuple<std::string, std::string, std::string>, sp::runtime::Result> managed_budget_results_;
+    struct ManagedBudgetBranchHead {
+        std::string financial_storage_thread_id;
+        std::string execution_thread_id;
+        std::string checkpoint_id;
+        std::string commitment;
+        std::shared_ptr<const NativeGraphCheckpoint> native_history;
+        bool valid = true;
+    };
+    const ManagedBudgetBranchHead& authenticate_managed_budget_branch_locked(
+        const Checkpoint& source, const std::string& commitment) const;
+    void validate_managed_budget_execution_locked(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const json& head) const;
+    std::unordered_map<std::string, ManagedBudgetBranchHead> managed_budget_branch_heads_;
 };
 
 } // namespace neograph::graph

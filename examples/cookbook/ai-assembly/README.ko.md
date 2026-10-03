@@ -46,7 +46,9 @@ Bill: [`bills/basic_income.txt`](bills/basic_income.txt) — 기본소득, 월 5
 
 ```bash
 # from NeoGraph repo root; A2A and LLM are optional build components
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
 cmake -S . -B build-cookbook \
+    -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
     -DNEOGRAPH_BUILD_EXAMPLES=ON \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
     -DNEOGRAPH_BUILD_A2A=ON \
@@ -54,16 +56,19 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-
-bash examples/cookbook/ai-assembly/scripts/run_session.sh
+# 오프라인 fixture: .env 로드/provider 통신 없음
+NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
+  bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
+# live: 환경 또는 .env에서 키를 비공개 설정
+NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
+  bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-회원 서버는 실시간 OpenRouter 호출을 수행합니다; `OPENROUTER_API_KEY` 및 네트워크 액세스가 필요합니다. 컴파일 자체는 오프라인입니다.
+typed SchemaProvider CMake 패키지와 빌드 의존성을 먼저 설치하세요. 통합 NeoGraph 타깃이며 standalone 프로젝트는 없습니다. `NEOGRAPH_BUILD_DIR`로 바이너리를 선택하며 미설정 시 `build-pybind`, `build`, recipe의 `build` 순으로 찾습니다. `--mock`는 모델 판단/사용량이 아닌 합성 기권입니다. live는 법안/페르소나 프롬프트를 OpenRouter로 보내며 유효한 키, 네트워크, 크레딧이 필요합니다. 네 멤버 호출은 비용을 발생시키며 고정 비용을 보장하지 않습니다. 키, `.env`, 프롬프트와 출력 기록을 비공개로 보관하고 raw native 기록을 공개하지 마세요. A2A에는 portable 응답만 전달합니다. C++은 typed `ProviderRequest`/SDK 이벤트와 완전한 불변 `sp::Outcome`을 사용하며 projection은 native replay 권한이 아닙니다. 소스 마이그레이션 기록이지 새 실행 검증이 아닙니다.
 
 ## Python 스피커 변형(v0.2.1+, 크로스 언어 A2A)
 
-동일한 스피커 로직을 Python으로 작성, 동일한 C++ 멤버 서버에 대하여 ~100줄의 Python로 구성되어 A2A Protocol이 언어 간 깔끔하게 연결함을 입증합니다:
+Python 바인딩은 이 전환에서 **deferred(연기)**입니다. `speaker.py`는 별도의 호환 `neograph_engine.a2a`가 필요하며 C++ 전환 완료가 이를 보장하지 않습니다. 아래는 역사적 사용 예입니다.
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
@@ -74,26 +79,24 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-파이썬 A2A 바인딩(`neograph_engine.a2a`)은 v0.2.1에 포함됩니다. 서버 측(graph-as-A2A-endpoint)은 현재 C++ 전용으로 유지됩니다.
+v0.2.1 바인딩은 역사적 릴리스 결과이지 현재 검증이 아닙니다. A2A wire client/protocol은 변경되지 않았습니다.
 
 ## 마찰 일지 — 새로운 NeoGraph 사용자가 걸려 넘어진 것
 
 
-이것은 이를 구축하면서 발견된 거친 부분입니다. **네 가지 모두 v0.2.1에서 수정되었습니다** — 기록으로 여기에 남겨두었습니다.
+전환 이전 역사적 마찰 기록이며 현재 legacy API 지원 주장이 아닙니다. 위 live transcript도 역사적 기록입니다.
 
 ### 1. A2A는 C++ 전용이었습니다 — Python 바인딩이 이를 노출하지 않았습니다 (v0.2.1에서 수정됨)
 
-`pip install neograph-engine` 작동하지만, v0.2.1 이전 버전의 `neograph_engine` 는 내보내지 않았습니다 `A2AClient` / `AgentCard`. v0.2.1은 `neograph_engine.a2a` 서브모듈(client + AgentCard + Task/Message/ Part/TaskState/Role)을 추가합니다. — 위의 Python 스피커 변형을 참조하세요.
-
-**서버 측 바인딩은 여전히 C++ 전용입니다**; A2AServer에는 v0.3에서 후속 작업으로 진행될 GIL 인식 수명 주기 계약이 필요합니다.
+과거 v0.2.1에서 Python A2A client가 추가되었습니다. 현재 바인딩은 연기되어 있으며 향후 릴리스 제공을 약속하지 않습니다.
 
 ### 2. 시스템 설치 없음 / 휠에 헤더 없음 (README v0.2.1에서 수정됨)
 
-README에 이제 "CMake 프로젝트에서 NeoGraph 사용하기" 섹션이 있으며 `FetchContent_Declare` 패턴을 보여줍니다. 이 쿡북은 NeoGraph 트리 내부에도 있으므로 외부 종속성 없이 `add_executable` 직접 사용할 수 있습니다. 스탠드얼론 변형은 FetchContent를 사용합니다.
+과거 README는 FetchContent를 설명했습니다. 이 recipe에는 통합 타깃만 있고 standalone CMake 프로젝트는 없습니다. SchemaProvider가 필요합니다.
 
 ### 3. `OpenAIProvider::create()` `unique_ptr` 대 `shared_ptr` (v0.2.1에서 수정됨)
 
-`OpenAIProvider::create_shared(cfg)` 추가됨 — `shared_ptr<Provider>`를 직접 반환하여 `NodeFactory` 클로저로 깔끔하게 캡처됩니다. 쿡북은 `member_server.cpp`의 ~133행에서 사용합니다.
+과거 `create_shared`는 이전 소유권 문제를 해결했습니다. 현재는 `examples::make_openrouter_provider`와 typed outcome을 사용합니다.
 
 ### 4. `.env` 자동 로드가 A2A 자식 프로세스로 전파되지 않음 (v0.2.1에서 문서화됨)
 
@@ -105,7 +108,7 @@ README에 이제 "CMake 프로젝트에서 NeoGraph 사용하기" 섹션이 있�
 - 에이전트카드 발견(`fetch_agent_card`)이 방금 작동했습니다 — 수동 HTTP가 필요 없었습니다.
 - 동시에 `send_message_sync`에서 `std::async` 퓨처를 처리합니다 — 클라이언트 측 잠금 없음, 공유 세션 상태 없음. A2A 사양 및 NeoGraph 모두 병렬 클라이언트 요청을 기본적으로 깔끔하게 처리합니다.
 - `parse_vote` 자유 형식 한국어 텍스트의 정규 표현식은 모델이 요청 시 `vote: support/oppose/abstain`를 안정적으로 존중하기 때문에 작동합니다. 페르소나 출력이 형식 안에 유지되어 이는 5-라인 집계(해당) 함수가 되었습니다.
-- 인트리 CMake 빌드는 자체적으로 완결됩니다. 다음을 사용하여 구성하십시오: `NEOGRAPH_BUILD_A2A=ON` 및 `NEOGRAPH_BUILD_LLM=ON` 위에 표시된 대로.
+- 역사적 in-tree 빌드 경험입니다. 현재 조건은 위를 참조하세요.
 
 ## 파일
 

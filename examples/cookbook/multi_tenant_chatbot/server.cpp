@@ -41,7 +41,7 @@ using clk = std::chrono::steady_clock;
 
 // ── (1) Mock-LLM nodes — 실제 Provider 호출 없이 결정적 응답 ─────────
 //
-// 진짜 multi-tenant 서버라면 LLMCallNode + 진짜 OpenAIProvider/Anthropic
+// 진짜 multi-tenant 서버라면 LLMCallNode + typed SchemaProvider
 // 를 쓰겠지만, 데모는 외부 의존성 0 으로 토폴로지 차이만 보여줌.
 // 응답은 prompt 내용 기반 결정적 — 같은 입력 → 같은 출력 (검증 가능).
 
@@ -177,13 +177,13 @@ static json topology_fanout() {
 
 class CompileCache {
     std::shared_mutex mu_;
-    std::unordered_map<size_t, std::shared_ptr<GraphEngine>> cache_;
+    std::unordered_map<std::string, std::shared_ptr<GraphEngine>> cache_;
     std::atomic<std::size_t> hits_{0}, misses_{0};
 public:
     std::shared_ptr<GraphEngine> get_or_compile(const json& def, const NodeContext& ctx) {
-        // json::dump() 으로 정규화 후 std::hash. 진짜 production 이면
-        // SHA-256 같은 충돌 안 나는 hash 권장 — 데모는 std::hash 로 충분.
-        size_t key = std::hash<std::string>{}(def.dump());
+        // This provider-free style demo still binds all captured configuration.
+        const std::string key = json::array({def, ctx.model, ctx.instructions,
+            ctx.extra_config, ctx.provider_name}).dump();
         {
             std::shared_lock lk(mu_);
             if (auto it = cache_.find(key); it != cache_.end()) {

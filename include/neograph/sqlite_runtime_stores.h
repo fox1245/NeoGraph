@@ -14,7 +14,8 @@ namespace neograph {
 /** Optional SQLite implementations of the runtime durability contracts. */
 class NEOGRAPH_API SQLiteContextStore final : public DurableContextStore {
 public:
-    explicit SQLiteContextStore(std::string database_path);
+    explicit SQLiteContextStore(std::string database_path,
+                                std::shared_ptr<sp::NativeArchive> archive = {});
     ~SQLiteContextStore() override;
     SQLiteContextStore(SQLiteContextStore&&) noexcept;
     SQLiteContextStore& operator=(SQLiteContextStore&&) noexcept;
@@ -26,6 +27,8 @@ public:
         const ContextStoreFeed&, std::string_view) const override;
     ContextHistoryRange snapshot_history(const ContextStoreFeed&, std::uint64_t, std::uint64_t) const override;
     std::string hydrate_history(const ContextHistoryRange&) const override;
+    std::vector<RuntimeHistoryRecord> hydrate_records(
+        const ContextHistoryRange&) const override;
     ContextArtifactPutResult put_artifact(std::string_view, const ContextArtifact&) override;
     std::optional<ContextArtifact> get_artifact(std::string_view, std::string_view) const override;
 private: struct Impl; std::unique_ptr<Impl> impl_;

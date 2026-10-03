@@ -1,6 +1,10 @@
 <!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ko source_sha256=a2b7c4a93e6564fc5ecb36f4c559d811fa6c61325ef48a930e1917817b8359d5 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## 과거 벤치마크 — 제공자 바인딩 전환 유예
+
+아래 측정·결론·재현 명령은 전환 이전 Python 벤치마크 기록이지 현재 빌드 검증이 아니다. 타입 C++ `ProviderRequest`/`sp::Event`/전체 불변 `sp::Outcome` 전환은 Python 제공자 바인딩을 구현하지 않으며 해당 작업은 유예되었다. 명령을 작동하는 기존 제공자 API나 현재 제공자 벤치마크 또는 전환 후 실행 증거로 해석하지 않는다. 일반 Python 그래프 측정은 제공자 표면을 검증하지 않는다. Python REPL/프로토콜 드라이버는 그대로다. 이번 문서 변경은 소스 대조만 했으며 빌드·벤치를 실행하지 않았다.
+
 # Python 모드 벤치마크 — Python의 NeoGraph-from-Python 대 LangGraph
 
 
@@ -10,7 +14,7 @@
 답변: **아니오.** 부풀림은 Python 인터프리터가 아니라 LangChain 가져오기 트리에서 발생합니다.
 NeoGraph-from-Python = 린 Python(10MB/30ms) + 단일 컴파일된 .so.
 
-## 재현
+## 과거 재현 명령 — 전환 후 미검증
 
 먼저 Python 개발 헤더와 pybind11이 필요한 소스 빌드를 구성합니다.
 

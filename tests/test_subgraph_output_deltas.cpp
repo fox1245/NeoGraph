@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <neograph/neograph.h>
+#include <codecs/responses.h>
+#include <codecs/responses_request.h>
+#include <core/native.h>
+#include <descriptor/descriptor.h>
 
 #include <atomic>
 #include <memory>
@@ -414,4 +418,127 @@ TEST(SubgraphOutputDeltas, ParentPendingWriteReplayDoesNotRerunOrDuplicateChild)
     EXPECT_EQ(resumed.channel<json>("messages"), json::array({"parent", "child"}));
     EXPECT_EQ(child_calls.load(), 1);
     EXPECT_EQ(sibling_calls.load(), 2);
+}
+
+TEST(SubgraphOutputDeltas, MappedCapturedHistoryRetainsNativePreflightAcrossFreshChildren) {
+    auto admitted = sp::descriptor::load(R"({"descriptor_version":1,"revision":1,
+        "id":"mapped-native","family":"openai.responses",
+        "connection":{"base_url":"https://fixture.invalid",
+        "paths":{"buffered":"/v1/responses","streaming":"/v1/responses"}}})");
+    ASSERT_TRUE(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(admitted));
+    const auto descriptor = std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted));
+    sp::responses::Request request;
+    request.model = "fixture-model";
+    request.account_scope = "mapped-native";
+    request.max_output_tokens = 128;
+    request.messages = {sp::Message{"", sp::Role::User, {sp::Text{"question"}}}};
+    const auto encoded = sp::responses::encode(descriptor, request, false);
+    ASSERT_TRUE(std::holds_alternative<sp::responses::EncodedRequest>(encoded));
+    sp::Accumulator accumulator;
+    sp::responses::Codec codec(descriptor, sp::responses::Mode::Buffered, accumulator,
+        std::get<sp::responses::EncodedRequest>(encoded).context);
+    ASSERT_TRUE(codec.buffered(R"({"id":"mapped-response","object":"response","created_at":1,
+        "model":"fixture-model","status":"completed","output":[
+        {"id":"reason","type":"reasoning","status":"completed",
+         "summary":[{"type":"summary_text","text":"consider"}],"encrypted_content":"mapped-private-fixture"},
+        {"id":"answer","type":"message","status":"completed","role":"assistant",
+         "content":[{"type":"output_text","text":"answer","annotations":[]}]}],
+        "usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},
+        "incomplete_details":null,"error":null})", {}));
+    ASSERT_TRUE(accumulator.outcome());
+    const auto captured = std::get<sp::Completion>(*accumulator.outcome()).messages.front();
+    ASSERT_TRUE(captured.native && captured.native->complete() && captured.wire_output);
+    auto client = std::make_shared<sp::runtime::Client>(descriptor);
+    std::vector<sp::Message> history = request.messages;
+    history.push_back(captured);
+    history.push_back(sp::Message{"", sp::Role::User, {sp::Text{"next"}}});
+
+    auto projection_only = request;
+    projection_only.messages.reserve(history.size());
+    for (std::size_t index = 1; index < history.size(); ++index)
+        projection_only.messages.push_back(portable_message(project_message(history[index])));
+    const auto rejected = client->prepare(std::move(projection_only));
+    ASSERT_TRUE(rejected.error());
+    EXPECT_EQ(rejected.error()->kind, sp::ErrorKind::ReplayIneligible);
+
+    class NativePreparationNode final : public GraphNode {
+    public:
+        NativePreparationNode(std::shared_ptr<sp::runtime::Client> client,
+                              sp::responses::Request request,
+                              std::shared_ptr<const sp::NativeReplay> seal,
+                              std::shared_ptr<std::atomic<unsigned>> admitted)
+            : client_(std::move(client)), request_(std::move(request)),
+              seal_(std::move(seal)), admitted_(std::move(admitted)) {}
+        std::string get_name() const override { return "native-preparation"; }
+        asio::awaitable<NodeOutput> run(NodeInput input) override {
+            auto request = request_;
+            request.messages = input.state.get_provider_messages();
+            if (request.messages.size() < 3 || request.messages[1].native != seal_)
+                throw std::logic_error("Mapped history lost genuine native custody");
+            const auto prepared = client_->prepare(std::move(request));
+            if (!prepared.valid())
+                throw std::logic_error("Mapped native history cannot prepare its continuation");
+            ++*admitted_;
+            NodeOutput output;
+            output.writes.push_back(provider_messages_write(std::vector<sp::Message>{
+                sp::Message{"", sp::Role::User, {sp::Text{"local-observation"}}}}));
+            co_return output;
+        }
+    private:
+        std::shared_ptr<sp::runtime::Client> client_;
+        sp::responses::Request request_;
+        std::shared_ptr<const sp::NativeReplay> seal_;
+        std::shared_ptr<std::atomic<unsigned>> admitted_;
+    };
+    const auto prepared_calls = std::make_shared<std::atomic<unsigned>>(0);
+    NodeFactory::instance().register_type("mapped_native_preparer",
+        [client, request, seal = captured.native, prepared_calls](const auto&, const json&, const NodeContext&) {
+            return std::make_unique<NativePreparationNode>(client, request, seal, prepared_calls);
+        });
+    const auto child = shared_engine(one_node_graph(
+        "mapped_native_child", "mapped_native_preparer", append_channels()));
+    NodeFactory::instance().register_type("mapped_native_child",
+        [child](const auto& name, const json&, const NodeContext&) {
+            return std::make_unique<SubgraphNode>(name, child,
+                std::map<std::string, std::string>{{"history", "messages"}},
+                std::map<std::string, std::string>{{"messages", "history"}},
+                SubgraphPersistence::Stateless);
+        });
+    auto seed = provider_messages_write(std::move(history));
+    seed.channel = "history";
+    std::vector<ChannelWrite> seed_writes;
+    seed_writes.push_back(std::move(seed));
+    register_writer("mapped_native_seed", std::move(seed_writes));
+    const json definition = {
+        {"name", "mapped_native_parent"},
+        {"channels", {{"history", {{"reducer", "append"}}}}},
+        {"nodes", {{"seed", {{"type", "mapped_native_seed"}}},
+                   {"first", {{"type", "mapped_native_child"}}},
+                   {"second", {{"type", "mapped_native_child"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "seed"}},
+            {{"from", "seed"}, {"to", "first"}}, {{"from", "first"}, {"to", "second"}},
+            {{"from", "second"}, {"to", "__end__"}}})}};
+    auto parent = GraphEngine::compile(definition, NodeContext{});
+    RunConfig config;
+    config.thread_id = "mapped-native-parent";
+    const auto result = parent->run(config);
+    EXPECT_EQ(prepared_calls->load(), 2u);
+    const auto actual = result.channel<json>("history");
+    ASSERT_EQ(actual.size(), 5u);
+    EXPECT_EQ(actual[0]["content"], "question");
+    EXPECT_EQ(actual[2]["content"], "next");
+    EXPECT_EQ(actual[3]["content"], "local-observation");
+    EXPECT_EQ(actual[4]["content"], "local-observation");
+}
+
+TEST(SubgraphOutputDeltas, GenericMessagesChannelDoesNotBecomeModelHistoryAtCompletion) {
+    const json value = json::array({{{"role", "assistant"},
+        {"content", {{"state", json::array({1, true, nullptr})}}}}});
+    register_writer("generic_messages_object", {ChannelWrite{"messages", value}});
+    auto engine = GraphEngine::compile(one_node_graph(
+        "generic_messages_object", "generic_messages_object", append_channels()), NodeContext{});
+    const auto result = engine->run(RunConfig{});
+    EXPECT_EQ(result.channel<json>("messages"), value);
+    EXPECT_TRUE(result.native_messages.empty());
+    EXPECT_FALSE(result.output.contains("final_response"));
 }

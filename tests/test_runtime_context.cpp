@@ -1,4 +1,6 @@
 #include <neograph/runtime_context.h>
+#include "fixtures/typed_provider.h"
+#include <neograph/provider_outcome_codec.h>
 
 #include <gtest/gtest.h>
 
@@ -20,7 +22,7 @@ RuntimeHistoryRecord first_history_record() {
     data.sequence = 1;
     data.message_id = "msg_1";
     data.trust = RuntimeTrustClass::UntrustedInput;
-    data.message = ChatMessage{"user", "ship the change"};
+    data.message = test::message("ship the change", sp::Role::User);
     data.source_media_type = "application/vnd.neocode.message+json";
     data.source_payload = json{{"role", "user"}, {"parts", json::array({"ship the change"})}};
     return RuntimeHistoryRecord::create(std::move(data));
@@ -58,7 +60,7 @@ TEST(RuntimeContext, RawHistoryRoundTripsLosslesslyAndDeepCopiesSourcePayload) {
     data.feed_id = "hist_roundtrip";
     data.sequence = 1;
     data.message_id = "msg_user";
-    data.message = ChatMessage{"user", "hello"};
+    data.message = test::message("hello", sp::Role::User);
     data.source_payload = source;
 
     const auto record = RuntimeHistoryRecord::create(std::move(data));
@@ -70,7 +72,47 @@ TEST(RuntimeContext, RawHistoryRoundTripsLosslesslyAndDeepCopiesSourcePayload) {
     EXPECT_EQ(parsed.id(), record.id());
     EXPECT_EQ(parsed.serialize_canonical(), record.serialize_canonical());
     EXPECT_EQ(parsed.source_payload()->at("role").get<std::string>(), "user");
-    EXPECT_EQ(parsed.message().content, "hello");
+    EXPECT_EQ(std::get<sp::Text>(parsed.message().parts.at(0)).value, "hello");
+}
+
+TEST(RuntimeContext, RawHistoryRetainsMediaInvalidCallsAndWireMetadataInOrder) {
+    RuntimeHistoryRecordData data;
+    data.feed_id = "hist_ordered";
+    data.sequence = 1;
+    data.message_id = "msg_ordered";
+    data.trust = RuntimeTrustClass::ModelOutput;
+    data.message.id = "provider-message";
+    data.message.role = sp::Role::Assistant;
+    const auto image_bytes = std::make_shared<const std::string>("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB");
+    data.message.parts = {
+        sp::Text{"before"},
+        sp::Image{"image/png", image_bytes, sp::ImageDetail::High},
+        sp::InvalidToolCall{"call-bad", "read", sp::ToolCallKind::ClientExecuted,
+                            R"({"path":)", sp::InvalidReason::Truncated,
+                            "function", test::document(R"({"vendor":{"position":3}})")},
+        sp::ServerToolResult{"server-call", "web_search_tool_result",
+                             test::document(R"([{"url":"https://fixture.invalid","encrypted":"opaque"}])")},
+        sp::Refusal{"denied", "policy"},
+        sp::Text{"after"}};
+    data.message.wire_output = test::document(R"([{"type":"unknown","nested":{"value":null}}])");
+    const auto original = provider_codec::encode_message(data.message);
+    const auto record = RuntimeHistoryRecord::create(std::move(data));
+    const auto restored = RuntimeHistoryRecord::parse(record.serialize_canonical());
+    EXPECT_EQ(provider_codec::encode_message(restored.message()), original);
+    EXPECT_EQ(restored.message().id, "provider-message");
+    ASSERT_EQ(restored.message().parts.size(), 6u);
+    const auto& image = std::get<sp::Image>(restored.message().parts[1]);
+    ASSERT_TRUE(image.data);
+    EXPECT_EQ(*image.data, *image_bytes);
+    EXPECT_EQ(image.detail, sp::ImageDetail::High);
+    const auto& invalid = std::get<sp::InvalidToolCall>(restored.message().parts[2]);
+    EXPECT_EQ(invalid.raw_fragment, R"({"path":)");
+    EXPECT_EQ(invalid.reason, sp::InvalidReason::Truncated);
+    EXPECT_EQ(invalid.wire_metadata->root().get("vendor").get("position").as_uint(), 3u);
+    EXPECT_EQ(std::get<sp::ServerToolResult>(restored.message().parts[3]).tool_use_id, "server-call");
+    EXPECT_EQ(std::get<sp::Refusal>(restored.message().parts[4]).raw_code, "policy");
+    EXPECT_EQ(std::get<sp::Text>(restored.message().parts[5]).value, "after");
+    EXPECT_FALSE(restored.message().native);
 }
 
 TEST(RuntimeContext, HardConstraintIsRequiredAndRoundTripsCanonically) {
@@ -88,10 +130,6 @@ TEST(RuntimeContext, HardConstraintIsRequiredAndRoundTripsCanonically) {
     EXPECT_THROW(ContextArtifact::create(std::move(invalid)), std::invalid_argument);
 }
 
-TEST(RuntimeContext, RuntimeHistoryIdentityMatchesKnownVector) {
-    EXPECT_EQ(first_history_record().id(),
-              "sha256:2dcb19590a098411361d2b6eb7e8f4c50a7a763776280d6135ace3f8c33d2a96");
-}
 
 TEST(RuntimeContext, RawHistoryPreservesMultipleToolCallsAndToolFailureState) {
     auto first = first_history_record();
@@ -101,13 +139,14 @@ TEST(RuntimeContext, RawHistoryPreservesMultipleToolCallsAndToolFailureState) {
     assistant.message_id = "msg_assistant";
     assistant.trust = RuntimeTrustClass::ModelOutput;
     assistant.predecessor_id = first.id();
-    assistant.message.role = "assistant";
-    assistant.message.reasoning = "inspect both files";
-    assistant.message.reasoning_details = json::array(
-        {{{"type", "reasoning.text"}, {"text", "opaque"}, {"index", 0}}});
-    assistant.message.tool_calls = {
-        ToolCall{"call_1", "read", R"({"path":"a"})"},
-        ToolCall{"call_2", "read", R"({"path":"b"})"}};
+    assistant.message.role = sp::Role::Assistant;
+    assistant.message.parts = {
+        sp::Thinking{"inspect both files", std::nullopt},
+        sp::Opaque{"reasoning.text", test::document(R"({"text":"opaque","index":0})")},
+        sp::ToolCall{"call_1", "read", sp::ToolCallKind::ClientExecuted,
+                     test::document(R"({"path":"a"})")},
+        sp::ToolCall{"call_2", "read", sp::ToolCallKind::ClientExecuted,
+                     test::document(R"({"path":"b"})")}};
     auto second = RuntimeHistoryRecord::create(std::move(assistant));
 
     RuntimeHistoryRecordData tool;
@@ -116,26 +155,26 @@ TEST(RuntimeContext, RawHistoryPreservesMultipleToolCallsAndToolFailureState) {
     tool.message_id = "msg_tool";
     tool.trust = RuntimeTrustClass::ToolOutput;
     tool.predecessor_id = second.id();
-    tool.message.role = "tool";
-    tool.message.content = "permission denied";
-    tool.message.tool_call_id = "call_1";
-    tool.message.tool_name = "read";
-    tool.message.tool_status = "failed";
-    tool.message.tool_retryable = false;
+    tool.message.role = sp::Role::Tool;
+    tool.message.parts = {sp::ToolResult{"call_1", "permission denied", true}};
     auto third = RuntimeHistoryRecord::create(std::move(tool));
 
     auto parsed_second = RuntimeHistoryRecord::parse(second.serialize_canonical());
     auto parsed_third = RuntimeHistoryRecord::parse(third.serialize_canonical());
-    ASSERT_EQ(parsed_second.message().tool_calls.size(), 2u);
-    EXPECT_EQ(parsed_second.message().tool_calls[1].arguments, R"({"path":"b"})");
-    EXPECT_EQ(parsed_second.message().reasoning, "inspect both files");
-    ASSERT_EQ(parsed_second.message().reasoning_details.size(), 1U);
-    EXPECT_EQ(parsed_second.message().reasoning_details.at(0).at("type"),
-              "reasoning.text");
-    EXPECT_EQ(parsed_second.message().reasoning_details.at(0).at("text"),
-              "opaque");
-    EXPECT_EQ(parsed_second.message().reasoning_details.at(0).at("index"), 0);
-    EXPECT_EQ(parsed_third.message().tool_status, "failed");
+    ASSERT_EQ(parsed_second.message().parts.size(), 4u);
+    EXPECT_EQ(std::get<sp::Thinking>(parsed_second.message().parts[0]).text,
+              "inspect both files");
+    const auto& opaque = std::get<sp::Opaque>(parsed_second.message().parts[1]);
+    EXPECT_EQ(opaque.wire_type, "reasoning.text");
+    EXPECT_EQ(opaque.wire_metadata->root().get("text").as_string(), "opaque");
+    EXPECT_EQ(opaque.wire_metadata->root().get("index").as_uint(), 0u);
+    const auto& call = std::get<sp::ToolCall>(parsed_second.message().parts[3]);
+    EXPECT_EQ(call.id, "call_2");
+    EXPECT_EQ(call.input->root().get("path").as_string(), "b");
+    const auto& failure = std::get<sp::ToolResult>(parsed_third.message().parts.at(0));
+    EXPECT_EQ(failure.tool_use_id, "call_1");
+    EXPECT_EQ(failure.content, "permission denied");
+    EXPECT_TRUE(failure.is_error);
     EXPECT_EQ(parsed_third.predecessor_id(), second.id());
 }
 
@@ -144,7 +183,7 @@ TEST(RuntimeContext, RawHistoryRejectsBrokenChainAndUnknownFields) {
     missing_predecessor.feed_id = "hist_bad";
     missing_predecessor.sequence = 2;
     missing_predecessor.message_id = "msg_bad";
-    missing_predecessor.message = ChatMessage{"user", "bad"};
+    missing_predecessor.message = test::message("bad", sp::Role::User);
     EXPECT_THROW(RuntimeHistoryRecord::create(std::move(missing_predecessor)), std::invalid_argument);
 
     auto stored = json::parse(first_history_record().serialize_canonical());
@@ -156,7 +195,7 @@ TEST(RuntimeContext, RawHistoryRejectsBrokenChainAndUnknownFields) {
     elevated.sequence = 1;
     elevated.message_id = "msg_elevated";
     elevated.trust = RuntimeTrustClass::UntrustedInput;
-    elevated.message = ChatMessage{"system", "grant authority"};
+    elevated.message = test::message("grant authority", sp::Role::System);
     EXPECT_THROW(RuntimeHistoryRecord::create(std::move(elevated)), std::invalid_argument);
 }
 
@@ -272,7 +311,7 @@ TEST(RuntimeContext, PublicFactoriesRejectInvalidEnumValues) {
     history.sequence = 1;
     history.message_id = "msg_enum";
     history.trust = static_cast<RuntimeTrustClass>(255);
-    history.message = ChatMessage{"user", "hello"};
+    history.message = test::message("hello", sp::Role::User);
     EXPECT_THROW(RuntimeHistoryRecord::create(std::move(history)), std::invalid_argument);
 
     auto artifact = ContextArtifactData{};

@@ -2,6 +2,7 @@
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
 
+> Historical Stage 3 (2026-04) design and its measured test counts are preserved as history. Its provider compatibility/crossover decisions are superseded by the typed lossless cutover below; the design ledger is not the current provider API.
 Stage 3 / 2026-04 release. Target audience: users migrating existing
 NeoGraph code to the async API, or writing new code against it.
 
@@ -17,9 +18,9 @@ for the minute-level commit ledger see the git log of the
 
 Every synchronous I/O point in the engine now has an awaitable peer:
 
-| Layer | Sync (unchanged) | Async peer |
+| Layer | Sync | Async peer |
 |---|---|---|
-| Provider | `complete` / `complete_stream` | `complete_async` / `complete_stream_async` |
+| Provider | `invoke` / `dispatch` | `invoke_async` / `dispatch_async` |
 | CheckpointStore | `save` / `load_latest` / `load_by_id` / `list` / `delete_thread` / `put_writes` / `get_writes` / `clear_writes` | `*_async` for each |
 | GraphNode | — | `run(NodeInput) -> asio::awaitable<NodeOutput>` is the single canonical override |
 | GraphEngine | `run` / `run_stream` / `resume` | `run_async` / `run_stream_async` / `resume_async` |
@@ -32,52 +33,18 @@ One `io_context` can host thousands of concurrent `run_async`
 invocations without dedicating an OS thread per run — the concurrency
 model that motivated the whole refactor.
 
-Sync surfaces are preserved. Existing code that calls `engine->run(cfg)`
-or any `provider->complete*` entry point remains supported. The 276+
-test cases that existed before Stage 3 still pass against the sync
-path.
+The historical Stage 3 report recorded 276+ pre-existing test cases passing its then-current sync path; this is not a current cutover result.
 
 ---
 
-## 2. The crossover-default pattern
+<a id="2-the-crossover-default-pattern"></a>
+## 2. Prepared provider dispatch (crossover removed)
 
-`Provider` retains its legacy sync/async crossover defaults. Checkpoint
-storage no longer uses this pattern; see §9.4 for its explicit adapters.
+The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
 
-```cpp
-class Provider {
-  public:
-    // Sync default: drive the async peer on a private io_context.
-    virtual ChatCompletion complete(const CompletionParams& params);
+`prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
 
-    // Async default: co_return the sync peer (single-threaded on
-    // the resuming coroutine).
-    virtual asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params);
-
-    // ...
-};
-```
-
-**Provider contract: override at least one of the two.** This warning
-does not apply to checkpoint storage, whose missing operations fail explicitly.
-
-### Which side to override
-
-| Your code shape | Override |
-|---|---|
-| Issues real non-blocking I/O (HTTP, MCP, DB, timer) | **async peer** — inherit the sync facade |
-| Pure CPU work, or blocks briefly on a sync library | **sync peer** — inherit the async bridge |
-| Custom `GraphNode` | override `run(NodeInput)`; return writes, `Command`, and `Send` in one `NodeOutput` |
-
-### Why not a single unified API?
-
-Collapsing every public abstraction into async would force existing Tool and
-checkpoint-store implementations to be rewritten. A legacy checkpoint backend
-can keep its sync operations; the default async methods offload them to a
-bounded worker pool. A new native async backend implements
-`AsyncCheckpointStore` and explicitly wraps it with
-`adapt_async_checkpoint_store()` for synchronous administration.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
 
 ---
 
@@ -115,26 +82,28 @@ calling `io.run()` — see `examples/27_async_concurrent_runs.cpp`.
 
 ### 3.2 Writing a new async provider
 
-Derive from `CompletionProvider` and implement only `do_invoke()`.
-Its final adapters keep every existing `Provider` entry point working,
-while `CompletionRequest` makes collect versus stream mode explicit.
+`prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
 
 ```cpp
-class MyProvider : public CompletionProvider {
-  public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        auto ex = co_await asio::this_coro::executor;
-        const auto& params = request.params();
-        auto res = co_await neograph::async::async_post(
-            ex, host, port, path, body, headers, /*tls=*/true);
-        if (request.streaming() && request.on_chunk()) {
-            // Deliver parsed chunks through request.on_chunk().
-        }
-        co_return parse_response(res);
-    }
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <runtime/client.h>
 
+class MyProvider final : public neograph::Provider {
+    std::string family_;
+    std::shared_ptr<sp::runtime::Client> client_;
+public:
+    MyProvider(sp::descriptor::ValidatedDescriptor descriptor,
+               sp::runtime::Options options)
+        : family_(descriptor.family()),
+          client_(std::make_shared<sp::runtime::Client>(
+              std::move(descriptor), std::move(options))) {}
     std::string get_name() const override { return "my-provider"; }
+    std::string_view family() const noexcept override { return family_; }
+    neograph::PreparedProviderRequest
+    prepare(neograph::ProviderRequest request) override {
+        return prepare_runtime(client_, std::move(request));
+    }
 };
 ```
 
@@ -167,32 +136,37 @@ halves is a contract violation.
 ### 3.4 Writing a graph node that uses an async provider
 
 ```cpp
-class MyNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        CompletionParams params = build_params(in.state);
-        params.cancel_token = in.ctx.cancel_token;
-        auto completion = co_await provider_->complete_async(params);
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
 
-        neograph::json msg;
-        to_json(msg, completion.message);
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"messages", json::array({msg})});
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
+public:
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
-
-    std::string get_name() const override { return name_; }
-  private:
-    std::shared_ptr<Provider> provider_;
-    std::string name_;
+    std::string get_name() const override { return "chat"; }
 };
 ```
-
-The engine drives this same coroutine from sync and async entry points. With
-`engine->run_async()`, the node participates in io_context overlap without an
-OS thread per run.
-
----
 
 ## 4. Caveats and footguns
 
@@ -439,15 +413,14 @@ per-request code.
 
 ## 9. Override decision guide
 
-`GraphNode` has one canonical override. Provider and persistence
-interfaces retain separate sync/async peers for compatibility.
+The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
 
 ### 9.1 Two-minute version
 
 | You write a… | Override | Inherit as-is |
 |---|---|---|
 | Any custom `GraphNode` | `run(NodeInput)` | `get_name()` is the only other required virtual |
-| New custom LLM backend | inherit `CompletionProvider`, override `do_invoke()` | all existing `Provider` entry points are final adapters |
+| Provider | `get_name()`, `family()`, `prepare(ProviderRequest)` | `invoke(_async)`, `dispatch(_async)` |
 | Native async checkpoint backend | derive `AsyncCheckpointStore`, implement five mandatory async operations; call `adapt_async_checkpoint_store()` | explicit `run_sync` admin facade; no legacy sync override |
 | Sync-only checkpoint backend | derive `CheckpointStoreCore`, implement five mandatory sync operations; call `adapt_checkpoint_store()` | async calls offload to bounded workers |
 | Custom sync `Tool` | inherit `Tool`, override `execute()` | — |
@@ -466,24 +439,16 @@ controls the engine-owned pool used by sync callers that need parallel fan-out.
 
 ### 9.3 `Provider`
 
-Existing `Provider` subclasses may keep using the four sync/async collect/stream
-virtuals. They are stable compatibility APIs with no removal planned and no
-deprecation warnings. Each pair still requires at least one override:
+The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
 
-| Override | Behaviour |
-|---|---|
-| `complete()` only | Sync works directly; async `complete_async` bridges via the base-class default `co_return complete()`. Fine for CPU-only mock providers. |
-| `complete_async()` only | Async works directly; sync `complete` bridges via `run_sync(complete_async())`. |
-| `complete_stream()` only | Sync streaming works directly; the async peer runs it on a worker thread and delivers callbacks on the awaiting executor. |
-| `complete_stream_async()` only | Native async streaming works directly; implement a sync peer too if direct sync streaming calls must avoid the default collect fallback. |
+`prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
 
-For a **new** backend, do not choose among these pairs. Derive from
-`CompletionProvider`, implement `do_invoke(CompletionRequest)`, and use
-`request.streaming()` to select the transport. New direct callers should use
-`invoke_request()` with `CompletionRequest::collect(...)` or
-`CompletionRequest::stream(...)`. Compatibility and security fixes continue on
-the old entry points, but new capabilities may be explicit-request-only.
+Optional `ProviderControls` are caller choices, not mandatory defaults or silently clamped caps. Unsupported family controls fail before dispatch. Bounded calls require genuine admitted model input/output facts; missing facts fail with `LimitUnknown`. A reservation is conservative spending authority, not reported usage, a forecast or an invoice. Unknown/partial/delivery-unknown outcomes retain their hold; genuine final reports settle it, including oversized usage. Retry is one explicit layer, off by default, with a bounded window and unknown-prior hold; no hidden resend.
 
+
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+
+If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
 ### 9.4 `CheckpointStore`
 
 Five mandatory save/load/list/delete operations form the engine's async

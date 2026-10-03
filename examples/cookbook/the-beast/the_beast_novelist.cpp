@@ -35,8 +35,7 @@
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/async/run_sync.h>
+#include "../../provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -56,14 +55,21 @@ namespace ng = neograph::graph;
 
 // Provider shared by the nodes (null → offline stub mode).
 static std::shared_ptr<neograph::Provider> g_prov;
+static auto g_usage = std::make_shared<neograph::UsageAccumulator>();
 
+// Each role receives an intentional portable text projection (outline, chapter
+// summary and bible), never a reconstructed native provider continuation.
 static std::string ask(const std::string& system, const std::string& user, int max_tokens) {
-    neograph::CompletionParams p;
-    p.model = "~deepseek/deepseek-v4-flash-latest";
-    p.temperature = 0.8f;   // prose wants some warmth
-    p.max_tokens = max_tokens;
-    p.messages = {{"system", system}, {"user", user}};
-    return neograph::async::run_sync(g_prov->invoke(p, nullptr)).message.content;
+    neograph::ProviderControls controls;
+    controls.temperature = 0.8;   // prose wants some warmth
+    controls.max_output_tokens = max_tokens;
+    sp::runtime::Result response = g_prov->invoke(
+        neograph::make_provider_request(*g_prov, "~deepseek/deepseek-v4-flash-latest",
+            {neograph::portable_message({"system", system}),
+             neograph::portable_message({"user", user})}, {}, controls));
+    if (response) g_usage->add(neograph::outcome_usage(*response));
+    response = neograph::outcome_or_throw(std::move(response));
+    return neograph::outcome_text(*response);
 }
 // Extract the block after marker `a` and before marker `b` (or end).
 static std::string slice(const std::string& s, const std::string& a, const std::string& b) {
@@ -289,10 +295,7 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (key && *key)
-        g_prov = neograph::llm::OpenAIProvider::create_shared(
-            {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "~deepseek/deepseek-v4-flash-latest",
-             .provider_routing = {{"zdr", true}}});
+        g_prov = examples::make_openrouter_provider(key, "chat");
 
     std::cout << "===== THE BEAST (novelist · prompt → light-novel .txt) =====\n"
                  "Premise: " << premise.substr(0, 100) << (premise.size() > 100 ? "…" : "") << "\n"
@@ -323,8 +326,17 @@ int main(int argc, char** argv) {
 
     auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc; rc.max_steps = total + 5;
-    auto res = engine->run(rc);
-    std::string book = res.has_channel("book") ? res.channel<json>("book").get<std::string>() : "";
+    rc.usage = g_usage;
+    std::string book;
+    try {
+        auto res = engine->run(rc);
+        book = res.has_channel("book") ? res.channel<json>("book").get<std::string>() : "";
+    } catch (const std::exception& e) {
+        std::cerr << "writing failed: " << e.what() << "\n"
+                  << "usage: " << neograph::usage_to_json(g_usage->snapshot()).dump()
+                  << "; monetary charge: unknown\n";
+        return 1;
+    }
 
     // Emit the manuscript as plain .txt.
     std::string fname = "novel_" + std::to_string(total) + "ch" + (g_prov ? "" : "_stub") + ".txt";
@@ -338,5 +350,7 @@ int main(int argc, char** argv) {
     if (!g_prov)
         std::cout << "(stub run — set OPENROUTER_API_KEY for real prose; the pipeline above is "
                      "the same graph either way.)\n";
+    std::cout << "usage: " << neograph::usage_to_json(g_usage->snapshot()).dump()
+              << "; monetary charge: unknown\n";
     return 0;
 }

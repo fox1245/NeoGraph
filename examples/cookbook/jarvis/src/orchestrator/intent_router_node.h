@@ -29,7 +29,8 @@ namespace jarvis::orchestrator {
 class McpCatalog;
 class AgentDispatcher;
 
-class IntentRouterNode : public neograph::graph::GraphNode {
+class IntentRouterNode : public neograph::graph::GraphNode,
+                         public neograph::RuntimeInterpositionConsumer {
   public:
     IntentRouterNode(std::string name,
                      const neograph::json& cfg,

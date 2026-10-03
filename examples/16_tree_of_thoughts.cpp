@@ -20,7 +20,7 @@
 // Wired through SchemaProvider ("openai_responses") to OpenRouter's
 // /api/v1/responses endpoint. DeepSeek evaluates the arithmetic states.
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -37,16 +37,16 @@ struct Node {
     float       score;    // evaluator's score, 0..10
 };
 
-static ChatCompletion ask(Provider& p,
-                          const std::string& system,
-                          const std::string& user,
-                          float temperature) {
-    CompletionParams params;
-    params.model = "~deepseek/deepseek-v4-flash-latest";
-    params.temperature = temperature;
-    params.messages.push_back({"system", system});
-    params.messages.push_back({"user",   user});
-    return p.complete(params);
+static sp::runtime::Result ask(Provider& p,
+                               const std::string& system,
+                               const std::string& user,
+                               float temperature) {
+    ProviderControls controls;
+    controls.temperature = temperature;
+    return p.invoke(make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest",
+        {examples::message(sp::Role::System, system), examples::message(sp::Role::User, user)},
+        {}, std::move(controls)));
 }
 
 // Ask the LLM to propose N continuations of `current_state`.
@@ -54,7 +54,8 @@ static ChatCompletion ask(Provider& p,
 static std::vector<std::string> expand(Provider& p,
                                        const std::string& problem,
                                        const std::string& current_state,
-                                       int n) {
+                                       int n,
+                                       std::vector<std::shared_ptr<const sp::Outcome>>& outcomes) {
     const std::string sys =
         "You are a problem solver exploring multiple solution paths. "
         "Given a problem and the current partial reasoning, produce " +
@@ -68,11 +69,13 @@ static std::vector<std::string> expand(Provider& p,
         (current_state.empty() ? "<none>" : current_state) +
         "\n\nProduce " + std::to_string(n) + " different next thoughts:";
 
-    auto reply = ask(p, sys, usr, 0.9f);
+    auto reply = examples::require_outcome(ask(p, sys, usr, 0.9f));
+    outcomes.push_back(reply);
+    const std::string text = examples::visible_text(*reply);
 
     std::vector<std::string> out;
     std::string line;
-    for (char c : reply.message.content) {
+    for (char c : text) {
         if (c == '\n') {
             if (!line.empty()) out.push_back(line);
             line.clear();
@@ -95,7 +98,8 @@ static std::vector<std::string> expand(Provider& p,
 // turns the evaluator from a hand-waving rater into a real verifier.
 static float evaluate(Provider& p,
                       const std::string& problem,
-                      const std::string& full_state) {
+                      const std::string& full_state,
+                      std::vector<std::shared_ptr<const sp::Outcome>>& outcomes) {
     const std::string sys =
         "You are a strict mathematical evaluator. Follow this protocol "
         "EXACTLY:\n"
@@ -114,9 +118,10 @@ static float evaluate(Provider& p,
         "\n\nPartial reasoning:\n" + full_state +
         "\n\nEvaluate:";
 
-    auto reply = ask(p, sys, usr, 0.0f);
-    // Extract the integer after "SCORE:"
-    const std::string& txt = reply.message.content;
+    auto reply = examples::require_outcome(ask(p, sys, usr, 0.0f));
+    outcomes.push_back(reply);
+    // Explicit text projection for the evaluator's score grammar.
+    const std::string txt = examples::visible_text(*reply);
     size_t pos = txt.find("SCORE:");
     if (pos == std::string::npos) return 0.0f;
     try {
@@ -137,13 +142,7 @@ int main() {
         return 1;
     }
 
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "openai_responses";
-    cfg.api_key = api_key;
-    cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = llm::SchemaProvider::create(cfg);
+    auto provider = examples::make_openrouter_provider(api_key);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 16: Tree of Thoughts                ║\n"
@@ -165,6 +164,8 @@ int main() {
     const int BRANCHING   = 3;   // candidates per expansion (k)
     const int BEAM_WIDTH  = 5;   // top-K kept per depth (b)
 
+    // Search states are parsed text; full provider outcomes stay owned separately.
+    std::vector<std::shared_ptr<const sp::Outcome>> outcomes;
     // Start with one empty root
     std::vector<Node> frontier = {{"", 0.0f}};
 
@@ -173,11 +174,11 @@ int main() {
 
         std::vector<Node> next_level;
         for (const auto& parent : frontier) {
-            auto thoughts = expand(*provider, problem, parent.thought, BRANCHING);
+            auto thoughts = expand(*provider, problem, parent.thought, BRANCHING, outcomes);
             for (const auto& t : thoughts) {
                 std::string combined =
                     parent.thought.empty() ? t : parent.thought + "\n" + t;
-                float score = evaluate(*provider, problem, combined);
+                float score = evaluate(*provider, problem, combined, outcomes);
                 next_level.push_back({combined, score});
                 std::cout << "  [" << score << "] " << t << "\n";
             }
@@ -202,7 +203,7 @@ int main() {
     std::cout << "── Best path (score " << best.score << ") ─────────────────\n"
               << best.thought << "\n\n";
 
-    auto final_reply = ask(*provider,
+    auto final_reply = examples::require_outcome(ask(*provider,
         "You are a math solver. Given the problem and the reasoning trace, "
         "produce the final answer. You MUST:\n"
         "  1. Output a single arithmetic expression that uses each input "
@@ -215,10 +216,11 @@ int main() {
         "  CHECK: <step-by-step calculation> = <result>",
         "Problem:\n" + problem + "\n\nReasoning so far:\n" + best.thought +
         "\n\nSolve:",
-        0.0f);
+        0.0f));
+    outcomes.push_back(final_reply);
 
     std::cout << "── Final expression ─────────────────────────────────\n"
-              << final_reply.message.content << "\n\n";
+              << examples::visible_text(*final_reply) << "\n\n";
     return 0;
     } catch (const std::exception& e) {
         std::cerr << "\nError: " << e.what() << "\n";

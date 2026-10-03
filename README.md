@@ -52,10 +52,12 @@ A rejected proposal cannot publish a `ProgramVersion`, and its dynamic-compile b
 
 ### C++ Core
 
+SchemaProvider is now a required external C++ dependency even when `NEOGRAPH_BUILD_LLM=OFF`: Core exports its owned typed provider contracts. Install the SDK runtime package and set `SCHEMAPROVIDER_PREFIX` to that install prefix; the configure commands below use `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`. Alternatively supply an explicit checkout with `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`. Neither a guessed sibling checkout nor the old bundled interpreter is selected automatically. The SDK runtime/archive currently supports Linux/POSIX; there is no dependency-free, no-OpenSSL, native Windows/macOS or WASM runtime promise for this cutover.
+
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
 cmake --build build --parallel
 ./build/example_core_quickstart
 ```
@@ -66,6 +68,7 @@ Enable the programmable control plane when needed:
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
@@ -87,6 +90,7 @@ For a local, host-specific performance build on GCC or Clang:
 
 ```bash
 cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
   -DNEOGRAPH_BUILD_BENCHMARKS=ON \
@@ -140,9 +144,39 @@ NeoGraph moves important behavior outside model discretion:
 - durable runtime developer instructions and admitted topology transitions.
 
 NeoGraph guarantees construction, admission, dispatch, and evidence boundaries. It does not claim an LLM attended to every token.
+## Typed C++ provider calls
+
+`SchemaProvider` accepts an admitted `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options` and optional `SchemaProvider::Defaults`. Descriptor loading is closed/versioned data admission, not a request/response interpreter or arbitrary primitive registry. Credentials belong in runtime options, not public descriptor files. Defaults contain only typed OpenRouter routing and Responses retention (`responses_store`); the latter is valid only for Responses. Hosted OpenRouter routing, retention and JSON formats remain declared typed controls. Images, Veo and Decisions use separate NeoGraph typed clients and separate authorization; they do not inherit an SDK chat grant.
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result first_call(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model) {
+    neograph::llm::SchemaProvider provider(
+        std::move(descriptor), std::move(options), {});
+    std::vector<sp::Message> history{
+        {.role = sp::Role::User, .parts = {sp::Text{"hi"}}}};
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history));
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));
+}
+```
+
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+
+`ChatMessage` / `ChatTool` and JSON are portable projections, not native authority. Current portable formats are [`provider-message-v2`](schemas/provider-message-v2.schema.json) and [`runtime-history-record-v2`](schemas/runtime-history-record-v2.schema.json). Genuine C++ in-memory checkpoint sidecars retain native seals without an archive. Durable native history and bank references require a real `sp::NativeArchive`: closed v2 / `spna2`, authenticated owner-private protected custody with an independent key, not encryption and not vendor-issuer authentication. Never publish archive bodies, keys, native blobs or raw wire observations. Managed recovery/forks share the canonical charged/reserved/report/dedup bank without renewal. Generic bounded durable forks require an external host-shared bank and journal; copied snapshots cannot grant independent sp…
+
+
+If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
 
 ## Python
 
+> The Python material below describes existing bindings; provider bindings/wrappers are explicitly deferred and have not been ported or exercised for the typed lossless C++ cutover. Installing a historical wheel does not expose the new C++ provider API.
 The Python package uses the same C++ engine and now includes the Program, Hook, strict-context, runtime-policy, and SQLite durability surfaces:
 
 ```bash
@@ -191,10 +225,11 @@ See [Python binding guide](docs/python-binding.md) and [Python examples](binding
 
 ## Build configuration
 
-Core-only users do not pay for Program or QuickJS:
+Core-only builds still omit Program and QuickJS, but no longer omit SchemaProvider runtime:
 
 ```bash
 cmake -S . -B build-core \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DNEOGRAPH_BUILD_PROGRAM=OFF \
   -DNEOGRAPH_BUILD_LLM=OFF \
   -DNEOGRAPH_BUILD_MCP=OFF
@@ -204,6 +239,7 @@ Important options:
 
 | Option | Purpose |
 |---|---|
+| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | Explicit SDK source checkout; otherwise an installed runtime package is required. |
 | `NEOGRAPH_BUILD_PROGRAM` | Durable Program values, catalog, runtime, lineage and migration |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program authoring and generator commands |
 | `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | Opt into non-portable host-specific instruction tuning for optimized configurations |
@@ -216,9 +252,17 @@ Important options:
 
 Use the narrow CMake target matching your deployment: `neograph::core`, `neograph::llm`, `neograph::program`, `neograph::mcp`, `neograph::a2a`, or another enabled component.
 
+The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
+
+```cmake
+find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(NeoGraph CONFIG REQUIRED)
+target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
+```
+
 ## Verification
 
-The repository runs deterministic C++ and Python suites, Program replay/migration probes, DSL capability fixtures, documentation/i18n checks, sanitizers, and optional live-model evaluations. Benchmark claims belong in [benchmarks](benchmarks/README.md) and the dated [performance report](docs/performance-deep-dive.md), not as timeless API guarantees.
+`scripts/test_find_package.sh` describes installed-consumer checks; its existence is not a current pass claim. The current SDK ABI3 full rebuild/CTest passed 26/26, and the shared installed consumer exercised real local HTTP two-turn typed requests, tool/native/refusal/known-zero outcomes and mismatch rejection. These results do not qualify NeoGraph, Python, Windows, macOS, WASM or paid live-provider compatibility. NeoGraph integrated verification is reported separately.
 
 ## Documentation
 

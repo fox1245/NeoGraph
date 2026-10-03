@@ -12,12 +12,38 @@
 #include <neograph/api.h>
 #include <neograph/graph/channel_key.h>
 #include <neograph/graph/types.h>
+#include <neograph/graph/run_context.h>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <vector>
+#include <core/native_archive.h>
 
 namespace neograph::graph {
+namespace detail { class ManagedBudgetJournalAccess; }
+class NativeGraphCheckpoint final {
+private:
+    struct History {
+        std::vector<sp::Message> messages;
+        json projection = json::array();
+    };
+    struct BudgetBinding {
+        std::shared_ptr<UsageAccumulator> bank;
+        std::uint64_t ceiling = 0;
+        std::uint64_t original_ceiling = 0;
+        bool managed = false;
+        std::string owner_scope, thread_id, graph_identity;
+        std::string original_thread_id, fork_source_thread_id;
+    };
+    std::map<std::string, History> histories_;
+    std::map<std::string, ProviderLoopHistory::Entry> loops_;
+    std::vector<sp::runtime::Result> outcomes_;
+    std::optional<BudgetBinding> budget_;
+    json projection_;
+    NativeGraphCheckpoint() = default;
+    friend class GraphState;
+    friend class detail::ManagedBudgetJournalAccess;
+};
 
 /**
  * @brief Thread-safe container for all graph state channels.
@@ -75,6 +101,27 @@ public:
      * @return Vector of ChatMessage objects from the "messages" channel.
      */
     std::vector<ChatMessage> get_messages() const;
+    /// Full ordered provider history; JSON is only its portable projection.
+    std::vector<sp::Message> get_provider_messages(const std::string& channel = "messages") const;
+    /// Captured C++ history only; never interprets an arbitrary JSON channel.
+    std::optional<std::vector<sp::Message>> captured_provider_messages(
+        const std::string& channel = "messages") const;
+    void set_native_history_archive(std::shared_ptr<sp::NativeArchive> archive);
+    void copy_provider_history_from(const GraphState& source);
+    void set_provider_run_history(std::shared_ptr<ProviderLoopHistory> loops,
+                                  std::shared_ptr<ProviderOutcomes> outcomes);
+    std::vector<sp::runtime::Result> provider_outcomes() const;
+    void configure_budget_bank(std::shared_ptr<UsageAccumulator> bank, std::uint64_t ceiling,
+        bool managed, std::string owner_scope, std::string thread_id, std::string graph_identity);
+    std::shared_ptr<UsageAccumulator> budget_bank() const;
+    std::uint64_t budget_ceiling() const;
+    std::uint64_t budget_original_ceiling() const;
+    std::string budget_original_thread_id() const;
+    bool budget_managed() const;
+    void defer_budget_authority_restore();
+    void activate_budget_authority(bool observation_only = false);
+    void rebind_fork_budget_thread(std::string thread_id, bool original_in_memory_custody);
+    void validate_budget_context(const std::string& graph_identity, const std::string& thread_id) const;
 
     /**
      * @brief Write a value to a single channel through its reducer (exclusive lock).
@@ -120,6 +167,8 @@ public:
     /// Isolated in-process Send workers need every live channel, including
     /// ephemeral values. Never pass this representation to a checkpoint store.
     json serialize_runtime() const;
+    /// Cacheable channel/native inputs, excluding operational budget authority.
+    json serialize_cache() const;
     void restore_runtime(const json& data);
 
     /// Record which non-checkpointed channels existed at this checkpoint.
@@ -128,7 +177,9 @@ public:
 
     /// Reject missing/incompatible guards and lost ephemeral values before
     /// restoring a durable checkpoint.
-    void restore_checkpoint(const json& data, const json& guard);
+    void restore_checkpoint(const json& data, const json& guard,
+                            std::shared_ptr<const NativeGraphCheckpoint> native = {});
+    std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> checkpoint_snapshot() const;
 
 
     /**
@@ -157,6 +208,23 @@ public:
 private:
     std::map<std::string, Channel> channels_;
     uint64_t global_version_ = 0;
+    using ProviderHistory = NativeGraphCheckpoint::History;
+    std::map<std::string, ProviderHistory> provider_histories_;
+    std::shared_ptr<sp::NativeArchive> native_history_archive_;
+    std::shared_ptr<ProviderLoopHistory> provider_loops_;
+    std::shared_ptr<ProviderOutcomes> provider_outcomes_;
+    std::optional<NativeGraphCheckpoint::BudgetBinding> provider_budget_;
+    bool defer_budget_authority_ = false;
+    std::optional<UsageAccumulator::AuthoritySnapshot> deferred_budget_authority_;
+    std::shared_ptr<UsageAccumulator> deferred_budget_bank_;
+    void admit_budget_binding(NativeGraphCheckpoint::BudgetBinding saved,
+                              std::optional<UsageAccumulator::AuthoritySnapshot> authority);
+    json managed_budget_projection_locked() const;
+    void update_provider_history_locked(const std::string& channel, const json& before, const json& incoming,
+        const json& after, const std::shared_ptr<const std::vector<sp::Message>>& native);
+    void save_provider_history_locked(json& snapshot, bool durable = true, bool include_budget = true) const;
+    json serialize_runtime_locked(bool include_budget) const;
+    void restore_provider_history_locked(const json& snapshot, bool trusted_runtime_copy = false);
     mutable std::shared_mutex mutex_;
 };
 

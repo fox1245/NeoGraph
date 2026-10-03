@@ -1,148 +1,100 @@
-// NeoGraph Example 29: /v1/responses envelope dump (debug aid)
-//
-// Single-purpose: ask /v1/responses a question with one tool registered,
-// dump the raw JSON envelope, and break out the output[] item types so
-// you can see at a glance what a tool-calling response actually looks
-// like before SchemaProvider flattens it into ChatCompletion.
-//
-// Useful for:
-//   - debugging schema_provider parsing regressions
-//   - learning the Responses API shape (function_call vs message vs
-//     web_search_call vs reasoning items)
-//   - confirming a model variant returns the items you expect
-//
-// Bypasses SchemaProvider on purpose — this is a wire-level peek.
-//
-// Usage:
-//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-//   ./example_responses_envelope
-//   ./example_responses_envelope "What's the weather in Tokyo?"
+// NeoGraph Example 29: full typed Responses envelope and ordered output dump.
+// Usage: ./example_responses_envelope ["What's the weather in Tokyo?"]
+// SchemaProvider owns HTTP admission/decoding. JSON below is only the function's
+// declared parameter schema, never an untyped request-body override.
 
-#include <neograph/neograph.h>
-#include <neograph/async/http_client.h>
-#include <neograph/async/endpoint.h>
-#include <neograph/async/run_sync.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
-
-#include <asio/this_coro.hpp>
-
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
-#include <vector>
-
-using namespace neograph;
-
-static asio::awaitable<async::HttpResponse>
-post_responses(async::AsyncEndpoint endpoint,
-               std::string body,
-               std::string auth_value) {
-    std::vector<std::pair<std::string, std::string>> headers = {
-        {"Authorization", std::move(auth_value)},
-        {"Content-Type",  "application/json"},
-    };
-    async::RequestOptions opts;
-    opts.timeout = std::chrono::seconds(60);
-
-    auto ex = co_await asio::this_coro::executor;
-    co_return co_await async::async_post(
-        ex,
-        endpoint.host,
-        endpoint.port,
-        endpoint.prefix + "/v1/responses",
-        std::move(body),
-        std::move(headers),
-        endpoint.tls,
-        opts);
-}
+#include <type_traits>
+#include <utility>
+#include <variant>
 
 int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
-
     try {
         const char* api_key = std::getenv("OPENROUTER_API_KEY");
         if (!api_key) {
-            std::cerr << "Set OPENROUTER_API_KEY environment variable "
-                         "(or put it in .env beside the binary)\n";
+            std::cerr << "Set OPENROUTER_API_KEY (env or .env)\n";
             return 1;
         }
-        const std::string model = "~deepseek/deepseek-v4-flash-latest";
-
-        std::string question = (argc >= 2)
-            ? argv[1]
+        const std::string model = examples::openrouter_model;
+        const std::string question = argc >= 2 ? argv[1]
             : "What is the weather right now in Tokyo? Use the get_weather "
               "tool if you need a current value.";
-
-        // One function tool so the model has a non-trivial choice between
-        // {"answer directly"} and {"call the tool"}. Hand-shaped to match
-        // OpenRouter Responses-compatible flat-function tool definition.
-        json tools = json::array({
-            json{
-                {"type",        "function"},
-                {"name",        "get_weather"},
-                {"description", "Look up the current weather for a city."},
-                {"parameters",  {
-                    {"type",       "object"},
-                    {"properties", {
-                        {"city", {{"type", "string"},
-                                  {"description", "City name"}}},
-                        {"unit", {{"type", "string"},
-                                  {"enum", json::array({"C", "F"})}}}
-                    }},
-                    {"required",   json::array({"city"})}
-                }}
-            }
-        });
-
-        json body;
-        body["model"] = model;
-        body["input"] = question;
-        body["tools"] = tools;
-        body["provider"] = {{"zdr", true}};
-
-        auto endpoint = async::split_async_endpoint("https://openrouter.ai/api");
-        auto resp = async::run_sync(post_responses(
-            endpoint, body.dump(), "Bearer " + std::string(api_key)));
-        if (resp.status != 200) {
-            std::cerr << "HTTP " << resp.status << ": "
-                      << resp.body.substr(0, 1000) << "\n";
-            return 2;
-        }
-
-        auto envelope = json::parse(resp.body);
-
+        auto parameters = sp::json::parse(R"({
+            "type":"object",
+            "properties":{
+                "city":{"type":"string","description":"City name"},
+                "unit":{"type":"string","enum":["C","F"]}
+            },
+            "required":["city"]
+        })");
+        if (const auto* error = std::get_if<sp::json::ParseError>(&parameters))
+            throw std::invalid_argument(error->message);
+        sp::responses::ToolDefinition weather;
+        weather.name = "get_weather";
+        weather.description = "Look up the current weather for a city.";
+        weather.parameters = std::make_shared<const sp::json::Document>(
+            std::get<sp::json::Document>(std::move(parameters)));
+        sp::responses::Request payload;
+        payload.model = model;
+        payload.messages.push_back(examples::message(sp::Role::User, question));
+        payload.tools.push_back(std::move(weather));
+        neograph::ProviderRequest request;
+        request.payload = std::move(payload);
+        request.options.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        auto provider = examples::make_openrouter_provider(api_key, "responses", std::chrono::seconds(60));
+        // Retain failures as well: their partial parts and native envelopes are
+        // just as important to inspection as successful completions.
+        const std::shared_ptr<const sp::Outcome> outcome = provider->invoke(std::move(request));
+        if (!outcome) throw std::runtime_error("Provider returned no owned Outcome");
         std::cout << "=== model    : " << model << "\n"
                   << "=== question : " << question << "\n\n";
-
-        std::cout << "─── Item-type summary ─────────────────────────────────\n";
-        if (envelope.contains("output") && envelope["output"].is_array()) {
-            int idx = 0;
-            for (const auto& item : envelope["output"]) {
-                std::string type = item.value("type", "?");
-                std::cout << "  [" << idx++ << "] " << type;
-                if (type == "function_call") {
-                    std::cout << "  name=" << item.value("name", "?")
-                              << "  args=" << item.value("arguments", "");
-                } else if (type == "message") {
-                    int parts = item.contains("content") &&
-                                item["content"].is_array()
-                        ? static_cast<int>(item["content"].size()) : 0;
-                    std::cout << "  parts=" << parts;
+        std::visit([](const auto& terminal) {
+            const auto& complete = [&]() -> const auto& {
+                if constexpr (std::is_same_v<std::decay_t<decltype(terminal)>, sp::Failure>)
+                    return terminal.partial;
+                else return terminal;
+            }();
+            std::cout << "--- Full response envelope ---\n";
+            if (complete.wire_envelope)
+                std::cout << complete.wire_envelope->root().dump() << "\n";
+            else
+                std::cout << "(no response envelope received)\n";
+            std::cout << "--- Ordered native output items and typed parts ---\n";
+            std::size_t message_index = 0;
+            for (const auto& message : complete.messages) {
+                std::cout << "message[" << message_index++ << "] id=" << message.id
+                          << " native_seal=" << static_cast<bool>(message.native) << "\n";
+                if (message.wire_output) {
+                    std::size_t item_index = 0;
+                    for (const auto item : message.wire_output->root().elements()) {
+                        std::cout << "  output[" << item_index++ << "] "
+                                  << item.get("type").as_string() << "\n"
+                                  << "    " << item.dump() << "\n";
+                    }
                 }
-                std::cout << "\n";
+                // Includes every ordered typed Part, function arguments,
+                // citations, reasoning, opaque hosted outputs and artifacts.
+                std::cout << neograph::message_projection_json(message).dump(2) << "\n";
             }
-        } else {
-            std::cout << "  (no output[] array)\n";
+        }, *outcome);
+        std::cout << "--- Full terminal Outcome ---\n"
+                  << neograph::outcome_projection_json(*outcome).dump(2) << "\n";
+        if (const auto* failure = std::get_if<sp::Failure>(outcome.get())) {
+            std::cerr << "Error: " << failure->error.safe_message
+                      << " (HTTP " << failure->error.http_status << ")\n";
+            return 2;
         }
-        std::cout << "\n";
-
-        std::cout << "─── Raw envelope ──────────────────────────────────────\n"
-                  << envelope.dump(2) << "\n";
         return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "\nError: " << e.what() << "\n";
+    } catch (const std::exception& error) {
+        std::cerr << "\nError: " << error.what() << "\n";
         return 1;
     }
 }

@@ -29,7 +29,7 @@
 // For production RAG with PGVector + gRPC, see NexaGraph.
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/graph/react_graph.h>
 
 #include <cppdotenv/dotenv.hpp>
@@ -303,11 +303,10 @@ static std::vector<Document> create_knowledge_base() {
 
         {"doc_6",
          "LLM Provider Support",
-         "NeoGraph supports multiple LLM providers through two mechanisms: "
-         "OpenAIProvider for any OpenAI-compatible API (OpenAI, Groq, Together, "
-         "vLLM, Ollama), and SchemaProvider which adapts to any LLM API via a "
-         "JSON schema. Built-in schemas are provided for OpenAI, Claude, and Gemini. "
-         "New providers can be added by creating a JSON schema file.",
+         "NeoGraph uses SchemaProvider's typed SDK runtime for admitted chat, "
+         "messages, responses, Gemini, and interactions requests. "
+         "Descriptors pin endpoint, model, and supported controls; complete "
+         "ordered outcomes retain native provider history and nullable usage.",
          "docs/providers.md",
          {}},
 
@@ -356,14 +355,8 @@ int main() {
     store->add_documents(create_knowledge_base());
 
     // 4. Create LLM provider
-    neograph::llm::OpenAIProvider::Config llm_config;
-    llm_config.api_key = api_key;
-    llm_config.base_url = "https://openrouter.ai/api";
-    llm_config.default_model = "~deepseek/deepseek-v4-flash-latest";
-    llm_config.provider_routing = {{"zdr", true}};
     auto provider = std::shared_ptr<neograph::Provider>(
-        neograph::llm::OpenAIProvider::create(llm_config)
-    );
+        examples::make_openrouter_provider(api_key));
 
     // 5. Create tools and ReAct graph
     std::vector<std::unique_ptr<neograph::Tool>> tools;
@@ -376,7 +369,8 @@ int main() {
         "ALWAYS use the search_documents tool first to find relevant information "
         "before answering. Base your answers on the retrieved documents. "
         "If the documents don't contain relevant information, say so. "
-        "Cite the source document when possible."
+        "Cite the source document when possible.",
+        examples::openrouter_model
     );
 
     // 6. Interactive CLI loop
@@ -392,19 +386,22 @@ int main() {
         if (input == "quit" || input == "exit" || input == "q") break;
 
         neograph::graph::RunConfig config;
-        config.input = {{"messages", json::array({
-            {{"role", "user"}, {"content", input}}
-        })}};
+        config.provider_messages = std::vector<sp::Message>{
+            examples::message(sp::Role::User, input)};
+        config.on_provider_event = [](const sp::Event& event) {
+            if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+                delta && delta->payload.kind == sp::PartKind::Text
+                && delta->payload.channel == sp::DeltaChannel::Content)
+                std::cout << delta->payload.bytes << std::flush;
+        };
         config.max_steps = 10;
 
         std::cout << "\nAssistant: " << std::flush;
 
         auto result = engine->run_stream(config,
             [](const neograph::graph::GraphEvent& event) {
-                if (event.type == neograph::graph::GraphEvent::Type::LLM_TOKEN) {
-                    std::cout << event.data.get<std::string>() << std::flush;
-                } else if (event.type == neograph::graph::GraphEvent::Type::NODE_START
-                           && event.node_name == "tools") {
+                if (event.type == neograph::graph::GraphEvent::Type::NODE_START
+                    && event.node_name == "tools") {
                     std::cerr << "\n  [searching documents...]\n";
                 }
             });

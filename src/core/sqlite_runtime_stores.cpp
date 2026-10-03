@@ -68,13 +68,210 @@ HookOutboxEntry checked_hook(std::string_view id,sqlite3_int64 state,std::string
 std::optional<HookOutboxEntry> hook(sqlite3* db,std::string_view id){Stmt s(db,"SELECT canonical,state FROM ng_hook_outbox WHERE invocation_id=?1");s.text(1,id);if(!s.row())return std::nullopt;auto canonical=bytes(s.get(),0);return checked_hook(id,sqlite3_column_int64(s.get(),1),canonical);}
 void save_hook(sqlite3* db,const HookOutboxEntry& e){Stmt s(db,"UPDATE ng_hook_outbox SET canonical=?2,state=?3 WHERE invocation_id=?1");s.text(1,e.data().invocation.id());s.text(2,e.serialize_canonical());s.i64(3,static_cast<unsigned>(e.data().state));s.done();if(sqlite3_changes(db)!=1)throw std::runtime_error("SQLite hook entry disappeared during update");}
 }
-struct SQLiteContextStore::Impl { explicit Impl(std::string p){open(db,p);} ~Impl(){if(db)sqlite3_close_v2(db);} sqlite3* db=nullptr;mutable std::mutex mu;};
-SQLiteContextStore::SQLiteContextStore(std::string p):impl_(std::make_unique<Impl>(std::move(p))){} SQLiteContextStore::~SQLiteContextStore()=default; SQLiteContextStore::SQLiteContextStore(SQLiteContextStore&&) noexcept=default; SQLiteContextStore& SQLiteContextStore::operator=(SQLiteContextStore&&) noexcept=default;
-ContextStoreAppendResult SQLiteContextStore::append_history(const ContextStoreFeed& f,const RuntimeHistoryRecord& r,const std::optional<std::string>& expected){validate_feed(f);if(r.feed_id()!=f.feed_id)throw std::invalid_argument("record does not belong to feed");if(expected&&!detail::is_sha256_identity(*expected))throw std::invalid_argument("invalid expected head");auto canonical=r.serialize_canonical();if(canonical.size()>InMemoryContextStore::MAX_RECORD_BYTES)throw std::invalid_argument("record too large");std::lock_guard l(impl_->mu);Tx tx(impl_->db);Stmt old(impl_->db,"SELECT canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence=?3");old.text(1,f.owner_id);old.text(2,f.feed_id);old.i64(3,r.sequence());if(old.row()){const auto stored=bytes(old.get(),0);const auto parsed=RuntimeHistoryRecord::parse(stored);if(parsed.feed_id()!=f.feed_id||parsed.sequence()!=r.sequence())throw std::runtime_error("corrupt history record metadata");auto same=stored==canonical;tx.commit();return same?ContextStoreAppendResult::AlreadyPresent:ContextStoreAppendResult::Conflict;}Stmt duplicate(impl_->db,"SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND json_extract(CAST(canonical AS TEXT),'$.message_id')=?3");duplicate.text(1,f.owner_id);duplicate.text(2,f.feed_id);duplicate.text(3,r.message_id());if(duplicate.row()){const auto sequence=sqlite3_column_int64(duplicate.get(),0);const auto record_id=text(duplicate.get(),1);const auto parsed=RuntimeHistoryRecord::parse(bytes(duplicate.get(),2));if(sequence<1||parsed.feed_id()!=f.feed_id||parsed.sequence()!=static_cast<std::uint64_t>(sequence)||parsed.id()!=record_id||parsed.message_id()!=r.message_id())throw std::runtime_error("corrupt history message identity index");tx.commit();return ContextStoreAppendResult::Conflict;} Stmt head(impl_->db,"SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 ORDER BY sequence DESC LIMIT 1");head.text(1,f.owner_id);head.text(2,f.feed_id);std::uint64_t seq=0;std::string id;if(head.row()){auto n=sqlite3_column_int64(head.get(),0);if(n<1)throw std::runtime_error("corrupt history sequence");seq=static_cast<std::uint64_t>(n);id=text(head.get(),1);const auto parsed=RuntimeHistoryRecord::parse(bytes(head.get(),2));if(parsed.feed_id()!=f.feed_id||parsed.sequence()!=seq||parsed.id()!=id)throw std::runtime_error("corrupt history head");}if(r.sequence()!=seq+1||(expected?*expected:"")!=id||(r.sequence()==1?r.predecessor_id().has_value():!r.predecessor_id()||*r.predecessor_id()!=id)){tx.commit();return ContextStoreAppendResult::Conflict;}Stmt put(impl_->db,"INSERT INTO ng_runtime_history VALUES(?1,?2,?3,?4,?5)");put.text(1,f.owner_id);put.text(2,f.feed_id);put.i64(3,r.sequence());put.text(4,r.id());put.text(5,canonical);put.done();tx.commit();return ContextStoreAppendResult::Appended;}
-ContextStoreHead SQLiteContextStore::history_head(const ContextStoreFeed& f)const{validate_feed(f);std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 ORDER BY sequence DESC LIMIT 1");s.text(1,f.owner_id);s.text(2,f.feed_id);if(!s.row())return {};auto n=sqlite3_column_int64(s.get(),0);if(n<1)throw std::runtime_error("corrupt history sequence");auto id=text(s.get(),1);auto parsed=RuntimeHistoryRecord::parse(bytes(s.get(),2));if(parsed.feed_id()!=f.feed_id||parsed.sequence()!=static_cast<std::uint64_t>(n)||parsed.id()!=id)throw std::runtime_error("corrupt history head");return {static_cast<std::uint64_t>(n),std::move(id)};}
-std::optional<RuntimeHistoryRecord> SQLiteContextStore::history_record_by_message_id(const ContextStoreFeed& f,std::string_view message_id)const{validate_feed(f);if(message_id.empty()||message_id.size()>512)throw std::invalid_argument("Context history message id is invalid");detail::validate_token(message_id,"Context history message id");std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND json_extract(CAST(canonical AS TEXT),'$.message_id')=?3");s.text(1,f.owner_id);s.text(2,f.feed_id);s.text(3,message_id);if(!s.row())return std::nullopt;const auto sequence=sqlite3_column_int64(s.get(),0);const auto record_id=text(s.get(),1);auto parsed=RuntimeHistoryRecord::parse(bytes(s.get(),2));if(sequence<1||parsed.feed_id()!=f.feed_id||parsed.sequence()!=static_cast<std::uint64_t>(sequence)||parsed.id()!=record_id||parsed.message_id()!=message_id)throw std::runtime_error("corrupt history message identity index");if(s.row())throw std::runtime_error("history message identity is not unique");return parsed;}
-ContextHistoryRange SQLiteContextStore::snapshot_history(const ContextStoreFeed& f,std::uint64_t from,std::uint64_t through)const{validate_feed(f);if(!from||through<from||through-from>=InMemoryContextStore::MAX_RANGE_RECORDS)throw std::invalid_argument("invalid range");std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence>=?3 AND sequence<=?4 ORDER BY sequence");s.text(1,f.owner_id);s.text(2,f.feed_id);s.i64(3,from);s.i64(4,through);std::string jsonl;for(auto n=from;s.row();++n){if(sqlite3_column_int64(s.get(),0)!=static_cast<sqlite3_int64>(n))throw std::out_of_range("range is not present");auto id=text(s.get(),1);auto b=bytes(s.get(),2);auto parsed=RuntimeHistoryRecord::parse(b);if(parsed.feed_id()!=f.feed_id||parsed.sequence()!=n||parsed.id()!=id)throw std::runtime_error("corrupt history snapshot");if(b.size()+(jsonl.empty()?0:1)>InMemoryContextStore::MAX_RANGE_BYTES-jsonl.size())throw std::invalid_argument("range too large");if(!jsonl.empty())jsonl+='\n';jsonl+=b;}if(jsonl.empty()||std::count(jsonl.begin(),jsonl.end(),'\n')+1!=through-from+1)throw std::out_of_range("range is not present");ContextHistoryRange r{f.owner_id,f.feed_id,from,through,digest(jsonl),{}};r.artifact_uri=uri(r);return r;}
-std::string SQLiteContextStore::hydrate_history(const ContextHistoryRange& r)const{validate_feed({r.owner_id,r.feed_id});if(!r.from_sequence||r.through_sequence<r.from_sequence||r.through_sequence-r.from_sequence>=InMemoryContextStore::MAX_RANGE_RECORDS||!detail::is_sha256_identity(r.digest)||r.artifact_uri!=uri(r))throw std::invalid_argument("invalid range");std::lock_guard l(impl_->mu);std::optional<std::string> prev;if(r.from_sequence>1){Stmt p(impl_->db,"SELECT canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence=?3");p.text(1,r.owner_id);p.text(2,r.feed_id);p.i64(3,r.from_sequence-1);if(!p.row())throw std::invalid_argument("broken history chain");prev=RuntimeHistoryRecord::parse(bytes(p.get(),0)).id();}Stmt s(impl_->db,"SELECT sequence,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence>=?3 AND sequence<=?4 ORDER BY sequence");s.text(1,r.owner_id);s.text(2,r.feed_id);s.i64(3,r.from_sequence);s.i64(4,r.through_sequence);std::string out;for(auto n=r.from_sequence;n<=r.through_sequence;++n){if(!s.row()||sqlite3_column_int64(s.get(),0)!=static_cast<sqlite3_int64>(n))throw std::invalid_argument("broken history chain");auto b=bytes(s.get(),1);auto x=RuntimeHistoryRecord::parse(b);if(x.feed_id()!=r.feed_id||x.sequence()!=n||(n==1?x.predecessor_id().has_value():!x.predecessor_id()||!prev||*x.predecessor_id()!=*prev))throw std::invalid_argument("broken history chain");prev=x.id();if(!out.empty())out+='\n';out+=b;}if(digest(out)!=r.digest)throw std::invalid_argument("range digest mismatch");return out;}
+struct SQLiteContextStore::Impl {
+    Impl(std::string path, std::shared_ptr<sp::NativeArchive> archive_)
+        : archive(std::move(archive_)) { open(db, path); }
+    ~Impl() { if (db) sqlite3_close_v2(db); }
+    RuntimeHistoryRecord decode(std::string_view bytes, std::string_view owner) const {
+        if (archive && archive->owner_scope() != owner)
+            throw std::invalid_argument("Context native archive owner mismatch");
+        return RuntimeHistoryRecord::parse(bytes, archive, owner);
+    }
+    sqlite3* db = nullptr;
+    std::shared_ptr<sp::NativeArchive> archive;
+    mutable std::mutex mu;
+};
+SQLiteContextStore::SQLiteContextStore(std::string path, std::shared_ptr<sp::NativeArchive> archive)
+    : impl_(std::make_unique<Impl>(std::move(path), std::move(archive))) {}
+SQLiteContextStore::~SQLiteContextStore() = default;
+SQLiteContextStore::SQLiteContextStore(SQLiteContextStore&&) noexcept = default;
+SQLiteContextStore& SQLiteContextStore::operator=(SQLiteContextStore&&) noexcept = default;
+
+ContextStoreAppendResult SQLiteContextStore::append_history(
+    const ContextStoreFeed& feed, const RuntimeHistoryRecord& record,
+    const std::optional<std::string>& expected) {
+    validate_feed(feed);
+    if (record.feed_id() != feed.feed_id)
+        throw std::invalid_argument("record does not belong to feed");
+    if (expected && !detail::is_sha256_identity(*expected))
+        throw std::invalid_argument("invalid expected head");
+    if (impl_->archive && impl_->archive->owner_scope() != feed.owner_id)
+        throw std::invalid_argument("Context native archive owner mismatch");
+    if (record.serialize_canonical().size() > InMemoryContextStore::MAX_RECORD_BYTES)
+        throw std::invalid_argument("record too large");
+    std::lock_guard lock(impl_->mu);
+    Tx tx(impl_->db);
+    Stmt old(impl_->db, "SELECT canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence=?3");
+    old.text(1, feed.owner_id); old.text(2, feed.feed_id); old.i64(3, record.sequence());
+    if (old.row()) {
+        const auto parsed = impl_->decode(bytes(old.get(), 0), feed.owner_id);
+        if (parsed.feed_id() != feed.feed_id || parsed.sequence() != record.sequence())
+            throw std::runtime_error("corrupt history record metadata");
+        const bool same = parsed.id() == record.id();
+        tx.commit();
+        return same ? ContextStoreAppendResult::AlreadyPresent : ContextStoreAppendResult::Conflict;
+    }
+    Stmt duplicate(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND json_extract(CAST(canonical AS TEXT),'$.message_id')=?3");
+    duplicate.text(1, feed.owner_id); duplicate.text(2, feed.feed_id); duplicate.text(3, record.message_id());
+    if (duplicate.row()) {
+        const auto sequence = sqlite3_column_int64(duplicate.get(), 0);
+        const auto parsed = impl_->decode(bytes(duplicate.get(), 2), feed.owner_id);
+        if (sequence < 1 || parsed.feed_id() != feed.feed_id ||
+            parsed.sequence() != static_cast<std::uint64_t>(sequence) ||
+            parsed.id() != text(duplicate.get(), 1) || parsed.message_id() != record.message_id())
+            throw std::runtime_error("corrupt history message identity index");
+        tx.commit();
+        return ContextStoreAppendResult::Conflict;
+    }
+    Stmt head(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 ORDER BY sequence DESC LIMIT 1");
+    head.text(1, feed.owner_id); head.text(2, feed.feed_id);
+    std::uint64_t sequence = 0;
+    std::string id;
+    if (head.row()) {
+        const auto n = sqlite3_column_int64(head.get(), 0);
+        if (n < 1) throw std::runtime_error("corrupt history sequence");
+        sequence = static_cast<std::uint64_t>(n);
+        id = text(head.get(), 1);
+        const auto parsed = impl_->decode(bytes(head.get(), 2), feed.owner_id);
+        if (parsed.feed_id() != feed.feed_id || parsed.sequence() != sequence || parsed.id() != id)
+            throw std::runtime_error("corrupt history head");
+    }
+    if (record.sequence() != sequence + 1 || (expected ? *expected : "") != id ||
+        (record.sequence() == 1 ? record.predecessor_id().has_value() :
+         !record.predecessor_id() || *record.predecessor_id() != id)) {
+        tx.commit();
+        return ContextStoreAppendResult::Conflict;
+    }
+    const auto canonical = record.serialize_canonical(impl_->archive, feed.owner_id);
+    if (canonical.size() > InMemoryContextStore::MAX_RECORD_BYTES)
+        throw std::invalid_argument("record too large");
+    Stmt put(impl_->db, "INSERT INTO ng_runtime_history VALUES(?1,?2,?3,?4,?5)");
+    put.text(1, feed.owner_id); put.text(2, feed.feed_id); put.i64(3, record.sequence());
+    put.text(4, record.id()); put.text(5, canonical); put.done();
+    tx.commit();
+    return ContextStoreAppendResult::Appended;
+}
+
+ContextStoreHead SQLiteContextStore::history_head(const ContextStoreFeed& feed) const {
+    validate_feed(feed);
+    std::lock_guard lock(impl_->mu);
+    Stmt row(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 ORDER BY sequence DESC LIMIT 1");
+    row.text(1, feed.owner_id); row.text(2, feed.feed_id);
+    if (!row.row()) return {};
+    const auto sequence = sqlite3_column_int64(row.get(), 0);
+    const auto id = text(row.get(), 1);
+    const auto parsed = impl_->decode(bytes(row.get(), 2), feed.owner_id);
+    if (sequence < 1 || parsed.feed_id() != feed.feed_id ||
+        parsed.sequence() != static_cast<std::uint64_t>(sequence) || parsed.id() != id)
+        throw std::runtime_error("corrupt history head");
+    return {static_cast<std::uint64_t>(sequence), id};
+}
+
+std::optional<RuntimeHistoryRecord> SQLiteContextStore::history_record_by_message_id(
+    const ContextStoreFeed& feed, std::string_view message_id) const {
+    validate_feed(feed);
+    if (message_id.empty() || message_id.size() > 512)
+        throw std::invalid_argument("Context history message id is invalid");
+    detail::validate_token(message_id, "Context history message id");
+    std::lock_guard lock(impl_->mu);
+    Stmt row(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND json_extract(CAST(canonical AS TEXT),'$.message_id')=?3");
+    row.text(1, feed.owner_id); row.text(2, feed.feed_id); row.text(3, message_id);
+    if (!row.row()) return std::nullopt;
+    const auto sequence = sqlite3_column_int64(row.get(), 0);
+    auto parsed = impl_->decode(bytes(row.get(), 2), feed.owner_id);
+    if (sequence < 1 || parsed.feed_id() != feed.feed_id ||
+        parsed.sequence() != static_cast<std::uint64_t>(sequence) ||
+        parsed.id() != text(row.get(), 1) || parsed.message_id() != message_id)
+        throw std::runtime_error("corrupt history message identity index");
+    if (row.row()) throw std::runtime_error("history message identity is not unique");
+    return parsed;
+}
+
+ContextHistoryRange SQLiteContextStore::snapshot_history(
+    const ContextStoreFeed& feed, std::uint64_t from, std::uint64_t through) const {
+    validate_feed(feed);
+    if (!from || through < from || through - from >= InMemoryContextStore::MAX_RANGE_RECORDS)
+        throw std::invalid_argument("invalid range");
+    std::lock_guard lock(impl_->mu);
+    Stmt row(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence>=?3 AND sequence<=?4 ORDER BY sequence");
+    row.text(1, feed.owner_id); row.text(2, feed.feed_id); row.i64(3, from); row.i64(4, through);
+    std::string jsonl;
+    auto expected = from;
+    while (row.row()) {
+        if (sqlite3_column_int64(row.get(), 0) != static_cast<sqlite3_int64>(expected))
+            throw std::out_of_range("range is not present");
+        const auto canonical = bytes(row.get(), 2);
+        const auto parsed = impl_->decode(canonical, feed.owner_id);
+        if (parsed.feed_id() != feed.feed_id || parsed.sequence() != expected ||
+            parsed.id() != text(row.get(), 1))
+            throw std::runtime_error("corrupt history snapshot");
+        if (canonical.size() + (jsonl.empty() ? 0u : 1u) >
+            InMemoryContextStore::MAX_RANGE_BYTES - jsonl.size())
+            throw std::invalid_argument("range too large");
+        if (!jsonl.empty()) jsonl.push_back('\n');
+        jsonl += canonical;
+        ++expected;
+    }
+    if (expected - 1 != through) throw std::out_of_range("range is not present");
+    ContextHistoryRange range{feed.owner_id, feed.feed_id, from, through, digest(jsonl), {}};
+    range.artifact_uri = uri(range);
+    return range;
+}
+
+std::vector<RuntimeHistoryRecord> SQLiteContextStore::hydrate_records(
+    const ContextHistoryRange& range) const {
+    validate_feed({range.owner_id, range.feed_id});
+    if (!range.from_sequence || range.through_sequence < range.from_sequence ||
+        range.through_sequence - range.from_sequence >= InMemoryContextStore::MAX_RANGE_RECORDS ||
+        !detail::is_sha256_identity(range.digest) || range.artifact_uri != uri(range))
+        throw std::invalid_argument("invalid range");
+    std::lock_guard lock(impl_->mu);
+    std::optional<std::string> predecessor;
+    if (range.from_sequence > 1) {
+        Stmt previous(impl_->db, "SELECT canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence=?3");
+        previous.text(1, range.owner_id); previous.text(2, range.feed_id); previous.i64(3, range.from_sequence - 1);
+        if (!previous.row()) throw std::invalid_argument("broken history chain");
+        const auto parsed = impl_->decode(bytes(previous.get(), 0), range.owner_id);
+        if (parsed.feed_id() != range.feed_id || parsed.sequence() != range.from_sequence - 1)
+            throw std::invalid_argument("broken history chain");
+        predecessor = parsed.id();
+    }
+    Stmt row(impl_->db, "SELECT sequence,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence>=?3 AND sequence<=?4 ORDER BY sequence");
+    row.text(1, range.owner_id); row.text(2, range.feed_id);
+    row.i64(3, range.from_sequence); row.i64(4, range.through_sequence);
+    std::string jsonl;
+    std::vector<RuntimeHistoryRecord> records;
+    records.reserve(range.through_sequence - range.from_sequence + 1);
+    for (auto sequence = range.from_sequence; sequence <= range.through_sequence; ++sequence) {
+        if (!row.row() || sqlite3_column_int64(row.get(), 0) != static_cast<sqlite3_int64>(sequence))
+            throw std::invalid_argument("broken history chain");
+        const auto canonical = bytes(row.get(), 1);
+        auto record = impl_->decode(canonical, range.owner_id);
+        if (record.feed_id() != range.feed_id || record.sequence() != sequence ||
+            (sequence == 1 ? record.predecessor_id().has_value() :
+             !record.predecessor_id() || !predecessor || *record.predecessor_id() != *predecessor))
+            throw std::invalid_argument("broken history chain");
+        predecessor = record.id();
+        if (canonical.size() + (jsonl.empty() ? 0u : 1u) >
+            InMemoryContextStore::MAX_RANGE_BYTES - jsonl.size())
+            throw std::invalid_argument("range too large");
+        if (!jsonl.empty()) jsonl.push_back('\n');
+        jsonl += canonical;
+        records.push_back(std::move(record));
+    }
+    if (digest(jsonl) != range.digest) throw std::invalid_argument("range digest mismatch");
+    return records;
+}
+
+std::string SQLiteContextStore::hydrate_history(const ContextHistoryRange& range) const {
+    const auto records = hydrate_records(range);
+    std::string jsonl;
+    for (const auto& record : records) {
+        if (!jsonl.empty()) jsonl.push_back('\n');
+        jsonl += record.serialize_canonical();
+    }
+    return jsonl;
+}
 ContextArtifactPutResult SQLiteContextStore::put_artifact(std::string_view owner,const ContextArtifact& a){validate_owner(owner);auto b=a.serialize_canonical();if(b.size()>InMemoryContextStore::MAX_ARTIFACT_BYTES)throw std::invalid_argument("artifact too large");std::lock_guard l(impl_->mu);Tx tx(impl_->db);Stmt s(impl_->db,"SELECT canonical FROM ng_runtime_artifacts WHERE owner_id=?1 AND artifact_id=?2");s.text(1,owner);s.text(2,a.id());if(s.row()){auto result=bytes(s.get(),0)==b?ContextArtifactPutResult::AlreadyPresent:ContextArtifactPutResult::Conflict;tx.commit();return result;}Stmt p(impl_->db,"INSERT INTO ng_runtime_artifacts VALUES(?1,?2,?3)");p.text(1,owner);p.text(2,a.id());p.text(3,b);p.done();tx.commit();return ContextArtifactPutResult::Stored;}
 std::optional<ContextArtifact> SQLiteContextStore::get_artifact(std::string_view owner,std::string_view id)const{validate_owner(owner);if(!detail::is_sha256_identity(id))throw std::invalid_argument("invalid artifact id");std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT canonical FROM ng_runtime_artifacts WHERE owner_id=?1 AND artifact_id=?2");s.text(1,owner);s.text(2,id);if(!s.row())return{};return ContextArtifact::parse(bytes(s.get(),0));}
 

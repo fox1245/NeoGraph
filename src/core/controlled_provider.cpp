@@ -1,9 +1,9 @@
 #include <neograph/controlled_provider.h>
 
-#include <neograph/runtime_turn_assembler.h>
 #include <neograph/graph/cancel.h>
 
 #include <neograph/async/run_sync.h>
+#include <asio/this_coro.hpp>
 
 #include "canonical_json.h"
 
@@ -17,17 +17,17 @@ namespace {
 
 constexpr std::string_view IDENTITY_PREAMBLE = "NeoGraph Provider dispatch identity v1";
 
-std::string mode_name(CompletionMode mode) {
+std::string mode_name(ProviderMode mode) {
     switch (mode) {
-        case CompletionMode::COLLECT: return "collect";
-        case CompletionMode::STREAM: return "stream";
+        case ProviderMode::Collect: return "collect";
+        case ProviderMode::Stream: return "stream";
     }
     throw std::invalid_argument("Provider dispatch mode is invalid");
 }
 
-CompletionMode mode_from_name(std::string_view value) {
-    if (value == "collect") return CompletionMode::COLLECT;
-    if (value == "stream") return CompletionMode::STREAM;
+ProviderMode mode_from_name(std::string_view value) {
+    if (value == "collect") return ProviderMode::Collect;
+    if (value == "stream") return ProviderMode::Stream;
     throw std::invalid_argument("Provider dispatch mode is invalid");
 }
 
@@ -100,17 +100,10 @@ void validate_outcome_data(const ProviderDispatchOutcomeReceiptData& data) {
     }
 }
 
-std::string completion_digest(const ChatCompletion& completion) {
-    json message;
-    to_json(message, completion.message);
+std::string completion_digest(const sp::Outcome& outcome) {
     return detail::sha256_identity(
-        IDENTITY_PREAMBLE, "provider-completion/v1",
-        detail::canonical_json_bytes(json{
-            {"message", std::move(message)},
-            {"stop_reason", completion.stop_reason},
-            {"usage", {{"prompt_tokens", completion.usage.prompt_tokens},
-                       {"completion_tokens", completion.usage.completion_tokens},
-                       {"total_tokens", completion.usage.total_tokens}}}}));
+        IDENTITY_PREAMBLE, "provider-outcome/v2",
+        detail::canonical_json_bytes(outcome_projection_json(outcome)));
 }
 
 std::string bounded_error(std::string_view value) {
@@ -176,7 +169,7 @@ const std::string& ProviderDispatchReceipt::provider_binding_identity() const no
 const std::string& ProviderDispatchReceipt::assembly_receipt_id() const noexcept { return impl_->data.assembly_receipt_id; }
 const std::string& ProviderDispatchReceipt::normalized_request_digest() const noexcept { return impl_->data.normalized_request_digest; }
 const std::string& ProviderDispatchReceipt::model() const noexcept { return impl_->data.model; }
-CompletionMode ProviderDispatchReceipt::mode() const noexcept { return impl_->data.mode; }
+ProviderMode ProviderDispatchReceipt::mode() const noexcept { return impl_->data.mode; }
 const std::string& ProviderDispatchReceipt::id() const noexcept { return impl_->id; }
 std::string ProviderDispatchReceipt::serialize_canonical() const { return impl_->canonical; }
 
@@ -364,92 +357,139 @@ ControlledProvider::~ControlledProvider() = default;
 ControlledProvider::ControlledProvider(ControlledProvider&&) noexcept = default;
 ControlledProvider& ControlledProvider::operator=(ControlledProvider&&) noexcept = default;
 
-asio::awaitable<ChatCompletion> ControlledProvider::dispatch_async(
-    std::string dispatch_id, const ContextAssemblyReceipt& assembly, CompletionRequest request) {
-    return dispatch_impl(impl_, {}, std::move(dispatch_id), assembly, std::move(request));
+asio::awaitable<sp::runtime::Result> ControlledProvider::dispatch_async(
+    std::string dispatch_id, const ContextAssemblyReceipt& assembly, ProviderRequest request) {
+    return dispatch_impl(impl_, {}, std::move(dispatch_id), assembly,
+                         impl_->provider->prepare(std::move(request)), {});
 }
-
-asio::awaitable<ChatCompletion> ControlledProvider::dispatch_async(
+asio::awaitable<sp::runtime::Result> ControlledProvider::dispatch_async(
     std::string owner_scope, std::string dispatch_id, const ContextAssemblyReceipt& assembly,
-    CompletionRequest request) {
+    ProviderRequest request) {
     return dispatch_impl(impl_, std::move(owner_scope), std::move(dispatch_id), assembly,
-                         std::move(request));
+                         impl_->provider->prepare(std::move(request)), {});
 }
-
-asio::awaitable<ChatCompletion> ControlledProvider::dispatch_impl(
+asio::awaitable<sp::runtime::Result> ControlledProvider::dispatch_prepared_async(
+    std::string dispatch_id, const ContextAssemblyReceipt& assembly, PreparedProviderRequest request,
+    ProviderBudgetClaim claim) {
+    return dispatch_impl(impl_, {}, std::move(dispatch_id), assembly, std::move(request), std::move(claim));
+}
+asio::awaitable<sp::runtime::Result> ControlledProvider::dispatch_prepared_async(
+    std::string owner_scope, std::string dispatch_id, const ContextAssemblyReceipt& assembly,
+    PreparedProviderRequest request, ProviderBudgetClaim claim) {
+    return dispatch_impl(impl_, std::move(owner_scope), std::move(dispatch_id), assembly, std::move(request), std::move(claim));
+}
+asio::awaitable<sp::runtime::Result> ControlledProvider::dispatch_impl(
     std::shared_ptr<Impl> impl, std::string owner_scope, std::string dispatch_id,
-    ContextAssemblyReceipt assembly, CompletionRequest request) {
+    ContextAssemblyReceipt assembly, PreparedProviderRequest request, ProviderBudgetClaim claim) {
     detail::validate_token(dispatch_id, "Controlled provider dispatch_id");
-    if (request.params().cancel_token && request.params().cancel_token->is_cancelled()) {
-        throw graph::CancelledException("provider dispatch cancelled before admission");
-    }
-    if (request.params().model.empty()) {
-        throw std::invalid_argument("Controlled provider requires a nonempty model");
-    }
-    detail::validate_token(request.params().model, "Controlled provider model");
-    if (RuntimeTurnAssembler::normalized_request_digest(request) !=
-        assembly.normalized_request_digest()) {
-        throw std::invalid_argument("Provider request does not match its assembly receipt");
+    // Observable codec/admission errors precede *every* durable receipt effect.
+    if (const auto* error = request.error())
+        co_return std::make_shared<const sp::Outcome>(sp::Failure{*error, {}});
+    if (!request.valid()) throw std::invalid_argument("Controlled provider requires a valid preparation");
+    detail::validate_token(request.model(), "Controlled provider model");
+    if (Provider::request_digest(request) != assembly.normalized_request_digest())
+        throw std::invalid_argument("Provider preparation does not match its assembly receipt");
+    const bool throw_on_cancel = co_await asio::this_coro::throw_if_cancelled();
+    co_await asio::this_coro::throw_if_cancelled(false);
+    const auto cancellation = co_await asio::this_coro::cancellation_state;
+    co_await asio::this_coro::throw_if_cancelled(throw_on_cancel);
+    if (cancellation.cancelled() != asio::cancellation_type::none ||
+        request.is_cancelled() || std::chrono::steady_clock::now() >= request.deadline()) {
+        sp::Error error;
+        error.kind = request.is_cancelled() || cancellation.cancelled() != asio::cancellation_type::none
+            ? sp::ErrorKind::Cancelled : sp::ErrorKind::DeadlineExceeded;
+        error.safe_message = "Provider preparation is no longer dispatchable";
+        error.retry_safety = sp::RetrySafety::NotSent;
+        co_return std::make_shared<const sp::Outcome>(sp::Failure{std::move(error), {}});
     }
     ProviderDispatchReceipt receipt = ProviderDispatchReceipt::create(
         {std::move(dispatch_id), impl->provider_binding_identity, assembly.id(),
-          assembly.normalized_request_digest(), request.params().model, request.mode()});
+         assembly.normalized_request_digest(), std::string(request.model()), request.mode()});
     const auto persisted = impl->receipts->persist(owner_scope, receipt);
     if (persisted != ProviderDispatchReceiptPutResult::Stored) {
-        if (persisted == ProviderDispatchReceiptPutResult::AlreadyPresent) {
+        if (persisted == ProviderDispatchReceiptPutResult::AlreadyPresent)
             throw std::runtime_error(
                 "reconciliation_required: provider dispatch is already admitted; durable state is " +
                 std::to_string(static_cast<unsigned>(impl->receipts->state(owner_scope, receipt.dispatch_id()))));
-        }
         throw std::runtime_error("Provider dispatch receipt persistence conflicted");
     }
     auto* outcomes = dynamic_cast<ProviderDispatchOutcomeStore*>(impl->receipts.get());
+    sp::runtime::Result result;
+    std::exception_ptr observer_error;
+    bool terminal_settled = false;
     try {
-        auto completion = co_await invoke_completion(*impl->provider, std::move(request));
+        co_await claim.begin_managed_effect(request);
+        claim.mark_dispatched();
+        try { result = co_await impl->provider->dispatch_async(std::move(request)); }
+        catch (const ProviderOutcomeError& error) {
+            result = error.outcome();
+            observer_error = std::current_exception();
+        } catch (const ProviderFailure& error) {
+            result = error.outcome();
+            observer_error = std::current_exception();
+        }
+        if (!result) throw std::runtime_error("Provider dispatch returned no owned outcome");
+        co_await claim.settle_managed(result, observer_error);
         if (outcomes) {
-            const auto settled = outcomes->settle(
-                owner_scope,
-                ProviderDispatchOutcomeReceipt::create(
-                    {receipt.dispatch_id(), receipt.id(), ProviderDispatchState::Succeeded,
-                     completion_digest(completion), {}}));
+            ProviderDispatchOutcomeReceiptData terminal;
+            terminal.dispatch_id = receipt.dispatch_id();
+            terminal.dispatch_receipt_id = receipt.id();
+            if (const auto* failed = std::get_if<sp::Failure>(result.get())) {
+                terminal.state = provider_failure_proves_not_sent(*failed)
+                    ? ProviderDispatchState::Failed : ProviderDispatchState::ReconciliationRequired;
+                terminal.error = bounded_error(failed->error.safe_message);
+                if (terminal.error.empty()) terminal.error = "Provider returned a typed failure";
+            } else {
+                terminal.state = ProviderDispatchState::Succeeded;
+                terminal.response_digest = completion_digest(*result);
+            }
+            const auto settled = outcomes->settle(owner_scope, ProviderDispatchOutcomeReceipt::create(std::move(terminal)));
             if (settled != ProviderDispatchOutcomePutResult::Stored &&
-                settled != ProviderDispatchOutcomePutResult::AlreadyPresent) {
-                throw std::runtime_error(
-                    "Provider dispatch succeeded but its terminal receipt could not be persisted");
-            }
+                settled != ProviderDispatchOutcomePutResult::AlreadyPresent)
+                throw std::runtime_error("Provider terminal receipt could not be persisted");
         }
-        co_return completion;
+        terminal_settled = true;
+        if (observer_error) std::rethrow_exception(observer_error);
+        co_return result;
+    } catch (const ProviderOutcomeError&) {
+        if (result && !terminal_settled)
+            throw ProviderDispatchOutcomePersistenceError(result, std::current_exception(), observer_error);
+        throw;
     } catch (const std::exception& error) {
-        if (outcomes && outcomes->outcome(owner_scope, receipt.dispatch_id()) == std::nullopt) {
-            const auto settled = outcomes->settle(
-                owner_scope,
-                ProviderDispatchOutcomeReceipt::create(
-                    {receipt.dispatch_id(), receipt.id(),
-                     ProviderDispatchState::ReconciliationRequired, {},
-                     bounded_error(error.what())}));
+        if (result) throw ProviderDispatchOutcomePersistenceError(result, std::current_exception(), observer_error);
+        if (outcomes && !outcomes->outcome(owner_scope, receipt.dispatch_id())) {
+            const auto settled = outcomes->settle(owner_scope, ProviderDispatchOutcomeReceipt::create(
+                {receipt.dispatch_id(), receipt.id(), ProviderDispatchState::ReconciliationRequired,
+                 {}, bounded_error(error.what())}));
             if (settled == ProviderDispatchOutcomePutResult::Conflict ||
-                settled == ProviderDispatchOutcomePutResult::MissingDispatch) {
-                throw std::runtime_error(
-                    "Provider dispatch failed and its reconciliation receipt conflicted");
-            }
+                settled == ProviderDispatchOutcomePutResult::MissingDispatch)
+                throw std::runtime_error("Provider reconciliation receipt conflicted");
         }
+        throw;
+    } catch (...) {
+        if (result) throw ProviderDispatchOutcomePersistenceError(result, std::current_exception(), observer_error);
+        if (outcomes && !outcomes->outcome(owner_scope, receipt.dispatch_id()))
+            (void)outcomes->settle(owner_scope, ProviderDispatchOutcomeReceipt::create(
+                {receipt.dispatch_id(), receipt.id(), ProviderDispatchState::ReconciliationRequired,
+                 {}, "Provider dispatch threw a non-standard exception"}));
         throw;
     }
 }
-
-ChatCompletion ControlledProvider::dispatch(std::string dispatch_id,
-                                              const ContextAssemblyReceipt& assembly,
-                                              CompletionRequest request) {
-    auto* token = request.params().cancel_token ? request.params().cancel_token.get() : nullptr;
-    return async::run_sync(dispatch_async(std::move(dispatch_id), assembly, std::move(request)), token);
+sp::runtime::Result ControlledProvider::dispatch(std::string dispatch_id,
+    const ContextAssemblyReceipt& assembly, ProviderRequest request) {
+    return async::run_sync(dispatch_async(std::move(dispatch_id), assembly, std::move(request)));
 }
-
-ChatCompletion ControlledProvider::dispatch(std::string owner_scope, std::string dispatch_id,
-                                             const ContextAssemblyReceipt& assembly,
-                                             CompletionRequest request) {
-    auto* token = request.params().cancel_token ? request.params().cancel_token.get() : nullptr;
-    return async::run_sync(dispatch_async(std::move(owner_scope), std::move(dispatch_id), assembly,
-                                          std::move(request)), token);
+sp::runtime::Result ControlledProvider::dispatch(std::string owner_scope, std::string dispatch_id,
+    const ContextAssemblyReceipt& assembly, ProviderRequest request) {
+    return async::run_sync(dispatch_async(std::move(owner_scope), std::move(dispatch_id), assembly, std::move(request)));
 }
-
-}  // namespace neograph
+sp::runtime::Result ControlledProvider::dispatch_prepared(std::string dispatch_id,
+    const ContextAssemblyReceipt& assembly, PreparedProviderRequest request, ProviderBudgetClaim claim) {
+    return async::run_sync(dispatch_prepared_async(std::move(dispatch_id), assembly, std::move(request), std::move(claim)));
+}
+sp::runtime::Result ControlledProvider::dispatch_prepared(std::string owner_scope, std::string dispatch_id,
+    const ContextAssemblyReceipt& assembly, PreparedProviderRequest request, ProviderBudgetClaim claim) {
+    return async::run_sync(dispatch_prepared_async(std::move(owner_scope), std::move(dispatch_id), assembly,
+        std::move(request), std::move(claim)));
+}
+} // namespace neograph

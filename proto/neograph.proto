@@ -136,8 +136,8 @@ message ToolCallResponse {
 // Remote checkpoint persistence over gRPC. Ported from the predecessor
 // NexaGraph (proto/rag_service.proto, src/nexagraph/grpc_checkpoint.*),
 // which already inherited neograph::graph::CheckpointStore. Mirrors the
-// 5 sync core virtuals of CheckpointStore exactly:
-//   save / load_latest / load_by_id / list / delete_thread
+// sync checkpoint operations, managed-budget denial obligation, and owned
+// currency journal CAS operations. Existing checkpoint payloads are unchanged.
 //
 // Wire shape: a single `checkpoint_json` string, NOT a field-per-member
 // message. NeoGraph's Checkpoint has next_nodes (repeated), an enum
@@ -156,6 +156,14 @@ service CheckpointService {
   rpc LoadCheckpointById(LoadByIdRequest) returns (CheckpointResponse);
   rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
   rpc DeleteThreadCheckpoints(DeleteThreadRequest) returns (StatusResponse);
+  rpc RequiresManagedBudget(RequiresManagedBudgetRequest) returns (RequiresManagedBudgetResponse);
+  // Receipt payloads are untrusted claims. Each operation delegates to the
+  // persistent backend's current generation/actor/head compare-and-set.
+  rpc AcquireManagedBudgetLease(AcquireManagedBudgetLeaseRequest) returns (ManagedBudgetLeaseResponse);
+  rpc BeginManagedBudgetEffect(BeginManagedBudgetEffectRequest) returns (ManagedBudgetEffectResponse);
+  rpc SettleManagedBudgetEffect(SettleManagedBudgetEffectRequest) returns (ManagedBudgetLeaseResponse);
+  rpc PublishManagedBudgetCheckpoint(PublishManagedBudgetCheckpointRequest) returns (ManagedBudgetLeaseResponse);
+  rpc ReleaseManagedBudgetLease(ReleaseManagedBudgetLeaseRequest) returns (ManagedBudgetLeaseResponse);
 }
 
 message CheckpointBlob {
@@ -190,3 +198,58 @@ message ListCheckpointsResponse {
   repeated CheckpointBlob checkpoints = 1;
 }
 message DeleteThreadRequest    { string thread_id = 1; }
+message RequiresManagedBudgetRequest { string thread_id = 1; }
+message RequiresManagedBudgetResponse {
+  // Denies omission of a managed bank; never authenticates or authorizes it.
+  // Unsupported backends and RPC failures use a non-OK gRPC status.
+  bool required = 1;
+}
+
+message ManagedBudgetLeaseScope {
+  string owner_scope = 1;
+  string thread_id = 2;
+  string storage_thread_id = 3;
+  string graph_identity = 4;
+  uint64 original_ceiling = 5;
+  bool has_original_deadline = 6;
+  int64 original_deadline_ticks = 7;
+  string deadline_clock_identity = 8;
+}
+message AcquireManagedBudgetLeaseRequest {
+  ManagedBudgetLeaseScope scope = 1;
+  string expected_checkpoint_id = 2;
+  string expected_checkpoint_commitment = 3;
+}
+message ManagedBudgetLeaseResponse {
+  // Actual backend receipt after successful commit; absent/corrupt denies.
+  string lease_json = 1;
+}
+message BeginManagedBudgetEffectRequest {
+  string lease_json = 1;
+  string effect_id = 2;
+  uint64 exact_claim_amount = 3;
+  string prepared_request_digest = 4;
+}
+message ManagedBudgetEffectResponse {
+  string lease_json = 1;
+  string effect_json = 2;
+}
+message SettleManagedBudgetEffectRequest {
+  string lease_json = 1;
+  string effect_json = 2;
+  // Full owned SDK outcome encoding, including native archive reference,
+  // native messages, wire envelopes, raw events and provider usage evidence.
+  // A nonempty reference resolvable by the server's trusted NativeArchive
+  // is mandatory, even when the outcome happens to have no native messages.
+  string outcome_json = 3;
+  // Complete atomic AuthoritySnapshot, authenticated by the outcome's
+  // archive binding to this exact lease/effect/snapshot. Never a grant.
+  string authority_json = 4;
+}
+message PublishManagedBudgetCheckpointRequest {
+  string lease_json = 1;
+  CheckpointBlob checkpoint = 2;
+}
+message ReleaseManagedBudgetLeaseRequest {
+  string lease_json = 1;
+}

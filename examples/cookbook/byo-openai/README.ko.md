@@ -1,6 +1,21 @@
 <!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=ko source_sha256=812a1f340ed6b8f92ddd742cc1c8f239265b501fa010c81929825f0973738e38 -->
 # 나만의 OpenAI 클라이언트 가져오기
 
+## 과거 Python recipe — binding 전환 보류
+
+이 페이지는 전환 이전 Python 공급자 API와 측정의 기록입니다. 아래 코드는
+**현재 타입 C++ 계약과 호환되지 않으며 현재 실행 지침이 아닙니다**.
+Python 공급자 binding, subclass trampoline, BYO/OpenRouter adapter는 아직 port하거나
+실행 검증하지 않았습니다. C++ 전환만으로 Python 호환성을 추론하지 마세요.
+현재 C++은 타입 `ProviderRequest`를 소유하고 한 번 prepare하며 전체 불변
+`sp::Outcome`, native history, nullable usage를 유지합니다. 아래 `complete(params)`/
+`ChatCompletion`은 과거 API입니다. 누락 usage는 zero가 아니며 마지막 호출 usage는
+전체 tool loop 사용량이 아닙니다. durable receipt 뒤에서 SDK retry가 숨은 재전송을
+만들면 안 됩니다. 키, prompt, native payload는 비공개로 유지하세요.
+
+## 전환 이전 지침과 관찰 기록
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 대부분의 프로덕션 Python 사용자는 이미 자체 재시도, 사용자 지정 전송, 관찰성 Hook 또는 OpenRouter 라우팅을 갖춘 `openai.OpenAI()` 클라이언트 인스턴스를 보유하고 있습니다. 이 cookbook은 기존 클라이언트를 사용자 지정 `Provider` 으로 NeoGraph에 연결하는 방법을 보여줍니다 — NeoGraph의 기본 제공 `OpenAIProvider`.

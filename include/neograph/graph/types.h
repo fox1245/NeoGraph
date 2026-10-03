@@ -134,7 +134,35 @@ struct ChannelWrite {
     std::string channel;              ///< Target channel name.
     json        value;                ///< Value to write.
     Mode        mode = Mode::Reduce;  ///< Default preserves the pre-#91 behavior.
+    /// Authoritative ordered provider messages paired with this portable write.
+    std::shared_ptr<const std::vector<sp::Message>> native_messages;
 };
+
+inline ChannelWrite provider_messages_write(std::vector<sp::Message> messages,
+    ChannelWrite::Mode mode = ChannelWrite::Mode::Reduce) {
+    json projection = json::array();
+    for (const auto& message : messages) {
+        json item;
+        to_json(item, project_message(message));
+        projection.push_back(std::move(item));
+    }
+    return ChannelWrite{"messages", std::move(projection), mode,
+        std::make_shared<const std::vector<sp::Message>>(std::move(messages))};
+}
+
+inline ChannelWrite provider_messages_write(const sp::runtime::Result& outcome,
+    ChannelWrite::Mode mode = ChannelWrite::Mode::Reduce) {
+    if (!outcome) throw std::invalid_argument("Provider returned no owned outcome");
+    const auto& messages = outcome_messages(*outcome);
+    json projection = json::array();
+    for (const auto& message : messages) {
+        json item;
+        to_json(item, project_message(message));
+        projection.push_back(std::move(item));
+    }
+    return ChannelWrite{"messages", std::move(projection), mode,
+        std::shared_ptr<const std::vector<sp::Message>>(outcome, &messages)};
+}
 
 /**
  * @brief Exception thrown from inside a node to trigger a dynamic breakpoint.
@@ -402,6 +430,7 @@ struct NodeContext {
     std::string              provider_name;
     /// Construction-only registry snapshot inherited by built-in subgraphs.
     std::shared_ptr<const GraphRegistry> registry;
+    ProviderControls provider_controls; ///< Explicit typed admission controls, including finite output cap.
 };
 
 /**

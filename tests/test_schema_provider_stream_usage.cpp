@@ -1,248 +1,195 @@
-// Before the audit fix, complete_stream() populated message content +
-// tool calls but never parsed `usage`, leaving prompt_tokens /
-// completion_tokens / total_tokens at zero regardless of provider.
-// Anyone tracking LLM cost lost the data silently once they switched
-// to streaming.
-//
-// The fix is schema-driven:
-//   * SSE_DATA providers (OpenAI, Gemini): the stream loop reads
-//     `resp_.usage_path` from each chunk. OpenAI's terminal chunk
-//     carries usage (with stream_options.include_usage = true); Gemini
-//     emits usageMetadata on every chunk so the last write wins.
-//   * SSE_EVENTS providers (Claude): new `action: "usage"` is triggered
-//     by the `message_start` and `message_delta` events, which carry
-//     input_tokens and output_tokens respectively.
-//
-// These tests pin both paths end-to-end with a local mock server
-// speaking each provider's SSE dialect.
-
 #include <gtest/gtest.h>
-#include <neograph/llm/schema_provider.h>
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include <httplib.h>
-
-#include <atomic>
-#include <chrono>
-#include <filesystem>
-#include <string>
-#include <thread>
+#include "fixtures/typed_wire_peer.h"
 
 using namespace neograph;
+namespace wire = neograph::test::wire;
 
-namespace {
-
-// Mock that answers /v1/messages with a Claude-style SSE_EVENTS stream.
-// Emits usage in message_start (input_tokens=50) and message_delta
-// (output_tokens=7). Content is three text deltas: "he", "llo", "!".
-struct ClaudeStreamMock {
-    httplib::Server svr;
-    std::thread t;
-    int port = 0;
-
-    ClaudeStreamMock() {
-        svr.Post("/v1/messages",
-            [](const httplib::Request&, httplib::Response& res) {
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_content(
-                    "event: message_start\n"
-                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0}}}\n"
-                    "\n"
-                    "event: content_block_start\n"
-                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n"
-                    "\n"
-                    "event: content_block_delta\n"
-                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"he\"}}\n"
-                    "\n"
-                    "event: content_block_delta\n"
-                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"llo\"}}\n"
-                    "\n"
-                    "event: content_block_delta\n"
-                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"!\"}}\n"
-                    "\n"
-                    "event: content_block_stop\n"
-                    "data: {\"type\":\"content_block_stop\",\"index\":0}\n"
-                    "\n"
-                    "event: message_delta\n"
-                     "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"stop_sequence\"},\"usage\":{\"output_tokens\":7}}\n"
-                    "\n"
-                    "event: message_stop\n"
-                    "data: {\"type\":\"message_stop\"}\n"
-                    "\n",
-                    "text/event-stream");
-            });
-
-        port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-    ~ClaudeStreamMock() {
-        svr.stop();
-        if (t.joinable()) t.join();
-    }
-};
-
-// OpenAI-shaped SSE_DATA stream. Terminal chunk carries usage with
-// prompt_tokens=12, completion_tokens=3, total_tokens=15.
-struct OpenAIStreamMock {
-    httplib::Server svr;
-    std::thread t;
-    int port = 0;
-
-    OpenAIStreamMock() {
-        svr.Post("/v1/chat/completions",
-            [](const httplib::Request&, httplib::Response& res) {
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_content(
-                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\",\"reasoning_content\":\"Need \"},\"finish_reason\":null}]}\n"
-                    "\n"
-                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\",\"reasoning_content\":\"approved lookup.\"},\"finish_reason\":null}]}\n"
-                    "\n"
-                     "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n"
-                    "\n"
-                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n"
-                    "\n"
-                    "data: [DONE]\n"
-                    "\n",
-                    "text/event-stream");
-            });
-
-        port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-    ~OpenAIStreamMock() {
-        svr.stop();
-        if (t.joinable()) t.join();
-    }
-};
-
-struct ReasoningAliasStreamMock {
-    httplib::Server svr;
-    std::thread worker;
-    int port = 0;
-
-    ReasoningAliasStreamMock() {
-        svr.Post("/v1/chat/completions",
-            [](const httplib::Request&, httplib::Response& res) {
-                res.set_content(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\",\"private_delta\":\"thought\"},\"finish_reason\":null}]}\n"
-                    "\n"
-                    "data: [DONE]\n"
-                    "\n",
-                    "text/event-stream");
-            });
-        port = svr.bind_to_any_port("127.0.0.1");
-        worker = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-
-    ~ReasoningAliasStreamMock() {
-        svr.stop();
-        if (worker.joinable()) worker.join();
-    }
-};
-
-} // namespace
-
-TEST(SchemaProviderStreamUsage, ClaudeStreamingPopulatesUsage) {
-    ClaudeStreamMock mock;
-    ASSERT_GT(mock.port, 0);
-
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "claude";
-    cfg.api_key = "test-key";
-    cfg.default_model = "claude-sonnet-4-5";
-    cfg.timeout_seconds = 10;
-    cfg.base_url_override =
-        "http://127.0.0.1:" + std::to_string(mock.port);
-    cfg.allow_insecure_loopback = true;
-
-    auto provider = llm::SchemaProvider::create(cfg);
-
-    CompletionParams params;
-    params.model = "claude-sonnet-4-5";
-    params.max_tokens = 64;
-    ChatMessage u; u.role = "user"; u.content = "hi";
-    params.messages.push_back(u);
-
-    std::string streamed;
-    auto result = provider->complete_stream(params,
-        [&streamed](const std::string& t) { streamed += t; });
-
-    EXPECT_EQ("hello!", streamed);
-    EXPECT_EQ("hello!", result.message.content);
-    EXPECT_EQ(50, result.usage.prompt_tokens)
-        << "message_start's input_tokens lost — pre-audit regression";
-    EXPECT_EQ(7, result.usage.completion_tokens)
-        << "message_delta's output_tokens lost — pre-audit regression";
-    EXPECT_EQ("stop_sequence", result.stop_reason);
+TEST(SchemaProviderStreamUsage, MessagesStreamingReportsInclusiveCacheUsage) {
+    const std::string events =
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"fixture-model\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":50,\"output_tokens\":0,\"cache_read_input_tokens\":10,\"cache_creation_input_tokens\":5}}}\n\n"
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello!\"}}\n\n"
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n"
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    wire::Peer peer(events, true);
+    auto provider = wire::provider("anthropic.messages", peer.origin());
+    const auto result = provider->invoke(wire::request("anthropic.messages", ProviderMode::Stream));
+    ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+    EXPECT_EQ(test::text(result), "hello!");
+    const auto& usage = test::completion(result).usage;
+    ASSERT_TRUE(usage.input_total); ASSERT_TRUE(usage.output_total); ASSERT_TRUE(usage.total);
+    EXPECT_EQ(usage.input_total->value, 65u);
+    EXPECT_EQ(usage.input_total->evidence, sp::Evidence::Derived);
+    ASSERT_TRUE(usage.input_uncached); ASSERT_TRUE(usage.cache_read); ASSERT_TRUE(usage.cache_write);
+    EXPECT_EQ(usage.input_uncached->value, 50u);
+    EXPECT_EQ(usage.cache_read->value, 10u); EXPECT_EQ(usage.cache_write->value, 5u);
+    EXPECT_EQ(usage.output_total->value, 7u); EXPECT_EQ(usage.total->value, 72u);
+    EXPECT_EQ(usage.input_uncached->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(usage.cache_read->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(usage.cache_write->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(usage.output_total->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
+    EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
+    EXPECT_EQ(usage.stage, sp::UsageStage::Final);
 }
 
-TEST(SchemaProviderStreamUsage, OpenAIStreamingPopulatesUsage) {
-    OpenAIStreamMock mock;
-    ASSERT_GT(mock.port, 0);
-
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "openai";
-    cfg.api_key = "test-key";
-    cfg.default_model = "gpt-4o-mini";
-    cfg.timeout_seconds = 10;
-    cfg.base_url_override =
-        "http://127.0.0.1:" + std::to_string(mock.port);
-    cfg.allow_insecure_loopback = true;
-
-    auto provider = llm::SchemaProvider::create(cfg);
-
-    CompletionParams params;
-    params.model = "gpt-4o-mini";
-    params.max_tokens = 64;
-    ChatMessage u; u.role = "user"; u.content = "hi";
-    params.messages.push_back(u);
-
-    std::string streamed;
-    auto result = provider->complete_stream(params,
-        [&streamed](const std::string& t) { streamed += t; });
-
-    EXPECT_EQ("hi there", streamed);
-    EXPECT_EQ("hi there", result.message.content);
-    EXPECT_EQ("Need approved lookup.", result.message.reasoning);
-    EXPECT_EQ(12, result.usage.prompt_tokens);
-    EXPECT_EQ(3,  result.usage.completion_tokens);
-    EXPECT_EQ(15, result.usage.total_tokens);
-    EXPECT_EQ("max_tokens", result.stop_reason);
+TEST(SchemaProviderStreamUsage, MessagesMissingCacheBandsCannotInventInclusiveTotals) {
+    for (const bool read : {false, true}) for (const bool write : {false, true}) {
+        SCOPED_TRACE(read);
+        SCOPED_TRACE(write);
+        json initial_usage = {{"input_tokens", 0}, {"output_tokens", 0}};
+        if (read) initial_usage["cache_read_input_tokens"] = 0;
+        if (write) initial_usage["cache_creation_input_tokens"] = 0;
+        const json start = {{"type", "message_start"}, {"message", {
+            {"id", "msg-cache"}, {"type", "message"}, {"role", "assistant"},
+            {"content", json::array()}, {"model", "fixture-model"},
+            {"stop_reason", nullptr}, {"stop_sequence", nullptr}, {"usage", initial_usage}}}};
+        const auto events = "event: message_start\ndata: " + start.dump() + "\n\n"
+            + "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
+            + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        wire::Peer peer(events, true);
+        auto provider = wire::provider("anthropic.messages", peer.origin());
+        const auto result = provider->invoke(wire::request("anthropic.messages", ProviderMode::Stream));
+        ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+        const auto& usage = test::completion(result).usage;
+        ASSERT_TRUE(usage.input_uncached); ASSERT_TRUE(usage.output_total);
+        EXPECT_EQ(usage.input_uncached->value, 0u);
+        EXPECT_EQ(usage.input_uncached->evidence, sp::Evidence::Reported);
+        EXPECT_EQ(usage.output_total->value, 3u);
+        EXPECT_EQ(usage.output_total->evidence, sp::Evidence::Reported);
+        ASSERT_EQ(usage.cache_read.has_value(), read);
+        ASSERT_EQ(usage.cache_write.has_value(), write);
+        if (read) EXPECT_EQ(usage.cache_read->value, 0u);
+        if (write) EXPECT_EQ(usage.cache_write->value, 0u);
+        ASSERT_EQ(usage.input_total.has_value(), read && write);
+        ASSERT_EQ(usage.total.has_value(), read && write);
+        if (read && write) {
+            EXPECT_EQ(usage.input_total->value, 0u);
+            EXPECT_EQ(usage.input_total->evidence, sp::Evidence::Derived);
+            EXPECT_EQ(usage.total->value, 3u);
+            EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
+        }
+        EXPECT_FALSE(usage.provider_reported_total);
+        EXPECT_EQ(usage.stage, sp::UsageStage::Final);
+        EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
+    }
 }
 
-TEST(SchemaProviderStreamUsage, ReasoningDeltasFollowExternalSchema) {
-    ReasoningAliasStreamMock mock;
-    ASSERT_GT(mock.port, 0);
+TEST(SchemaProviderStreamUsage, ChatStreamingOwnsReasoningAndFinalUsage) {
+    const std::string events =
+        wire::chat_frame(json::parse(R"({"choices":[{"index":0,"delta":{"role":"assistant","content":"hi","reasoning_content":"Need "},"finish_reason":null}]})"))
+        + wire::chat_frame(json::parse(R"({"choices":[{"index":0,"delta":{"content":" there","reasoning_content":"approved lookup."},"finish_reason":null}]})"))
+        + wire::chat_frame(json::parse(R"({"choices":[{"index":0,"delta":{},"finish_reason":"length"}]})"))
+        + wire::chat_frame(json::parse(R"({"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}})"))
+        + "data: [DONE]\n\n";
+    wire::Peer peer(events, true);
+    auto provider = wire::provider("openai.chat", peer.origin());
+    auto request = wire::request("openai.chat", ProviderMode::Stream);
+    auto observed = std::make_shared<std::string>();
+    request.on_event = [owned = observed](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event); delta && delta->payload.kind == sp::PartKind::Thinking)
+            owned->append(delta->payload.bytes);
+    };
+    const auto result = provider->invoke(std::move(request));
+    ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+    const auto& completion = test::completion(result);
+    EXPECT_EQ(test::text(result), "hi there");
+    std::string reasoning;
+    for (const auto& message : completion.messages) for (const auto& part : message.parts)
+        if (const auto* thinking = std::get_if<sp::Thinking>(&part)) reasoning += thinking->text;
+    EXPECT_EQ(reasoning, "Need approved lookup.");
+    EXPECT_EQ(*observed, reasoning);
+    ASSERT_TRUE(completion.usage.input_total);
+    ASSERT_TRUE(completion.usage.output_total);
+    ASSERT_TRUE(completion.usage.total);
+    ASSERT_TRUE(completion.usage.provider_reported_total);
+    EXPECT_EQ(completion.usage.input_total->value, 12u);
+    EXPECT_EQ(completion.usage.output_total->value, 3u);
+    EXPECT_EQ(completion.usage.total->value, 15u);
+    EXPECT_EQ(completion.usage.input_total->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(completion.usage.output_total->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(completion.usage.total->evidence, sp::Evidence::Derived);
+    EXPECT_EQ(completion.usage.provider_reported_total->value, 15u);
+    EXPECT_EQ(completion.usage.provider_reported_total->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(completion.usage.stage, sp::UsageStage::Final);
+    EXPECT_EQ(completion.usage.quality, sp::UsageQuality::Consistent);
+    EXPECT_EQ(completion.stop.kind, sp::StopKind::MaxTokens);
+}
 
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = (std::filesystem::path(__FILE__).parent_path() /
-                       "fixtures" / "schema_reasoning_alias.json").string();
-    cfg.default_model = "test-model";
-    cfg.timeout_seconds = 10;
-    cfg.base_url_override = "http://127.0.0.1:" + std::to_string(mock.port);
-    cfg.allow_insecure_loopback = true;
-    auto provider = llm::SchemaProvider::create(cfg);
+TEST(SchemaProviderStreamUsage, KnownZeroAndMissingCountersStayDistinct) {
+    for (const bool zero : {false, true}) {
+        auto body = json::parse(wire::chat_response());
+        body["usage"] = nullptr;
+        if (zero) body["usage"] = {{"prompt_tokens", 0}, {"completion_tokens", 0}, {"total_tokens", 0}};
+        wire::Peer peer(body.dump());
+        auto provider = wire::provider("openai.chat", peer.origin());
+        const auto result = provider->invoke(wire::request());
+        ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+        const auto& usage = test::completion(result).usage;
+        ASSERT_EQ(usage.input_total.has_value(), zero);
+        ASSERT_EQ(usage.output_total.has_value(), zero);
+        ASSERT_EQ(usage.total.has_value(), zero);
+        ASSERT_EQ(usage.provider_reported_total.has_value(), zero);
+        if (zero) {
+            EXPECT_EQ(usage.input_total->value, 0u);
+            EXPECT_EQ(usage.output_total->value, 0u);
+            EXPECT_EQ(usage.total->value, 0u);
+            EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
+            EXPECT_EQ(usage.provider_reported_total->value, 0u);
+            EXPECT_EQ(usage.provider_reported_total->evidence, sp::Evidence::Reported);
+            EXPECT_EQ(usage.stage, sp::UsageStage::Final);
+        } else EXPECT_EQ(usage.stage, sp::UsageStage::Missing);
+        EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
+    }
+}
 
-    CompletionParams params;
-    params.model = "test-model";
-    ChatMessage user;
-    user.role = "user";
-    user.content = "hi";
-    params.messages.push_back(user);
+TEST(SchemaProviderStreamUsage, WideInconsistentReportsRetainEvidenceWithoutTruncation) {
+    auto body = json::parse(wire::chat_response());
+    const std::uint64_t wide = std::uint64_t{1} << 40;
+    body["usage"] = {{"prompt_tokens", wide}, {"completion_tokens", 3}, {"total_tokens", wide + 4}};
+    wire::Peer peer(body.dump()); auto provider = wire::provider("openai.chat", peer.origin());
+    const auto result = provider->invoke(wire::request());
+    ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+    const auto& usage = test::completion(result).usage;
+    ASSERT_TRUE(usage.input_total); ASSERT_TRUE(usage.total); ASSERT_TRUE(usage.provider_reported_total);
+    EXPECT_EQ(usage.input_total->value, wide);
+    EXPECT_EQ(usage.total->value, wide + 3);
+    EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
+    EXPECT_EQ(usage.provider_reported_total->value, wide + 4);
+    EXPECT_EQ(usage.provider_reported_total->evidence, sp::Evidence::Reported);
+    EXPECT_EQ(usage.quality, sp::UsageQuality::Inconsistent);
+    ASSERT_EQ(usage.conflicts.size(), 1u);
+    EXPECT_EQ(usage.conflicts[0].counter, "total");
+}
 
-    std::string streamed;
-    const auto result = provider->complete_stream(params,
-        [&streamed](const std::string& token) { streamed += token; });
-    EXPECT_EQ(streamed, "ok");
-    EXPECT_EQ(result.message.content, "ok");
-    EXPECT_EQ(result.message.reasoning, "thought");
+TEST(SchemaProviderStreamUsage, InteractionsReportedTotalDoesNotInventMissingThoughtOutput) {
+    for (const bool thoughts : {false, true}) {
+        SCOPED_TRACE(thoughts);
+        auto body = json::parse(R"({"id":"interaction-usage","model":"fixture-model","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"done"}]}],"usage":{"total_input_tokens":4,"total_output_tokens":2,"total_tokens":6}})");
+        if (thoughts) body["usage"]["total_thought_tokens"] = 0;
+        wire::Peer peer(body.dump());
+        auto provider = wire::provider("google.interactions", peer.origin());
+        const auto result = provider->invoke(wire::request("google.interactions"));
+        ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+        EXPECT_EQ(test::text(result), "done");
+        const auto& usage = test::completion(result).usage;
+        ASSERT_TRUE(usage.input_total); ASSERT_TRUE(usage.provider_reported_total); ASSERT_TRUE(usage.total);
+        EXPECT_EQ(usage.input_total->value, 4u);
+        EXPECT_EQ(usage.input_total->evidence, sp::Evidence::Reported);
+        EXPECT_EQ(usage.provider_reported_total->value, 6u);
+        EXPECT_EQ(usage.provider_reported_total->evidence, sp::Evidence::Reported);
+        EXPECT_EQ(usage.total->value, 6u);
+        EXPECT_EQ(usage.total->evidence, thoughts ? sp::Evidence::Derived : sp::Evidence::Reported);
+        ASSERT_EQ(usage.output_total.has_value(), thoughts);
+        ASSERT_EQ(usage.reasoning.has_value(), thoughts);
+        if (thoughts) {
+            EXPECT_EQ(usage.reasoning->value, 0u);
+            EXPECT_EQ(usage.reasoning->evidence, sp::Evidence::Reported);
+            EXPECT_EQ(usage.output_total->value, 2u);
+            EXPECT_EQ(usage.output_total->evidence, sp::Evidence::Derived);
+        }
+        EXPECT_EQ(usage.stage, sp::UsageStage::Final);
+        EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
+    }
 }

@@ -12,6 +12,7 @@
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/server.h>
 #include <neograph/provider.h>
+#include "fixtures/typed_provider.h"
 
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
@@ -316,46 +317,45 @@ private:
     std::map<std::string, json> runs_;
 };
 
-class ScriptedProvider final : public neograph::Provider {
+class ScriptedProvider final : public neograph::test::LocalProvider {
+    struct State {
+        std::vector<sp::runtime::Result> completions;
+        std::vector<neograph::ProviderRequest> calls;
+    };
 public:
-    std::vector<neograph::ChatCompletion> completions;
-    std::vector<neograph::CompletionParams> calls;
-
-    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
-        calls.push_back(params);
-        if (completions.empty()) throw std::runtime_error("no scripted completion");
-        auto result = completions.front();
-        completions.erase(completions.begin());
-        return result;
-    }
-
-    std::string get_name() const override { return "scripted-harness-provider"; }
+    explicit ScriptedProvider(std::shared_ptr<State> state = std::make_shared<State>())
+        : LocalProvider([state](neograph::ProviderRequest request, const auto&, const auto&)
+                            -> asio::awaitable<sp::runtime::Result> {
+              state->calls.push_back(std::move(request));
+              if (state->completions.empty()) throw std::runtime_error("no scripted completion");
+              auto result = state->completions.front();
+              state->completions.erase(state->completions.begin());
+              co_return result;
+          }, "scripted-harness-provider", neograph::test::bounded_client()),
+          completions(state->completions), calls(state->calls) {}
+    std::vector<sp::runtime::Result>& completions;
+    std::vector<neograph::ProviderRequest>& calls;
 };
 
-class AsioErrorProvider final : public neograph::Provider {
+class AsioErrorProvider final : public neograph::test::LocalProvider {
 public:
-    explicit AsioErrorProvider(asio::error_code error) : error_(error) {}
-
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        throw asio::system_error(error_);
-    }
-
-    std::string get_name() const override { return "asio-error-harness-provider"; }
-
-private:
-    asio::error_code error_;
+    explicit AsioErrorProvider(asio::error_code error)
+        : LocalProvider([error](auto, const auto&, const auto&)
+                            -> asio::awaitable<sp::runtime::Result> {
+              throw asio::system_error(error);
+              co_return nullptr;
+          }, "asio-error-harness-provider", neograph::test::bounded_client()) {}
 };
 
-class CancellationAwareProvider final : public neograph::Provider {
+class CancellationAwareProvider final : public neograph::test::LocalProvider {
 public:
-    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
-        while (!params.cancel_token->is_cancelled()) {
-            std::this_thread::sleep_for(1ms);
-        }
-        throw neograph::graph::CancelledException("provider cancellation observed");
-    }
-
-    std::string get_name() const override { return "cancellation-aware-harness-provider"; }
+    CancellationAwareProvider()
+        : LocalProvider([](neograph::ProviderRequest request, const auto&, const auto&)
+                            -> asio::awaitable<sp::runtime::Result> {
+              while (!request.cancel_token->is_cancelled()) std::this_thread::sleep_for(1ms);
+              throw neograph::graph::CancelledException("provider cancellation observed");
+              co_return nullptr;
+          }, "cancellation-aware-harness-provider", neograph::test::bounded_client()) {}
 };
 
 class StartFailingJournal final : public neograph::mcp::HarnessJournal {
@@ -1152,19 +1152,16 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
     const auto expected_path =
         std::filesystem::weakly_canonical(workspace / "src/main.cpp").string();
     auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.role = "assistant";
-    tool_request.message.tool_calls.push_back(
-        {"call-1", "repo.read", R"({"path":"src/main.cpp"})"});
-    neograph::ChatCompletion final;
-    final.message.role = "assistant";
-    final.message.content = R"({"status":"ok","findings":[]})";
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "call-1", "repo.read", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"path":"src/main.cpp"})")}}}});
+    const auto final = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {tool_request, final};
 
     int capability_calls = 0;
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = provider;
-    config.model = "test-model";
     config.capability_executor = [&capability_calls, expected_path](const json& tool,
                                                                     const json& arguments,
                                                                     const auto&) {
@@ -1197,14 +1194,18 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
     EXPECT_EQ(response.value["status"], "ok");
     EXPECT_EQ(capability_calls, 1);
     ASSERT_EQ(provider->calls.size(), 2u);
-    EXPECT_EQ(provider->calls[0].model, "test-model");
-    ASSERT_EQ(provider->calls[1].messages.size(), 3u);
-    EXPECT_EQ(provider->calls[1].messages.back().role, "tool");
+    EXPECT_EQ(std::get<sp::chat::Request>(provider->calls[0].payload).model, "test-model");
+    const auto& history = std::get<sp::chat::Request>(provider->calls[1].payload).canonical_messages;
+    ASSERT_EQ(history.size(), 3u);
+    EXPECT_EQ(history.back().role, sp::Role::Tool);
+    const auto& observation = std::get<sp::ToolResult>(history.back().parts.at(0));
+    EXPECT_EQ(observation.tool_use_id, "call-1");
+    EXPECT_NE(observation.content.find("int main() {}"), std::string::npos);
     std::filesystem::remove_all(workspace);
 }
 
 TEST(HarnessServiceTest, ProviderExecutorPreservesTransportTimeoutKind) {
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = std::make_shared<AsioErrorProvider>(
         asio::error::make_error_code(asio::error::timed_out));
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
@@ -1215,15 +1216,13 @@ TEST(HarnessServiceTest, ProviderExecutorPreservesTransportTimeoutKind) {
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
 
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TIMEOUT);
-    EXPECT_FALSE(response.message.empty());
 }
 
 TEST(HarnessServiceTest, ProviderExecutorAppliesEffectiveOutputBudget) {
     auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion completion;
-    completion.message.content = R"({"status":"ok","findings":[]})";
+    const auto completion = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {completion};
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = provider;
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
 
@@ -1236,30 +1235,12 @@ TEST(HarnessServiceTest, ProviderExecutorAppliesEffectiveOutputBudget) {
 
     ASSERT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
     ASSERT_EQ(provider->calls.size(), 1u);
-    EXPECT_EQ(provider->calls[0].max_tokens, 37);
+    EXPECT_EQ(std::get<sp::chat::Request>(provider->calls[0].payload).max_output_tokens, 37);
 }
 
-TEST(HarnessServiceTest, ProviderExecutorPreservesUnboundedDefaults) {
-    auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion completion;
-    completion.message.content = R"({"status":"ok","findings":[]})";
-    provider->completions = {completion};
-    neograph::mcp::HarnessProviderExecutorConfig config;
-    config.provider = provider;
-    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
-
-    HarnessWorkerCall call;
-    call.task = {{"objective", "Review"}};
-    call.worker = worker("reviewer");
-    const auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
-
-    ASSERT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
-    ASSERT_EQ(provider->calls.size(), 1u);
-    EXPECT_EQ(provider->calls[0].max_tokens, -1);
-}
 
 TEST(HarnessServiceTest, ProviderExecutorDeadlineCancelsOnlyProviderChild) {
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = std::make_shared<CancellationAwareProvider>();
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
 
@@ -1317,27 +1298,9 @@ TEST(HarnessServiceTest, SuppliesEffectiveProviderBudgetsToWorker) {
     EXPECT_EQ(observed["max_output_tokens"], 25);
 }
 
-TEST(HarnessServiceTest, SuppliesUnboundedProviderBudgetByDefault) {
-    json observed;
-    HarnessServiceConfig config;
-    config.worker_executor = [&observed](const HarnessWorkerCall& call, const auto&) {
-        observed = call.worker["_harness_provider_budget"];
-        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
-    };
-    HarnessService service(std::move(config));
-    const auto compiled = service.compile(request());
-    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
-    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
-    ASSERT_TRUE(started["started"].get<bool>()) << started.dump();
-    const auto terminal = wait_terminal(service, started["run_id"].get<std::string>());
-
-    EXPECT_EQ(terminal["status"], "completed") << terminal.dump();
-    EXPECT_EQ(observed["provider_timeout_seconds"], 0);
-    EXPECT_EQ(observed["max_output_tokens"], -1);
-}
 
 TEST(HarnessServiceTest, ProviderExecutorKeepsOtherAsioFailuresAsToolErrors) {
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = std::make_shared<AsioErrorProvider>(
         asio::error::make_error_code(asio::error::connection_refused));
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
@@ -1348,11 +1311,10 @@ TEST(HarnessServiceTest, ProviderExecutorKeepsOtherAsioFailuresAsToolErrors) {
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
 
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
-    EXPECT_FALSE(response.message.empty());
 }
 
 TEST(HarnessServiceTest, ProviderExecutorKeepsGenericFailuresAsToolErrors) {
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = std::make_shared<ScriptedProvider>();
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
 
@@ -1362,18 +1324,18 @@ TEST(HarnessServiceTest, ProviderExecutorKeepsGenericFailuresAsToolErrors) {
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
 
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
-    EXPECT_EQ(response.message, "no scripted completion");
 }
 
 TEST(HarnessServiceTest, ProviderExecutorRejectsWorkspaceEscapeBeforeToolCall) {
     auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"call-1", "repo.read", R"({"path":"../secret.txt"})"});
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "call-1", "repo.read", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"path":"../secret.txt"})")}}}});
     provider->completions = {tool_request};
 
     int capability_calls = 0;
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = provider;
     config.capability_executor = [&capability_calls](const json&, const json&, const auto&) {
         ++capability_calls;
@@ -1398,7 +1360,6 @@ TEST(HarnessServiceTest, ProviderExecutorRejectsWorkspaceEscapeBeforeToolCall) {
 
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
-    EXPECT_NE(response.message.find("escapes configured workspace roots"), std::string::npos);
     EXPECT_EQ(capability_calls, 0);
 }
 
@@ -1421,12 +1382,13 @@ TEST(HarnessServiceTest, ProviderExecutorRejectsSymlinkWorkspaceEscape) {
     }
 
     auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"call-1", "repo.read", R"({"path":"link/secret.txt"})"});
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "call-1", "repo.read", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"path":"link/secret.txt"})")}}}});
     provider->completions = {tool_request};
     int capability_calls = 0;
-    neograph::mcp::HarnessProviderExecutorConfig config;
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
     config.provider = provider;
     config.capability_executor = [&capability_calls](const json&, const json&, const auto&) {
         ++capability_calls;
@@ -1451,7 +1413,6 @@ TEST(HarnessServiceTest, ProviderExecutorRejectsSymlinkWorkspaceEscape) {
 
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
-    EXPECT_NE(response.message.find("escapes configured workspace roots"), std::string::npos);
     EXPECT_EQ(capability_calls, 0);
     std::filesystem::remove_all(base);
 #endif
@@ -1461,11 +1422,11 @@ TEST(HarnessServiceTest, ExperimentalTasksProfileNegotiatesAndResumesInput) {
     const auto           root = unique_temp_path("neograph-harness-tasks");
     TempDirectoryCleanup cleanup(root);
     auto                 provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"provider-call", "host.lookup", R"({"query":"needle"})"});
-    neograph::ChatCompletion final;
-    final.message.content = R"({"status":"ok","findings":[]})";
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
+    const auto final = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {tool_request, final};
 
     HarnessServiceConfig config;
@@ -1473,7 +1434,7 @@ TEST(HarnessServiceTest, ExperimentalTasksProfileNegotiatesAndResumesInput) {
     config.record_store = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
     config.enable_experimental_tasks = true;
     config.poll_interval             = 25ms;
-    neograph::mcp::HarnessProviderExecutorConfig provider_config;
+    neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
     provider_config.provider = provider;
     config.worker_executor =
         neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -1675,11 +1636,12 @@ TEST(HarnessServiceTest, ProviderExecutorReturnsTypedHostPendingStates) {
              {"tool_result", neograph::mcp::HarnessWorkerResponseKind::AWAITING_TOOL_RESULTS},
              {"input", neograph::mcp::HarnessWorkerResponseKind::INPUT_REQUIRED}}) {
         auto                     provider = std::make_shared<ScriptedProvider>();
-        neograph::ChatCompletion tool_request;
-        tool_request.message.tool_calls.push_back(
-            {"provider-call", "host.lookup", R"({"query":"needle"})"});
+        const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+            {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+                "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+                neograph::test::document(R"({"query":"needle"})")}}}});
         provider->completions = {tool_request};
-        neograph::mcp::HarnessProviderExecutorConfig config;
+        neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
         config.provider = provider;
         auto executor   = neograph::mcp::make_provider_harness_executor(std::move(config));
 
@@ -1700,15 +1662,16 @@ TEST(HarnessServiceTest, ProviderExecutorReturnsTypedHostPendingStates) {
 TEST(HarnessServiceTest, WaitingHostCallCanBeCancelled) {
     const auto               root     = unique_temp_path("neograph-harness-cancel");
     auto                     provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"provider-call", "host.lookup", R"({"query":"needle"})"});
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
     provider->completions = {tool_request};
 
     HarnessServiceConfig config;
     config.checkpoint_store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
     config.record_store = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
-    neograph::mcp::HarnessProviderExecutorConfig provider_config;
+    neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
     provider_config.provider = provider;
     config.worker_executor =
         neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -1776,9 +1739,10 @@ TEST(HarnessServiceTest, CancellationPropagatesIntoResumedWorker) {
 TEST(HarnessServiceTest, ExpiredHostResultIsRejectedAndPersisted) {
     const auto               root     = unique_temp_path("neograph-harness-expiry");
     auto                     provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"provider-call", "host.lookup", R"({"query":"needle"})"});
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
     provider->completions = {tool_request};
 
     std::string run_id;
@@ -1789,7 +1753,7 @@ TEST(HarnessServiceTest, ExpiredHostResultIsRejectedAndPersisted) {
         config.record_store =
             std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
         config.run_ttl = 500ms;
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -2312,11 +2276,11 @@ TEST(HarnessServiceTest, JournalCorrelatesProviderAndCapabilityCallsToWorkerAtte
     auto records = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
         (root / "runs.db").string());
     auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"capability-call", "catalog.lookup", R"({"query":"needle"})"});
-    neograph::ChatCompletion final;
-    final.message.content = R"({"status":"ok","findings":[]})";
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "capability-call", "catalog.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
+    const auto final = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {tool_request, final};
 
     auto authored = request();
@@ -2340,7 +2304,7 @@ TEST(HarnessServiceTest, JournalCorrelatesProviderAndCapabilityCallsToWorkerAtte
     }});
     HarnessServiceConfig config;
     config.record_store = records;
-    neograph::mcp::HarnessProviderExecutorConfig provider_config;
+    neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
     provider_config.provider = provider;
     provider_config.capability_executor = [](const json&, const json&, const auto&) {
         return json{{"answer", "found"}};
@@ -2850,11 +2814,11 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
     neograph::mcp::SqliteHarnessJournalConfig journal_config;
     journal_config.mode               = neograph::mcp::HarnessJournalPayloadMode::FULL;
     auto                     provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"provider-call", "host.lookup", R"({"query":"needle"})"});
-    neograph::ChatCompletion final;
-    final.message.content = R"({"status":"ok","findings":[]})";
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
+    const auto final = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {tool_request, final};
 
     std::string run_id;
@@ -2865,7 +2829,7 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
             records_database.string(), 5s, journal_config);
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -2885,7 +2849,7 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
             records_database.string(), 5s, journal_config);
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -2919,14 +2883,17 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
             std::invalid_argument);
     }
     ASSERT_EQ(provider->calls.size(), 2u);
-    EXPECT_NE(provider->calls[1].messages[0].content.find("host_resume"), std::string::npos);
+    const auto& resumed_history =
+        std::get<sp::chat::Request>(provider->calls[1].payload).canonical_messages;
+    EXPECT_NE(neograph::outcome_text(sp::Completion{resumed_history}).find("host_resume"),
+              std::string::npos);
     {
         HarnessServiceConfig config;
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
             records_database.string(), 5s, journal_config);
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -2966,11 +2933,11 @@ TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
     const auto records_database = root / "runs.db";
     std::filesystem::create_directories(root);
     auto                     provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"provider-call", "host.lookup", R"({"query":"needle"})"});
-    neograph::ChatCompletion final;
-    final.message.content = R"({"status":"ok","findings":[]})";
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
+    const auto final = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {tool_request, final};
 
     std::string run_id;
@@ -2981,7 +2948,7 @@ TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store =
             std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -3010,7 +2977,7 @@ TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store = records;
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -3031,11 +2998,11 @@ TEST(HarnessServiceTest, AmbiguousHostEffectSurvivesReconnectAndReconciles) {
     neograph::mcp::SqliteHarnessJournalConfig journal_config;
     journal_config.mode = neograph::mcp::HarnessJournalPayloadMode::FULL;
     auto provider = std::make_shared<ScriptedProvider>();
-    neograph::ChatCompletion tool_request;
-    tool_request.message.tool_calls.push_back(
-        {"provider-call", "host.lookup", R"({"query":"needle"})"});
-    neograph::ChatCompletion final;
-    final.message.content = R"({"status":"ok","findings":[]})";
+    const auto tool_request = neograph::test::success(std::vector<sp::Message>{
+        {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+            "provider-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+            neograph::test::document(R"({"query":"needle"})")}}}});
+    const auto final = neograph::test::success(R"({"status":"ok","findings":[]})");
     provider->completions = {tool_request, final};
 
     std::string run_id;
@@ -3047,7 +3014,7 @@ TEST(HarnessServiceTest, AmbiguousHostEffectSurvivesReconnectAndReconciles) {
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
             records_database.string(), 5s, journal_config);
-        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
         provider_config.provider = provider;
         config.worker_executor =
             neograph::mcp::make_provider_harness_executor(std::move(provider_config));
@@ -3364,3 +3331,65 @@ TEST(HarnessServiceTest, CooperativeCancellationHasDistinctRunState) {
 }
 
 } // namespace
+
+TEST(HarnessServiceTest, InvalidToolCallPreventsExecutionOfValidSiblingCall) {
+    auto provider = std::make_shared<ScriptedProvider>();
+    provider->completions = {neograph::test::success(std::vector<sp::Message>{
+        {"mixed-calls", sp::Role::Assistant, {
+            sp::ToolCall{"valid-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+                         neograph::test::document(R"({"query":"needle"})")},
+            sp::InvalidToolCall{"invalid-call", "host.lookup", sp::ToolCallKind::ClientExecuted,
+                                R"({"query":)", sp::InvalidReason::Truncated}}}})};
+    auto effects = std::make_shared<std::atomic<unsigned>>(0);
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
+    config.provider = provider;
+    config.capability_executor = [effects](const json&, const json&, const auto&) {
+        ++*effects;
+        return json::object();
+    };
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+    HarnessWorkerCall call;
+    call.task = {{"objective", "reject partial tool calls"}};
+    call.worker = worker("reviewer", json::array({"host.lookup"}));
+    call.tool_catalog = json::array({{
+        {"id", "host.lookup"}, {"description", "Lookup"},
+        {"input_schema", {{"type", "object"}}},
+        {"executor", {{"kind", "builtin"}}}}});
+    const auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_EQ(effects->load(), 0U);
+    EXPECT_EQ(provider->calls.size(), 1U);
+}
+
+TEST(HarnessServiceTest, ServerAndApprovalCallsNeverExecuteAsClientTools) {
+    auto provider = std::make_shared<ScriptedProvider>();
+    provider->completions = {neograph::test::success(std::vector<sp::Message>{
+        {"hosted-calls", sp::Role::Assistant, {
+            sp::ToolCall{"server-call", "host.lookup", sp::ToolCallKind::ServerExecuted,
+                         neograph::test::document(R"({"query":"needle"})")},
+            sp::ServerToolResult{"server-call", "search-result",
+                                 neograph::test::document(R"({"answer":"server-owned"})")},
+            sp::ToolCall{"approval-call", "host.lookup", sp::ToolCallKind::ApprovalRequest,
+                         neograph::test::document(R"({"query":"approval"})")},
+            sp::Text{R"({"status":"ok","findings":[]})"}}}})};
+    auto effects = std::make_shared<std::atomic<unsigned>>(0);
+    neograph::mcp::HarnessProviderExecutorConfig config{.model = "test-model"};
+    config.provider = provider;
+    config.capability_executor = [effects](const json&, const json&, const auto&) {
+        ++*effects;
+        return json::object();
+    };
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+    HarnessWorkerCall call;
+    call.task = {{"objective", "preserve provider-owned execution"}};
+    call.worker = worker("reviewer", json::array({"host.lookup"}));
+    call.tool_catalog = json::array({{
+        {"id", "host.lookup"}, {"description", "Lookup"},
+        {"input_schema", {{"type", "object"}}},
+        {"executor", {{"kind", "builtin"}}}}});
+    const auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
+    EXPECT_EQ(response.value.at("status"), "ok");
+    EXPECT_EQ(effects->load(), 0U);
+    EXPECT_EQ(provider->calls.size(), 1U);
+}

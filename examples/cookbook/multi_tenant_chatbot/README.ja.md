@@ -1,6 +1,18 @@
 <!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
 # マルチテナントチャットボットサーバー
 
+## 現在のソース境界と過去の測定
+
+C++ mock/live は型付き SDK request と完全な不変 Outcome を使用します。engine cache identity は
+ tenant/topology と捕捉した provider/model/host instruction に結び付きます。信頼 host の tenant 選択、
+quota/store 境界、thread 分離は維持します。portable JSON 要約は native authority ではありません。
+以下の数値/実行記録は過去の資料で、新移行の実行または live pass ではありません。
+live binary は **1,000 request / 32 worker** 固定で、低費用 small-smoke flag はありません。
+単発検証として実行せず、live 鍵/network と別途承認された大きな provider 費用を必要とします。
+価格や zero-error を保証しません。鍵/prompt/artifact は非公開で raw native payload を公開しません。
+provider retry は明示的な一 layer、既定 off。旧 throttle-provider wrapper は現在の public API にありません。
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **1つのプロセスが、N人の顧客に対してN種類の異なるエージェントトポロジーを同時に提供する。** 測定値：実OpenAI呼び出し1000並行／顧客6／トポロジー3／**ピーク29 MB／エラー0**。
@@ -104,7 +116,7 @@ cmake --build build --target cookbook_multi_tenant_live
 主要数値:
 
 - **1000件の同時実行中のLLMコルーチン + 接続メモリコスト ≈ 29 MB**。 100リクエスト → 1000リクエストで+7 MB増加 ⇒ 追加コネクション1件あたり約 8 KB。asioコルーチン + httplib SSLコネクションプールの組み合わせ。
-- **1000件同時実行時のエラーゼロ** — NGはレート制限 / ネットワークジッター / TLSハンドシェイクジッターをリトライなしで吸収する。プロバイダー側のスロットルは`RateLimitedProvider`ラッパーで強化可能。
+- 過去の1000 request 実行のエラー0件は現在の reliability 保証ではありません。
 - **キャッシュヒット率 99.4%** — トポロジー数が同じなら顧客が増えてもヒット率は維持される。**1000顧客シナリオのメモリも ~30 MB のまま**。
 
 ## LangGraph比較 — 実際の意味

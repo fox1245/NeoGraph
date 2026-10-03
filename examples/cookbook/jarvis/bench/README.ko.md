@@ -3,6 +3,14 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## 타입 제공자 전환 — 소스 상태
+
+C++ 라우터·합성기·전문가 픽스처는 타입 `ProviderRequest`, `sp::Message`, `sp::Event` 및 전체 불변 `sp::Outcome` (`sp::runtime::Result`)을 사용하며 기존 문자열 응답 API가 아니다. `src/provider_support.h`의 Jarvis/coder/researcher mock은 고정 라우터 JSON, 사용자 텍스트 echo, 명시적인 가상 연구 응답을 제공한다. 키나 네트워크 제공자는 필요 없지만 실제 연구·추론은 아니다. 아래 기존 설정/프로필 경로는 이 문서 변경으로 생성하거나 고치지 않는다.
+
+로컬 음성은 선택 사항이며 선택한 whisper/Moonshine 모델, ONNX Runtime/Supertonic 자산, miniaudio 및 사용 가능한 마이크·스피커가 필요하다. 텍스트/mock 실행은 음성 동작의 증거가 아니다. 클라우드 불필요는 로컬/mock에만 해당한다. 라이브 요청에는 승인된 `OPENROUTER_API_KEY`, 네트워크·제공자 용량이 필요하며 프롬프트, 대화 메모리, 첨부 도구/위임 결과를 OpenRouter로 전송한다. 모델은 고정되어 있고 네이티브 요청의 ZDR은 지역 상주 보장이 아니다. 키를 로그·저장소에 넣지 않는다. nullable 토큰 사용량은 청구액이 아니며 비용에는 현재 엔드포인트/모델 가격과 실제 청구 사용량이 필요하다.
+
+`[jarvis:ttft]`는 비어 있지 않은 첫 `sp::PartDelta` 중 `PartKind::Text`와 `DeltaChannel::Content`에만 발생하며 사용량·추론·헤더 이벤트는 제외한다. 첫 합성 텍스트 시점이지 실제 TTS 청취 시작이 아니다. Python REPL/벤치 프로토콜 드라이버는 그대로이고 타입 Python 제공자 바인딩은 유예되었다. 아래 시간·실행 주장은 모두 과거 기록이며 전환된 C++ 실행 증거가 아니다. 이번 변경은 소스 대조 문서화만 했고 빌드·벤치·음성/라이브 실행은 하지 않았다.
+
 NeoGraph(C++ 목업 빌드)와 LangGraph(파이썬 트윈 `langgraph_twin.py`)에서 동일한 토폴로지(mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)를 미러링하고, 동일한 제약 조건(`--cpus=2 --memory=2g`) 컨테이너에서 측정합니다.
 
 ```bash
@@ -63,7 +71,7 @@ OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 
 ## 스트리밍 TTFT 라운드 (2026-07-05)
 
-현대 LLM 서비스는 모두 스트리밍하므로 벤치마크도 그에 맞춘다: 두 synth 호출 모두 스트리밍으로 변경됨 (C++ `invoke(p, on_chunk)`, LangGraph `SYNTH_LLM.stream()`), 드라이버는 `[jarvis:ttft]` 마커로 **턴 전송 → 첫 synth 토큰** 시간을 측정. nginx는 `proxy_buffering off`로 SSE를 통과시키므로 `$upstream_header_time`가 실제 첫 바이트입니다. 라운드별 분리 로그 (mv + `nginx -s reopen`) 를 사용하여 라운드 분할 추측을 제거.
+현대 LLM 서비스는 모두 스트리밍하므로 벤치마크도 그에 맞춘다: 두 synth 호출 모두 스트리밍으로 변경됨 (C++ `ProviderMode::Stream` / `sp::Event`, LangGraph `SYNTH_LLM.stream()`), 드라이버는 `[jarvis:ttft]` 마커로 **턴 전송 → 첫 synth 토큰** 시간을 측정. nginx는 `proxy_buffering off`로 SSE를 통과시키므로 `$upstream_header_time`가 실제 첫 바이트입니다. 라운드별 분리 로그 (mv + `nginx -s reopen`) 를 사용하여 라운드 분할 추측을 제거.
 
 |  | 인지된 TTFT p50 | 완료 시간 p50 | 턴당 평균 업스트림 |
 |---|---|---|---|

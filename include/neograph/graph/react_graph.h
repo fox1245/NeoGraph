@@ -18,13 +18,14 @@ namespace neograph::graph {
  * @param provider LLM provider for making completions.
  * @param tools Vector of tools available to the agent (ownership transferred).
  * @param instructions Optional system prompt / instructions for the LLM.
- * @param model Optional model name override (empty = use provider default).
+ * @param model Required admitted model identity (empty is rejected at preparation).
  * @return A compiled GraphEngine ready for execution.
  */
 std::unique_ptr<GraphEngine> create_react_graph(
     std::shared_ptr<Provider> provider,
     std::vector<std::unique_ptr<Tool>> tools,
     const std::string& instructions = "",
-    const std::string& model = "");
+    const std::string& model = "",
+    ProviderControls controls = {});
 
 } // namespace neograph::graph

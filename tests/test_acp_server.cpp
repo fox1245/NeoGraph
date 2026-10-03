@@ -16,6 +16,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/node.h>
 
+#include "fixtures/typed_provider.h"
 #include <chrono>
 #include <condition_variable>
 #include <future>
@@ -105,30 +106,23 @@ struct DependencyProbe {
     std::shared_ptr<neograph::graph::CancelToken> token;
 };
 
-class CancellableProvider final : public neograph::Provider {
+class CancellableProvider final : public neograph::test::LocalProvider {
   public:
     explicit CancellableProvider(std::shared_ptr<DependencyProbe> probe)
-        : probe_(std::move(probe)) {}
-    asio::awaitable<neograph::ChatCompletion> complete_async(
-        const neograph::CompletionParams& params) override {
-        probe_->provider_started.store(true, std::memory_order_release);
-        while (true) {
-            if (probe_->provider_release.load(std::memory_order_acquire)) {
-                co_return neograph::ChatCompletion{};
+        : LocalProvider([probe = std::move(probe)](
+              neograph::ProviderRequest request, const neograph::PreparedProviderRequest&,
+              const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            probe->provider_started.store(true, std::memory_order_release);
+            while (true) {
+                if (probe->provider_release.load(std::memory_order_acquire))
+                    co_return neograph::test::success("");
+                if (request.cancel_token && request.cancel_token->is_cancelled()) {
+                    probe->provider_cancelled.store(true, std::memory_order_release);
+                    throw neograph::graph::CancelledException();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            if (params.cancel_token && params.cancel_token->is_cancelled()) {
-                probe_->provider_cancelled.store(true, std::memory_order_release);
-                throw neograph::graph::CancelledException();
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        throw std::runtime_error("sync provider path not expected");
-    }
-    std::string get_name() const override { return "cancellable"; }
-  private:
-    std::shared_ptr<DependencyProbe> probe_;
+        }, "cancellable") {}
 };
 
 class CancellableTool final : public neograph::AsyncTool {
@@ -162,10 +156,9 @@ class DependencyNode final : public GraphNode {
           tool_(std::move(tool)), probe_(std::move(probe)) {}
     asio::awaitable<NodeOutput> run(NodeInput in) override {
         probe_->token = in.ctx.cancel_token;
-        neograph::CompletionParams params;
-        params.model = "mock";
-        params.cancel_token = in.ctx.cancel_token;
-        (void)co_await provider_->complete_async(params);
+        auto request = neograph::test::request("mock");
+        request.cancel_token = in.ctx.cancel_token;
+        (void)co_await provider_->invoke_async(std::move(request));
         (void)co_await tool_->execute_async({});
         co_return NodeOutput{};
     }
@@ -387,35 +380,37 @@ std::shared_ptr<GraphEngine> build_interrupt_engine(
 }
 
 class BlockingListCheckpointStore : public neograph::graph::InMemoryCheckpointStore {
+    struct State {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool entered = false, released = false;
+    };
+    std::shared_ptr<State> state_ = std::make_shared<State>();
   public:
     std::vector<neograph::graph::Checkpoint> list(
         const std::string& thread_id, int limit) override {
+        auto state = state_;
         {
-            std::unique_lock lk(mu_);
-            list_entered_ = true;
-            cv_.notify_all();
-            cv_.wait(lk, [this] { return release_list_; });
+            std::unique_lock lock(state->mutex);
+            state->entered = true;
+            state->condition.notify_all();
+            state->condition.wait(lock, [state] { return state->released; });
         }
         return InMemoryCheckpointStore::list(thread_id, limit);
     }
 
     void wait_for_list() {
-        std::unique_lock lk(mu_);
-        ASSERT_TRUE(cv_.wait_for(lk, std::chrono::seconds(2),
-                                 [this] { return list_entered_; }));
+        auto state = state_;
+        std::unique_lock lock(state->mutex);
+        ASSERT_TRUE(state->condition.wait_for(lock, std::chrono::seconds(2),
+                                              [state] { return state->entered; }));
     }
 
     void release_list() {
-        std::lock_guard lk(mu_);
-        release_list_ = true;
-        cv_.notify_all();
+        std::lock_guard lock(state_->mutex);
+        state_->released = true;
+        state_->condition.notify_all();
     }
-
-  private:
-    std::mutex              mu_;
-    std::condition_variable cv_;
-    bool                    list_entered_ = false;
-    bool                    release_list_ = false;
 };
 
 class ThrowingAdapter : public ACPGraphAdapter {
@@ -503,15 +498,24 @@ std::string new_session(ACPServer& server, const std::string& cwd = "/work") {
 // thread block until a response with a particular id arrives. Models
 // what the run-loop reader does in production.
 struct CapturingSink {
-    std::mutex                  mu;
-    std::condition_variable     cv;
-    std::vector<neograph::json> envs;
+  private:
+    struct State {
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::vector<neograph::json> envelopes;
+    };
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+  public:
+    CapturingSink() : mu(state_->mutex), cv(state_->condition), envs(state_->envelopes) {}
+    std::mutex& mu;
+    std::condition_variable& cv;
+    std::vector<neograph::json>& envs;
 
     ACPServer::NotificationSink as_sink() {
-        return [this](const neograph::json& env) {
-            std::lock_guard lk(mu);
-            envs.push_back(env);
-            cv.notify_all();
+        return [state = state_](const neograph::json& env) {
+            std::lock_guard lock(state->mutex);
+            state->envelopes.push_back(env);
+            state->condition.notify_all();
         };
     }
 
@@ -519,8 +523,8 @@ struct CapturingSink {
                                      std::chrono::milliseconds timeout
                                          = std::chrono::seconds(5)) {
         std::unique_lock lk(mu);
-        cv.wait_for(lk, timeout, [&]{
-            for (auto& e : envs) {
+        cv.wait_for(lk, timeout, [state = state_, id] {
+            for (const auto& e : state->envelopes) {
                 if (!e.contains("method")
                     && e.contains("id")
                     && e["id"].is_number_integer()

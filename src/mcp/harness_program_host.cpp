@@ -55,6 +55,17 @@ public:
                          std::map<std::string, json> tools)
         : name_(std::move(name)), executor_(std::move(executor)), tools_(std::move(tools)) {}
     std::string                  get_name() const override { return name_; }
+    std::string_view family() const noexcept override { return {}; }
+    PreparedProviderRequest prepare(ProviderRequest) override {
+        // This capability binds the worker executor, not a model endpoint.
+        // Direct model requests are denied before effects; the sealed worker
+        // node below invokes the real executor with its full Harness contract.
+        sp::Error error;
+        error.kind = sp::ErrorKind::Unsupported;
+        error.safe_message = "Harness worker capability does not admit direct model requests";
+        error.retry_safety = sp::RetrySafety::NotSent;
+        return reject_preparation(std::move(error));
+    }
     const HarnessWorkerExecutor& executor() const noexcept { return executor_; }
     const std::map<std::string, json>& tools() const noexcept { return tools_; }
 
@@ -125,21 +136,27 @@ HarnessWorkerResponseKind response_kind(std::string_view value) {
 }
 
 json recorded_call(const HarnessWorkerCall& call, const HarnessWorkerResponse& response) {
-    return {{"worker_id", call.worker.at("worker_id")},
+    return {{"encoding_version", 2}, {"worker_id", call.worker.at("worker_id")},
             {"attempt", call.attempt},
             {"kind", std::string(response_kind(response.kind))},
             {"value", response.value},
-            {"message", response.message}};
+            {"message", response.message},
+            {"provider_effect_uncertain", response.provider_effect_uncertain}};
 }
 
 HarnessWorkerResponse recorded_response(const json& value) {
-    if (!value.is_object() || !value.contains("kind") || !value.at("kind").is_string() ||
+    if (!value.is_object() || !value.contains("encoding_version") ||
+        !value.at("encoding_version").is_number_integer() ||
+        value.at("encoding_version").get<int>() != 2 ||
+        !value.contains("kind") || !value.at("kind").is_string() ||
         !value.contains("value") || !value.contains("message") ||
-        !value.at("message").is_string()) {
-        throw std::invalid_argument("recorded Harness capability evidence is malformed");
+        !value.at("message").is_string() || !value.contains("provider_effect_uncertain") ||
+        !value.at("provider_effect_uncertain").is_boolean()) {
+        throw std::invalid_argument("incompatible or malformed recorded Harness capability evidence");
     }
     return {response_kind(value.at("kind").get<std::string>()), value.at("value"),
-            value.at("message").get<std::string>()};
+            value.at("message").get<std::string>(),
+            value.at("provider_effect_uncertain").get<bool>()};
 }
 
 struct RecordedHarnessCall {
@@ -269,6 +286,7 @@ public:
                     break;
                 }
             }
+            if (response.provider_effect_uncertain) break;
         }
         co_return graph::NodeOutput{{graph::ChannelWrite{
             "worker_results",
@@ -411,7 +429,7 @@ HarnessNodeRegistration judge_registration(std::string_view compiler_build_id) {
     return r;
 }
 
-program::RecordedBindingSet make_recorded_binding(
+program::RecordedCapabilityMaterialization make_recorded_materialization(
     const program::ProgramVersion& version, const HarnessCapabilityBindingRequest& requested,
     const std::vector<program::ProgramEvent>& events) {
     const auto exact_bindings =
@@ -513,8 +531,14 @@ program::RecordedBindingSet make_recorded_binding(
     }
     owned.tools    = ToolSet(std::move(tools));
     owned.receipts = exact_bindings;
-    return program::RecordedBindingSet(exact_bindings, std::move(expected_calls),
-                                       std::move(owned), std::move(evidence));
+    return {program::RecordedBindingSet(exact_bindings, std::move(expected_calls),
+                                        std::move(evidence)), std::move(owned)};
+}
+
+program::RecordedBindingSet make_recorded_binding(
+    const program::ProgramVersion& version, const HarnessCapabilityBindingRequest& requested,
+    const std::vector<program::ProgramEvent>& events) {
+    return make_recorded_materialization(version, requested, events).evidence;
 }
 
 }  // namespace
@@ -556,6 +580,11 @@ HarnessServiceResources make_harness_program_service_resources(HarnessProgramHos
                                std::shared_ptr<program::ProgramStore> store,
                                const HarnessCapabilityBindingRequest& requested) {
         program::CatalogConfig cc{std::move(store), registry, engines, compiler_build_id, {}, 1};
+        cc.recorded_capability_binder =
+            [requested](const program::ProgramVersion& version,
+                        const std::vector<program::ProgramEvent>& source_events) {
+                return make_recorded_materialization(version, requested, source_events);
+            };
         cc.capability_binder =
             [requested, worker_executor, capability_executor, provider_binding_identity,
              provider_host_configuration, tool_binding_identities, tool_metadata](

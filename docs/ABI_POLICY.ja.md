@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=d2a0d445bf112968279a8efd4c21953f01b3dae5bb9a5b026a821b04e12a99e9 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=eadbd5019a617097b40042dc1f99f69e4ef46d890f562c028484e003fa10f5ce -->
 # バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -7,6 +7,7 @@
 C++ コンシューマーに適用されます。Python wheel は対応する拡張と
 ライブラリを一つのパッケージとして配布するため、同梱ライブラリだけを
 個別に置き換えてはいけません。
+typed provider 移行は必須の再コンパイル境界で、旧恒久互換計画を置き換えます。NeoGraph の pre-v1 loader 名を維持しても旧 provider オブジェクトの互換性はありません。NeoGraph と SchemaProvider SDK の一致したヘッダー/ライブラリを一括設置します。SDK interface revision 3 と `libsp_*.so.3` は out-of-line capability gate を持つ別 shared ABI です。不安定 package `0.0.0` は安定リリースではありません。現 SDK runtime/archive は Linux/POSIX を必要とします。以下の Windows/macOS 名前例は packaging policy であり、新依存 runtime の動作証拠ではありません。Python provider binding/wrapper は延期・未移植です。
 
 ## バージョン契約
 
@@ -50,14 +51,12 @@ hot-swap しないでください。1.0 で世代 1 のレイアウトを固定�
 ## 公開 virtual インターフェース
 
 - `GraphNode` の正式な実行 virtual は `run(NodeInput)` 一つです。
-- `Provider` は恒久互換性の決定に従い既存 vtable を維持します。新規実装には
-  `CompletionProvider` を推奨します。
+- `Provider`: `get_name()`, `family()`, `prepare(ProviderRequest)`;
+  `invoke(_async)` / `dispatch(_async)` → `sp::runtime::Result`.
+  ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は不安定 `0.0.0`、interface revision 3 / shared ABI 3、out-of-line capability check を使用し、安定リリースの宣言ではありません。現 runtime/archive は Linux/POSIX で、Windows・macOS・WASM runtime の資格検証を意味しません。Python provider binding/wrapper は延期され、この C++ 変更では移植されません。
 - 将来の `CheckpointStore` 非同期移行もこのポリシーに従います。v1 後は
   安定レイアウトの変更より、別の capability interface と adapter を優先します。
 
 ## 検証
 
-`scripts/test_find_package.sh` は隔離した install prefix からコンシューマーを
-ビルド・実行します。`--shared` は全ライブラリのバージョンリンクと ELF
-SONAME または Mach-O install name も検査します。CI は静的・共有の両方を
-実行し、Linux と macOS で共有ライブラリメタデータを確認します。
+`scripts/test_find_package.sh` は installed-consumer 検査手順であり、存在するだけで現 pass を主張しません。現 SDK ABI3 全再ビルド/CTest は 26/26 pass、shared 設置 consumer は実際の local HTTP 二 turn typed 要求、tool/native/refusal/known-zero 結果と mismatch 拒否を実行しました。NeoGraph・Python・Windows・macOS・WASM・有料 live-provider 互換の資格検証ではありません。NeoGraph 統合検証は別途報告します。

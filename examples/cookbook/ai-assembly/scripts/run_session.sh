@@ -5,11 +5,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Find the binaries. In-tree (NeoGraph repo) build lives at
-# <neograph-root>/build-pybind or <neograph-root>/build; standalone
-# build at $ROOT/build. Try each in order.
+# Explicit fixture mode never sources credentials or starts provider transport.
+MEMBER_ARGS=()
+if [ "${1:-}" = "--mock" ]; then
+    MEMBER_ARGS=(--mock)
+    shift
+fi
+
+# Prefer the selected integrated build; retain the existing build directories.
 NG_ROOT="$(cd "$ROOT/../../.." && pwd 2>/dev/null)" || NG_ROOT=""
-if [ -n "$NG_ROOT" ] && [ -x "$NG_ROOT/build-pybind/cookbook_ai_assembly_member" ]; then
+if [ -n "${NEOGRAPH_BUILD_DIR:-}" ]; then
+    BUILD="$NEOGRAPH_BUILD_DIR"
+elif [ -n "$NG_ROOT" ] && [ -x "$NG_ROOT/build-pybind/cookbook_ai_assembly_member" ]; then
     BUILD="$NG_ROOT/build-pybind"
 elif [ -n "$NG_ROOT" ] && [ -x "$NG_ROOT/build/cookbook_ai_assembly_member" ]; then
     BUILD="$NG_ROOT/build"
@@ -22,17 +29,18 @@ BILL="${1:-$ROOT/bills/basic_income.txt}"
 if [ ! -x "$BUILD/cookbook_ai_assembly_member" ] || [ ! -x "$BUILD/cookbook_ai_assembly_speaker" ]; then
     echo "Build first. From NeoGraph root:"
     echo "  cmake --build build-pybind --target cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4"
-    echo "or standalone (sibling repo):"
-    echo "  cmake -S '$ROOT' -B '$ROOT/build' && cmake --build '$ROOT/build' -j4"
+    echo "Set NEOGRAPH_BUILD_DIR to select another integrated build."
     exit 1
 fi
 
-# Load OPENROUTER_API_KEY from .env (cwd or NeoGraph root) if present.
-for envf in "$ROOT/.env" "$NG_ROOT/.env"; do
-    if [ -n "$envf" ] && [ -f "$envf" ]; then set -a; . "$envf"; set +a; break; fi
-done
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-    echo "OPENROUTER_API_KEY not set"; exit 2
+if [ "${#MEMBER_ARGS[@]}" -eq 0 ]; then
+    # Load OPENROUTER_API_KEY only for explicitly live sessions.
+    for envf in "$ROOT/.env" "$NG_ROOT/.env"; do
+        if [ -n "$envf" ] && [ -f "$envf" ]; then set -a; . "$envf"; set +a; break; fi
+    done
+    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+        echo "OPENROUTER_API_KEY not set"; exit 2
+    fi
 fi
 
 PIDS=()
@@ -46,7 +54,7 @@ trap cleanup EXIT
 
 start_member() {
     local port=$1; local name=$2; local party=$3; local prompt=$4
-    "$BUILD/cookbook_ai_assembly_member" "$port" "$name" "$party" "$ROOT/prompts/$prompt" &
+    "$BUILD/cookbook_ai_assembly_member" "$port" "$name" "$party" "$ROOT/prompts/$prompt" "${MEMBER_ARGS[@]}" &
     PIDS+=($!)
 }
 

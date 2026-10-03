@@ -1,6 +1,58 @@
 # 매턴 하니스를 제안하는 챗봇
 
-**Languages:** [English](README.md) | [한국어](README.ko.md)
+## 현재 타입 Program chat 계약
+
+`program_chat.cpp`는 `evolving-chat/v6`, `chat.step` version `1.5.0`
+(manifest digest `chat.step/v6`), ledger schema `neograph.program-chat-call/v6`를 사용합니다.
+기존 browser/HTTP protocol은 변경하지 않았습니다. Alice/Bob owner scope,
+reviewed-template generation, 역할별 prompt, effect/capability grant,
+정확한 checkpoint lineage와 nonrenewable budget은 host가 소유합니다.
+
+```bash
+# configure 전에 SCHEMAPROVIDER_SOURCE를 제공된 SDK checkout 경로로 설정하세요.
+cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
+cmake --build build-chat --target cookbook_program_chatbot
+./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+  --native-archive-dir .chat-native --session demo
+```
+
+loopback browser는 `http://127.0.0.1:8768`이며 `alice-demo`/`bob-demo`는 production 인증이
+아닌 demo bearer token입니다. live에는 OpenRouter eligible route, 키, 네트워크가 필요하며
+CLI default는 GLM-5.3-Flash입니다. archive는 host-only이며 기본 경로는 `DB_PATH.native`입니다.
+독립 키와 owner-private custody를 DB와 함께 보존하세요. 이는 인증 custody이며 암호화나
+vendor issuer proof가 아닙니다. raw native payload, 키, prompt, ledger artifact를 공개 log에
+내보내지 마세요. 이 durable recipe에는 archive가 필요하지만 진짜 C++ in-memory checkpoint sidecar에는 필요 없습니다.
+
+`turn:role`마다 한 번 prepare하고 정확한 `Provider::request_digest(prepared)`를 계산하여
+`Provider::conservative_token_upper_bound(prepared)`를 예약하고 pending claim을
+durable 저장한 뒤 같은 handle을 dispatch합니다. 전체 호출 범위 상한은 승인된 모델의
+input/output 한도, 실제 output cap, hosted invocation 한도와 retry 정책으로 계산합니다.
+모델 사실이 없으면 예약과 dispatch 전에 거절합니다. private loopback fixture에도
+명시적인 지원 모델 정책 사실이 필요하며 mock은 한도나 provider usage를 만들어내지 않습니다.
+예약은 provider usage, forecast, invoice가 아닙니다. nullable wide provider count와
+`charged_tokens`는 별개이며 known zero는 누락이 아닙니다. consistent final input/output
+evidence가 있고 이전 usage가 unknown이 아니며 transport 내부 재전송이 없을 때만 정산합니다.
+그 외에는 원래 예약을 `UnknownHold`로 유지합니다. 예약 초과 report도 charge에 포함하며
+`cost`는 unknown입니다.
+`--descriptor-policy PATH`(C++ `Options::descriptor_policy_file`)로 호스트 소유 SDK
+descriptor-policy JSON을 지정합니다. 내장 codec resource snapshot으로 한 번 승인한 뒤
+두 tenant가 공유하며 기본값은 내장 정책입니다. 명시적인 fixture 정책은 정확한 loopback
+`openrouter_origins`와 `program-chat-mock`(또는 지정한 fixture 모델)의 한도를 선언해야 합니다.
+승인된 정책 identity를 세션 settings에 바인딩하므로 같은 파일 경로라도 내용이 바뀌면 새 세션이
+필요합니다. 모델 제안이나 checkpoint는 정책을 선택할 수 없습니다. `--mock`에도 해당 사실이
+필요하며 예산 증가는 명시적으로만 지정합니다.
+
+restart에서 pending은 `UnknownHold`가 되고 자동 재전송하지 않습니다. completed replay는 같은
+prepared digest/reservation을 요구하며 archive에서 원본 불변 Outcome/native role history를
+복원하고 settlement/output을 검증합니다. DB, archive/key, session, provider/model/settings,
+build identity를 유지하세요. 설정 변경은 새 session이 필요합니다. SDK retry는 off (`max_attempts=1`)입니다.
+restart/교체는 budget을 갱신하지 않습니다. model JSON은 제안이지 native authority가 아닙니다.
+이 내용은 소스 계약이며 새 recipe 실행이나 live pass를 주장하지 않습니다.
+
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 `cookbook_program_chatbot`은 Alice와 Bob의 대화·예산·실행 계보를 분리하고,
 매턴 하니스 제안을 평가하는 Program 예제입니다. 승인된 후보는 새로운
@@ -82,9 +134,10 @@ host는 [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md)와
 모델에 제공하고 반환된 소스를 실제 컴파일러로 검증합니다. 챗봇의 템플릿 제안 모드는
 모델에게 컴파일러 도구를 직접 노출하지 않습니다. 이전 빌드의 예제 DB에는 새 세션을 만드세요.
 
-기본 세션 한도는 tenant마다 12턴·모델 호출 100회·20만 토큰입니다. 호출 전에
-예약하고 실제 사용량으로 정산하며, 사용량이 없으면 예약량을 유지합니다. 입력 예약은
-UTF-8 바이트와 여유분을 사용하며 모델별 토크나이저의 정확한 계산은 아닙니다.
+기본 세션 한도는 tenant마다 12턴·모델 호출 100회·20만 토큰입니다. 호출 전에 승인된
+전체 호출 범위 토큰 상한을 예약합니다. 이전 usage가 unknown이 아니고 transport 내부
+재전송이 없을 때만 일관된 최종 사용량으로 정산하며, 누락된 사용량은 예약을 유지합니다.
+모델 한도가 없으면 dispatch 전에 거절하며 요청 바이트로 토큰 상한을 추정하지 않습니다.
 금액은 가격을 가정하지 않고 미상으로 표시하며 금액 한도를 제공하지 않습니다.
 Program의 컴파일·연산·Core step·자식 수/깊이 예산은 교체나 재시작으로 초기화되지 않습니다.
 대기 시간도 세션의 wall-time 한도에 포함됩니다.

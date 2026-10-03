@@ -3,7 +3,15 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-> 云端零依赖，单台树莓派即可运行。
+## 类型化提供方迁移 — 源码状态
+
+C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp::Message`、`sp::Event` 及完整不可变 `sp::Outcome` (`sp::runtime::Result`)，不是旧字符串响应 API。`src/provider_support.h` 的 Jarvis/coder/researcher mock 提供固定路由 JSON、用户文本 echo 和明确的模拟研究回复。不需要密钥或网络提供方，但不是真实研究或推理。本次文档更新不会创建或修复下文既有配置/配置档路径。
+
+本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
+
+`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL/基准协议驱动不变；类型化 Python 提供方绑定延期。下文所有耗时及执行主张均为历史记录，不能证明迁移后 C++ 已执行。本次仅对齐源码，未运行构建、基准或语音/实时调用。
+
+> 本地/mock 无需云端提供方；可选语音需要本地资源和设备。
 > 麦克风是Tony，NeoGraph是JARVIS，工具/专家是JARVIS的下属。
 
 本手册**不是**一个“语音TTS示例”。它展示了NeoGraph的多智能体原语——MCP工具、双向A2A、异步并行、Store记忆、ReAct子图——**通过一条语音无缝编织在一起**。

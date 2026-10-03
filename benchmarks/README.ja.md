@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=db24e5932e8c6357d88b133d6230abaaffdeeb4c0cf8453e7afd97d0dae66e76 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=0b89132e34b3f81b00ea1a1094e3d311a10bdd1c97ec2ad1a029a8fcd066db26 -->
 # NeoGraph と Python のグラフ/パイプライン フレームワーク — エンジン オーバーヘッド ベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -320,3 +320,57 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
 
 Numbers will vary on your hardware, but the ratios should be stable to
 within ~20%.
+
+## Typed provider 切り替え: 実際の GraphEngine 前後測定
+
+上記 Python フレームワーク比較とは別の **ローカル TLS HTTP/SSE** 測定であり、モデル推論時間ではない。static Release/GCC13.3/Linux x64 の本番 `GraphEngine.llm_call/tool_dispatch` 経路で **16設定 × 独立プロセス3回 = 48記録**が通過した。共通 H1 の3負荷、5 family の buffered/SSE native continuation、実際の H2 3負荷を含む。測定中のコンパイル・有料呼び出しはない。
+
+| 共通グラフ負荷 | 前 p50 ms | 後 p50 ms | 前グラフ/s | 後グラフ/s | 前 peak RSS MiB | 後 peak RSS MiB |
+|---|---:|---:|---:|---:|---:|---:|
+| H1 buffered text | 0.707 | 1.320 | 1,375.58 | 733.65 | 12.617 | 15.465 |
+| H1 buffered tool loop | 29.337 | 30.510 | 800.30 | 702.64 | 17.832 | 20.219 |
+| H1 SSE tool loop | 600.540 | 37.593 | 51.43 | 615.38 | 14.414 | 20.367 |
+
+3回統計の中央値、HTTP要求ではなく **グラフ実行単位**。text は並行数1/遅延0、tool は並行数32/要求ごと5ms/グラフごと2要求。warmup10・測定100、tool/native は各反復8キャンセル。全設定で測定失敗0、実キャンセル336/失敗0、厳密な synthetic native replay3,300、Provider破棄後の所有結果検証5,280、無効要求0・超過retry0を観測した。
+
+完全な owned raw/native/nullable データと権限検証で text コスト・メモリは増加し、buffered tool p50 は少し増加する。SSE は legacy buffered 経路の遅延を除いた。legacy は native/nullable 権限と一部 worker 制御が未対応なので、意味/資源等価やモデル高速化は主張しない。
+
+[原本9記録](provider-cutover-legacy-results.json)、[現在48記録](provider-cutover-current-results.json)、[p95/p99・キャンセル・拡張 family](provider-cutover-summary.json)、[正確な再現コマンド](README.md#typed-provider-cutover-actual-graphengine-beforeafter)。
+
+
+## 最終検証 cohort：fresh typed provider GraphEngine 測定
+
+最終 Release GraphEngine/local TLS HTTP/SSE cohort は **16設定 × fresh process3回 = 48記録、失敗0、38.29秒**で完了しました。全 actual protocol/owned-outcome check が pass。測定中の compiler 実行・有料 model call はありません。これは fresh final-worktree cohort であり、上の歴史 table を置換しません。[最終 scalar summary](provider-cutover-final-summary.json) と [最終 raw owned synthetic object](provider-cutover-final-results.json) は、未変更の [legacy9記録](provider-cutover-legacy-results.json)、[以前の current48記録](provider-cutover-current-results.json)、[以前の comparison](provider-cutover-summary.json) と別です。約60MB raw file は実際の synthetic outcome object を含み、provider secret は含みません。
+
+以下は summary の独立 process3回の中央値で、**graph run 単位**です。Model token/HTTP request 単位ではありません。全設定が negotiated protocol と provider 破棄後の retained owned graph outcome を検証しました。Resource/control および native/nullable authority の相違は残ります。**Semantic/resource equivalence は false**；local 測定 tradeoff であり model 高速化や vendor qualification ではありません。
+
+### 最終16設定の測定
+
+| Family | HTTP | 負荷 | p50 ms | p95 ms | p99 ms | Graph runs/s | Peak RSS MiB | Peak thread |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `openai.chat` | H1 | text buffered | 1.296943 | 1.349401 | 1.397812 | 769.975584 | 15.898438 | 3 |
+| `openai.chat` | H1 | tool buffered | 30.672507 | 100.492667 | 112.663949 | 678.507993 | 20.585938 | 19 |
+| `openai.chat` | H1 | tool SSE | 35.800113 | 105.431034 | 117.559931 | 627.047345 | 21.042969 | 19 |
+| `openai.chat` | H1 | native buffered | 32.546693 | 102.680190 | 115.244483 | 683.637830 | 20.925781 | 19 |
+| `openai.chat` | H1 | native SSE | 38.135188 | 115.463732 | 126.668501 | 615.357297 | 21.902344 | 19 |
+| `anthropic.messages` | H1 | native buffered | 30.612805 | 103.979300 | 123.110448 | 678.785191 | 20.324219 | 19 |
+| `anthropic.messages` | H1 | native SSE | 44.021986 | 71.548005 | 93.941146 | 604.744184 | 22.125000 | 19 |
+| `openai.responses` | H1 | native buffered | 35.070430 | 100.615954 | 114.597387 | 647.751880 | 22.179688 | 19 |
+| `openai.responses` | H1 | native SSE | 46.670934 | 77.636952 | 89.664406 | 571.458359 | 25.511719 | 19 |
+| `google.generate` | H1 | native buffered | 31.449930 | 99.319459 | 112.385528 | 698.783682 | 21.726562 | 19 |
+| `google.generate` | H1 | native SSE | 37.774704 | 105.703383 | 120.826886 | 627.040287 | 22.500000 | 19 |
+| `google.interactions` | H1 | native buffered | 32.588486 | 101.365734 | 109.841457 | 690.967042 | 21.664062 | 19 |
+| `google.interactions` | H1 | native SSE | 46.786625 | 76.036675 | 92.590316 | 573.469300 | 23.058594 | 19 |
+| `openai.chat` | H2 | text buffered | 1.311873 | 2.443117 | 2.604176 | 701.785481 | 16.148438 | 3 |
+| `openai.chat` | H2 | tool SSE | 40.349311 | 54.813608 | 59.912728 | 714.064349 | 20.386719 | 19 |
+| `google.interactions` | H2 | native SSE | 44.561127 | 56.692743 | 64.665852 | 663.966743 | 22.750000 | 19 |
+
+### 共通 H1 3負荷：未変更 legacy と最終 cohort
+
+| H1 graph 負荷 | 前 p50 ms | 最終 p50 ms | 前 graph runs/s | 最終 graph runs/s |
+|---|---:|---:|---:|---:|
+| text buffered | 0.706631 | 1.296943 | 1375.578826 | 769.975584 |
+| tool buffered | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
+| tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
+
+前の値は元の7b47ad43 cohort のままです。Text latency は上昇し throughput は低下；buffered-tool の変化は小さく、SSE は旧 buffered-path delay を除去します。歴史値は再計算・上書きしません。拡張 family/protocol、first-semantic、cancellation、native replay、retained-outcome の事実は最終 summary/raw record に保持します。Benchmark 証拠は有料 native-consumption/cryptographic-validation の主張を強めません。

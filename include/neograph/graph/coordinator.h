@@ -36,11 +36,13 @@
 #include <vector>
 
 namespace neograph { class HookRuntime; }
+namespace sp { class NativeArchive; }
 
 namespace neograph::graph {
 
 class GraphState;
 class CancelToken;
+namespace detail { struct SubgraphWriteJournal; }
 
 /// Per-attempt host identity and control inherited by checkpoint hook delivery.
 struct CheckpointHookContext {
@@ -63,6 +65,7 @@ struct ResumeContext {
 
     std::string checkpoint_id;
     json channel_values;         ///< Serialized GraphState at cp time.
+    std::shared_ptr<const NativeGraphCheckpoint> native_history;
     json metadata;               ///< Checkpoint metadata including lifecycle guard.
     int start_step = 0;          ///< Phase-adjusted step to re-enter at.
     CheckpointPhase phase = CheckpointPhase::Completed;
@@ -76,6 +79,8 @@ struct ResumeContext {
     /// Barrier accumulators for in-flight AND-joins. Present since
     /// schema v2; empty for v1 blobs.
     BarrierState barrier_state;
+    /// Exact loaded source retained for the standalone bank head commitment.
+    std::shared_ptr<const Checkpoint> managed_budget_source;
 };
 
 /**
@@ -92,7 +97,11 @@ public:
     CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
                           std::string thread_id,
                           std::shared_ptr<::neograph::HookRuntime> hook_runtime = {},
-                          CheckpointHookContext hook_context = {});
+                          CheckpointHookContext hook_context = {},
+                          std::shared_ptr<sp::NativeArchive> native_archive = {},
+                          std::shared_ptr<detail::SubgraphWriteJournal> native_journal = {});
+
+    void set_managed_budget_lease(std::shared_ptr<OwnedManagedBudgetLease> lease);
 
     /// @return True iff a non-null store is wired up AND thread_id is non-empty.
     bool enabled() const noexcept { return store_ != nullptr && !thread_id_.empty(); }
@@ -212,11 +221,16 @@ public:
 
 private:
     asio::awaitable<void> publish_checkpoint_async(const Checkpoint& checkpoint) const;
+    void capture_state(Checkpoint& checkpoint, const GraphState& state) const;
 
     std::shared_ptr<CheckpointStore> store_;
     std::string thread_id_;
     std::shared_ptr<::neograph::HookRuntime> hook_runtime_;
     CheckpointHookContext hook_context_;
+    std::shared_ptr<sp::NativeArchive> native_archive_;
+    std::shared_ptr<detail::SubgraphWriteJournal> native_journal_;
+    std::shared_ptr<OwnedManagedBudgetLease> managed_budget_lease_;
+    bool native_memory_ = false;
 };
 
 } // namespace neograph::graph

@@ -103,8 +103,40 @@ public:
     void clear_writes(const std::string& thread_id,
                       const std::string& parent_checkpoint_id) override;
 
-    /// Drop all `neograph_*` tables and recreate them. Test-only utility.
-    /// Useful in fixtures that want a clean slate per test case.
+    /// Monotonic denial evidence, independent of retained checkpoint JSON.
+    bool requires_managed_budget(const std::string& thread_id) override;
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override;
+
+    std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override;
+    asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+        std::string expected_checkpoint_commitment) override;
+    ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override;
+    asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest) override;
+    void settle_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override;
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) override;
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) override;
+    void release_managed_budget_lease(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease) override;
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease) override;
+
+    /// Drop and recreate checkpoint payload tables. Test-only utility.
+    /// Managed-budget obligations, heads, effects and migration markers remain intact.
     void drop_schema();
 
     /// Number of distinct channel-value blobs currently held. Mirrors
@@ -116,6 +148,8 @@ public:
 private:
     void ensure_schema();
     void exec_ddl(const char* sql);
+    /// Caller holds db_mutex_ and the guarded writer transaction.
+    void save_locked(const Checkpoint& checkpoint);
 
     /// RAII helper closes the connection on destruction. We hold the
     /// raw pointer so forward-declaration in the header works.

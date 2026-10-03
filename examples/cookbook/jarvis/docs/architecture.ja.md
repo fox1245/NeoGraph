@@ -3,6 +3,14 @@
 
 **Languages:** [English](architecture.md) | [한국어](architecture.ko.md) | [日本語](architecture.ja.md) | [简体中文](architecture.zh-CN.md)
 
+## 型付きプロバイダー移行 — ソースの状態
+
+C++ルーター・合成器・専門家フィクスチャは型付き `ProviderRequest`、`sp::Message`、`sp::Event` と完全な不変 `sp::Outcome` (`sp::runtime::Result`) を使用し、旧文字列応答APIではない。`src/provider_support.h` のJarvis/coder/researcher mockは固定ルーターJSON、ユーザーテキストecho、明示的な架空の研究応答を返す。キーやネットワーク提供者は不要だが、本物の研究・推論ではない。以下の既存設定/プロファイルのパスを、この文書変更で作成・修正することはない。
+
+ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
+
+`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL/ベンチのプロトコルドライバーは不変で、型付きPythonプロバイダーバインディングは延期。以下の時間・実行主張はすべて過去の記録で、移行したC++の実行証拠ではない。今回はソースとの整合のみで、ビルド・ベンチ・音声/ライブ実行はしていない。
+
 `config/jarvis_graph.json`内の各ノードが何を行うか、そしてなぜその位置にあるのか。README.mdの図と併せて読むのが最適です。
 
 ## 1ターンのライフスパン

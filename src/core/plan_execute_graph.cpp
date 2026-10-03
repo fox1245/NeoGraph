@@ -92,44 +92,38 @@ std::vector<std::string> extract_plan(const std::string& text) {
 class PlannerNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     PlannerNode(std::string name, std::shared_ptr<Provider> provider,
-                std::string model, std::string prompt)
+                std::string model, std::string prompt, ProviderControls controls)
         : name_(std::move(name))
         , provider_(std::move(provider))
         , model_(std::move(model))
-        , prompt_(std::move(prompt)) {}
+        , prompt_(std::move(prompt)), controls_(std::move(controls)) {}
 
     std::string get_name() const override { return name_; }
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto msgs = in.state.get_messages();
+        auto msgs = in.state.get_provider_messages();
         std::string objective;
         for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
-            if (it->role == "user") { objective = it->content; break; }
+            if (it->role == sp::Role::User) { objective = project_message(*it).content; break; }
         }
 
-        std::vector<ChatMessage> prompt_msgs;
-        if (!prompt_.empty()) {
-            ChatMessage s; s.role = "system"; s.content = prompt_;
-            prompt_msgs.push_back(std::move(s));
-        }
-        for (auto& m : msgs) {
-            if (m.role == "system") continue;
-            prompt_msgs.push_back(m);
-        }
-
-        CompletionParams params;
-        params.model = model_;
-        params.messages = prompt_msgs;
-
-        params.cancel_token = in.ctx.cancel_token;
-        std::vector<ChatMessage> host;
-        if (!prompt_.empty()) host.push_back({"system", prompt_});
-        std::vector<ChatMessage> supplemental(
-            prompt_msgs.begin() + (prompt_.empty() ? 0 : 1), prompt_msgs.end());
-        auto completion = co_await invoke_provider(provider_, std::move(params), {}, std::move(host),
-                                                    std::move(supplemental));
-        record_usage(in.ctx, completion);   // #88
-        auto plan_items = extract_plan(completion.message.content);
+        std::vector<sp::Message> prompt_msgs;
+        if (!prompt_.empty()) prompt_msgs.push_back(portable_message(ChatMessage{"system", prompt_}));
+        for (const auto& message : msgs)
+            if (message.role != sp::Role::System) prompt_msgs.push_back(message);
+        auto request = make_provider_request(*provider_, model_, prompt_msgs, {}, controls_);
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        request.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+        request.on_event = in.ctx.on_provider_event;
+        std::vector<sp::Message> host;
+        if (!prompt_.empty()) host.push_back(portable_message(ChatMessage{"system", prompt_}));
+        std::vector<sp::Message> supplemental(prompt_msgs.begin() + (prompt_.empty() ? 0 : 1), prompt_msgs.end());
+        auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(request), std::move(host), std::move(supplemental),
+            provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, completion);
+        outcome_or_throw(completion);
+        auto plan_items = extract_plan(outcome_text(*completion));
 
         json plan_json = json::array();
         for (auto& s : plan_items) plan_json.push_back(json(s));
@@ -145,6 +139,7 @@ private:
     std::shared_ptr<Provider> provider_;
     std::string model_;
     std::string prompt_;
+    ProviderControls controls_;
 };
 
 // =========================================================================
@@ -155,13 +150,13 @@ class ExecutorNode : public GraphNode, public ::neograph::RuntimeInterpositionCo
 public:
     ExecutorNode(std::string name, std::shared_ptr<Provider> provider,
                  std::vector<Tool*> tools, std::string model,
-                 std::string prompt, int max_iter)
+                 std::string prompt, int max_iter, ProviderControls controls)
         : name_(std::move(name))
         , provider_(std::move(provider))
         , tools_(std::move(tools))
         , model_(std::move(model))
         , prompt_(std::move(prompt))
-        , max_iter_(max_iter) {}
+        , max_iter_(max_iter), controls_(std::move(controls)) {}
 
     std::string get_name() const override { return name_; }
 
@@ -175,14 +170,14 @@ public:
             if (first.is_string()) step = first.get<std::string>();
         }
 
-        std::vector<ChatMessage> convo;
-        if (!prompt_.empty()) {
-            ChatMessage s; s.role = "system"; s.content = prompt_;
-            convo.push_back(std::move(s));
-        }
-        {
-            ChatMessage u; u.role = "user"; u.content = step;
-            convo.push_back(std::move(u));
+        const auto task = make_tool_execution_context(in.ctx).effect_task_id + ":" + name_;
+        auto histories = in.ctx.provider_loop_history ? in.ctx.provider_loop_history : std::make_shared<ProviderLoopHistory>();
+        auto continuation = histories->get(task);
+        auto& convo = continuation.messages;
+        if (convo.empty()) {
+            if (!prompt_.empty()) convo.push_back(portable_message(ChatMessage{"system", prompt_}));
+            convo.push_back(portable_message(ChatMessage{"user", step}));
+            histories->set(task, continuation);
         }
 
         std::vector<ChatTool> tool_defs;
@@ -190,46 +185,43 @@ public:
         for (auto* t : tools_) tool_defs.push_back(t->get_definition());
 
         std::string result_text;
-        for (int iter = 0; iter < max_iter_; ++iter) {
-            CompletionParams params;
-            params.model = model_;
-            params.messages = convo;
-            params.tools = tool_defs;
-
-            params.cancel_token = in.ctx.cancel_token;
-            std::vector<ChatMessage> host;
-            if (!prompt_.empty()) host.push_back({"system", prompt_});
-            std::vector<ChatMessage> supplemental(convo.begin() + (prompt_.empty() ? 0 : 1), convo.end());
-            auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                       std::move(host), std::move(supplemental));
-            record_usage(in.ctx, completion);   // #88
-            auto& msg = completion.message;
-            convo.push_back(msg);
-
-            if (msg.tool_calls.empty()) {
-                result_text = msg.content;
-                break;
+        for (;;) {
+            auto calls = continuation.client_calls_ready ? pending_client_tool_calls(convo) : std::vector<ToolCall>{};
+            if (calls.empty()) {
+                if (continuation.turns >= static_cast<std::uint64_t>(std::max(0, max_iter_))) break;
+                auto request = make_provider_request(*provider_, model_, convo, tool_defs, controls_);
+                request.cancel_token = in.ctx.cancel_token;
+                request.options.deadline = in.ctx.deadline;
+                request.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+                request.on_event = in.ctx.on_provider_event;
+                std::vector<sp::Message> host;
+                if (!prompt_.empty()) host.push_back(portable_message(ChatMessage{"system", prompt_}));
+                std::vector<sp::Message> supplemental(convo.begin() + (prompt_.empty() ? 0 : 1), convo.end());
+                auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(request), std::move(host), std::move(supplemental),
+                    provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, continuation.turns)));
+                record_usage(in.ctx, completion);
+                const auto& returned = outcome_messages(*completion);
+                convo.insert(convo.end(), returned.begin(), returned.end());
+                ++continuation.turns;
+                continuation.client_calls_ready = std::holds_alternative<sp::Completion>(*completion);
+                histories->set(task, continuation);
+                outcome_or_throw(completion);
+                calls = pending_client_tool_calls(returned);
+                if (calls.empty()) { result_text = outcome_text(*completion); break; }
             }
-
-            for (const auto& tc : msg.tool_calls) {
-                auto it = std::find_if(tools_.begin(), tools_.end(),
-                    [&](Tool* t) { return t->get_name() == tc.name; });
-                ChatMessage tm;
-                tm.role = "tool";
-                tm.tool_call_id = tc.id;
-                tm.tool_name = tc.name;
-                if (it == tools_.end()) {
-                    tm.content = R"({"error":"Tool not found: )" + tc.name + "\"}";
-                } else {
-                    try {
-                        auto args = json::parse(tc.arguments);
-                        tm.content = (*it)->execute(args);
-                    } catch (const std::exception& e) {
-                        tm.content = std::string(R"({"error":")") + e.what() + "\"}";
-                    }
-                }
-                convo.push_back(std::move(tm));
-            }
+            ToolGateContext gate;
+            gate.resume_value = in.ctx.resume_value;
+            gate.thread_id = in.ctx.thread_id;
+            gate.step = in.ctx.step;
+            auto execution = make_tool_execution_context(in.ctx);
+            execution.effect_task_id += ":turn:" + std::to_string(continuation.turns);
+            auto results = co_await dispatch_tool_calls(std::move(calls), tools_, in.ctx.tool_gate,
+                                                        std::move(gate), std::move(execution));
+            std::vector<sp::Message> returned;
+            for (const auto& result : results) returned.push_back(portable_message(result));
+            convo.insert(convo.end(), returned.begin(), returned.end());
+            continuation.client_calls_ready = false;
+            histories->set(task, continuation);
         }
 
         json new_plan = json::array();
@@ -252,6 +244,7 @@ private:
     std::string model_;
     std::string prompt_;
     int max_iter_;
+    ProviderControls controls_;
 };
 
 // =========================================================================
@@ -260,11 +253,11 @@ private:
 class ResponderNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     ResponderNode(std::string name, std::shared_ptr<Provider> provider,
-                  std::string model, std::string prompt)
+                  std::string model, std::string prompt, ProviderControls controls)
         : name_(std::move(name))
         , provider_(std::move(provider))
         , model_(std::move(model))
-        , prompt_(std::move(prompt)) {}
+        , prompt_(std::move(prompt)), controls_(std::move(controls)) {}
 
     std::string get_name() const override { return name_; }
 
@@ -290,37 +283,25 @@ public:
             }
         }
 
-        std::vector<ChatMessage> convo;
-        if (!prompt_.empty()) {
-            ChatMessage s; s.role = "system"; s.content = prompt_;
-            convo.push_back(std::move(s));
-        }
-        {
-            ChatMessage u; u.role = "user";
-            u.content = "Objective:\n" + objective +
-                        "\n\nCompleted steps:\n" + steps_text.str() +
-                        "\nProduce the final answer for the user.";
-            convo.push_back(std::move(u));
-        }
-
-        CompletionParams params;
-        params.model = model_;
-        params.messages = convo;
-
-        params.cancel_token = in.ctx.cancel_token;
-        std::vector<ChatMessage> host;
-        if (!prompt_.empty()) host.push_back({"system", prompt_});
-        std::vector<ChatMessage> supplemental(convo.begin() + (prompt_.empty() ? 0 : 1), convo.end());
-        auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                   std::move(host), std::move(supplemental));
-        record_usage(in.ctx, completion);   // #88
-
-        json asst_json;
-        to_json(asst_json, completion.message);
-
+        std::vector<sp::Message> convo;
+        if (!prompt_.empty()) convo.push_back(portable_message(ChatMessage{"system", prompt_}));
+        convo.push_back(portable_message(ChatMessage{"user", "Objective:\n" + objective +
+            "\n\nCompleted steps:\n" + steps_text.str() + "\nProduce the final answer for the user."}));
+        auto request = make_provider_request(*provider_, model_, convo, {}, controls_);
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        request.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+        request.on_event = in.ctx.on_provider_event;
+        std::vector<sp::Message> host;
+        if (!prompt_.empty()) host.push_back(portable_message(ChatMessage{"system", prompt_}));
+        std::vector<sp::Message> supplemental(convo.begin() + (prompt_.empty() ? 0 : 1), convo.end());
+        auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(request), std::move(host), std::move(supplemental),
+            provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, completion);
+        outcome_or_throw(completion);
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"final_response", json(completion.message.content)});
-        out.writes.push_back(ChannelWrite{"messages", json::array({asst_json})});
+        out.writes.push_back(ChannelWrite{"final_response", json(outcome_text(*completion))});
+        out.writes.push_back(provider_messages_write(completion));
         co_return out;
     }
 
@@ -329,6 +310,7 @@ private:
     std::shared_ptr<Provider> provider_;
     std::string model_;
     std::string prompt_;
+    ProviderControls controls_;
 };
 
 // =========================================================================
@@ -342,7 +324,7 @@ void ensure_registrations_once() {
                const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
                 return std::make_unique<PlannerNode>(
                     name, ctx.provider, ctx.model,
-                    config.value("prompt", std::string{}));
+                    config.value("prompt", std::string{}), ctx.provider_controls);
             });
 
         NodeFactory::instance().register_type("__pe_executor",
@@ -351,7 +333,7 @@ void ensure_registrations_once() {
                 return std::make_unique<ExecutorNode>(
                     name, ctx.provider, ctx.tools.view(), ctx.model,
                     config.value("prompt", std::string{}),
-                    config.value("max_iter", 5));
+                    config.value("max_iter", 5), ctx.provider_controls);
             });
 
         NodeFactory::instance().register_type("__pe_responder",
@@ -359,7 +341,7 @@ void ensure_registrations_once() {
                const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
                 return std::make_unique<ResponderNode>(
                     name, ctx.provider, ctx.model,
-                    config.value("prompt", std::string{}));
+                    config.value("prompt", std::string{}), ctx.provider_controls);
             });
 
         ConditionRegistry::instance().register_condition("plan_empty",
@@ -380,7 +362,7 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
     const std::string& executor_prompt,
     const std::string& responder_prompt,
     const std::string& model,
-    int max_step_iterations) {
+    int max_step_iterations, ProviderControls controls) {
 
     ensure_registrations_once();
 
@@ -423,6 +405,7 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
     ctx.tools        = ToolSet(std::move(tools));
     ctx.model        = model;
     ctx.instructions = std::string{};
+    ctx.provider_controls = std::move(controls);
 
     auto engine = GraphEngine::compile(definition, ctx);
     return engine;

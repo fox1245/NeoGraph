@@ -171,11 +171,50 @@ public:
     get_writes(const std::string& thread_id, const std::string& parent_checkpoint_id) override;
     void clear_writes(const std::string& thread_id,
                       const std::string& parent_checkpoint_id) override;
+    bool requires_managed_budget(const std::string& thread_id) override;
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override;
+    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override;
+    asio::awaitable<std::shared_ptr<graph::OwnedManagedBudgetLease>>
+    acquire_managed_budget_lease_async(graph::ManagedBudgetLeaseScope scope,
+        std::string expected_checkpoint_id, std::string expected_checkpoint_commitment) override;
+    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override;
+    asio::awaitable<graph::ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest) override;
+    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override;
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease,
+        graph::ManagedBudgetEffectReceipt effect, sp::runtime::Result genuine_outcome,
+        UsageAccumulator::AuthoritySnapshot authority) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::Checkpoint& checkpoint) override;
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::Checkpoint checkpoint) override;
+    void release_managed_budget_lease(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) override;
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease) override;
+    bool retains_native_checkpoint() const noexcept override;
+    void publish_managed_budget_fork(const graph::Checkpoint& authenticated_source,
+        const graph::Checkpoint& genuine_shared_bank_fork) override;
+    asio::awaitable<void> publish_managed_budget_fork_async(
+        graph::Checkpoint source, graph::Checkpoint forked) override;
 
 private:
     std::string private_id(std::string_view id) const;
     graph::Checkpoint private_checkpoint(const graph::Checkpoint& cp) const;
     graph::Checkpoint public_checkpoint(graph::Checkpoint cp) const;
+    graph::ManagedBudgetLeaseScope private_scope(graph::ManagedBudgetLeaseScope scope) const;
+    std::string private_source_commitment(
+        const graph::Checkpoint& checkpoint, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) const;
     TenantScope scope_;
     std::shared_ptr<graph::CheckpointStore> backend_;
 };

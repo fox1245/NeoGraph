@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=db24e5932e8c6357d88b133d6230abaaffdeeb4c0cf8453e7afd97d0dae66e76 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=0b89132e34b3f81b00ea1a1094e3d311a10bdd1c97ec2ad1a029a8fcd066db26 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # NeoGraph 대 Python graph/pipeline 프레임워크 — 엔진 오버헤드 벤치마크
@@ -321,3 +321,57 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
 
 Numbers will vary on your hardware, but the ratios should be stable to
 within ~20%.
+
+## Typed provider 전환: 실제 GraphEngine 전후 측정
+
+위 Python 프레임워크 비교와 별개인 **로컬 TLS HTTP/SSE** 측정이다. 모델 생성시간이 아니다. 현재 static Release/GCC13.3/Linux x64에서 실제 `GraphEngine.llm_call/tool_dispatch`를 거친 **16개 설정 × 독립 프로세스 3회 = 48개 기록**이 통과했다. 3개 공통 H1 부하, 5개 family의 buffered/SSE native continuation, 실제 H2 3개 부하를 포함한다. 측정 중 컴파일이나 유료 호출은 없었다.
+
+| 공통 그래프 부하 | 전 p50 ms | 후 p50 ms | 전 그래프/s | 후 그래프/s | 전 peak RSS MiB | 후 peak RSS MiB |
+|---|---:|---:|---:|---:|---:|---:|
+| H1 buffered text | 0.707 | 1.320 | 1,375.58 | 733.65 | 12.617 | 15.465 |
+| H1 buffered tool loop | 29.337 | 30.510 | 800.30 | 702.64 | 17.832 | 20.219 |
+| H1 SSE tool loop | 600.540 | 37.593 | 51.43 | 615.38 | 14.414 | 20.367 |
+
+독립 3회 통계의 중앙값이며 HTTP 요청이 아닌 **그래프 실행 단위**다. text는 동시성1/지연0, tool은 동시성32/요청별 지연5ms/그래프당 요청2회다. warmup10·측정100회; tool/native는 반복별 취소8회다. 현재 전체에서 측정실패0, 실제 취소336/취소실패0, 정확한 synthetic native replay3,300, Provider 파괴 후 보존 결과검증5,280, 잘못된 peer 요청0·초과 재시도0을 관찰했다.
+
+완전한 owned raw/native/nullable 데이터와 권한 검증으로 text 비용·메모리는 증가하고 buffered tool p50은 소폭 증가한다. SSE는 legacy buffered 경로 지연을 제거했다. legacy가 native/nullable 권한과 일부 worker 설정을 지원하지 않았으므로 의미/리소스 동등성이나 모델 속도향상으로 주장하지 않는다.
+
+[원본9회](provider-cutover-legacy-results.json), [현재48회](provider-cutover-current-results.json), [p95/p99·취소·확장 family 요약](provider-cutover-summary.json), [정확한 재현 명령](README.md#typed-provider-cutover-actual-graphengine-beforeafter).
+
+
+## 최종 검증 cohort: fresh typed provider GraphEngine 측정
+
+최종 Release GraphEngine/local TLS HTTP/SSE cohort는 **16설정 × fresh process3회 = 48기록,실패0,38.29초**로 완료했다. 모든 actual protocol/owned-outcome check가 pass했다. 측정 중 compiler 실행이나 유료 model call은 없었다. 이는 fresh final-worktree cohort이며 위 historical table을 대체하지 않는다. [최종 scalar summary](provider-cutover-final-summary.json)와 [최종 raw owned synthetic object](provider-cutover-final-results.json)는 변경하지 않은 [legacy9기록](provider-cutover-legacy-results.json),[이전 current48기록](provider-cutover-current-results.json),[이전 comparison](provider-cutover-summary.json)과 별개다. 약60MB raw file은 실제 synthetic outcome object이며 provider secret을 포함하지 않는다.
+
+아래 값은 summary의 독립 process3회 중앙값이며 **graph run 단위**이지 model token/HTTP request 단위가 아니다. 모든 설정에서 negotiated protocol과 provider 소멸 후 retained owned graph outcome을 검증했다. Resource/control 및 native/nullable authority 차이는 남는다. **Semantic/resource equivalence는 false**이며 local 측정 tradeoff이지 model 속도향상이나 vendor qualification이 아니다.
+
+### 최종16설정 측정
+
+| Family | HTTP | 부하 | p50 ms | p95 ms | p99 ms | Graph runs/s | Peak RSS MiB | Peak thread |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `openai.chat` | H1 | text buffered | 1.296943 | 1.349401 | 1.397812 | 769.975584 | 15.898438 | 3 |
+| `openai.chat` | H1 | tool buffered | 30.672507 | 100.492667 | 112.663949 | 678.507993 | 20.585938 | 19 |
+| `openai.chat` | H1 | tool SSE | 35.800113 | 105.431034 | 117.559931 | 627.047345 | 21.042969 | 19 |
+| `openai.chat` | H1 | native buffered | 32.546693 | 102.680190 | 115.244483 | 683.637830 | 20.925781 | 19 |
+| `openai.chat` | H1 | native SSE | 38.135188 | 115.463732 | 126.668501 | 615.357297 | 21.902344 | 19 |
+| `anthropic.messages` | H1 | native buffered | 30.612805 | 103.979300 | 123.110448 | 678.785191 | 20.324219 | 19 |
+| `anthropic.messages` | H1 | native SSE | 44.021986 | 71.548005 | 93.941146 | 604.744184 | 22.125000 | 19 |
+| `openai.responses` | H1 | native buffered | 35.070430 | 100.615954 | 114.597387 | 647.751880 | 22.179688 | 19 |
+| `openai.responses` | H1 | native SSE | 46.670934 | 77.636952 | 89.664406 | 571.458359 | 25.511719 | 19 |
+| `google.generate` | H1 | native buffered | 31.449930 | 99.319459 | 112.385528 | 698.783682 | 21.726562 | 19 |
+| `google.generate` | H1 | native SSE | 37.774704 | 105.703383 | 120.826886 | 627.040287 | 22.500000 | 19 |
+| `google.interactions` | H1 | native buffered | 32.588486 | 101.365734 | 109.841457 | 690.967042 | 21.664062 | 19 |
+| `google.interactions` | H1 | native SSE | 46.786625 | 76.036675 | 92.590316 | 573.469300 | 23.058594 | 19 |
+| `openai.chat` | H2 | text buffered | 1.311873 | 2.443117 | 2.604176 | 701.785481 | 16.148438 | 3 |
+| `openai.chat` | H2 | tool SSE | 40.349311 | 54.813608 | 59.912728 | 714.064349 | 20.386719 | 19 |
+| `google.interactions` | H2 | native SSE | 44.561127 | 56.692743 | 64.665852 | 663.966743 | 22.750000 | 19 |
+
+### 공통 H1 3부하: 변경하지 않은 legacy 대 최종 cohort
+
+| H1 graph 부하 | 전 p50 ms | 최종 p50 ms | 전 graph runs/s | 최종 graph runs/s |
+|---|---:|---:|---:|---:|
+| text buffered | 0.706631 | 1.296943 | 1375.578826 | 769.975584 |
+| tool buffered | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
+| tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
+
+전 값은 원래7b47ad43 cohort 그대로다. Text latency는 증가하고 throughput은 감소했다. Buffered-tool 변화는 작고 SSE는 이전 buffered-path delay를 제거한다. Historical 값은 재계산하거나 덮어쓰지 않는다. 확장 family/protocol,first-semantic,cancellation,native replay,retained-outcome 사실은 최종 summary/raw record에 보존한다. Benchmark 증거가 유료 native-consumption/cryptographic-validation 주장을 강화하지 않는다.

@@ -4,6 +4,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/provider.h>
 #include <neograph/graph/checkpoint.h>
+#include "fixtures/typed_provider.h"
 #include <neograph/graph/store.h>
 #include <chrono>
 #include <cstdlib>
@@ -224,19 +225,33 @@ TEST(McpAdoptionTest, RetainedExecutorLosesAuthorityWhenRegistryIsDestroyed) {
     EXPECT_FALSE(std::filesystem::exists(fixture.calls));
 }
 
-class AdoptedToolProvider final : public neograph::Provider {
+class AdoptedToolProvider final : public neograph::test::LocalProvider {
 public:
-    unsigned calls = 0;
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        neograph::ChatCompletion completion;
-        completion.message.role = "assistant";
-        if (++calls == 1)
-            completion.message.tool_calls.push_back(
-                {"approved-call", "mcp.fixture.lookup", R"({"query":"SELECT approved"})"});
-        else completion.message.content = R"({"status":"ok","findings":["approved"]})";
-        return completion;
-    }
-    std::string get_name() const override { return "adoption-fixture"; }
+    AdoptedToolProvider()
+        : LocalProvider([calls = std::make_shared<unsigned>(0)](
+              neograph::ProviderRequest request, const neograph::PreparedProviderRequest&,
+              const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            auto message = neograph::test::message("");
+            if (++*calls == 1)
+                message.parts = {sp::ToolCall{
+                    "approved-call", "mcp.fixture.lookup", sp::ToolCallKind::ClientExecuted,
+                    neograph::test::document(R"({"query":"SELECT approved"})")}};
+            else {
+                const sp::ToolResult* adopted_result = nullptr;
+                for (const auto& history : std::get<sp::chat::Request>(request.payload).canonical_messages)
+                    for (const auto& part : history.parts)
+                        if (const auto* result = std::get_if<sp::ToolResult>(&part);
+                            result && result->tool_use_id == "approved-call")
+                            adopted_result = result;
+                if (!adopted_result || adopted_result->is_error)
+                    throw std::runtime_error("adopted tool result did not reach provider history");
+                const auto value = neograph::json::parse(adopted_result->content).at("value");
+                message = neograph::test::message(neograph::json{
+                    {"status", "ok"}, {"findings", neograph::json::array({value})}}.dump());
+            }
+            co_return neograph::test::success(
+                std::vector<sp::Message>{std::move(message)}, neograph::test::usage(0, 0, 0));
+        }, "adoption-fixture", neograph::test::bounded_client("test-model", 16384)) {}
 };
 
 TEST(McpAdoptionTest, PinnedAdoptedToolRunsThroughCompileStartGet) {
@@ -246,6 +261,7 @@ TEST(McpAdoptionTest, PinnedAdoptedToolRunsThroughCompileStartGet) {
     auto provider = std::make_shared<AdoptedToolProvider>();
     HarnessProviderExecutorConfig provider_config;
     provider_config.provider = provider;
+    provider_config.model = "test-model";
     HarnessProgramHostConfig host;
     const auto hash = [](char value) { return "sha256:" + std::string(64, value); };
     const neograph::program::ExecutableIdentity identity{
@@ -285,7 +301,10 @@ TEST(McpAdoptionTest, PinnedAdoptedToolRunsThroughCompileStartGet) {
         if (terminal.value("status", "") != "queued" && terminal.value("status", "") != "running") break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    EXPECT_EQ(terminal.value("status", ""), "completed") << terminal.dump();
+    ASSERT_EQ(terminal.value("status", ""), "completed") << terminal.dump();
+    ASSERT_EQ(terminal.at("result").at("outcome"), "ok") << terminal.dump();
+    EXPECT_EQ(terminal.at("result").at("valid_workers"), 1);
+    EXPECT_EQ(terminal.at("result").at("findings"), neograph::json::array({"approved"}));
     std::ifstream calls(fixture.calls);
     std::string line;
     ASSERT_TRUE(static_cast<bool>(std::getline(calls, line)));

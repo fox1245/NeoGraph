@@ -1,5 +1,21 @@
 # Multi-tenant Chatbot Server
 
+## Current source boundary and historical measurements
+
+The C++ mock/live sources now use typed SDK requests and full immutable Outcomes;
+engine-cache identity binds the tenant/topology and captured provider/model/host
+instructions. Trusted host tenant selection, quota/store boundaries and thread
+isolation remain in force. Portable JSON summaries are not native authority.
+The numerical results and transcripts retained below are historical, not a new
+cutover execution or live pass. The live binary hardcodes **1,000 requests and
+32 workers** and has no cheap small-smoke flag. Do not run it as a single-call
+check: it needs live credentials/network and authorizes substantial provider
+spending only when separately approved. No price or zero-error guarantee is
+inferred. Keep credentials/prompts/artifacts private and never publicly export
+raw native payloads. Provider retry is a single explicit layer, default off;
+there is no retired throttling-provider wrapper in the current public API.
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **One process serves N customers with N different agent topologies simultaneously.**
@@ -158,8 +174,7 @@ Key numbers:
   29 MB**. 100 req → 1000 req increase +7 MB ⇒ ~8 KB per additional connection.
   Combination of asio coroutine + httplib SSL connection pool.
 - **0 errors at 1000 concurrent** — NG gracefully absorbs rate-limit / network jitter / TLS
-  handshake jitter without retry. Provider-side throttle can be reinforced with
-  `RateLimitedProvider` wrapper.
+  handshake jitter without retry in that historical run; this is not a current reliability guarantee.
 - **Cache hit rate 99.4%** — hit rate maintained even with more customers if
   topology count stays same. **1000 customer scenario memory also stays ~30 MB**.
 

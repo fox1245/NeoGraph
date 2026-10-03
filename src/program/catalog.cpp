@@ -2,6 +2,7 @@
 #include <neograph/program/catalog.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/store.h>
+#include <neograph/program/replay.h>
 
 #include "canonical_json.h"
 #include "catalog_access.h"
@@ -904,7 +905,9 @@ struct ProgramCatalog::Impl {
          std::size_t                            workers,
          std::string                            context_identity,
          std::shared_ptr<const ModuleStore>     modules,
-         std::string                            host)
+         std::string                            host,
+         std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
+             recorded_binder)
         : program_store(std::move(store)),
           registry(std::move(registry_snapshot)),
           engines(std::move(engine_cache)),
@@ -913,7 +916,8 @@ struct ProgramCatalog::Impl {
           worker_count(workers),
           materialization_context_identity(std::move(context_identity)),
           module_store(std::move(modules)),
-          host_identity(std::move(host)) {}
+          host_identity(std::move(host)),
+          recorded_capability_binder(std::move(recorded_binder)) {}
 
     std::shared_ptr<ProgramStore>          program_store;
     RegistrySnapshot                       registry;
@@ -924,6 +928,8 @@ struct ProgramCatalog::Impl {
     std::string                            materialization_context_identity;
     std::shared_ptr<const ModuleStore>     module_store;
     std::string                            host_identity;
+    std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
+        recorded_capability_binder;
 
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<const detail::MaterializedProgram>>
@@ -963,7 +969,8 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
                                    std::move(config.engines), std::move(config.compiler_build_id),
                                    std::move(config.capability_binder), config.worker_count,
                                    std::move(config.materialization_context_identity),
-                                   std::move(config.module_store), std::move(config.host_identity));
+                                   std::move(config.module_store), std::move(config.host_identity),
+                                   std::move(config.recorded_capability_binder));
 }
 
 ProgramCatalog::ProgramCatalog(ProgramCatalog&&) noexcept            = default;
@@ -1826,6 +1833,40 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
         throw ProgramDiagnosticError(start_not_admitted(version_id));
     }
     return isolated;
+}
+
+std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess::pin_recorded(
+    ProgramCatalog& catalog, const ProgramVersion& version,
+    const RecordedBindingSet& requested, const std::vector<ProgramEvent>& source_events) {
+    if (!catalog.impl_->recorded_capability_binder) {
+        Diagnostic diagnostic;
+        diagnostic.phase = CompilePhase::Resolve;
+        diagnostic.code = "P_REPLAY_UNSUPPORTED";
+        diagnostic.message = "Catalog has no captured capability mediation";
+        diagnostic.witness = json{{"program_version_id", version.id()}};
+        throw ProgramDiagnosticError(std::move(diagnostic));
+    }
+    auto captured = catalog.impl_->recorded_capability_binder(version, source_events);
+    captured.evidence.validate_target(version);
+    if (captured.evidence.fingerprint() != requested.fingerprint())
+        throw std::invalid_argument(
+            "P_REPLAY_EVIDENCE: Public evidence differs from durable source observations");
+    auto pinned = pin_with_binding(catalog, version.ownership_scope(), version.id(),
+                                   std::move(captured.binding));
+    for (const auto& identity : pinned->bundle.executable_registry_identities()) {
+        const auto& manifest = detail::RegistrySnapshotAccess::require_manifest(
+            catalog.impl_->registry, identity.kind, identity.name);
+        if (manifest.identity != identity ||
+            manifest.execution_guarantee == ExecutionGuarantee::Unmanaged) {
+            Diagnostic diagnostic;
+            diagnostic.phase = CompilePhase::Resolve;
+            diagnostic.code = "P_REPLAY_GUARANTEE";
+            diagnostic.message = "Recorded replay cannot execute an unmanaged Core executable";
+            diagnostic.witness = json{{"executable", identity.name}};
+            throw ProgramDiagnosticError(std::move(diagnostic));
+        }
+    }
+    return pinned;
 }
 
 }  // namespace neograph::program

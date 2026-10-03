@@ -1,324 +1,208 @@
-/**
- * @file provider.h
- * @brief Abstract LLM provider interface.
- *
- * Defines the Provider base class that all LLM backends must implement.
- * Supports both synchronous and streaming completions.
- */
 #pragma once
 
 #include <neograph/api.h>
 #include <neograph/types.h>
-
+#include <runtime/client.h>
+#include <core/request_controls.h>
 #include <asio/awaitable.hpp>
-
+#include <cstdint>
+#include <atomic>
 #include <functional>
+#include <exception>
 #include <memory>
-#include <stdexcept>
 #include <string>
+#include <stdexcept>
+#include <utility>
 
-namespace neograph::graph { class CancelToken; }
+namespace neograph::graph {
+class CancelToken;
+class CheckpointStore;
+class OwnedManagedBudgetLease;
+class ManagedBudgetEffectReceipt;
+}
 
 namespace neograph {
 
-/**
- * @brief Thrown by a Provider when an upstream API returned HTTP 429
- *        (rate limit exceeded).
- *
- * This is a typed exception so decorators like `RateLimitedProvider`
- * can catch it specifically and apply backoff, without fragile string
- * parsing of a generic error message.
- *
- * The `retry_after_seconds()` value is the upstream's `Retry-After`
- * header in seconds, or -1 if no usable Retry-After was present.
- * Decorators should prefer the honest value when positive and fall
- * back to their own default when -1.
- */
-class NEOGRAPH_API RateLimitError : public std::runtime_error {
-public:
-    RateLimitError(const std::string& message, int retry_after_seconds = -1)
-        : std::runtime_error(message)
-        , retry_after_seconds_(retry_after_seconds) {}
-
-    /// @brief Seconds to wait per the upstream, or -1 if unknown.
-    int retry_after_seconds() const noexcept { return retry_after_seconds_; }
-
-private:
-    int retry_after_seconds_;
+struct ProviderDispatchBudget {
+    std::shared_ptr<UsageAccumulator> usage;
+    std::uint64_t model_token_budget = 0;
+    std::shared_ptr<std::atomic<bool>> budget_exhausted;
+    std::shared_ptr<graph::CancelToken> budget_cancel_token;
+    std::shared_ptr<graph::OwnedManagedBudgetLease> managed_budget_lease;
+    std::shared_ptr<graph::CheckpointStore> managed_budget_store;
+    std::string managed_effect_id;
 };
 
-/// Callback invoked per token during streaming completion.
-/// @param chunk The token or text chunk received from the LLM.
-using StreamCallback = std::function<void(const std::string& chunk)>;
+enum class ProviderMode : std::uint8_t { Collect, Stream };
 
-/**
- * @brief Parameters for an LLM completion request.
- */
-struct CompletionParams {
-    std::string model;                  ///< Model name to use (e.g., "gpt-4o-mini").
-    std::vector<ChatMessage> messages;  ///< Conversation history.
-    std::vector<ChatTool> tools;        ///< Available tools the LLM may call.
-    float temperature = 0.7f;           ///< Sampling temperature (0.0 = deterministic, 1.0 = creative).
-    int max_tokens = -1;                ///< Maximum output tokens. -1 means provider default.
-    /**
-     * @brief Optional cancel handle (v0.3+).
-     *
-     * When set, async-native providers (OpenAIProvider, SchemaProvider)
-     * bind ``cancel_token->slot()`` to their ``ConnPool::async_post``
-     * co_await, so a caller's ``cancel()`` aborts the in-flight HTTPS
-     * socket and stops billable LLM work mid-stream.
-     *
-     * The engine populates this from ``RunConfig::cancel_token`` when
-     * a node calls ``ctx.provider->complete(params)``; user code that
-     * constructs CompletionParams directly may set it to share an
-     * abort across multiple completions.
-     */
+struct ProviderControls {
+    std::optional<std::uint64_t> max_output_tokens;
+    std::optional<std::uint64_t> max_tool_calls;
+    std::optional<double> temperature, top_p;
+    std::optional<std::string> reasoning_effort, reasoning_summary;
+    std::optional<std::uint64_t> thinking_budget;
+    std::optional<bool> include_thoughts;
+    std::optional<std::string> thinking_level;
+    std::optional<bool> thinking_summaries;
+    std::optional<std::string> service_tier, required_tool;
+    std::optional<sp::OpenRouterRouting> provider;
+    std::optional<sp::ResponseFormat> response_format;
+    std::optional<bool> store;
+    std::string account_scope, system;
+};
+
+/// Host-only delivery caps; explicit values may tighten admitted SDK resources.
+struct ProviderObserverLimits {
+    std::optional<std::size_t> max_events;
+    std::optional<std::size_t> max_bytes;
+};
+
+// Portable request controls remain the SDK's declared, family-specific fields.
+// No raw JSON field override or callback-selected streaming mode is admitted.
+struct ProviderRequest {
+    sp::runtime::Request payload;
+    ProviderMode mode = ProviderMode::Collect;
+    sp::runtime::RunOptions options;
     std::shared_ptr<graph::CancelToken> cancel_token;
-
-    /**
-     * @brief Per-call body field bindings (issue #33, v0.8+).
-     *
-     * Map of `path → value` overrides that the provider stamps into
-     * the outgoing request body for THIS call only. Companion to
-     * the schema-static `request.extra_fields` block that ships
-     * with every body — `extra_fields` here is the dynamic per-call
-     * side of the same hook.
-     *
-     * For ``SchemaProvider``: the schema author declares which paths
-     * are bindable per-call via `"request.per_call_fields": [...]`.
-     * Only listed paths are honoured; unknown paths are silently
-     * dropped (the schema, not the caller, owns the contract). This
-     * keeps the per-call surface declarative and matches how
-     * `temperature_path` / `max_tokens_path` already address specific
-     * paths.
-     *
-     * Native ``Provider`` subclasses (e.g. ``OpenAIProvider``) may
-     * choose to honour or ignore individual keys per their own
-     * documented surface — the field is generic, the contract is
-     * provider-defined.
-     *
-     * @code
-     * // Reasoning model — high effort for hard call, low for cheap call.
-     * CompletionParams hard;
-     * hard.extra_fields = {{"reasoning.effort", "high"}};
-     * auto deep = co_await provider->complete_async(hard);
-     *
-     * CompletionParams cheap;
-     * cheap.extra_fields = {{"reasoning.effort", "low"}};
-     * auto fast = co_await provider->complete_async(cheap);
-     * @endcode
-     *
-     * Default: empty json. Same lifecycle shape as the existing
-     * schema-static `request.extra_fields` block.
-     */
-    json extra_fields;
-
-    /// Per-call transport timeout. Positive values override the provider
-    /// default; -1 keeps the provider configuration. Exact deadline versus
-    /// read-idle semantics are transport-specific.
-    /// Appended to preserve existing positional aggregate initialization.
-    int timeout_seconds = -1;
-    std::string prompt;                ///< Input for schema-defined prompt envelopes.
+    std::function<void(const sp::Event&)> on_event;
+    ProviderObserverLimits observer_limits;
 };
 
-/**
- * @brief Abstract base class for LLM providers.
- *
- * Existing subclasses may continue to implement any supported sync/async pair.
- * These entry points are stable compatibility APIs with no removal planned.
- * New backends should normally derive from `CompletionProvider` and implement
- * its explicit request contract instead.
- *
- * @see neograph::llm::OpenAIProvider
- * @see neograph::llm::SchemaProvider
- */
+/// Post-dispatch host failure retaining the exact drained provider outcome.
+/// The owned outcome is evidence, not success or permission to redispatch.
+class NEOGRAPH_API ProviderOutcomeError : public std::runtime_error {
+public:
+    ProviderOutcomeError(const char* message, sp::runtime::Result outcome,
+                         std::exception_ptr cause)
+        : std::runtime_error(message), outcome_(std::move(outcome)), cause_(std::move(cause)) {}
+    const sp::runtime::Result& outcome() const noexcept { return outcome_; }
+    const std::exception_ptr& cause() const noexcept { return cause_; }
+private:
+    sp::runtime::Result outcome_;
+    std::exception_ptr cause_;
+};
+
+class NEOGRAPH_API ProviderBudgetSettlementError final : public ProviderOutcomeError {
+public:
+    ProviderBudgetSettlementError(sp::runtime::Result outcome, std::exception_ptr cause,
+                                  std::exception_ptr dispatch_error = {})
+        : ProviderOutcomeError("Provider budget settlement could not be persisted",
+                               std::move(outcome), std::move(cause)),
+          dispatch_error_(std::move(dispatch_error)) {}
+    const std::exception_ptr& dispatch_error() const noexcept { return dispatch_error_; }
+private:
+    std::exception_ptr dispatch_error_;
+};
+
+class NEOGRAPH_API ProviderObserverError final : public ProviderOutcomeError {
+public:
+    ProviderObserverError(sp::runtime::Result result, std::exception_ptr cause,
+                          sp::ErrorKind kind = sp::ErrorKind::Misuse)
+        : ProviderOutcomeError(kind == sp::ErrorKind::ResourceLimit
+              ? "Provider event retention resource limit exhausted" : "Provider event observer failed",
+              std::move(result), std::move(cause)), kind_(kind) {}
+    sp::ErrorKind error_kind() const noexcept { return kind_; }
+private:
+    sp::ErrorKind kind_;
+};
+
+class Provider;
+class NEOGRAPH_API PreparedProviderRequest final {
+public:
+    PreparedProviderRequest();
+    ~PreparedProviderRequest();
+    PreparedProviderRequest(PreparedProviderRequest&&) noexcept;
+    PreparedProviderRequest& operator=(PreparedProviderRequest&&) noexcept;
+    PreparedProviderRequest(const PreparedProviderRequest&) = delete;
+    PreparedProviderRequest& operator=(const PreparedProviderRequest&) = delete;
+    bool valid() const noexcept;
+    const sp::Error* error() const noexcept;
+    std::string_view family() const noexcept;
+    std::string_view model() const noexcept;
+    std::string_view encoded_body() const noexcept;
+    sp::runtime::SteadyTime deadline() const noexcept;
+    ProviderMode mode() const noexcept;
+    bool is_cancelled() const noexcept;
+    std::optional<std::uint64_t> max_output_tokens() const noexcept;
+    bool requires_native_custody() const noexcept;
+    const sp::descriptor::ValidatedDescriptor* admitted_descriptor() const noexcept;
+private:
+    struct Impl;
+    explicit PreparedProviderRequest(std::unique_ptr<Impl>);
+    std::unique_ptr<Impl> impl_;
+    friend class Provider;
+};
+
+class NEOGRAPH_API ProviderBudgetClaim final {
+public:
+    ProviderBudgetClaim();
+    ~ProviderBudgetClaim();
+    ProviderBudgetClaim(ProviderBudgetClaim&&) noexcept;
+    ProviderBudgetClaim& operator=(ProviderBudgetClaim&&) noexcept;
+    ProviderBudgetClaim(const ProviderBudgetClaim&) = delete;
+    ProviderBudgetClaim& operator=(const ProviderBudgetClaim&) = delete;
+    bool active() const noexcept;
+    std::uint64_t amount() const noexcept;
+    asio::awaitable<void> begin_managed_effect(
+        const PreparedProviderRequest& request, std::string effect_id = {});
+    asio::awaitable<void> settle_managed(
+        sp::runtime::Result result, std::exception_ptr dispatch_error = {});
+    void mark_dispatched();
+    std::uint64_t settle(sp::runtime::Result result);
+private:
+    ProviderBudgetClaim(ProviderDispatchBudget budget, std::uint64_t amount);
+    void release_undispatched() noexcept;
+    std::uint64_t settle_accounting(sp::runtime::Result result);
+    ProviderDispatchBudget budget_;
+    std::uint64_t amount_ = 0;
+    std::unique_ptr<graph::ManagedBudgetEffectReceipt> managed_effect_;
+    bool dispatched_ = false, settled_ = false, writeahead_committed_ = false;
+    friend ProviderBudgetClaim reserve_provider_dispatch(
+        const PreparedProviderRequest&, ProviderDispatchBudget);
+};
+
+// Capability identity plus a single prepared, owned operation contract.
+// Returned awaitables own all operation state, including the runtime client;
+// neither request nor Provider object must survive coroutine scheduling.
 class NEOGRAPH_API Provider {
-  public:
+public:
     virtual ~Provider() = default;
-
-    /**
-     * @brief Perform a synchronous LLM completion.
-     *
-     * Default implementation bridges to `complete_async()` via an
-     * internal io_context (see neograph::async::run_sync). Subclasses
-     * written against the sync path override this directly; async-
-     * native subclasses override `complete_async()` and inherit this.
-     *
-     * @param params Completion parameters including model, messages, and tools.
-     * @return The full completion response with message and usage statistics.
-     *
-     */
-    virtual ChatCompletion complete(const CompletionParams& params);
-
-    /**
-     * @brief Perform an LLM completion as a coroutine.
-     *
-     * Returns an `asio::awaitable` that resolves to the completion
-     * response. The awaitable does no I/O on the caller's thread —
-     * resume it on an io_context to run the request.
-     *
-     * Default implementation delegates to the synchronous `complete()`
-     * (runs on whatever thread resumes the coroutine — caller's I/O
-     * loop will block on HTTP). Subclasses that perform async HTTP
-     * should override this to co_await non-blocking operations; when
-     * they do, `complete()` transparently bridges via `run_sync()`.
-     *
-     * @note Override at least one of `complete` / `complete_async`.
-     * Overriding neither results in infinite mutual recursion when
-     * the method is called.
-     *
-     * @param params Completion parameters.
-     * @return An awaitable yielding the full completion response.
-     *
-     */
-    virtual asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params);
-
-    /**
-     * @brief Perform a streaming LLM completion.
-     *
-     * Calls @p on_chunk for each token as it arrives, then returns the
-     * full assembled completion when done.
-     *
-     * Default implementation calls @ref complete and forwards the full
-     * assembled message content as a single chunk — sufficient for
-     * mocks, unit-test fixtures, and non-streaming-native providers
-     * that just want to satisfy the streaming surface. Streaming-native
-     * subclasses (OpenAI, schema-driven, etc.) override this to emit
-     * tokens incrementally.
-     *
-     * @param params Completion parameters.
-     * @param on_chunk Callback invoked per received token.
-     * @return The full completion response after streaming is complete.
-     *
-     */
-    virtual ChatCompletion complete_stream(const CompletionParams& params,
-                                           const StreamCallback& on_chunk);
-
-    /**
-     * @brief Async streaming completion. Awaitable peer of @ref complete_stream.
-     *
-     * Default implementation (post-#4): spawns a dedicated worker
-     * thread that runs the synchronous `complete_stream` and writes
-     * tokens and completion state to a private queue. The awaiting
-     * coroutine polls that queue and invokes the user's `on_chunk` on
-     * its own executor (single-threaded with the awaiter — no
-     * reentrancy). If the coroutine is abandoned, late tokens are
-     * discarded and the worker finishes independently without using
-     * the awaiter's executor. Subclasses with a fully async streaming
-     * transport (WebSocket Responses, native SSE coroutine, etc.)
-     * SHOULD override this to drop the worker thread and stream
-     * tokens straight onto the coroutine's executor.
-     *
-     * @note Pre-#4 the default was `co_return complete_stream(...)`
-     * inline, which blocked the awaiting executor for the whole
-     * stream and — when `complete_stream` itself called `run_sync()`
-     * — nested two io_contexts on the same thread, racing on shared
-     * provider state. The current default avoids both: the executor
-     * stays responsive, and `complete_stream` runs on its own thread
-     * with no implicit io_context reentry. `SchemaProvider` overrides
-     * the WebSocket Responses branch to skip even the worker thread
-     * (it's already async-native).
-     *
-     * @note **Subclass override contract for the streaming pair**
-     * (mirrors the non-streaming `complete` / `complete_async` pair
-     * above): subclasses MUST override at least one of
-     * `complete_stream` / `complete_stream_async`. Subclasses whose
-     * native sync `complete_stream` itself drives a `run_sync()` on
-     * an internal `io_context` (the WebSocket Responses path in
-     * `SchemaProvider` is the canonical example) MUST override
-     * `complete_stream_async` directly to expose the async-native
-     * peer — relying on the default bridge is functional but spawns
-     * an extra worker thread per call. Subclasses whose
-     * `complete_stream` is purely synchronous (e.g. blocking httplib)
-     * can leave the default bridge in place — it routes the sync work
-     * onto a worker thread and lets the awaiting coroutine drain the
-     * token queue on its own executor.
-     *
-     * @warning The default bridge calls the virtual `complete_stream`
-     * through this Provider object. If the returned awaitable is
-     * abandoned, the Provider must remain alive until that synchronous
-     * transport call returns. Abandoning the awaitable or destroying
-     * its `io_context` does not wait for the worker, and therefore does
-     * not extend the Provider object's lifetime.
-     *
-     * @note **`asio::io_context.run()` placement for the awaiter**
-     * (issue #16): drive the outer `asio::io_context.run()` from
-     * your application's main thread or a long-lived worker thread.
-     * Nesting `io.run()` inside an HTTP server per-request callback
-     * (e.g. httplib's `set_chunked_content_provider` lambda) has been
-     * observed to SEGV in `getaddrinfo` under the per-request
-     * worker-thread spawn this default bridge issues, on some
-     * glibc/OpenSSL combinations. See `docs/concepts.md` §8 for
-     * tested-good shapes and the two recommended workarounds.
-     *
-     * @param params   Completion parameters.
-     * @param on_chunk Callback invoked per received token (runs on the
-     *                 awaiting coroutine's executor — never on the
-     *                 internal worker thread).
-     * @return Awaitable resolving to the full completion response.
-     *
-     */
-    virtual asio::awaitable<ChatCompletion>
-    complete_stream_async(const CompletionParams& params,
-                          const StreamCallback& on_chunk);
-
-    /**
-     * @brief Compatibility callback-selected async completion entry point.
-     *
-     * Existing Provider subclasses may override this method to combine the
-     * legacy async collect and stream paths. New implementations should derive
-     * from `CompletionProvider`, whose explicit `CompletionRequest` keeps the
-     * transport mode independent of callback presence.
-     *
-     * Semantics:
-     *   - `on_chunk == nullptr` → caller wants the full assembled
-     *     completion only; provider may skip streaming framing.
-     *   - `on_chunk != nullptr` → caller wants tokens incrementally;
-     *     provider invokes `on_chunk` on each chunk AND returns the
-     *     full assembled completion when the stream ends.
-     *
-     * The returned awaitable resolves on the caller's executor; the
-     * `on_chunk` callback runs there too (single-threaded with the
-     * awaiter, same invariant `complete_stream_async` already provides).
-     *
-     * The default implementation forwards to `complete_stream_async()` when
-     * `on_chunk` is set and to `complete_async()` otherwise, preserving every
-     * existing Provider subclass. These compatibility methods remain supported
-     * with no removal planned. Compatibility and security fixes apply to them;
-     * new capabilities may be available only through `CompletionProvider`'s
-     * explicit request API.
-     *
-     * @param params   Completion parameters (model, messages, tools, ...).
-     * @param on_chunk Optional per-chunk callback. `nullptr` for non-
-     *                 streaming use.
-     * @return Awaitable yielding the full assembled completion.
-     */
-    virtual asio::awaitable<ChatCompletion>
-    invoke(const CompletionParams& params, StreamCallback on_chunk = nullptr);
-
-    /**
-     * @brief Get the provider name (e.g., "openai", "claude").
-     *
-     * **Opaque debug identifier**, not a typed dispatch key. Different
-     * subclasses pick different conventions:
-     *   - `OpenAIProvider` always returns `"openai"`.
-     *   - `SchemaProvider` returns whatever's in the schema's `name`
-     *     field — could be `"openai"`, `"claude"`, `"openai-responses"`,
-     *     `"gemini"`, or a user-defined schema id.
-     *   - `RateLimitedProvider` delegates to its inner provider.
-     *
-     * Code branching on the exact string (e.g. `if (get_name() ==
-     * "openai-responses")`) is brittle — a custom schema named
-     * `"openai-responses-v2"` slips through, or a future rename
-     * silently breaks the branch. Use it for logging, telemetry, or
-     * version-pinning diagnostics. For typed behaviour, add a typed
-     * `ProviderKind` accessor or branch on the schema's actual
-     * fields.
-     *
-     * @return Opaque provider identifier string.
-     */
     virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(const PreparedProviderRequest& request);
+protected:
+    using LocalDispatch = std::function<asio::awaitable<sp::runtime::Result>(
+        const PreparedProviderRequest&, const std::function<void(const sp::Event&)>&)>;
+    static PreparedProviderRequest prepare_local(
+        std::shared_ptr<sp::runtime::Client> client, ProviderRequest request, LocalDispatch dispatch);
+    static PreparedProviderRequest prepare_runtime(
+        std::shared_ptr<sp::runtime::Client> client, ProviderRequest request);
+    static PreparedProviderRequest reject_preparation(sp::Error error);
+    static PreparedProviderRequest observe_prepared(
+        PreparedProviderRequest request,
+        std::function<void(const PreparedProviderRequest&)> before,
+        std::function<void(sp::runtime::Result)> after,
+        std::function<void(const sp::Event&)> event = {},
+        std::function<void(std::exception_ptr)> on_error = {}) noexcept;
+private:
+    static asio::awaitable<sp::runtime::Result> dispatch_impl(PreparedProviderRequest request);
+    static asio::awaitable<sp::runtime::Result> dispatch_operation(PreparedProviderRequest request);
 };
+
+NEOGRAPH_API ProviderRequest make_provider_request(
+    const Provider& provider, std::string model, std::vector<sp::Message> messages,
+    std::vector<ChatTool> tools = {}, ProviderControls controls = {},
+    ProviderMode mode = ProviderMode::Collect);
+NEOGRAPH_API void set_provider_request_messages(ProviderRequest& request, std::vector<sp::Message> messages);
+NEOGRAPH_API void clear_provider_request_messages(ProviderRequest& request);
+NEOGRAPH_API const std::vector<sp::Message>& provider_request_messages(const ProviderRequest& request);
+NEOGRAPH_API ProviderBudgetClaim reserve_provider_dispatch(
+    const PreparedProviderRequest& request, ProviderDispatchBudget budget);
 
 } // namespace neograph

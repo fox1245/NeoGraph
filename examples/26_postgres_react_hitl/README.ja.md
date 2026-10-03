@@ -8,7 +8,7 @@
 1. **`PostgresCheckpointStore`** — 実PostgreSQLにおけるチャンネルブロブ重複排除を備えた耐久チェックポイント。
 2. **NodeInterrupt駆動のHITL** — Deep Researchグラフはレポートを生成した後に一時停止し、人間による確認を待ち、承認（→終了）またはフィードバック（→もう一度研究ラウンド）のいずれかで再開する。
 
-このデモは意図的に**プロセス非連続**である：バイナリはレポート生成後に終了する。そのため`resume`を行うとき、あなたはすべてをPGから再ロードしなければならない新しいプロセスである。それがまさに要点である — チェックポイントが実際にプロセス境界を越えたことを証明する。
+このデモはプロセス境界を越えます。新しい`resume`プロセスはPG状態と所有者専用native履歴を復元する必要があり、PGだけではtyped native再開に不十分です。
 
 ## シナリオ
 
@@ -92,6 +92,8 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 
 ### 実際の実行からの参照番号
 
+切り替え前の実行による歴史的数値です。上の出力も歴史的/例示記録で、現在のtyped provider移行の実行検証ではありません。
+
 上記のマルチモーダルRAGデモでの完全な実行・再開・再開サイクル(スーパーバイザー2ラウンド×リサーチャー各2名、OpenRouter経由でDeepSeek固定)で、以下のPG数値が生成されました。
 
 | メトリック                      | 値      | 注記 |
@@ -116,12 +118,19 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. デモを実行します（上記の「シナリオ」を参照）。最初の`docker compose run`が`agent`イメージのビルドをトリガーします（ウォームマシンで約1分）。
+3. BuildKitとDocker Compose >= 2.17を使い、`SCHEMAPROVIDER_SOURCE`に実際のSchemaProviderソースを指定します（既定`../../../SchemaProvider`、このディレクトリ基準）。Dockerfileはnamed additional contextから`SchemaProvider::runtime`を先にインストールします。
+4. `.env`の`NEOGRAPH_NATIVE_ARCHIVE_OWNER`を固定し、一度だけプロビジョニングします：
+   ```
+   docker compose run --rm agent init-archive
+   ```
+5. デモを実行します。有効なOpenRouter/Crawl4AI資格情報、ネットワーク、providerクレジットが必要です。研究/フィードバックの各ラウンドはモデル料金を伴います。固定料金や現在の実行成功は主張しません。
+
+`pgdata`、`native-history`、`native-keys`を一緒に保持します。履歴と鍵には別々の非公開ボリューム親を使います。再開には同じowner、互換provider descriptor、元の鍵とarchive記録が必要です。古いスレッドの再開用に鍵を再生成しないでください。これは認証付きの所有者専用ホスト保管で、**暗号化やprovider issuer証明ではありません**。PG、バックアップ、プロンプト、フィードバック、レポート、`.env`も保護します。raw native記録やarchive/鍵内容を公開ログへ出さないでください。CLIは質問、フィードバック、レポートを表示するため非公開端末/ログを使います。
 
 完了した場合：
 ```
-docker compose down       # stop services, keep PG volume
-docker compose down -v    # drop the PG volume too
+docker compose down       # PG、native-history、native-keysを保持
+docker compose down -v    # 3つを削除；古いnative再開は失われる
 ```
 
 ## バイナリを直接実行する（エージェントにdocker-composeを使用しない）
@@ -129,9 +138,15 @@ docker compose down -v    # drop the PG volume too
 また、ホスト上でバイナリをビルドし、docker-compose管理のPostgres + Crawl4AIを指定することもできます：
 
 ```
-cmake -B build -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
+# 作業ディレクトリの.envとarchiveパスを非公開で維持
+mkdir -m 700 .native-keys
+./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
 ./build/example_postgres_react_hitl resume <thread_id> "feedback"
 ./build/example_postgres_react_hitl status <thread_id>
@@ -179,7 +194,8 @@ SELECT blob_data::text FROM neograph_checkpoint_blobs
 - HITL ゲートは Deep Research グラフ内の `DeepResearchConfig::enable_human_review` フラグの背後に組み込まれている(デフォルトはオフなので、例25は影響を受けない)。オンにすると、`HumanReviewNode` が `final_report` と `__end__` の間に配置される。
 - そのノードは、初回実行時に`NodeInterrupt`をスローします。エンジンはそれをキャッチし、フェーズ`NodeInterrupt`でチェックポイントを保存し、呼び出し元に再スローします。再開時、エンジンはユーザーの返信を`messages`チャネルに書き込んだ状態で、同じノードに再入場します。
 - ノードは「承認」(→ Command(__end__)) とフィードバック (→ Command(supervisor) で、フィードバックが`supervisor_messages`に追加され、イテレーションカウンタがリセットされる) を区別します。どちらの経路も実行をきちんと終了するため、PGは常に一貫した最新のcpを保持します。
-- このシナリオの3つのステップすべて (初回実行、フィードバックでの再開、承認での再開) がプロセス境界を越えます。エンジン状態は、呼び出し間の全体がPG内に存在します。
+- PGはportableグラフ状態を保存し、native再開には保護されたarchiveと元の鍵も必要です。
+- C++はtyped `ProviderRequest`/イベントと完全な不変`sp::Outcome`を使用します。レポート文字列はprojectionでありnative replay権限ではありません。本書はソース移行の記録で、新しいビルド/テスト/live検証ではありません。
 
 ## なぜフロントエンドがないのか
 

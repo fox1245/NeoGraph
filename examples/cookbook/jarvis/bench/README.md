@@ -2,6 +2,14 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## Typed provider migration — source status
+
+The C++ router, synthesizer and specialist fixtures use typed `ProviderRequest`, `sp::Message` and `sp::Event`; provider results are full immutable `sp::Outcome` values (`sp::runtime::Result`), not legacy response strings. `src/provider_support.h` implements local Jarvis/coder/researcher mock profiles: deterministic router JSON, user-text echo, and an explicitly synthetic researcher reply. These fixtures require neither credentials nor a network provider, but do not supply real research or expert reasoning. Existing configuration/profile paths below are not repaired or created by this documentation update.
+
+Local voice is optional and needs the selected whisper/Moonshine models, ONNX Runtime/Supertonic assets, miniaudio and usable microphone/speaker devices; text/mock operation is not proof of working voice. Cloud-free applies only to local/mock operation. Live requests require an authorized `OPENROUTER_API_KEY`, network access and provider capacity, and send prompts, conversation memory and attached tool/delegation results to OpenRouter. The live model is pinned; the native request sets ZDR, not a residency guarantee. Keep keys out of logs and version control. Provider token usage is nullable accounting, not a monetary bill: cost requires current endpoint/model pricing and billable usage.
+
+`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. All timings and execution statements retained below are historical, not evidence that this migrated C++ path was executed. This update aligns documentation with source only; no build, benchmark or voice/live run was performed.
+
 Mirrors identical topology (mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)
 in NeoGraph (C++ mock build) and LangGraph (Python twin `langgraph_twin.py`),
 measures in identical constraints (`--cpus=2 --memory=2g`) container.
@@ -89,7 +97,7 @@ don't wobble even if rounds hit different Groq windows.
 ## Streaming TTFT Round (2026-07-05)
 
 Modern LLM services all stream, so benchmark matches: Both synth calls changed to streaming
-(C++ `invoke(p, on_chunk)`, LangGraph `SYNTH_LLM.stream()`),
+(C++ `ProviderMode::Stream` / `sp::Event`, LangGraph `SYNTH_LLM.stream()`),
 driver measures **turn-send → first synth token** time with `[jarvis:ttft]` marker.
 nginx passes SSE through with `proxy_buffering off` so `$upstream_header_time` is
 the real first byte. Separate logs per round (mv + `nginx -s reopen`) to eliminate

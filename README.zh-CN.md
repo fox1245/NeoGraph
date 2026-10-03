@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=b55194bbadc8c3c1d7ad7d1de6c96629aaeb960f4cc4b5c5f66d33ac710ec351 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=73d8153a6b0ecc5957982362ae8429663ac2730be7c65242cb1c4b1031fc170c -->
 <p align="center">
 <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -54,10 +54,12 @@ proposal → reserve → compile → semantic validate → admit → publish →
 
 ### C++ Core
 
+即使 `NEOGRAPH_BUILD_LLM=OFF`，SchemaProvider 也已是必需的外部 C++ 依赖，因为 Core 公开拥有所有权的 typed provider 契约。请安装 SDK runtime package，将安装 prefix 设为 `SCHEMAPROVIDER_PREFIX`；下方 configure 使用 `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`。也可用 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` 明确指定 checkout。不会自动选择猜测的 sibling checkout 或旧 bundled interpreter。当前 SDK runtime/archive 支持 Linux/POSIX；不承诺无依赖、无需 OpenSSL、native Windows/macOS 或 WASM runtime。
+
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
 cmake --build build --parallel
 ./build/example_core_quickstart
 ```
@@ -68,6 +70,7 @@ cmake --build build --parallel
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
@@ -88,6 +91,7 @@ Release 的 `-O3 -DNDEBUG` 标志时编译 QuickJS 和 NeoGraph。
 
 ```bash
 cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
   -DNEOGRAPH_BUILD_BENCHMARKS=ON \
@@ -141,9 +145,39 @@ NeoGraph 将重要行为移出模型自由裁量范围：
 - 持久的运行时开发者指令与已准入(admission)的拓扑转换。
 
 NeoGraph 保证构建、准入(admission)、分发与证据边界。它不声称 LLM 处理了每个 token。
+## Typed C++ provider 调用
+
+`SchemaProvider` 接收获准的 `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options` 及可选 `SchemaProvider::Defaults`。descriptor 是 closed/versioned 数据 admission，不是请求/响应 interpreter 或任意 primitive registry。credential 应放在 runtime options，而非公开 descriptor。Defaults 仅包含 typed OpenRouter routing 和 Responses 保留 (`responses_store`)，后者仅适用于 Responses。Hosted OpenRouter routing、retention、JSON 格式仍是声明的 typed 控制。Images、Veo、Decisions 使用独立的 NeoGraph typed client 和独立授权，不继承 SDK chat grant。
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result first_call(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model) {
+    neograph::llm::SchemaProvider provider(
+        std::move(descriptor), std::move(options), {});
+    std::vector<sp::Message> history{
+        {.role = sp::Role::User, .parts = {sp::Text{"hi"}}}};
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history));
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));
+}
+```
+
+提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、完整 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。使用量是带依据、阶段、质量的 nullable `uint64_t`；缺失表示未知，绝不是零。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+
+`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。当前格式为 [`provider-message-v2`](schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](schemas/runtime-history-record-v2.schema.json)。真实 C++ 内存 checkpoint sidecar 无需 archive 即可保留 native seal。持久 native 历史和 bank 引用需要真实 `sp::NativeArchive`：closed v2 / `spna2` 是使用独立密钥、经过认证的 owner-private 受保护 custody，不是加密或 vendor-issuer 认证。不得公开 archive 正文、密钥、native blob 或 raw wire 观测。managed 恢复/fork 共享 charged/reserved/report/dedup canonical bank，不更新预算。通用有界持久 fork 必须使用外部 host-shared bank/journal，复制 snapshot 不能授予独立支出权限。
+
+
+实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
+这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
 
 ## Python
 
+> 下方 Python 资料描述既有 binding；provider binding/wrapper 已明确延期，未针对 typed lossless C++ 切换移植或执行。安装历史 wheel 不会提供新的 C++ provider API。
 Python 包使用相同的 C++ 引擎，现包含 Program、Hook、strict-context、运行时策略与 SQLite 持久化接口：
 
 ```bash
@@ -192,10 +226,11 @@ Python 额外公开：
 
 ## 构建配置
 
-仅使用 Core 的用户不需要为 Program 或 QuickJS 付费：
+Core-only 构建仍可省去 Program/QuickJS，但不能省去 SchemaProvider runtime：
 
 ```bash
 cmake -S . -B build-core \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DNEOGRAPH_BUILD_PROGRAM=OFF \
   -DNEOGRAPH_BUILD_LLM=OFF \
   -DNEOGRAPH_BUILD_MCP=OFF
@@ -205,6 +240,7 @@ cmake -S . -B build-core \
 
 | 选项 | 用途 |
 |---|---|
+| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | 明确指定 SDK source checkout；未指定时必须安装 runtime package。 |
 | `NEOGRAPH_BUILD_PROGRAM` | 持久化 Program 值、目录、运行时、血缘及迁移 |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program 编写及生成器命令 |
 | `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 为优化配置选择不可移植的本机指令调优 |
@@ -217,9 +253,17 @@ cmake -S . -B build-core \
 
 使用与你的部署匹配的窄 CMake 目标：`neograph::core`、`neograph::llm`、`neograph::program`、`neograph::mcp`、`neograph::a2a`，或其他已启用的组件。
 
+SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
+
+```cmake
+find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(NeoGraph CONFIG REQUIRED)
+target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
+```
+
 ## 验证
 
-该仓库运行确定性的 C++ 和 Python 测试套件、Program 重放/迁移探针、DSL 能力夹具、文档/i18n 检查、消毒器，以及可选的实时模型评估。基准声明应归于 [benchmarks](benchmarks/README.md) 和带日期的 [性能报告](docs/performance-deep-dive.md)，而非作为永恒的 API 保证。
+`scripts/test_find_package.sh` 描述 installed-consumer 检查，文件存在不代表当前已通过。当前 SDK ABI3 全量重建/CTest 已通过 26/26；shared 安装 consumer 实际执行 local HTTP 两 turn typed 请求、tool/native/refusal/known-zero 结果及 mismatch 拒绝。这不代表 NeoGraph、Python、Windows、macOS、WASM 或付费 live-provider 兼容已验证。NeoGraph 集成验证另行报告。
 
 ## 文档
 

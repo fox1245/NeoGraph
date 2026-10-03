@@ -2,13 +2,17 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## Historical benchmark; provider binding migration deferred
+
+The measurements, conclusions and reproduction commands below describe the pre-cutover Python benchmark, not a verified current build. The typed C++ `ProviderRequest`/`sp::Event`/full immutable `sp::Outcome` migration does not establish Python provider bindings: that work is deferred. Do not interpret these commands as a working legacy provider API, a current provider benchmark, or proof of execution after migration. Generic Python graph measurements do not qualify the provider surface. Python REPL/protocol drivers are unchanged. This documentation update was checked against source only; no build or benchmark was run.
+
 Core question: **Does using NeoGraph from Python via pybind (node body also Python) eliminate
 the advantages of standalone C++ (startup · RSS · throughput)?**
 
 Answer: **No.** The bloat is not from Python interpreter but from LangChain import tree.
 NeoGraph-from-Python = lean Python (10MB/30ms) + single compiled .so.
 
-## Reproduce
+## Historical reproduction commands — not validated after cutover
 
 Configure a source build with Python bindings first (Python development headers
 and pybind11 are required):

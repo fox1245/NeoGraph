@@ -31,7 +31,7 @@ callbacks arrive via `NodeInput::stream_cb` (a nullable pointer).
 | Legacy Virtual | Migrated Form |
 |---|---|
 | `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;` (sync body) |
-| `execute_async(state)` | Native async like `co_return co_await provider->complete_async(...);` |
+| `execute_async(state)` | Native async like `co_await provider->invoke_async(std::move(request));` |
 | `execute_stream(state, cb)` | `if (in.stream_cb) (*in.stream_cb)(event); co_return NodeOutput{...};` |
 | `execute_stream_async(state, cb)` | Above + native async (`co_await ...`) |
 | `execute_full(state)` | `NodeOutput out; out.writes=...; out.command=...; co_return out;` |
@@ -104,70 +104,83 @@ Differences:
 
 ### Case 2 — Async LLM Node (Migrating `execute_async`)
 
-**Old:**
 ```cpp
-class TalkNode : public GraphNode {
-    std::shared_ptr<Provider> prov_;
-public:
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override {
-        auto reply = co_await prov_->complete_async({
-            .messages = state.get_messages(),
-            .model    = "gpt-mock",
-        });
-        co_return std::vector<ChannelWrite>{
-            {"reply", json(reply.message.content)}
-        };
-    }
-    std::string get_name() const override { return "talk"; }
-};
-```
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
 
-**New:**
-```cpp
-class TalkNode : public GraphNode {
-    std::shared_ptr<Provider> prov_;
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto reply = co_await prov_->complete_async({
-            .messages = in.state.get_messages(),
-            .model    = "gpt-mock",
-        });
-        NodeOutput out;
-        out.writes.push_back({"reply", json(reply.message.content)});
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
-    std::string get_name() const override { return "talk"; }
+    std::string get_name() const override { return "chat"; }
 };
 ```
 
 ### Case 3 — Streaming Node (Migrating `execute_stream`)
 
-**Old:**
-```cpp
-std::vector<ChannelWrite>
-execute_stream(const GraphState& state, const GraphStreamCallback& cb) override {
-    auto reply = prov_->complete_stream(params, [&](const std::string& chunk) {
-        cb({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
-    });
-    return {ChannelWrite{"reply", json(reply.message.content)}};
-}
-```
+The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
 
-**New:**
 ```cpp
-asio::awaitable<NodeOutput> run(NodeInput in) override {
-    // in.stream_cb is a pointer — null means the caller does not want streaming.
-    auto on_chunk = [&](const std::string& chunk) {
-        if (in.stream_cb) {
-            (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
-        }
-    };
-    auto reply = prov_->complete_stream(params, on_chunk);
-    NodeOutput out;
-    out.writes.push_back({"reply", json(reply.message.content)});
-    co_return out;
-}
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+
+class StreamingChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
+public:
+    StreamingChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages(), {}, {},
+            neograph::ProviderMode::Stream);
+        request.on_event = [sink = in.stream_cb](const sp::Event& event) {
+            if (!sink) return;
+            const auto* delta = std::get_if<sp::PartDelta>(&event);
+            if (delta && delta->payload.kind == sp::PartKind::Text &&
+                delta->payload.channel == sp::DeltaChannel::Content)
+                (*sink)({neograph::graph::GraphEvent::Type::LLM_TOKEN,
+                         "chat", neograph::json(std::string(delta->payload.bytes))});
+        };
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
+        co_return out;
+    }
+    std::string get_name() const override { return "chat"; }
+};
 ```
 
 ### Case 4 — Node Using Command / Send (Migrating `execute_full`)
@@ -290,157 +303,122 @@ manually. There are no shortcuts.
 
 ---
 
-# Migration 2: `Provider` Compatibility Policy and New Explicit Request API (v0.9+)
+# Migration 2: Typed lossless Provider cutover (mandatory recompile)
 
-The existing `Provider::complete*` four methods and callback-based `invoke()` are
-stable APIs with no removal plans. Existing implementations and callers need not
-migrate. However, new `Provider` implementations should override only
-`CompletionProvider::do_invoke()`, and new direct calls should use
-`invoke_request(CompletionRequest)`.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
 
-## Existing vs Recommended New Call Patterns
+Fresh installed find_package Program C++/C ABI/dualQuickJS consumers and the NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed. Interface/ABI declarations alone remain distinct from this exercised package result; broader platforms and stable release are not claimed.
 
-| Stable Compatible API | Recommended API When Using `CompletionProvider` Directly |
-|---|---|
-| `complete(params)` | `run_sync(invoke_request(CompletionRequest::collect(params)))` |
-| `complete_async(params)` | `co_await invoke_request(CompletionRequest::collect(params))` |
-| `complete_stream(params, on_chunk)` | `run_sync(invoke_request(CompletionRequest::stream(params, on_chunk)))` |
-| `complete_stream_async(params, on_chunk)` | `co_await invoke_request(CompletionRequest::stream(params, on_chunk))` |
-
-`CompletionRequest` separates callback presence from transport mode. Thus, even
-without a callback, `CompletionRequest::stream(params)` explicitly requests
-streaming transport. Code that holds only `Provider&` or `Provider*` can use
-existing `complete*` methods unchanged.
-
-## Case-by-Case Conversion
-
-### User Code Calling Provider
+The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
 
 ```cpp
-// Stable compatible API — continues to be supported
-auto completion = co_await provider->complete_async(params);
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <neograph/controlled_provider.h>
+
+// Public operation signatures (the only virtual operation is prepare).
+// ProviderRequest owns the SDK request variant, mode, options and observer.
+// invoke[_async](request) = prepare once, then dispatch the same handle.
+// dispatch[_async](prepared) returns sp::runtime::Result.
 ```
+
+### ProviderRequest / ProviderControls
 
 ```cpp
-// New code using `CompletionProvider` directly — mode is explicit
-auto completion = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result call_provider(
+    neograph::Provider& provider, std::string model,
+    std::vector<sp::Message> history,
+    std::function<void(const sp::Event&)> observer) {
+    neograph::ProviderControls controls;
+    controls.max_output_tokens = 128;  // optional caller-selected wire cap
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history), {},
+        std::move(controls), neograph::ProviderMode::Stream);
+    request.on_event = std::move(observer);
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));  // owns Completion or Failure
+}
 ```
 
-### Custom Provider Subclass
+### PreparedProviderRequest / ProviderBudgetClaim
+`prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
 
-Existing `Provider` subclasses continue to work. New implementations should
-inherit from `CompletionProvider` and implement only `do_invoke()`. The
-existing `Provider` vtable and Python `complete()` contract remain unchanged.
+Optional `ProviderControls` are caller choices, not mandatory defaults or silently clamped caps. Unsupported family controls fail before dispatch. Bounded calls require genuine admitted model input/output facts; missing facts fail with `LimitUnknown`. A reservation is conservative spending authority, not reported usage, a forecast or an invoice. Unknown/partial/delivery-unknown outcomes retain their hold; genuine final reports settle it, including oversized usage. Retry is one explicit layer, off by default, with a bounded window and unknown-prior hold; no hidden resend.
+
+
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+
+If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
+### SchemaProvider
+
+`SchemaProvider` accepts an admitted `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options` and optional `SchemaProvider::Defaults`. Descriptor loading is closed/versioned data admission, not a request/response interpreter or arbitrary primitive registry. Credentials belong in runtime options, not public descriptor files. Defaults contain only typed OpenRouter routing and Responses retention (`responses_store`); the latter is valid only for Responses. Hosted OpenRouter routing, retention and JSON formats remain declared typed controls. Images, Veo and Decisions use separate NeoGraph typed clients and separate authorization; they do not inherit an SDK chat grant.
 
 ```cpp
-// Old pattern — async-native provider
-class MyProvider : public neograph::Provider {
-public:
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override {
-        // ... HTTP call ...
-        co_return result;
-    }
+#include <neograph/llm/schema_provider.h>
+#include <descriptor/descriptor.h>
+#include <stdexcept>
+#include <variant>
 
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override {
-        // ... SSE call ...
-        return result;
-    }
-
-    std::string get_name() const override { return "my"; }
-};
+std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
+    std::string_view descriptor_json, std::string api_key) {
+    auto loaded = sp::descriptor::load(descriptor_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument(error->message);
+    sp::runtime::Options options;
+    options.api_key = std::move(api_key);
+    neograph::llm::SchemaProvider::Defaults defaults;
+    return std::make_shared<neograph::llm::SchemaProvider>(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+        std::move(options), std::move(defaults));
+}
 ```
 
-```cpp
-// New pattern — transport mode is decoupled from callback presence
-class MyProvider : public neograph::CompletionProvider {
-public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        if (request.streaming()) {
-            // Uses SSE/WS transport even without callback.
-            // With callback, invokes request.on_chunk()(token) per token.
-        } else {
-            // ... HTTP call ...
-        }
-        co_return result;
-    }
+### Native history / budget
 
-    std::string get_name() const override { return "my"; }
-};
-```
+`ChatMessage` / `ChatTool` and JSON are portable projections, not native authority. Portable formats remain [`provider-message-v2`](../schemas/provider-message-v2.schema.json) and [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json). Genuine C++ checkpoint sidecars retain native seals in memory. Durable native history requires host-owned `sp::NativeArchive`: closed v3 / `spna3`, with authenticated owner-private custody and an independent key. Archive v2 is rejected, not upgraded or interpreted. Authentication binds every semantic descriptor choice (origin/paths/headers, policy, request field mappings, usage path and stop mappings), owner and exact custody binding. It is neither encryption nor vendor-issuer authentication; never publish archive bodies, keys, native blobs or raw wire observations. An archive is evidence storage, not a money grant or a spending lease. Program/external banks remain independently journal-owned; snapshot copies cannot create credit.
 
-New callers specify the mode explicitly.
+**Standalone bank journal correction — current contract revised; exercised runtime evidence below.** The owner-approved protocol requires a monotonic trusted-store namespace obligation and a real immutable original owner/thread/graph scope, ceiling, deadline/clock identity and generation. Only exact durable head CAS over the full checkpoint commitment and revision may issue a host-owned opaque lease. Exact pending effect windows must persist before provider I/O; settlement must use genuine SDK outcomes and actual charges, nullable reports, holds and dedup identities. Checkpoint and next head must publish atomically under the same owned actor/revision. Removing bank metadata, pruning a checkpoint, replaying an old authenticated snapshot, overwriting the same ID or losing the actor must not grant credit. Tightening a 130 ceiling to 129 with an existing 65 hold cannot admit another 65; a proven no-effect failure may release the unchanged head so authentic 130 recovery can still proceed. Crash/unknown/lost-lease windows remain held without refund, retry or fallback. Plain/pristine archive configuration grants no money or native spending lease, and current `config.usage` cannot replace an existing standalone obligation; Program/external-bank journal ownership is unchanged. This is the required contract; actual currency/custody evidence and instrumentation limits are reported below, not a stable released API guarantee.
 
-```cpp
-auto full = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
+**Current declarations; integrated runtime evidence below:** `<neograph/graph/checkpoint.h>` declares `ManagedBudgetLeaseScope` with `owner_scope`, logical `thread_id`, private backend `storage_thread_id`, `graph_identity`, `original_ceiling`, `original_deadline_ticks` and `deadline_clock_identity`. `OwnedManagedBudgetLease` exposes read-only `scope()`, `actor_id()`, immutable `bank_generation()`, `revision()`, `head_checkpoint_id()` and `head_commitment()`; it has no public authority-import constructor. `ManagedBudgetEffectReceipt` exposes `active()`, `effect_id()`, `claim_amount()` and `request_digest()`; a default receipt grants nothing. `CheckpointStore` declares `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`, `begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`, `settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`, `publish_managed_budget_checkpoint(lease, checkpoint)` and `release_managed_budget_lease(lease)`, with `_async` counterparts. Sync `CheckpointStoreCore` and `AsyncCheckpointStore` expose their respective variants. `managed_budget_checkpoint_commitment(checkpoint)` covers the full durable checkpoint, not just bank JSON. These declarations do not establish backend CAS, currency safety, installed ABI compatibility or a successfully exercised runtime path.
 
-auto streamed = co_await provider.invoke_request(
-    CompletionRequest::stream(params, on_chunk));
+**Genuine InMemory shared-bank fork retained and exercised.** The original genuine C++ fork uses ONE original financial journal and trusted current branch heads, not cloned grants. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` (and `_async`) requires the authentic current source/full commitment and actual same-bank native C++ pointer; durable standalone forks remain explicitly unsupported. `OwnedManagedBudgetLease::scope()` and original owner/thread/graph, ceiling, deadline/clock and generation remain immutable. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` select the execution branch separately; `GraphState::budget_original_thread_id()` identifies the original financial bank. Exact selected-branch head CAS and global actor/revision serialize all branches against canonical current counters, pending effects and burned identities. Original and fork branches remain usable without replenishment; stale snapshots, copied checkpoints and imported JSON cannot mint aliases or rewind heads. The original root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank proof PASSED in the unchanged test_graph_engine.cpp:810–913; saved original ceiling30 is separate from effective fork ceiling20; widening31 and JSON-only restore must reject. Unbounded reported observations are factual data, not finite grants. Only a proven zero-effect lease can release an unchanged head; unknown/pending effects keep their obligations.
 
-// Can explicitly request streaming transport even without observing tokens.
-auto streamed_without_observer = co_await provider.invoke_request(
-    CompletionRequest::stream(params));
-```
+**Current release-error contract; exercised suite/probes below.** `graph::ManagedBudgetLeaseReleaseError` in `<neograph/graph/engine.h>` derives from `ProviderOutcomeError`. `cause()` preserves the original execution exception and `release_error()` exposes the secondary durable lease-disposition failure. `outcome()` retains genuine SDK evidence when available and is null when no SDK outcome exists; release failure cannot invent an outcome or permit redispatch. Closed `_neograph_managed_budget_scope` metadata describes original logical scope/cap/deadline clock/generation, but is data rather than backend CAS authority.
 
-The legacy four virtuals and `invoke(params, on_chunk)` remain supported. The
-`CompletionProvider` final adapter connects all legacy entry points to
-`do_invoke()` once, preventing mutual recursion.
+**Archive-owner/retention contract; exercised suite/probes below.** Only finite standalone roots or authenticated finite sources inherit an omitted original owner from the genuinely configured `sp::NativeArchive::owner_scope()`; unbounded/plain owner metadata semantics are unchanged. An explicitly conflicting archive owner is rejected before lease acquisition. `CheckpointStore::retains_native_checkpoint() const noexcept` and the corresponding Core/Async storage capability default to false; the real InMemory backend overrides true, and wrappers must delegate actual retention. This read-only description permits legitimate unleased/plain/unbounded C++ native checkpoint custody; it grants neither spending credit nor native replay authority. Leased custody uses the actual store-issued receipt rather than a JSON flag or guessed store type.
 
-## Automatic Cancellation Propagation
+**Native-custody pre-I/O gate; exercised suite/probes below.** Beginning a managed effect requires a genuinely bound NativeArchive or the actual local store-issued private C++ retention capability before any pending-effect, slot or held-window mutation. The private capability is never imported from JSON or transferred over the wire. gRPC requires real client and server archives even when the remote backend is InMemory, because a C++ sidecar cannot cross that boundary. Original anonymous owner scope remains empty when no archive supplies a finite source owner; a real archive binding must match the original scope. Financial head/lease evidence alone does not prove native-custody readiness.
 
-If cancellation is needed, specify `CompletionParams::cancel_token`. Internal
-engine nodes pass the `RunContext` token to providers in params. The thread-local
-implicit propagation path is no longer used.
+Diagnostic JSON preserves original raw bytes, including syntactically valid duplicate-key documents; executable request/configuration admission still rejects duplicates. Original non-2xx response JSON remains in `http.error` evidence, without a second lossy parse. A named SSE error takes precedence over a later normal stream close. Diagnostic/provider metadata is bounded by its admitted source extent, not an unrelated tiny error-text cap.
 
-```cpp
-// Node body inside engine — both cancel identically
-co_await provider->invoke(params, nullptr);                    // OK
-neograph::async::run_sync(provider->invoke(params, nullptr));  // OK
-```
+`ProviderRequest::observer_limits` is host-only: explicitly supplied `max_events` and `max_bytes` must be positive and may only lower admitted SDK delivery ceilings. `provider-request/v3` digests the effective limits, mode, encoded body, retry policy and all semantic descriptor bindings. The bridge charges actual PMR vector/map capacity plus owned event/document bytes across both queued and draining batches; cancellation is requested outside its queue mutex. Generic channels called `messages` are not coerced to chat. Mapping a native `history` channel into `messages` preserves its C++ sidecar, rather than manufacturing native authority from JSON.
 
-Direct callers outside the graph (e.g., `Agent` user code) follow the same
-pattern — without an explicit cancel_token, cancellation cannot be received
-(same as before).
+`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of provider retries, and a caller-selected `max_output_tokens` is never silently clamped.
 
-## What Happens If You Don't Migrate
+`ProgramFailure` retains live `provider_outcome` and `provider_cause`. Its canonical factual SDK witness binds genuine archive custody to owner/run/version/bundle/operation/attempt; Runtime eagerly restores configured custody before exposing a recovered failure. Public data-only `ProgramResult::create()` cannot bypass this with a prefilled witness, and an unresolved parsed seal is not an executable result. After process restart the original exception pointer is unavailable (`provider_cause == nullptr`), not recreated from text. A failure that cannot be persisted cannot be serialized, published or replayed.
 
-No action is required:
-- Legacy virtual overrides and direct calls continue to work.
-- Provider-related `-Wdeprecated-declarations` warnings no longer occur.
-- Compatibility and security fixes apply to legacy APIs as well.
+`RecordedBindingSet` is source-bound, move-only data, never a caller-supplied dispatcher. The trusted Catalog `recorded_capability_binder` independently materializes captured-only capabilities from real persisted source events. `ProgramRuntime::replay_recorded()` checks original selected-source permissions, then transfers the actual remaining bank through durable CAS; inherited spend is not a new model grant. The old `start_recorded` renewal API is removed. InMemory, File, SQLite and PostgreSQL Program stores preserve the exact immutable owned lease throughout execution; expiry does not renew it. Controlled JavaScript still validates the underlying capability manifest and consumes exact completed command outcomes without redispatching external effects.
 
-There are no plans to remove legacy APIs. However, new features may only be
-added to the explicit request contract, so implementing new features with
-`CompletionProvider` is preferable.
+**Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
 
-## Can It Be Automatically Converted?
+**Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
 
-Call sites follow simple patterns:
+**Native-axis observations, not cryptographic verification or native consumption/equivalence.** Generate accepted mutation, omission and duplication. Interactions accepted the isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission and duplication. Removing all thoughts/signatures returned generic400; removing all signature fields while keeping THOUGHT items also returned generic400. The last capture had a local encoded-original retention control, not a same-capture server positive; the earlier positive cohort remains genuine. These observations establish an aggregate-carrier-absence boundary only, not issuer/signature validation or vendor consumption. Actual reports: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`; prerequisite-failed/not-run/negative-inconclusive states remain factual. Thought-only/carrier-only omissions were accepted while another carrier remained; this does not strengthen issuer-validation or native-consumption claims.
 
-```bash
-# Review with dry-run
-grep -rnE '->complete(_async|_stream|_stream_async)?\(' your/code
+**Actual integrated proof and remaining limits.** Latest Core full run:2242 tests, zero failures,16 skips (14 RAM process-loss cases not applicable; two live-credential gates),130.17seconds. `PgNestedJsonRoundTrips` preserved exact duplicate keys/order/null metadata, blob and residual in0.18seconds. The unchanged original shared-bank fork and existing Recorded CPU/Memory await/handoff scenarios passed. Real wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probes passed plain and ASan+UBSan. LOCAL Memory/SQLite/PostgreSQL TSan scopes:seven passed,zero warnings. Full mixed gRPC plus system Abseil/Protobuf TSan exited66 with402 race warnings in dependency/generated-RPC stacks: an instrumentation/coverage limit, not a proven false positive; remote TSan/race-freedom is NOT claimed and no warning is suppressed. Installed find_package Program C++/C ABI/dualQuickJS three consumers passed. Fresh installed NeoGraph/SchemaProvider typed consumer passed two real HTTP requests, provider destruction before coroutine start, native/tool replay, refusal,known-zero/raw retention and actual LinkedMismatch rejection. Browser Alice/Bob isolation and generation2 replacement were visually verified; PostgreSQL Program Chat six black-box tests passed18.989seconds. Latest SDK26/26 passed,zero failures,74.07seconds. Final ReleaseGraph16 configurations ×3 fresh process repetitions/48 records completed38.29seconds,zero failures,all actual protocol/owned-outcome checks passed. NeoGraph `benchmarks/provider-cutover-final-results.json` and `benchmarks/provider-cutover-final-summary.json` retain this separate final cohort. No compiler or paid model ran during measurement; historical cohorts stay unchanged and semantic/resource equivalence is not claimed. Unstable SDK/ABI3 is not a stable release or broader-platform qualification.
 
-# Then manually edit case-by-case (refer to the mapping table above).
-```
+**Minimal paid evidence (2026-10-03), not broad qualification.** Three separately approved one-shot calls produced: Images—one JPEG, 1024×1024, 360685 bytes, input/output/total tokens 19/1408/1427, visually inspected; Veo—one MP4, 1280×720, 4 seconds, 437737 bytes, one generation plus three status GETs, nullable usage, decoded and visually inspected in Chromium; Decisions—`typesafe/jev-1.13`, probability 0.93, input/output tokens 283/21, total unknown, API-reported cost USD 0.000011886. Image USD 0.0336 base plus text/thinking and Veo USD 0.20 are catalog expectations, not invoices; the minimal image smoke did not capture a price-band breakdown. No result renews one-shot authority or authorizes reruns.
 
-Merging legacy `Provider` subclasses into a single `CompletionProvider::do_invoke()`
-is optional and requires manual editing due to intertwined logic.
+The completed chat pairs do not establish native-continuation consumption by a downstream vendor.
 
-## Related Documentation / Issues
+Historical Stage 3 (2026-04) design and its measured test counts are preserved as history. Its provider compatibility/crossover decisions are superseded by the typed lossless cutover below; the design ledger is not the current provider API.
 
-- [`include/neograph/graph/node.h`](../include/neograph/graph/node.h) — inline
-  docstring for the new `run(NodeInput)` virtual (includes examples)
-- [ROADMAP_v1.md](../ROADMAP_v1.md) — Detailed design notes for Candidate 1
-  (GraphNode 8-virtual flattening)
-- [troubleshooting.md](troubleshooting.md) — Compilation errors and runtime
-  differences encountered during actual migration
-- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — Record of decision
-  on Provider method implementation path and permanent compatibility policy
+- [ABI_POLICY.md](ABI_POLICY.md)
+- [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
+- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — historical decision; superseded provider compatibility policy.
 
 ---
 
@@ -524,6 +502,8 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 See ROADMAP_v1.md perf section for detailed measurements (separate addition).
+
+> Historical Stage 3 (2026-04) design and its measured test counts are preserved as history. Its provider compatibility/crossover decisions are superseded by the typed lossless cutover below; the design ledger is not the current provider API.
 
 ---
 

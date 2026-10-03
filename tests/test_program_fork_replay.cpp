@@ -1,10 +1,13 @@
+#include "fixtures/typed_provider.h"
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#include <neograph/provider_outcome_codec.h>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -115,32 +118,17 @@ ProgramPendingEffect failed_effect(const RecordedCapabilityCallReference& refere
     return ProgramPendingEffect(std::move(data));
 }
 
-CatalogCapabilityBinding owned_binding(std::vector<CapabilityBindingReceipt> receipts) {
-    CatalogCapabilityBinding result;
-    result.receipts = std::move(receipts);
-    return result;
-}
 
-class ReplayProvider final : public neograph::Provider {
+class ReplayProvider final : public neograph::test::LocalProvider {
 public:
-    ReplayProvider(std::atomic<unsigned>& calls, std::string content, bool fail)
-        : calls_(calls), content_(std::move(content)), fail_(fail) {}
-
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        ++calls_;
-        if (fail_) throw std::runtime_error("recorded provider failure");
-        neograph::ChatCompletion completion;
-        completion.message.role    = "assistant";
-        completion.message.content = content_;
-        return completion;
-    }
-
-    std::string get_name() const override { return "recorded-provider"; }
-
-private:
-    std::atomic<unsigned>& calls_;
-    std::string            content_;
-    bool                   fail_;
+    ReplayProvider(std::shared_ptr<std::atomic<unsigned>> calls, std::string content, bool fail)
+        : LocalProvider([calls = std::move(calls), content = std::move(content), fail](
+                            auto, const auto&, const auto&)
+                            -> asio::awaitable<sp::runtime::Result> {
+              ++*calls;
+              if (fail) co_return neograph::test::failure(sp::ErrorKind::RemoteFailure);
+              co_return neograph::test::success(content);
+          }, "recorded-provider") {}
 };
 
 class ReplayProviderNode final : public GraphNode {
@@ -150,11 +138,14 @@ public:
         if (!provider_) throw std::invalid_argument("ReplayProviderNode requires a provider");
     }
 
-    asio::awaitable<NodeOutput> run(NodeInput) override {
-        neograph::CompletionParams params;
-        const auto completion = co_await provider_->complete_async(params);
-        NodeOutput                       output;
-        output.writes.push_back(ChannelWrite{"value", completion.message.content});
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto result = co_await observe_provider_result(
+            in.ctx, provider_->invoke_async(neograph::test::request()));
+        if (!result) throw std::runtime_error("Provider returned no outcome");
+        record_usage(in.ctx, result);
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{
+            "value", neograph::provider_codec::encode_outcome(*result)});
         co_return output;
     }
 
@@ -248,8 +239,10 @@ RunInvocation replay_invocation(const ProgramVersion& version,
 
 struct RecordedRuntimeFixture {
     std::atomic<unsigned>                           live_binder_calls{0};
-    std::atomic<unsigned>                           live_provider_calls{0};
-    std::atomic<unsigned>                           recorded_provider_calls{0};
+    std::shared_ptr<std::atomic<unsigned>> live_provider_calls =
+        std::make_shared<std::atomic<unsigned>>(0);
+    std::shared_ptr<std::atomic<unsigned>> recorded_provider_calls =
+        std::make_shared<std::atomic<unsigned>>(0);
     RegistrySnapshot                                registry;
     AdmissionProfile                                profile;
     PolicySnapshot                                  policy;
@@ -259,11 +252,43 @@ struct RecordedRuntimeFixture {
     std::shared_ptr<EngineGenerationCache>          engines;
     std::shared_ptr<ProgramCatalog>                 catalog;
     std::unique_ptr<ProgramRuntime>                 runtime;
+    bool fail_live = false;
+    std::shared_ptr<neograph::Provider> live_override;
 
-    RecordedRuntimeFixture()
+    RecordedCapabilityMaterialization captured(
+        const ProgramVersion& version, const std::vector<ProgramEvent>& events) {
+        const auto receipt = version.core_materialization_receipt().capability_bindings.front();
+        for (const auto& event : events) {
+            const auto* typed = std::get_if<neograph::graph::TypedGraphEvent>(&event.payload);
+            if (!typed) continue;
+            const auto* write = std::get_if<neograph::graph::ChannelWriteEvent>(typed);
+            if (!write || write->channel != "value") continue;
+            auto reference = call_reference(receipt, 1, "source-provider-call");
+            reference.operation_id = event.operation_id;
+            RecordedBindingSet evidence(
+                {receipt}, {reference},
+                {RecordedCapabilityEvidence(RecordedCapabilityEvidenceData{
+                    reference, RecordedEvidenceCoverage::Full, false,
+                    consumed_input(reference, write->value), std::nullopt, std::nullopt})});
+            const auto outcome = neograph::provider_codec::decode_outcome(write->value);
+            CatalogCapabilityBinding captured_binding;
+            captured_binding.receipts = {receipt};
+            captured_binding.node_context.provider =
+                std::make_shared<neograph::test::LocalProvider>(
+                    [outcome, calls = recorded_provider_calls](auto, const auto&, const auto&)
+                        -> asio::awaitable<sp::runtime::Result> {
+                        ++*calls;
+                        co_return outcome;
+                    }, "recorded-provider");
+            return {std::move(evidence), std::move(captured_binding)};
+        }
+        throw std::invalid_argument("Source has no captured provider outcome");
+    }
+
+    explicit RecordedRuntimeFixture(std::uint64_t operation_limit = 3)
         : registry(replay_registry()),
           profile(make_profile(registry)),
-          policy(make_policy(profile)),
+          policy(make_policy(profile, operation_limit)),
           store(std::make_shared<InMemoryProgramStore>()),
           checkpoints(std::make_shared<InMemoryCheckpointStore>()),
           transitions(std::make_shared<InMemoryProgramTransitionStore>()) {
@@ -276,7 +301,7 @@ struct RecordedRuntimeFixture {
             .semantic_version("1.0.0")
             .registry(registry)
             .mode(AdmissionMode::TrustedEmbedding)
-            .max_program_schema_version(1)
+            .max_program_schema_version(2)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered)
             .allow_effect_mode(EffectMode::TrustedNative);
@@ -285,45 +310,50 @@ struct RecordedRuntimeFixture {
         return std::move(builder).build();
     }
 
-    static PolicySnapshot make_policy(const AdmissionProfile& profile) {
+    static PolicySnapshot make_policy(const AdmissionProfile& profile, std::uint64_t operation_limit) {
         PolicySnapshotBuilder builder;
         builder.id("recorded-policy")
             .semantic_version("1.0.0")
             .owner_scope("tenant:recorded")
             .admission_profile(profile)
             .allow_capability(std::string(TRUSTED_NATIVE_CAPABILITY))
-            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 1, 1, 20, 1, 1, 1});
+            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 1, operation_limit, 20, 1, 1, 1});
         return std::move(builder).build();
     }
 
-    CatalogCapabilityBinding make_binding(bool recorded, bool failure) {
+    CatalogCapabilityBinding make_live_binding() {
         CatalogCapabilityBinding result;
-        result.node_context.provider = std::make_shared<ReplayProvider>(
-            recorded ? recorded_provider_calls : live_provider_calls,
-            failure ? "unused" : "recorded-success", failure);
+        result.node_context.provider = live_override ? live_override
+            : std::make_shared<ReplayProvider>(live_provider_calls, "observed-source", fail_live);
         result.receipts = {binding()};
         return result;
     }
 
-    void restart() {
+    void restart(bool captured_dispatch = true) {
         runtime.reset();
         catalog.reset();
         engines = std::make_shared<EngineGenerationCache>();
-        catalog = std::make_shared<ProgramCatalog>(
-            CatalogConfig{store, registry, engines, "recorded-runtime-test/v1",
-                          [this](const std::vector<ExecutableIdentity>&) {
-                              ++live_binder_calls;
-                              return make_binding(false, false);
-                          },
-                          1, {}, "host:recorded-runtime-test"});
+        CatalogConfig config{store, registry, engines, "recorded-runtime-test/v1",
+                             [this](const std::vector<ExecutableIdentity>&) {
+                                 ++live_binder_calls;
+                                 return make_live_binding();
+                             },
+                             1, {}, "host:recorded-runtime-test"};
+        if (captured_dispatch)
+            config.recorded_capability_binder =
+                [this](const ProgramVersion& version, const std::vector<ProgramEvent>& events) {
+                    return captured(version, events);
+                };
+        catalog = std::make_shared<ProgramCatalog>(std::move(config));
         runtime = std::make_unique<ProgramRuntime>(
             RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
     }
 
-    ProgramVersion admit() {
+    ProgramVersion admit(json document = replay_program_document()) {
         ProgramCompiler compiler(registry, {"recorded-runtime-test/v1"});
+        const auto schema = document.at("program_schema_version").get<std::uint32_t>();
         auto            source =
-            ProgramSource::from_cpp_builder("test:recorded", 1, replay_program_document());
+            ProgramSource::from_cpp_builder("test:recorded", schema, std::move(document));
         auto bundle = compiler.compile(source);
         return catalog->admit(bundle, ProgramAdmission{"tenant:recorded", profile, policy, {}});
     }
@@ -425,6 +455,35 @@ TEST(ProgramForkValuesTest, ChannelReducerAndContinuationMismatchesAreTyped) {
     }
 }
 
+TEST(ProgramRecordedReplayValuesTest, DurableBankKeepsWideChargeAndSeparateUnknownHold) {
+    neograph::UsageAccumulator bank;
+    ASSERT_TRUE(bank.try_reserve(1, 2));
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    bank.add(neograph::test::usage(0, maximum, maximum));
+    ASSERT_TRUE(bank.remember_provider_effect("owner:source:wide-effect"));
+    ProgramResultData data;
+    data.status = ProgramTerminalStatus::Completed;
+    data.run_id = "wide-provider-custody";
+    data.program_version_id = digest('a');
+    data.bundle_id = digest('b');
+    data.attempt = 1;
+    data.usage.model_tokens = bank.total_tokens_wide();
+    data.provider_budget_authority = bank.authority_snapshot();
+    const auto result = ProgramResult::create(data);
+    const auto restored = ProgramResult::parse(result.serialize_canonical());
+    ASSERT_TRUE(restored.provider_budget_authority());
+    const auto& custody = *restored.provider_budget_authority();
+    EXPECT_EQ(custody.charged, maximum);
+    EXPECT_EQ(custody.reserved, 1U);
+    ASSERT_TRUE(custody.reports.output_total);
+    EXPECT_EQ(custody.reports.output_total->value, maximum);
+    EXPECT_EQ(custody.provider_effects,
+              std::vector<std::string>({"owner:source:wide-effect"}));
+    EXPECT_EQ(restored.usage().model_tokens, maximum);
+    data.usage.model_tokens = 0;
+    EXPECT_THROW(ProgramResult::create(std::move(data)), std::invalid_argument);
+}
+
 TEST(ProgramRecordedReplayValuesTest, FullSuccessAndFailureEvidenceRoundTrip) {
     const auto                 receipt     = binding();
     const auto                 success_ref = call_reference(receipt, 1, "call-success");
@@ -446,26 +505,6 @@ TEST(ProgramRecordedReplayValuesTest, FullSuccessAndFailureEvidenceRoundTrip) {
               ProgramEffectReconciliation::Failed);
 }
 
-TEST(ProgramRecordedReplayValuesTest, ExactFullOrderedSetOwnsBindingWithoutLiveBinder) {
-    const auto                              receipt = binding();
-    const auto                              first   = call_reference(receipt, 1, "call-first");
-    const auto                              second  = call_reference(receipt, 2, "call-second");
-    std::vector<RecordedCapabilityEvidence> evidence;
-    evidence.emplace_back(RecordedCapabilityEvidenceData{
-        first, RecordedEvidenceCoverage::Full, false, consumed_input(first, json{{"value", 1}}),
-        std::nullopt, std::nullopt});
-    evidence.emplace_back(RecordedCapabilityEvidenceData{
-        second, RecordedEvidenceCoverage::Full, false, consumed_input(second, json{{"value", 2}}),
-        std::nullopt, std::nullopt});
-
-    RecordedBindingSet set({receipt}, {first, second}, owned_binding({receipt}),
-                           std::move(evidence));
-    EXPECT_TRUE(set.fingerprint().starts_with("sha256:"));
-    EXPECT_EQ(set.evidence().size(), 2U);
-    auto released = std::move(set).release_owned_binding();
-    EXPECT_EQ(released.receipts, std::vector<CapabilityBindingReceipt>{receipt});
-}
-
 TEST(ProgramRecordedReplayValuesTest, RedactedMissingUnorderedAndWrongBindingReject) {
     const auto receipt = binding();
     const auto other   = binding('d', 'e');
@@ -474,13 +513,13 @@ TEST(ProgramRecordedReplayValuesTest, RedactedMissingUnorderedAndWrongBindingRej
 
     EXPECT_THROW(
         (RecordedBindingSet(
-            {receipt}, {first}, owned_binding({receipt}),
+            {receipt}, {first},
             {RecordedCapabilityEvidence(RecordedCapabilityEvidenceData{
                 first, RecordedEvidenceCoverage::Full, true, std::nullopt, std::nullopt,
                 RecordedCapabilityFailure{"P_REDACTED", "recorded", "hidden", json::object()}})})),
         std::invalid_argument);
 
-    EXPECT_THROW((RecordedBindingSet({receipt}, {first}, owned_binding({receipt}), {})),
+    EXPECT_THROW((RecordedBindingSet({receipt}, {first}, {})),
                  std::invalid_argument);
 
     std::vector<RecordedCapabilityEvidence> reversed;
@@ -490,13 +529,12 @@ TEST(ProgramRecordedReplayValuesTest, RedactedMissingUnorderedAndWrongBindingRej
     reversed.emplace_back(RecordedCapabilityEvidenceData{first, RecordedEvidenceCoverage::Full,
                                                          false, consumed_input(first, 1),
                                                          std::nullopt, std::nullopt});
-    EXPECT_THROW((RecordedBindingSet({receipt}, {first, second}, owned_binding({receipt}),
-                                     std::move(reversed))),
+    EXPECT_THROW((RecordedBindingSet({receipt}, {first, second}, std::move(reversed))),
                  std::invalid_argument);
 
     const auto wrong_ref = call_reference(other, 1, "call-first");
     EXPECT_THROW(
-        (RecordedBindingSet({receipt}, {wrong_ref}, owned_binding({receipt}),
+        (RecordedBindingSet({receipt}, {wrong_ref},
                             {RecordedCapabilityEvidence(RecordedCapabilityEvidenceData{
                                 wrong_ref, RecordedEvidenceCoverage::Full, false,
                                 consumed_input(wrong_ref, 1), std::nullopt, std::nullopt})})),
@@ -504,88 +542,109 @@ TEST(ProgramRecordedReplayValuesTest, RedactedMissingUnorderedAndWrongBindingRej
 }
 
 TEST(ProgramRecordedReplayRuntimeTest,
-     RecordedSuccessAndFailureSurviveRestartWithoutLiveBindingCalls) {
+     RegisteredCapturedDispatchRetainsActualSuccessAndFailureAcrossRestart) {
+    for (const bool fail : {false, true}) {
+        RecordedRuntimeFixture fixture;
+        fixture.fail_live = fail;
+        const auto version = fixture.admit();
+        const auto source_invocation = replay_invocation(version, "captured-source", "source");
+        const auto source = fixture.runtime->start(source_invocation).wait();
+        ASSERT_EQ(source.status(), ProgramTerminalStatus::Completed);
+        ASSERT_EQ(fixture.live_provider_calls->load(), 1U);
+        const auto source_events = fixture.transitions->load_events("tenant:recorded", source.run_id());
+        fixture.restart();
+        fixture.live_binder_calls.store(0);
+        fixture.live_provider_calls->store(0);
+        auto evidence = fixture.captured(version, source_events).evidence;
+        const auto fingerprint = evidence.fingerprint();
+        auto invocation = source_invocation;
+        invocation.run_id = "captured-replay";
+        invocation.correlation_id = "replay";
+        const auto replay =
+            fixture.runtime->replay_recorded(source.run_id(), invocation, std::move(evidence)).wait();
+        ASSERT_EQ(replay.status(), ProgramTerminalStatus::Completed);
+        EXPECT_EQ(replay.output(), source.output());
+        EXPECT_GT(replay.usage().core_steps, 0U);
+        EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
+        EXPECT_EQ(fixture.live_provider_calls->load(), 0U);
+        EXPECT_EQ(fixture.recorded_provider_calls->load(), 1U);
+        const auto record = fixture.transitions->load("tenant:recorded", replay.run_id());
+        ASSERT_TRUE(record && record->recorded_binding_set_fingerprint());
+        EXPECT_EQ(*record->recorded_binding_set_fingerprint(), fingerprint);
+        EXPECT_EQ(record->invocation(), invocation);
+        fixture.restart();
+        const auto reconnected = fixture.runtime->reconnect("tenant:recorded", replay.run_id()).wait();
+        EXPECT_EQ(reconnected.output(), replay.output());
+        EXPECT_EQ(fixture.live_provider_calls->load(), 0U);
+    }
+}
+
+TEST(ProgramRecordedReplayRuntimeTest,
+     UnregisteredLiveExecutorRejectsBeforeEffectAndSourceDebit) {
     RecordedRuntimeFixture fixture;
-    const auto             version = fixture.admit();
-    ASSERT_EQ(version.core_materialization_receipt().capability_bindings.size(), 1U);
-    const auto exact_receipt = version.core_materialization_receipt().capability_bindings.front();
-
-    fixture.restart();
+    const auto version = fixture.admit();
+    const auto source_invocation = replay_invocation(version, "unsafe-source", "source");
+    const auto source = fixture.runtime->start(source_invocation).wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Completed);
+    auto evidence = fixture.captured(
+        version, fixture.transitions->load_events("tenant:recorded", source.run_id())).evidence;
+    const auto source_head = fixture.transitions->load_run_lineage("tenant:recorded", source.run_id());
+    ASSERT_TRUE(source_head);
+    fixture.restart(false);
     fixture.live_binder_calls.store(0);
-    fixture.live_provider_calls.store(0);
-    fixture.recorded_provider_calls.store(0);
-    const auto success_ref = call_reference(exact_receipt, 1, "recorded-success-call");
-    std::vector<RecordedCapabilityEvidence> success_evidence;
-    success_evidence.emplace_back(RecordedCapabilityEvidenceData{
-        success_ref, RecordedEvidenceCoverage::Full, false,
-        consumed_input(success_ref, json{{"content", "recorded-success"}}), std::nullopt,
-        std::nullopt});
-    RecordedBindingSet success_set({exact_receipt}, {success_ref},
-                                   fixture.make_binding(true, false), std::move(success_evidence));
-    const auto         success_fingerprint = success_set.fingerprint();
-
-    const auto success_invocation =
-        replay_invocation(version, "recorded-success-run", "trace-recorded-success");
-    const auto success =
-        fixture.runtime->start_recorded(success_invocation, std::move(success_set)).wait();
-    EXPECT_EQ(success.status(), ProgramTerminalStatus::Completed);
-    EXPECT_EQ(success.output()["channels"]["value"]["value"], "recorded-success");
+    fixture.live_provider_calls->store(0);
+    auto invocation = source_invocation;
+    invocation.run_id = "unsafe-target";
+    EXPECT_THROW(fixture.runtime->replay_recorded(
+        source.run_id(), invocation, std::move(evidence)), ProgramDiagnosticError);
+    EXPECT_EQ(fixture.live_provider_calls->load(), 0U)
+        << "the live executor effects before any reservation; it must never be called";
     EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
-    EXPECT_EQ(fixture.live_provider_calls.load(), 0U);
-    EXPECT_EQ(fixture.recorded_provider_calls.load(), 1U);
-    const auto success_record = fixture.transitions->load("tenant:recorded", success.run_id());
-    ASSERT_TRUE(success_record.has_value());
-    ASSERT_TRUE(success_record->recorded_binding_set_fingerprint().has_value());
-    EXPECT_EQ(*success_record->recorded_binding_set_fingerprint(), success_fingerprint);
-    EXPECT_EQ(success_record->invocation(), success_invocation);
+    EXPECT_FALSE(fixture.transitions->load("tenant:recorded", invocation.run_id));
+    EXPECT_EQ(fixture.transitions->load_run_lineage("tenant:recorded", source.run_id())->id(),
+              source_head->id());
+}
 
-    fixture.restart();
-    const auto reconnected_success =
-        fixture.runtime->reconnect("tenant:recorded", success.run_id()).wait();
-    EXPECT_EQ(reconnected_success.status(), ProgramTerminalStatus::Completed);
-    EXPECT_EQ(reconnected_success.output(), success.output());
-    EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
-    EXPECT_EQ(fixture.live_provider_calls.load(), 0U);
-
-    fixture.recorded_provider_calls.store(0);
-    const auto failure_ref = call_reference(exact_receipt, 1, "recorded-failure-call");
-    std::vector<RecordedCapabilityEvidence> failure_evidence;
-    failure_evidence.emplace_back(RecordedCapabilityEvidenceData{
-        failure_ref, RecordedEvidenceCoverage::Full, false, std::nullopt, std::nullopt,
-        RecordedCapabilityFailure{"P_RECORDED_PROVIDER", "provider", "recorded provider failure",
-                                  json::object()}});
-    RecordedBindingSet failure_set({exact_receipt}, {failure_ref}, fixture.make_binding(true, true),
-                                   std::move(failure_evidence));
-
-    const auto failure_invocation =
-        replay_invocation(version, "recorded-failure-run", "trace-recorded-failure");
-    const auto failure =
-        fixture.runtime->start_recorded(failure_invocation, std::move(failure_set)).wait();
-    EXPECT_EQ(failure.status(), ProgramTerminalStatus::Failed);
-    EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
-    EXPECT_EQ(fixture.live_provider_calls.load(), 0U);
-    EXPECT_EQ(fixture.recorded_provider_calls.load(), 1U);
-    const auto failure_record = fixture.transitions->load("tenant:recorded", failure.run_id());
-    ASSERT_TRUE(failure_record.has_value());
-    EXPECT_EQ(failure_record->invocation(), failure_invocation);
-
-    fixture.restart();
-    const auto reconnected_failure =
-        fixture.runtime->reconnect("tenant:recorded", failure.run_id()).wait();
-    EXPECT_EQ(reconnected_failure.status(), ProgramTerminalStatus::Failed);
-    ASSERT_TRUE(reconnected_failure.failure().has_value());
-    EXPECT_EQ(reconnected_failure.failure()->code, failure.failure()->code);
-    EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
-    EXPECT_EQ(fixture.live_provider_calls.load(), 0U);
+TEST(ProgramRecordedReplayRuntimeTest,
+     ChangedCapturedOutcomeCannotAuthorizeReplayWithMatchingReceipts) {
+    RecordedRuntimeFixture fixture;
+    const auto version = fixture.admit();
+    const auto source_invocation = replay_invocation(version, "tamper-source", "source");
+    const auto source = fixture.runtime->start(source_invocation).wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Completed);
+    auto captured = fixture.captured(
+        version, fixture.transitions->load_events("tenant:recorded", source.run_id()));
+    const auto reference = captured.evidence.expected_calls().front();
+    RecordedBindingSet modified(
+        captured.evidence.exact_bindings(), {reference},
+        {RecordedCapabilityEvidence(RecordedCapabilityEvidenceData{
+            reference, RecordedEvidenceCoverage::Full, false,
+            consumed_input(reference, json{{"replacement", "not observed"}}),
+            std::nullopt, std::nullopt})});
+    const auto lineage = fixture.transitions->load_run_lineage("tenant:recorded", source.run_id());
+    ASSERT_TRUE(lineage);
+    const auto live_calls = fixture.live_provider_calls->load();
+    auto invocation = source_invocation;
+    invocation.run_id = "tamper-target";
+    EXPECT_THROW(fixture.runtime->replay_recorded(
+        source.run_id(), invocation, std::move(modified)), std::invalid_argument);
+    EXPECT_EQ(fixture.live_provider_calls->load(), live_calls);
+    EXPECT_EQ(fixture.recorded_provider_calls->load(), 0U);
+    EXPECT_FALSE(fixture.transitions->load("tenant:recorded", invocation.run_id));
+    EXPECT_EQ(fixture.transitions->load_run_lineage("tenant:recorded", source.run_id())->id(),
+              lineage->id());
 }
 
 TEST(ProgramRecordedReplayRuntimeTest, WrongTargetBindingRejectsBeforeRunAndNeverFallsBackLive) {
     RecordedRuntimeFixture fixture;
     const auto             version = fixture.admit();
+    const auto source_invocation = replay_invocation(version, "wrong-source", "source");
+    const auto source = fixture.runtime->start(source_invocation).wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Completed);
     fixture.restart();
     fixture.live_binder_calls.store(0);
-    fixture.live_provider_calls.store(0);
-    fixture.recorded_provider_calls.store(0);
+    fixture.live_provider_calls->store(0);
+    fixture.recorded_provider_calls->store(0);
 
     const auto wrong_receipt = binding('d', 'e');
     const auto wrong_ref     = call_reference(wrong_receipt, 1, "wrong-target-call");
@@ -593,19 +652,73 @@ TEST(ProgramRecordedReplayRuntimeTest, WrongTargetBindingRejectsBeforeRunAndNeve
     evidence.emplace_back(RecordedCapabilityEvidenceData{
         wrong_ref, RecordedEvidenceCoverage::Full, false,
         consumed_input(wrong_ref, json{{"content", "wrong"}}), std::nullopt, std::nullopt});
-    RecordedBindingSet wrong_set({wrong_receipt}, {wrong_ref}, owned_binding({wrong_receipt}),
-                                 std::move(evidence));
+    RecordedBindingSet wrong_set({wrong_receipt}, {wrong_ref}, std::move(evidence));
 
+    auto invocation = source_invocation;
+    invocation.run_id = "recorded-wrong-run";
     EXPECT_THROW(
-        (void)fixture.runtime->start_recorded(
-            "tenant:recorded", version,
-            ProgramInvocation{
-                json::object(), replay_budget(), "trace-wrong-recorded", {}, "recorded-wrong-run"},
-            std::move(wrong_set)),
+        (void)fixture.runtime->replay_recorded(source.run_id(), invocation, std::move(wrong_set)),
         std::invalid_argument);
     EXPECT_FALSE(fixture.transitions->load("tenant:recorded", "recorded-wrong-run").has_value());
     EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
-    EXPECT_EQ(fixture.live_provider_calls.load(), 0U);
-    EXPECT_EQ(fixture.recorded_provider_calls.load(), 0U);
+    EXPECT_EQ(fixture.live_provider_calls->load(), 0U);
+    EXPECT_EQ(fixture.recorded_provider_calls->load(), 0U);
+}
+
+TEST(ProgramRecordedReplayRuntimeTest,
+     PostEffectFailureRetainsOwnedCompletionAndOriginalCauseWithoutProgramRetry) {
+    auto completion = std::get<sp::Completion>(*neograph::test::success(
+        "actual response", neograph::test::usage(std::nullopt, 3, std::nullopt)));
+    completion.attempt = {true, 91, true, 1, 2, true};
+    completion.raw_events = {
+        {"unknown.first", neograph::test::document(R"({"future":[null,18446744073709551615]})")},
+        {"unknown.second", neograph::test::document(R"({"tail":true})")}};
+    const auto actual = std::make_shared<const sp::Outcome>(std::move(completion));
+    const auto original_cause = std::make_exception_ptr(std::runtime_error("settlement storage failed"));
+    auto effects = std::make_shared<std::atomic<unsigned>>(0);
+    // One retry operator plus up to three actual Core calls is a four-operation
+    // admitted workload, even though the owned provider failure stops after one.
+    RecordedRuntimeFixture fixture(4);
+    fixture.live_override = std::make_shared<neograph::test::LocalProvider>(
+        [actual, original_cause, effects](auto, const auto&, const auto&)
+            -> asio::awaitable<sp::runtime::Result> {
+            ++*effects;
+            throw neograph::ProviderOutcomeError(
+                "actual post-response settlement fault", actual, original_cause);
+        }, "recorded-provider");
+    auto document = replay_program_document();
+    document["program_schema_version"] = 2U;
+    document["declared_budget_requirements"][4]["maximum"] = 4U;
+    auto definition = std::move(document["root"]["definition"]);
+    document["root"] = json{{"op", "retry"}, {"name", "main"}, {"definition", std::move(definition)},
+                            {"max_attempts", 3U}, {"body", json{{"op", "call_core"}}}};
+    const auto version = fixture.admit(std::move(document));
+    auto invocation = replay_invocation(version, "provider-failure-source", "source");
+    invocation.budget.max_program_operations = 4;
+    const auto result = fixture.runtime->start(invocation).wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    const auto failure = result.failure();
+    ASSERT_TRUE(failure && failure->provider_outcome && failure->provider_cause);
+    EXPECT_EQ(failure->provider_outcome, actual);
+    EXPECT_EQ(effects->load(), 1U);
+    try {
+        std::rethrow_exception(failure->provider_cause);
+    } catch (const neograph::ProviderOutcomeError& error) {
+        EXPECT_EQ(error.outcome(), actual);
+        EXPECT_EQ(error.cause(), original_cause);
+    }
+    const auto restored = ProgramResult::parse(result.serialize_canonical());
+    const auto restored_failure = restored.failure();
+    ASSERT_TRUE(restored_failure && restored_failure->provider_outcome);
+    EXPECT_FALSE(restored_failure->provider_cause);
+    EXPECT_EQ(neograph::provider_codec::observe_outcome(*restored_failure->provider_outcome),
+              neograph::provider_codec::observe_outcome(*actual));
+    EXPECT_EQ(restored.id(), result.id());
+    fixture.restart();
+    const auto reconnected = fixture.runtime->reconnect("tenant:recorded", result.run_id()).wait();
+    ASSERT_TRUE(reconnected.failure() && reconnected.failure()->provider_outcome);
+    EXPECT_EQ(neograph::provider_codec::observe_outcome(*reconnected.failure()->provider_outcome),
+              neograph::provider_codec::observe_outcome(*actual));
+    EXPECT_EQ(effects->load(), 1U);
 }
 }  // namespace

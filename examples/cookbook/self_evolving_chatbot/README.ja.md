@@ -1,6 +1,61 @@
 <!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=14c932ce835be59435fe30b831344894d899490a1478a3bd34f442e9113414da -->
 # 自己進化型チャットボット
 
+## 現在の型付き Program chat 契約
+
+`program_chat.cpp` は `evolving-chat/v6`、`chat.step` version `1.5.0`
+（manifest digest `chat.step/v6`）、ledger schema `neograph.program-chat-call/v6` を使用します。
+既存 browser/HTTP protocol は不変です。Alice/Bob owner scope、reviewed-template generation、
+役割別 prompt、effect/capability grant、正確な checkpoint lineage、nonrenewable budget は host が所有します。
+
+```bash
+# configure 前に SCHEMAPROVIDER_SOURCE を供給された SDK checkout に設定します。
+cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
+cmake --build build-chat --target cookbook_program_chatbot
+./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+  --native-archive-dir .chat-native --session demo
+```
+
+loopback browser は `http://127.0.0.1:8768`。`alice-demo`/`bob-demo` は demo bearer token で、
+production 認証ではありません。live には OpenRouter eligible route、鍵、network が必要で、
+CLI default は GLM-5.3-Flash です。archive は host-only、既定は `DB_PATH.native`。
+独立鍵と owner-private custody を DB と共に保持します。認証 custody であり暗号化や vendor issuer proof ではありません。
+raw native payload、鍵、prompt、ledger artifact を公開 log に出さないでください。
+この durable recipe は archive を必要としますが、真正 C++ in-memory checkpoint sidecar は不要です。
+
+各 `turn:role` は一度 prepare し、正確な `Provider::request_digest(prepared)` を計算、
+`Provider::conservative_token_upper_bound(prepared)` を予約し pending claim を
+永続化してから同じ handle を dispatch します。全呼び出し範囲の上限は承認された
+モデルの input/output 上限、実際の output cap、hosted invocation 上限と retry 方針から計算します。
+モデルの事実がなければ予約と dispatch の前に拒否します。private loopback fixture も
+明示的な対応モデルの方針事実が必要で、mock は上限や provider usage を捏造しません。
+予約は provider usage、forecast、invoice ではありません。nullable wide provider count は
+`charged_tokens` と別で、known zero は欠落ではありません。consistent final input/output
+evidence があり、以前の usage が unknown でなく transport 内部再送もない場合だけ精算します。
+それ以外は元の予約を `UnknownHold` として保持します。予約超過 report も charge に含め、
+`cost` は unknown です。
+`--descriptor-policy PATH`（C++ `Options::descriptor_policy_file`）でホスト所有の SDK
+descriptor-policy JSON を指定します。組み込み codec resource snapshot で一度承認して
+両 tenant で共有し、指定しない場合は組み込み方針を使います。明示的な fixture 方針は正確な
+loopback `openrouter_origins` と `program-chat-mock`（または指定した fixture モデル）の
+上限を宣言する必要があります。承認された方針 identity をセッション settings に結び付けるため、
+同じパスでも内容が変われば新しいセッションが必要です。モデル提案や checkpoint は方針を
+選択できません。`--mock` にもこれらの事実が必要で、予算増加は明示的に指定します。
+
+restart では pending は `UnknownHold` となり自動再送しません。completed replay は同じ prepared
+ digest/reservation を要求し、archive から元の不変 Outcome/native role history を復元して settlement/output を検証します。
+DB、archive/key、session、provider/model/settings、build identity を保持し、変更には新 session が必要です。
+SDK retry は off（`max_attempts=1`）。restart/置換は budget を更新しません。
+model JSON は提案であって native authority ではありません。これはソース契約であり、新 recipe 実行/live pass の主張ではありません。
+
+## 旧 Core デモの歴史的手順と測定
+
+以下は `server.cpp`/`server_multi.cpp` の旧 Core デモです。次の request の graph 選択を示し、
+上記 Program の実行中 checkpoint 置換や今回の検証済み測定ではありません。
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **チャットボットハーネスは、ユーザーの行動に基づいてランタイムに*自身の*トポロジーを再形成する。この能力はNeoGraphに固有であり、LangGraphはランタイムにグラフを再形成できない。**

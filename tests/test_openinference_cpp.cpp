@@ -1,11 +1,11 @@
 // Issue #9 — parity coverage for the C++ OpenInference layer.
 //
-// Mirrors the assertions in `bindings/python/tests/test_openinference.py`:
-//   - openinference_tracer opens a CHAIN root + per-node CHAIN children
-//   - OpenInferenceProvider opens an LLM-kind child span carrying the
-//     full LLM attribute set (model, params, in/out messages, usage)
-//   - Streaming overloads append per-token events on the LLM span
-//   - Provider exceptions surface ERROR status on the span and re-raise
+// Covers the owned typed C++ provider boundary:
+//   - graph tracing opens a CHAIN root + per-node CHAIN children
+//   - provider dispatch records public text/control scalars, never private replay
+//   - streaming forwards typed events but traces only visible text deltas
+//   - nullable usage, partial failures, and original exceptions remain distinct
+//   - tracer failures and teardown never replace provider behavior
 //
 // The Tracer adapter under test is an in-memory recorder (no
 // opentelemetry-cpp dependency).
@@ -18,6 +18,7 @@
 #include <neograph/provider.h>
 #include <neograph/graph/types.h>
 #include <neograph/json.h>
+#include "fixtures/typed_provider.h"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -38,11 +39,10 @@
 #include <unordered_map>
 #include <vector>
 
-using neograph::ChatCompletion;
-using neograph::ChatMessage;
-using neograph::CompletionParams;
-using neograph::Provider;
-using neograph::StreamCallback;
+using neograph::ProviderRequest;
+using neograph::PreparedProviderRequest;
+using neograph::ProviderMode;
+namespace typed = neograph::test;
 using neograph::graph::GraphEvent;
 
 namespace obs = neograph::observability;
@@ -134,57 +134,59 @@ private:
 // Fake provider — records calls, emits configurable response.
 // ---------------------------------------------------------------------------
 
-class FakeProvider : public Provider {
+class FakeProvider : public typed::LocalProvider {
+    struct State {
+        std::string reply = "ok";
+        std::uint64_t prompt_tokens = 7, completion_tokens = 3;
+        std::vector<std::string> stream_chunks;
+        std::atomic<int> calls{0};
+    };
+    explicit FakeProvider(std::shared_ptr<State> state)
+        : LocalProvider([state](ProviderRequest, const PreparedProviderRequest& prepared,
+                               const EventCallback& on_event) -> asio::awaitable<sp::runtime::Result> {
+            ++state->calls;
+            std::string text = state->reply;
+            if (prepared.mode() == ProviderMode::Stream) {
+                text.clear();
+                if (on_event) {
+                    on_event(sp::Begin{"observability"});
+                    on_event(sp::MessageBegin{{0}, {}, sp::Role::Assistant});
+                    on_event(sp::PartBegin{{0}, {0}, sp::PartKind::Text});
+                }
+                for (const auto& chunk : state->stream_chunks) {
+                    text += chunk;
+                    if (on_event) on_event(sp::PartDelta{{0}, {sp::PartKind::Text, chunk}});
+                }
+                if (text.empty()) text = state->reply;
+                if (on_event) {
+                    on_event(sp::PartSeal{{0}, {}});
+                    on_event(sp::MessageSeal{{0}});
+                }
+            }
+            co_return typed::success(std::move(text), typed::usage(
+                state->prompt_tokens, state->completion_tokens,
+                state->prompt_tokens + state->completion_tokens));
+        }, "fake"), state_(std::move(state)), reply(state_->reply),
+          prompt_tokens(state_->prompt_tokens), completion_tokens(state_->completion_tokens),
+          stream_chunks(state_->stream_chunks), calls(state_->calls) {}
+    std::shared_ptr<State> state_;
 public:
-    std::string reply = "ok";
-    int prompt_tokens = 7;
-    int completion_tokens = 3;
-    std::vector<std::string> stream_chunks;
-    std::atomic<int> calls{0};
-
-    ChatCompletion complete(const CompletionParams& /*p*/) override {
-        ++calls;
-        return make_completion();
-    }
-
-    ChatCompletion complete_stream(const CompletionParams& /*p*/,
-                                   const StreamCallback& on_chunk) override {
-        ++calls;
-        std::string acc;
-        for (const auto& c : stream_chunks) {
-            acc += c;
-            if (on_chunk) on_chunk(c);
-        }
-        if (acc.empty()) acc = reply;
-        auto comp = make_completion();
-        comp.message.content = acc;
-        return comp;
-    }
-
-    std::string get_name() const override { return "fake"; }
-
-private:
-    ChatCompletion make_completion() const {
-        ChatCompletion c;
-        c.message.role = "assistant";
-        c.message.content = reply;
-        c.usage.prompt_tokens = prompt_tokens;
-        c.usage.completion_tokens = completion_tokens;
-        c.usage.total_tokens = prompt_tokens + completion_tokens;
-        return c;
-    }
+    FakeProvider() : FakeProvider(std::make_shared<State>()) {}
+    std::string& reply;
+    std::uint64_t& prompt_tokens;
+    std::uint64_t& completion_tokens;
+    std::vector<std::string>& stream_chunks;
+    std::atomic<int>& calls;
 };
 
-class ThrowingProvider : public Provider {
+class ThrowingProvider : public typed::LocalProvider {
 public:
-    ChatCompletion complete(const CompletionParams&) override {
-        throw std::runtime_error("boom");
-    }
-    ChatCompletion complete_stream(const CompletionParams&,
-                                   const StreamCallback&) override {
-        return {};
-    }
-    std::string get_name() const override { return "throw"; }
+    ThrowingProvider()
+        : LocalProvider([](ProviderRequest, const PreparedProviderRequest&,
+                           const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            throw std::runtime_error("boom");
+            co_return typed::success("");
+        }, "throw") {}
 };
 
 class ThrowingStartTracer : public obs::Tracer {
@@ -441,42 +443,43 @@ public:
         std::make_shared<BlockingTerminalState>();
 };
 
-class NonStdAsyncProvider : public Provider {
+class NonStdAsyncProvider : public typed::LocalProvider {
 public:
-    ChatCompletion complete(const CompletionParams&) override { return {}; }
-
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams&) override {
-        throw 42;
-        co_return ChatCompletion{};
-    }
-
-    std::string get_name() const override { return "non-std-async"; }
+    NonStdAsyncProvider()
+        : LocalProvider([](ProviderRequest, const PreparedProviderRequest&,
+                           const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            throw 42;
+            co_return typed::success("");
+        }, "non-std-async") {}
 };
 
-class SuspendedAsyncProvider : public Provider {
+class SuspendedAsyncProvider : public typed::LocalProvider {
+    struct State {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool entered = false;
+    };
+    explicit SuspendedAsyncProvider(std::shared_ptr<State> state)
+        : LocalProvider([state](ProviderRequest, const PreparedProviderRequest&,
+                               const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            auto executor = co_await asio::this_coro::executor;
+            {
+                std::lock_guard lock(state->mutex);
+                state->entered = true;
+            }
+            state->condition.notify_all();
+            asio::steady_timer timer(executor);
+            timer.expires_after(std::chrono::hours(1));
+            co_await timer.async_wait(asio::use_awaitable);
+            co_return typed::success("");
+        }, "suspended-async"), state_(std::move(state)), mu(state_->mutex),
+          cv(state_->condition), entered(state_->entered) {}
+    std::shared_ptr<State> state_;
 public:
-    ChatCompletion complete(const CompletionParams&) override { return {}; }
-
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams&) override {
-        auto executor = co_await asio::this_coro::executor;
-        {
-            std::lock_guard lock(mu);
-            entered = true;
-        }
-        cv.notify_all();
-        asio::steady_timer timer(executor);
-        timer.expires_after(std::chrono::hours(1));
-        co_await timer.async_wait(asio::use_awaitable);
-        co_return ChatCompletion{};
-    }
-
-    std::string get_name() const override { return "suspended-async"; }
-
-    std::mutex mu;
-    std::condition_variable cv;
-    bool entered = false;
+    SuspendedAsyncProvider() : SuspendedAsyncProvider(std::make_shared<State>()) {}
+    std::mutex& mu;
+    std::condition_variable& cv;
+    bool& entered;
 };
 
 } // namespace
@@ -711,15 +714,15 @@ TEST(OpenInferenceCpp, ProviderEmitsLLMSpanWithFullAttributes) {
     inner->completion_tokens = 3;
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
-    CompletionParams params;
-    params.model = "fake-model-1";
-    params.temperature = 0.5f;
-    params.max_tokens = 100;
-    params.messages.push_back({"system", "be helpful"});
-    params.messages.push_back({"user", "hi"});
+    auto request = typed::request("fake-model-1");
+    auto& payload = std::get<sp::chat::Request>(request.payload);
+    payload.temperature = 0.5;
+    payload.max_output_tokens = 100;
+    payload.canonical_messages = {typed::message("be helpful", sp::Role::System),
+                                  typed::message("hi", sp::Role::User)};
 
-    auto result = wrapped.complete(params);
-    EXPECT_EQ(result.message.content, "hello world");
+    auto result = wrapped.invoke(std::move(request));
+    EXPECT_EQ(typed::text(result), "hello world");
 
     auto spans = tracer.snapshot();
     ASSERT_EQ(spans.size(), 1u);
@@ -733,6 +736,9 @@ TEST(OpenInferenceCpp, ProviderEmitsLLMSpanWithFullAttributes) {
     EXPECT_EQ(s.attrs_str.at("llm.input_messages.1.message.content"), "hi");
     EXPECT_EQ(s.attrs_str.at("llm.output_messages.0.message.role"), "assistant");
     EXPECT_EQ(s.attrs_str.at("llm.output_messages.0.message.content"), "hello world");
+    const auto invocation = neograph::json::parse(s.attrs_str.at("llm.invocation_parameters"));
+    EXPECT_EQ(invocation.at("temperature"), 0.5);
+    EXPECT_EQ(invocation.at("max_tokens"), 100);
     EXPECT_EQ(s.attrs_int.at("llm.token_count.prompt"), 7);
     EXPECT_EQ(s.attrs_int.at("llm.token_count.completion"), 3);
     EXPECT_EQ(s.attrs_int.at("llm.token_count.total"), 10);
@@ -748,24 +754,27 @@ TEST(OpenInferenceCpp, ProviderStreamAppendsPerTokenEvents) {
     inner->stream_chunks = {"foo", "bar", "baz"};
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
-    CompletionParams params;
-    params.model = "fake-stream";
-    params.messages.push_back({"user", "hi"});
-
+    auto request = typed::request("fake-stream", "hi", ProviderMode::Stream);
     std::vector<std::string> user_received;
-    auto result = wrapped.complete_stream(
-        params, [&](const std::string& c) { user_received.push_back(c); });
+    request.on_event = [&user_received](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+            delta && delta->payload.kind == sp::PartKind::Text)
+            user_received.emplace_back(delta->payload.bytes);
+    };
+    auto result = wrapped.invoke(std::move(request));
 
-    EXPECT_EQ(result.message.content, "foobarbaz");
+    EXPECT_EQ(typed::text(result), "foobarbaz");
     EXPECT_EQ(user_received, (std::vector<std::string>{"foo", "bar", "baz"}));
 
     auto spans = tracer.snapshot();
     ASSERT_EQ(spans.size(), 1u);
     const auto& s = *spans[0];
-    EXPECT_EQ(s.events.size(), 3u);
-    EXPECT_EQ(s.events[0].name, "llm.token");
-    EXPECT_EQ(s.events[0].payload, "foo");
-    EXPECT_EQ(s.events[2].payload, "baz");
+    std::vector<std::string> deltas;
+    for (const auto& event : s.events) {
+        EXPECT_EQ(event.name, "llm.token");
+        deltas.push_back(event.payload);
+    }
+    EXPECT_EQ(deltas, (std::vector<std::string>{"foo", "bar", "baz"}));
     EXPECT_EQ(s.attrs_str.at("output.value"), "foobarbaz");
     EXPECT_TRUE(s.ended);
 }
@@ -775,11 +784,8 @@ TEST(OpenInferenceCpp, ProviderPropagatesExceptionAndMarksSpanError) {
     auto inner = std::make_shared<ThrowingProvider>();
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
-    CompletionParams params;
-    params.model = "x";
-    params.messages.push_back({"user", "hi"});
-
-    EXPECT_THROW(wrapped.complete(params), std::runtime_error);
+    auto request = typed::request("x", "hi");
+    EXPECT_THROW(wrapped.invoke(std::move(request)), std::runtime_error);
 
     auto spans = tracer.snapshot();
     ASSERT_EQ(spans.size(), 1u);
@@ -802,8 +808,8 @@ TEST(OpenInferenceCpp, ParentLookupFailureDoesNotBlockInnerCall) {
             throw std::runtime_error("parent lookup failed");
         });
 
-    auto result = wrapped.complete({});
-    EXPECT_EQ(result.message.content, "ok");
+    auto result = wrapped.invoke(typed::request());
+    EXPECT_EQ(typed::text(result), "ok");
     EXPECT_EQ(inner->calls.load(), 1);
 
     auto spans = tracer.snapshot();
@@ -820,9 +826,9 @@ TEST(OpenInferenceCpp, LegacyParentLookupPreservesCallerOwnedHierarchy) {
     obs::OpenInferenceProvider wrapped(
         inner, tracer, [&]() -> obs::Span* { return parent.get(); });
 
-    auto result = wrapped.complete({});
+    auto result = wrapped.invoke(typed::request());
 
-    EXPECT_EQ(result.message.content, "ok");
+    EXPECT_EQ(typed::text(result), "ok");
     auto spans = tracer.snapshot();
     ASSERT_EQ(spans.size(), 2u);
     EXPECT_EQ(spans[1]->parent, parent.get());
@@ -838,7 +844,7 @@ TEST(OpenInferenceCpp, ParentLeaseSurvivesConcurrentCloseThroughStartSpan) {
     obs::OpenInferenceProvider wrapped(inner, tracer, session);
 
     auto completion = std::async(std::launch::async, [&] {
-        return wrapped.complete({});
+        return wrapped.invoke(typed::request());
     });
     {
         std::unique_lock lock(tracer.window_mu);
@@ -859,7 +865,7 @@ TEST(OpenInferenceCpp, ParentLeaseSurvivesConcurrentCloseThroughStartSpan) {
     EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
     EXPECT_TRUE(tracer.parent_usable_during_start);
-    EXPECT_EQ(completion.get().message.content, "ok");
+    EXPECT_EQ(typed::text(completion.get()), "ok");
 }
 
 TEST(OpenInferenceCpp, ReentrantCloseFromStartSpanDoesNotDeadlock) {
@@ -872,11 +878,11 @@ TEST(OpenInferenceCpp, ReentrantCloseFromStartSpanDoesNotDeadlock) {
     obs::OpenInferenceProvider wrapped(inner, tracer, session);
 
     auto completion = std::async(std::launch::async, [&] {
-        return wrapped.complete({});
+        return wrapped.invoke(typed::request());
     });
 
     ASSERT_EQ(completion.wait_for(2s), std::future_status::ready);
-    EXPECT_EQ(completion.get().message.content, "ok");
+    EXPECT_EQ(typed::text(completion.get()), "ok");
     EXPECT_EQ(session.current_parent(), nullptr);
 }
 
@@ -889,7 +895,7 @@ TEST(OpenInferenceCpp, CloseWaitsForFinalSpanWrapperDestruction) {
     obs::OpenInferenceProvider wrapped(inner, tracer, session);
 
     auto completion = std::async(std::launch::async, [&] {
-        return wrapped.complete({});
+        return wrapped.invoke(typed::request());
     });
     {
         std::unique_lock lock(tracer.state->mu);
@@ -921,7 +927,7 @@ TEST(OpenInferenceCpp, CloseWaitsForFinalSpanWrapperDestruction) {
 
     EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
-    EXPECT_EQ(completion.get().message.content, "ok");
+    EXPECT_EQ(typed::text(completion.get()), "ok");
 }
 
 TEST(OpenInferenceCpp, CloseWaitsForTerminalSpanTeardown) {
@@ -962,8 +968,8 @@ TEST(OpenInferenceCpp, StartSpanFailureDoesNotBlockInnerCall) {
     auto inner = std::make_shared<FakeProvider>();
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
-    auto result = wrapped.complete({});
-    EXPECT_EQ(result.message.content, "ok");
+    auto result = wrapped.invoke(typed::request());
+    EXPECT_EQ(typed::text(result), "ok");
     EXPECT_EQ(inner->calls.load(), 1);
 }
 
@@ -973,7 +979,7 @@ TEST(OpenInferenceCpp, TracingFailureDoesNotReplaceInnerException) {
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
     try {
-        (void)wrapped.complete({});
+        (void)wrapped.invoke(typed::request());
         FAIL() << "inner provider exception was not propagated";
     } catch (const std::runtime_error& error) {
         EXPECT_STREQ(error.what(), "boom");
@@ -985,9 +991,9 @@ TEST(OpenInferenceCpp, SpanMethodFailuresDoNotAffectInnerCall) {
     auto inner = std::make_shared<FakeProvider>();
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
-    auto result = wrapped.complete({});
+    auto result = wrapped.invoke(typed::request());
 
-    EXPECT_EQ(result.message.content, "ok");
+    EXPECT_EQ(typed::text(result), "ok");
     EXPECT_EQ(inner->calls.load(), 1);
     EXPECT_EQ(tracer.end_calls.load(), 1);
 }
@@ -998,7 +1004,7 @@ TEST(OpenInferenceCpp, SpanMethodFailuresDoNotReplaceInnerException) {
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
     try {
-        (void)wrapped.complete({});
+        (void)wrapped.invoke(typed::request());
         FAIL() << "inner provider exception was not propagated";
     } catch (const std::runtime_error& error) {
         EXPECT_STREQ(error.what(), "boom");
@@ -1012,7 +1018,7 @@ TEST(OpenInferenceCpp, AsyncNonStdExceptionEndsSpanExactlyOnce) {
     obs::OpenInferenceProvider wrapped(inner, tracer);
 
     EXPECT_THROW(
-        (void)neograph::async::run_sync(wrapped.complete_async({})), int);
+        (void)neograph::async::run_sync(wrapped.invoke_async(typed::request())), int);
 
     auto spans = tracer.snapshot();
     ASSERT_EQ(spans.size(), 1u);
@@ -1031,7 +1037,7 @@ TEST(OpenInferenceCpp, AbandonedAsyncCallEndsSpanExactlyOnce) {
     asio::co_spawn(
         *io,
         [wrapped]() -> asio::awaitable<void> {
-            (void)co_await wrapped->complete_async({});
+            (void)co_await wrapped->invoke_async(typed::request());
         },
         asio::detached);
 
@@ -1049,4 +1055,141 @@ TEST(OpenInferenceCpp, AbandonedAsyncCallEndsSpanExactlyOnce) {
     ASSERT_EQ(spans.size(), 1u);
     EXPECT_TRUE(spans[0]->ended);
     EXPECT_EQ(spans[0]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, ProviderKeepsPrivatePartsOutOfTelemetryAndPreservesNullableUsage) {
+    InMemoryTracer tracer;
+    sp::Message message;
+    message.parts = {
+        sp::Thinking{"private-thought", std::string("signature")},
+        sp::Text{"visible"},
+        sp::Opaque{"vendor-extension", typed::document(R"({"opaque":"retained"})")},
+        sp::InvalidToolCall{"broken", "lookup", sp::ToolCallKind::ClientExecuted,
+                            "{PRIVATE_ARGUMENT", sp::InvalidReason::Truncated}};
+    sp::Completion completion;
+    completion.messages = {std::move(message)};
+    completion.stop = {sp::StopKind::MaxTokens, "length"};
+    completion.usage = typed::usage(0, std::nullopt, std::nullopt, sp::UsageStage::Partial);
+    auto owned = std::make_shared<const sp::Outcome>(std::move(completion));
+    auto inner = std::make_shared<typed::LocalProvider>(
+        [owned](ProviderRequest, const PreparedProviderRequest&,
+                const typed::LocalProvider::EventCallback& on_event) -> asio::awaitable<sp::runtime::Result> {
+            if (on_event) {
+                const auto& value = std::get<sp::Completion>(*owned);
+                const auto& parts = value.messages[0].parts;
+                const auto& thinking = std::get<sp::Thinking>(parts[0]);
+                on_event(sp::Begin{"private-stream"});
+                on_event(sp::MessageBegin{{0}, {}, sp::Role::Assistant});
+                on_event(sp::PartBegin{{0}, {0}, sp::PartKind::Thinking});
+                on_event(sp::PartDelta{{0}, {sp::PartKind::Thinking, thinking.text}});
+                on_event(sp::PartDelta{{0}, {sp::PartKind::Thinking, *thinking.signature,
+                                            sp::DeltaChannel::Signature}});
+                on_event(sp::PartSeal{{0}, {}});
+                on_event(sp::PartBegin{{0}, {1}, sp::PartKind::Text, {}, 1});
+                on_event(sp::PartDelta{{1}, {sp::PartKind::Text, std::get<sp::Text>(parts[1]).value}});
+                on_event(sp::PartSeal{{1}, {}});
+                const auto& opaque = std::get<sp::Opaque>(parts[2]);
+                sp::PartHeader header;
+                header.wire_type = opaque.wire_type;
+                header.wire_metadata = opaque.wire_metadata;
+                on_event(sp::PartBegin{{0}, {2}, sp::PartKind::Opaque, header, 2});
+                on_event(sp::PartSeal{{2}, {}, opaque.wire_metadata});
+                const auto& invalid = std::get<sp::InvalidToolCall>(parts[3]);
+                header = {};
+                header.wire_id = invalid.id;
+                header.name = invalid.name;
+                on_event(sp::PartBegin{{0}, {3}, sp::PartKind::ToolCall, header, 3});
+                on_event(sp::PartDelta{{3}, {sp::PartKind::ToolCall, invalid.raw_fragment}});
+                on_event(sp::PartSeal{{3}, {}});
+                on_event(sp::MessageSeal{{0}});
+                on_event(sp::UsageUpdate{value.usage});
+                on_event(sp::Stop{value.stop});
+            }
+            co_return owned;
+        });
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+    auto request = typed::request("fixture-model", "hello", ProviderMode::Stream);
+    struct ReceivedDelta {
+        sp::PartKind kind;
+        sp::DeltaChannel channel;
+        std::string bytes;
+    };
+    auto received = std::make_shared<std::vector<ReceivedDelta>>();
+    request.on_event = [received](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event))
+            received->push_back({delta->payload.kind, delta->payload.channel,
+                                 std::string(delta->payload.bytes)});
+    };
+    std::get<sp::chat::Request>(request.payload).tools = {
+        {"lookup", "private-tool-description",
+         typed::document(R"({"type":"object","properties":{"path":{"type":"string","description":"private-tool-schema"}}})")}};
+    const auto result = wrapped.invoke(std::move(request));
+    ASSERT_EQ(result, owned);
+    ASSERT_EQ(received->size(), 4u);
+    EXPECT_EQ((*received)[0].kind, sp::PartKind::Thinking);
+    EXPECT_EQ((*received)[0].bytes, "private-thought");
+    EXPECT_EQ((*received)[1].channel, sp::DeltaChannel::Signature);
+    EXPECT_EQ((*received)[1].bytes, "signature");
+    EXPECT_EQ((*received)[2].kind, sp::PartKind::Text);
+    EXPECT_EQ((*received)[2].bytes, "visible");
+    EXPECT_EQ((*received)[3].kind, sp::PartKind::ToolCall);
+    EXPECT_EQ((*received)[3].bytes, "{PRIVATE_ARGUMENT");
+    const auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    const auto& span = *spans[0];
+    const auto& parts = typed::completion(result).messages[0].parts;
+    ASSERT_EQ(parts.size(), 4u);
+    EXPECT_EQ(std::get<sp::Thinking>(parts[0]).text, "private-thought");
+    EXPECT_EQ(std::get<sp::Thinking>(parts[0]).signature, "signature");
+    EXPECT_EQ(std::get<sp::Text>(parts[1]).value, "visible");
+    EXPECT_EQ(std::get<sp::Opaque>(parts[2]).wire_type, "vendor-extension");
+    EXPECT_EQ(std::get<sp::InvalidToolCall>(parts[3]).raw_fragment, "{PRIVATE_ARGUMENT");
+    EXPECT_EQ(span.attrs_str.at("output.value"), "visible");
+    EXPECT_EQ(span.attrs_str.at("llm.output_messages.0.message.content"), "visible");
+    for (const auto& [key, value] : span.attrs_str) {
+        for (const auto* secret : {"private-thought", "signature", "vendor-extension",
+                                  "retained", "PRIVATE_ARGUMENT", "private-tool-description",
+                                  "private-tool-schema"})
+            EXPECT_EQ(value.find(secret), std::string::npos) << key;
+    }
+    ASSERT_EQ(span.events.size(), 1u);
+    EXPECT_EQ(span.events[0].name, "llm.token");
+    EXPECT_EQ(span.events[0].payload, "visible");
+    EXPECT_EQ(span.attrs_int.at("llm.token_count.prompt"), 0);
+    EXPECT_FALSE(span.attrs_int.contains("llm.token_count.completion"));
+    EXPECT_FALSE(span.attrs_int.contains("llm.token_count.total"));
+    EXPECT_FALSE(typed::completion(result).usage.output_total.has_value());
+    EXPECT_EQ(typed::completion(result).usage.stage, sp::UsageStage::Partial);
+}
+
+TEST(OpenInferenceCpp, ProviderFailureKeepsPartialOutcomeAndEndsErrorSpan) {
+    InMemoryTracer tracer;
+    sp::Failure failure;
+    failure.error.kind = sp::ErrorKind::Truncated;
+    failure.error.safe_message = "stream interrupted";
+    failure.error.retry_safety = sp::RetrySafety::OutputObserved;
+    failure.partial.messages = {typed::message("retained-prefix")};
+    failure.partial.usage = typed::usage(4, std::nullopt, std::nullopt, sp::UsageStage::Partial);
+    auto owned = std::make_shared<const sp::Outcome>(std::move(failure));
+    auto inner = std::make_shared<typed::LocalProvider>(
+        [owned](ProviderRequest, const PreparedProviderRequest&,
+                const typed::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            co_return owned;
+        });
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+    const auto result = wrapped.invoke(typed::request());
+    ASSERT_EQ(result, owned);
+    ASSERT_TRUE(std::holds_alternative<sp::Failure>(*result));
+    const auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    const auto& span = *spans[0];
+    EXPECT_EQ(span.status, "error");
+    EXPECT_TRUE(span.ended);
+    EXPECT_EQ(span.end_calls, 1);
+    const auto& retained = std::get<sp::Failure>(*result);
+    EXPECT_EQ(retained.error.kind, sp::ErrorKind::Truncated);
+    EXPECT_EQ(retained.error.retry_safety, sp::RetrySafety::OutputObserved);
+    EXPECT_EQ(std::get<sp::Text>(retained.partial.messages[0].parts[0]).value, "retained-prefix");
+    EXPECT_EQ(span.attrs_str.at("output.value"), "retained-prefix");
+    EXPECT_FALSE(span.attrs_int.contains("llm.token_count.completion"));
 }

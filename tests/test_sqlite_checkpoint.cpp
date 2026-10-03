@@ -1,13 +1,18 @@
 // Unit tests for SqliteCheckpointStore.
 //
-// All tests run against an in-memory SQLite (":memory:") so they need
-// no filesystem or external service — every test gets a fresh DB by
-// construction. The test cases mirror test_postgres_checkpoint.cpp so
-// the two backends are held to identical contracts; if you change one
-// surface, change both.
+// Portable backend contract tests use isolated in-memory databases. The native
+// history restart regression uses a temporary file and independently protected
+// archive/key custody so a new engine must restore genuine provider seals.
 
 #include <neograph/graph/sqlite_checkpoint.h>
 #include <neograph/graph/state.h>
+#include <neograph/graph/engine.h>
+#include <neograph/provider_outcome_codec.h>
+#include "fixtures/typed_provider.h"
+#include <codecs/messages.h>
+#include <codecs/responses.h>
+#include <core/native.h>
+#include <atomic>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -516,3 +521,491 @@ TEST(SqliteCheckpointTest_File, FileBackedRoundTrip) {
     // RAII PathCleanup runs at scope exit (covering both happy path
     // and ASSERT_* early-return).
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+namespace {
+
+class NativeCheckpointFiles {
+public:
+    NativeCheckpointFiles() {
+        path_ = std::filesystem::temp_directory_path() /
+                ("ng-native-checkpoint-" + Checkpoint::generate_id());
+        if (!std::filesystem::create_directory(path_))
+            throw std::runtime_error("cannot reserve native checkpoint fixture directory");
+        std::filesystem::permissions(path_, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
+    }
+    ~NativeCheckpointFiles() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+    std::string database() const { return (path_ / "checkpoint.sqlite").string(); }
+    std::string archive() const { return (path_ / "archive").string(); }
+    std::string key() const { return (path_ / "archive.key").string(); }
+private:
+    std::filesystem::path path_;
+};
+
+struct DurableNativeProbe {
+    unsigned provider_calls = 0;
+    std::vector<sp::messages::Request> requests;
+};
+
+// Capture real SDK authority before any graph dispatch. The graph's provider
+// operation later prepares exactly once with these same immutable controls.
+sp::runtime::Result durable_native_outcome(const sp::descriptor::ValidatedDescriptor& descriptor) {
+    sp::messages::Request request;
+    request.model = "fixture-model";
+    request.account_scope = "fixture-account";
+    request.max_tokens = 64;
+    request.messages = {neograph::test::message("message", sp::Role::User)};
+    request.tools = {{"read", "read fixture", neograph::test::document(R"({"type":"object"})"), {}, {}}};
+    auto encoded = sp::messages::encode(descriptor, request, false);
+    if (const auto* error = std::get_if<sp::Error>(&encoded))
+        throw std::logic_error(error->safe_message);
+    sp::Accumulator accumulator;
+    sp::messages::Codec codec(descriptor, sp::messages::Mode::Buffered, accumulator,
+        std::get<sp::messages::EncodedRequest>(std::move(encoded)).context);
+    codec.buffered(R"({"id":"msg-native","type":"message","role":"assistant","model":"fixture-model",
+        "content":[{"type":"thinking","thinking":"inspect","signature":"fixture-signature"},
+                   {"type":"tool_use","id":"call-native","name":"read","input":{"path":"a"}},
+                   {"type":"text","text":"pending"}],
+        "stop_reason":"tool_use","stop_sequence":null,
+        "usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}})", {});
+    codec.finish();
+    auto outcome = accumulator.take_outcome();
+    if (!outcome || !std::holds_alternative<sp::Completion>(*outcome))
+        throw std::logic_error("native checkpoint fixture response was not admitted");
+    return std::make_shared<const sp::Outcome>(std::move(*outcome));
+}
+
+class DurableNativeProvider final : public neograph::test::LocalProvider {
+public:
+    DurableNativeProvider(std::shared_ptr<DurableNativeProbe> probe,
+                          sp::descriptor::ValidatedDescriptor descriptor,
+                          sp::runtime::Result result)
+        : LocalProvider(
+            [probe, result = std::move(result)](
+                neograph::ProviderRequest request, const neograph::PreparedProviderRequest&,
+                const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+                if (++probe->provider_calls > 1)
+                    throw std::logic_error("native checkpoint replay dispatched an extra provider turn");
+                probe->requests.push_back(std::get<sp::messages::Request>(std::move(request.payload)));
+                co_return result;
+            }, "durable-native-checkpoint",
+            std::make_shared<sp::runtime::Client>(descriptor)) {}
+    std::string_view family() const noexcept override { return "anthropic.messages"; }
+};
+
+class DurableNativeTool final : public neograph::Tool {
+public:
+    explicit DurableNativeTool(std::shared_ptr<std::atomic<unsigned>> effects)
+        : effects_(std::move(effects)) {}
+    neograph::ChatTool get_definition() const override {
+        return {"read", "read fixture", json{{"type", "object"}}};
+    }
+    std::string execute(const json& args) override {
+        if (args.at("path") != "a") throw std::logic_error("unexpected native tool argument");
+        ++*effects_;
+        return "read-result";
+    }
+    std::string get_name() const override { return "read"; }
+private:
+    std::shared_ptr<std::atomic<unsigned>> effects_;
+};
+
+json durable_native_graph() {
+    return {
+        {"name", "durable-native-checkpoint"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {{"llm", {{"type", "llm_call"}}}, {"tools", {{"type", "tool_dispatch"}}}}},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "llm"}},
+            {{"from", "llm"}, {"type", "conditional"}, {"condition", "has_tool_calls"},
+             {"routes", {{"true", "tools"}, {"false", "__end__"}}}},
+            {{"from", "tools"}, {"to", "llm"}}})},
+        {"interrupt_after", json::array({"tools"})}};
+}
+
+EngineConfig durable_native_config(const std::shared_ptr<neograph::Provider>& provider,
+                                   const std::shared_ptr<std::atomic<unsigned>>& effects,
+                                   const std::shared_ptr<SqliteCheckpointStore>& checkpoints,
+                                   std::shared_ptr<sp::NativeArchive> archive = {}) {
+    EngineConfig config;
+    config.node_context.provider = provider;
+    config.node_context.model = "fixture-model";
+    std::vector<std::unique_ptr<neograph::Tool>> tools;
+    tools.push_back(std::make_unique<DurableNativeTool>(effects));
+    config.node_context.tools = neograph::ToolSet(std::move(tools));
+    config.node_context.provider_controls.account_scope = "fixture-account";
+    config.node_context.provider_controls.max_output_tokens = 64;
+    config.checkpoint_store = checkpoints;
+    config.native_history_archive = std::move(archive);
+    return config;
+}
+
+sp::descriptor::ValidatedDescriptor managed_responses_descriptor() {
+    auto source = json::parse(sp::config_defaults::descriptor_policy_json);
+    json defaults;
+    for (const auto& family : source.at("families"))
+        if (family.at("family") == "openai.responses") defaults = family.at("defaults");
+    const json model{{"family", "openai.responses"}, {"model", "fixture-model"},
+        {"defaults", std::move(defaults)}, {"output_limit", nullptr}, {"input_limit", 1}};
+    bool replaced = false;
+    for (auto row : source.at("models")) {
+        if (row.at("family") == "openai.responses" && row.at("model") == "fixture-model") {
+            row = model;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) source.at("models").push_back(model);
+    auto policy = sp::descriptor::load_policy(source.dump(), sp::config_defaults::codec_defaults_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&policy))
+        throw std::logic_error(error->pointer + ": " + error->message);
+    return neograph::test::descriptor("openai.responses", "https://fixture.invalid",
+        std::get<sp::descriptor::PolicySnapshot>(std::move(policy)));
+}
+
+sp::runtime::Result managed_missing_output_outcome(const sp::descriptor::ValidatedDescriptor& descriptor) {
+    sp::responses::Request request;
+    request.model = "fixture-model";
+    request.account_scope = "fixture-account";
+    request.max_output_tokens = 64;
+    request.messages = {neograph::test::message("message", sp::Role::User)};
+    request.tools = {{"read", "read fixture", neograph::test::document(R"({"type":"object"})"), {}}};
+    auto encoded = sp::responses::encode(descriptor, request, false);
+    if (const auto* error = std::get_if<sp::Error>(&encoded))
+        throw std::logic_error(error->safe_message);
+    sp::Accumulator accumulator;
+    sp::responses::Codec codec(descriptor, sp::responses::Mode::Buffered, accumulator,
+        std::get<sp::responses::EncodedRequest>(std::move(encoded)).context);
+    codec.buffered(R"({"id":"resp-native","object":"response","created_at":1,"model":"fixture-model",
+        "status":"completed","output":[
+            {"id":"rs-1","type":"reasoning","status":"completed",
+             "summary":[{"type":"summary_text","text":"inspect"}],"encrypted_content":"fixture-encrypted"},
+            {"id":"fc-1","type":"function_call","status":"completed",
+             "call_id":"call-native","name":"read","arguments":"{\"path\":\"a\"}"},
+            {"id":"msg-1","type":"message","status":"completed","role":"assistant",
+             "content":[{"type":"output_text","text":"pending","annotations":[]}]}],
+        "usage":{"input_tokens":2},"incomplete_details":null,"error":null})", {});
+    codec.finish();
+    auto outcome = accumulator.take_outcome();
+    if (!outcome || !std::holds_alternative<sp::Completion>(*outcome))
+        throw std::logic_error("missing-output Responses fixture was not admitted");
+    return std::make_shared<const sp::Outcome>(std::move(*outcome));
+}
+
+struct ManagedNativeProbe {
+    unsigned calls = 0;
+    std::vector<sp::responses::Request> requests;
+};
+
+class ManagedNativeProvider final : public neograph::test::LocalProvider {
+public:
+    ManagedNativeProvider(std::shared_ptr<ManagedNativeProbe> probe,
+                          sp::descriptor::ValidatedDescriptor descriptor,
+                          sp::runtime::Result result)
+        : LocalProvider([probe, result = std::move(result)](
+            neograph::ProviderRequest request, const neograph::PreparedProviderRequest&,
+            const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+                if (++probe->calls > 1) throw std::logic_error("managed restart dispatched twice");
+                probe->requests.push_back(std::get<sp::responses::Request>(std::move(request.payload)));
+                co_return result;
+            }, "managed-native-checkpoint", std::make_shared<sp::runtime::Client>(descriptor)) {}
+    std::string_view family() const noexcept override { return "openai.responses"; }
+};
+
+} // namespace
+
+TEST(SqliteCheckpointNativeHistory, RestartRestoresAuthenticToolHistoryAndOwnedReportsWithoutRenewingBudget) {
+    NativeCheckpointFiles files;
+    const auto descriptor = neograph::test::descriptor("anthropic.messages");
+    const std::string owner = "native-checkpoint-owner";
+    auto activation = sp::NativeArchive::provision(files.archive(), files.key(), owner, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(activation));
+    auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(activation));
+    auto effects = std::make_shared<std::atomic<unsigned>>(0);
+    auto usage = std::make_shared<neograph::UsageAccumulator>();
+    ASSERT_TRUE(usage->try_reserve(17, 100));
+    RunMetadata metadata;
+    metadata.owner_scope = owner;
+    metadata.run_id = "native-checkpoint-run";
+    RunConfig run;
+    run.thread_id = "native-checkpoint-thread";
+    run.input = {{"messages", json::array({{{"role", "user"}, {"content", "message"}}})}};
+    run.usage = usage;
+    std::string checkpoint_id;
+    json original_report;
+    json original_message;
+    {
+        auto probe = std::make_shared<DurableNativeProbe>();
+        const auto outcome = durable_native_outcome(descriptor);
+        original_report = neograph::provider_codec::observe_outcome(*outcome);
+        original_message = neograph::provider_codec::encode_message(
+            std::get<sp::Completion>(*outcome).messages.at(0));
+        auto provider = std::make_shared<DurableNativeProvider>(probe, descriptor, outcome);
+        auto checkpoints = std::make_shared<SqliteCheckpointStore>(files.database());
+        auto engine = GraphEngine::build(durable_native_graph(),
+            durable_native_config(provider, effects, checkpoints, archive));
+        const auto interrupted = engine->run(run, metadata);
+        ASSERT_TRUE(interrupted.interrupted);
+        checkpoint_id = interrupted.checkpoint_id;
+        EXPECT_EQ(probe->provider_calls, 1u);
+        EXPECT_EQ(effects->load(), 1u);
+        EXPECT_EQ(usage->total_tokens_wide(), 22u);
+        const auto checkpoint = checkpoints->load_by_id(checkpoint_id);
+        ASSERT_TRUE(checkpoint);
+        EXPECT_FALSE(checkpoint->native_history);
+        ASSERT_EQ(interrupted.native_messages.size(), 3u);
+        EXPECT_EQ(neograph::provider_codec::encode_message(interrupted.native_messages[1]),
+                  original_message);
+    }
+    // All provider, graph, database and archive owners from the first run die.
+    // The host keeps its nonrenewable usage ledger, not a replay-created budget.
+    archive.reset();
+    run.input = json();
+    auto wrong_owner = sp::NativeArchive::open(files.archive(), files.key(), "other-owner", descriptor);
+    ASSERT_TRUE(std::holds_alternative<sp::Error>(wrong_owner));
+    EXPECT_EQ(std::get<sp::Error>(wrong_owner).kind, sp::ErrorKind::Permission);
+    auto reopened = sp::NativeArchive::open(files.archive(), files.key(), owner, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(reopened));
+    archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(reopened));
+    EXPECT_EQ(archive->owner_scope(), owner);
+    auto probe = std::make_shared<DurableNativeProbe>();
+    const auto final_outcome = neograph::test::success("finished", neograph::test::usage(2, 3, 5));
+    auto provider = std::make_shared<DurableNativeProvider>(probe, descriptor, final_outcome);
+    auto checkpoints = std::make_shared<SqliteCheckpointStore>(files.database());
+    {
+        auto without_archive = GraphEngine::build(durable_native_graph(),
+            durable_native_config(provider, effects, checkpoints));
+        EXPECT_THROW(without_archive->resume_from(run, checkpoint_id, {}, {}, metadata), std::exception);
+        EXPECT_EQ(probe->provider_calls, 0u);
+        EXPECT_EQ(effects->load(), 1u);
+        EXPECT_EQ(usage->total_tokens_wide(), 22u);
+    }
+    auto engine = GraphEngine::build(durable_native_graph(),
+        durable_native_config(provider, effects, checkpoints, archive));
+    const auto completed = engine->resume_from(run, checkpoint_id, {}, {}, metadata);
+    EXPECT_FALSE(completed.interrupted);
+    EXPECT_EQ(probe->provider_calls, 1u);
+    EXPECT_EQ(effects->load(), 1u);
+    ASSERT_EQ(probe->requests.size(), 1u);
+    const auto& replayed = probe->requests.front().messages;
+    ASSERT_EQ(replayed.size(), 3u);
+    ASSERT_TRUE(replayed[1].native);
+    EXPECT_TRUE(replayed[1].native->complete());
+    EXPECT_EQ(neograph::provider_codec::encode_message(replayed[1]), original_message);
+    ASSERT_EQ(replayed[1].parts.size(), 3u);
+    EXPECT_EQ(std::get<sp::Thinking>(replayed[1].parts[0]).signature,
+              std::optional<std::string>("fixture-signature"));
+    const auto& call = std::get<sp::ToolCall>(replayed[1].parts[1]);
+    EXPECT_EQ(call.id, "call-native");
+    EXPECT_EQ(call.input->root().get("path").as_string(), "a");
+    EXPECT_EQ(std::get<sp::Text>(replayed[1].parts[2]).value, "pending");
+    ASSERT_EQ(replayed[2].parts.size(), 1u);
+    const auto& result = std::get<sp::ToolResult>(replayed[2].parts[0]);
+    EXPECT_EQ(result.tool_use_id, "call-native");
+    EXPECT_EQ(result.content, "read-result");
+    EXPECT_FALSE(result.is_error);
+    ASSERT_EQ(completed.provider_outcomes.size(), 2u);
+    EXPECT_EQ(neograph::provider_codec::observe_outcome(*completed.provider_outcomes[0]), original_report);
+    EXPECT_EQ(completed.provider_outcomes[1], final_outcome);
+    ASSERT_EQ(completed.native_messages.size(), 4u);
+    EXPECT_EQ(neograph::provider_codec::encode_message(completed.native_messages[1]), original_message);
+    EXPECT_EQ(std::get<sp::Text>(completed.native_messages.back().parts.at(0)).value, "finished");
+    EXPECT_EQ(usage->total_tokens_wide(), 27u);
+    ASSERT_TRUE(completed.usage.input_total);
+    ASSERT_TRUE(completed.usage.output_total);
+    EXPECT_EQ(completed.usage.input_total->value, 4u);
+    EXPECT_EQ(completed.usage.output_total->value, 6u);
+    engine.reset();
+    provider.reset();
+    checkpoints.reset();
+    archive.reset();
+    const auto& retained = std::get<sp::Completion>(*completed.provider_outcomes.front());
+    ASSERT_TRUE(retained.messages.front().native);
+    EXPECT_TRUE(retained.messages.front().native->complete());
+    EXPECT_EQ(neograph::provider_codec::observe_outcome(*completed.provider_outcomes.front()), original_report);
+    EXPECT_EQ(usage->total_tokens_wide(), 27u);
+    EXPECT_EQ(effects->load(), 1u);
+}
+
+TEST(SqliteCheckpointNativeHistory, FreshManagedBankAuthenticatesHeldClaimsScopeAndCapBeforeResumeOrFork) {
+    NativeCheckpointFiles files;
+    const auto descriptor = managed_responses_descriptor();
+    const std::string owner = "managed-checkpoint-owner";
+    auto provisioned = sp::NativeArchive::provision(files.archive(), files.key(), owner, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(provisioned));
+    auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(provisioned));
+    auto effects = std::make_shared<std::atomic<unsigned>>(0);
+    RunMetadata metadata;
+    metadata.owner_scope = owner;
+    metadata.run_id = "managed-checkpoint-run";
+    RunConfig run;
+    run.thread_id = "managed-checkpoint-thread";
+    run.model_token_budget = 130; // Admitted input limit 1 + explicit output 64 => each real claim is 65.
+    run.input = {{"messages", json::array({{{"role", "user"}, {"content", "message"}}})}};
+    std::string checkpoint_id;
+    json original_report;
+    json original_authority;
+    {
+        auto probe = std::make_shared<ManagedNativeProbe>();
+        const auto outcome = managed_missing_output_outcome(descriptor);
+        const auto& report = std::get<sp::Completion>(*outcome).usage;
+        ASSERT_TRUE(report.input_total);
+        EXPECT_EQ(report.input_total->value, 2u);
+        EXPECT_FALSE(report.output_total);
+        EXPECT_FALSE(report.total);
+        original_report = neograph::provider_codec::observe_outcome(*outcome);
+        auto provider = std::make_shared<ManagedNativeProvider>(probe, descriptor, outcome);
+        auto checkpoints = std::make_shared<SqliteCheckpointStore>(files.database());
+        auto engine = GraphEngine::build(durable_native_graph(),
+            durable_native_config(provider, effects, checkpoints, archive));
+        const auto interrupted = engine->run(run, metadata);
+        ASSERT_TRUE(interrupted.interrupted);
+        checkpoint_id = interrupted.checkpoint_id;
+        EXPECT_EQ(probe->calls, 1u);
+        EXPECT_EQ(effects->load(), 1u);
+        const auto saved = checkpoints->load_by_id(checkpoint_id);
+        ASSERT_TRUE(saved);
+        EXPECT_FALSE(saved->native_history);
+        original_authority = saved->channel_values.at("provider_managed_budget").at("data");
+        EXPECT_EQ(original_authority.at("charged").get<std::uint64_t>(), 0u);
+        EXPECT_EQ(original_authority.at("reserved").get<std::uint64_t>(), 65u);
+        EXPECT_EQ(original_authority.at("ceiling").get<std::uint64_t>(), 130u);
+        EXPECT_EQ(original_authority.at("owner_scope"), owner);
+        EXPECT_EQ(original_authority.at("thread_id"), run.thread_id);
+        EXPECT_EQ(original_authority.at("reports"), neograph::provider_codec::encode_usage(report));
+        EXPECT_TRUE(original_authority.at("has_report").get<bool>());
+    }
+    // No original managed bank, provider outcome, engine or connection survives.
+    archive.reset();
+    auto opened = sp::NativeArchive::open(files.archive(), files.key(), owner, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(opened));
+    archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(opened));
+    auto probe = std::make_shared<ManagedNativeProbe>();
+    const auto final_outcome = neograph::test::success("finished", neograph::test::usage(2, 3, 5));
+    auto provider = std::make_shared<ManagedNativeProvider>(probe, descriptor, final_outcome);
+    auto checkpoints = std::make_shared<SqliteCheckpointStore>(files.database());
+    auto engine = GraphEngine::build(durable_native_graph(),
+        durable_native_config(provider, effects, checkpoints, archive));
+    run.input = json();
+    run.model_token_budget = 0; // Must inherit the authenticated original finite cap.
+    const auto authentic = checkpoints->load_by_id(checkpoint_id);
+    ASSERT_TRUE(authentic);
+    EXPECT_THROW(engine->fork(run.thread_id, "managed-illegal-fork", checkpoint_id), std::invalid_argument);
+    EXPECT_FALSE(checkpoints->load_latest("managed-illegal-fork"));
+    EXPECT_EQ(checkpoints->load_by_id(checkpoint_id)->channel_values, authentic->channel_values);
+    EXPECT_EQ(probe->calls, 0u);
+    EXPECT_EQ(effects->load(), 1u);
+
+    const std::vector<std::pair<std::string, json>> changes{
+        {"charged", 1u}, {"reserved", 0u}, {"ceiling", 131u},
+        {"owner_scope", "other-owner"}, {"thread_id", "other-thread"},
+        {"graph_identity", "other-graph"},
+        {"provider_effects", json::array({"forged-dedup-effect"})}};
+    for (const auto& [field, value] : changes) {
+        auto tampered = *authentic;
+        tampered.id = Checkpoint::generate_id();
+        tampered.channel_values["provider_managed_budget"]["data"][field] = value;
+        checkpoints->save(tampered);
+        EXPECT_THROW(engine->resume_from(run, tampered.id, {}, {}, metadata), std::exception)
+            << "tampered authority field " << field;
+        EXPECT_EQ(probe->calls, 0u);
+        EXPECT_EQ(effects->load(), 1u);
+        EXPECT_EQ(checkpoints->load_by_id(checkpoint_id)->channel_values, authentic->channel_values);
+    }
+    auto downgraded = *authentic;
+    downgraded.id = Checkpoint::generate_id();
+    downgraded.channel_values["provider_managed_budget"]["data"]["reserved"] = 0u;
+    downgraded.channel_values["provider_managed_budget"]["custody"]["native_archive_reference"] = nullptr;
+    checkpoints->save(downgraded);
+    EXPECT_THROW(engine->resume_from(run, downgraded.id, {}, {}, metadata), std::exception);
+    EXPECT_EQ(probe->calls, 0u);
+    EXPECT_EQ(effects->load(), 1u);
+    for (const bool remove_bank : {false, true}) {
+        auto missing_custody = *authentic;
+        missing_custody.id = Checkpoint::generate_id();
+        if (remove_bank) {
+            auto channels = json::object();
+            for (const auto& [name, value] : missing_custody.channel_values.items())
+                if (name != "provider_managed_budget") channels[name] = value;
+            missing_custody.channel_values = std::move(channels);
+        } else {
+            missing_custody.channel_values["provider_history_durable"] = false;
+            missing_custody.channel_values["provider_managed_budget"]["data"]["reserved"] = 0u;
+        }
+        checkpoints->save(missing_custody);
+        EXPECT_THROW(engine->resume_from(run, missing_custody.id, {}, {}, metadata), std::exception);
+        EXPECT_EQ(probe->calls, 0u);
+        EXPECT_EQ(effects->load(), 1u);
+        EXPECT_EQ(checkpoints->load_by_id(checkpoint_id)->channel_values, authentic->channel_values);
+    }
+    auto raised = run;
+    raised.model_token_budget = 131;
+    EXPECT_THROW(engine->resume_from(raised, checkpoint_id, {}, {}, metadata), std::invalid_argument);
+    auto wrong_owner = metadata;
+    wrong_owner.owner_scope = "other-owner";
+    EXPECT_THROW(engine->resume_from(run, checkpoint_id, {}, {}, wrong_owner), std::invalid_argument);
+    auto wrong_thread = run;
+    wrong_thread.thread_id = "other-thread";
+    EXPECT_THROW(engine->resume_from(wrong_thread, checkpoint_id, {}, {}, metadata), std::exception);
+    auto changed_definition = durable_native_graph();
+    changed_definition["name"] = "another-authenticated-graph";
+    auto changed_graph = GraphEngine::build(changed_definition,
+        durable_native_config(provider, effects, checkpoints, archive));
+    EXPECT_THROW(changed_graph->resume_from(run, checkpoint_id, {}, {}, metadata), std::invalid_argument);
+    EXPECT_EQ(probe->calls, 0u);
+    EXPECT_EQ(effects->load(), 1u);
+
+    // Lowering a ceiling is permitted, but the unknown earlier hold is not
+    // released to fit it. A second claim of 65 cannot fit alongside held 65.
+    auto lowered = run;
+    lowered.model_token_budget = 129;
+    try {
+        (void)engine->resume_from(lowered, checkpoint_id, {}, {}, metadata);
+        FAIL() << "the original held claim must remain spent authority";
+    } catch (const NodeExecutionError& error) {
+        try {
+            std::rethrow_exception(error.cause());
+        } catch (const neograph::ProviderFailure& failure) {
+            EXPECT_EQ(std::get<sp::Failure>(*failure.outcome()).error.kind, sp::ErrorKind::QuotaExhausted);
+        }
+    }
+    EXPECT_EQ(probe->calls, 0u);
+    EXPECT_EQ(effects->load(), 1u);
+    const auto completed = engine->resume_from(run, checkpoint_id, {}, {}, metadata);
+    EXPECT_FALSE(completed.interrupted);
+    EXPECT_EQ(probe->calls, 1u);
+    EXPECT_EQ(effects->load(), 1u);
+    ASSERT_EQ(completed.provider_outcomes.size(), 2u);
+    EXPECT_EQ(neograph::provider_codec::observe_outcome(*completed.provider_outcomes.front()), original_report);
+    EXPECT_EQ(completed.provider_outcomes.back(), final_outcome);
+    ASSERT_TRUE(completed.usage.input_total);
+    EXPECT_EQ(completed.usage.input_total->value, 4u);
+    EXPECT_FALSE(completed.usage.output_total);
+    EXPECT_FALSE(completed.usage.total);
+    const auto saved_final = checkpoints->load_by_id(completed.checkpoint_id);
+    ASSERT_TRUE(saved_final);
+    const auto& restored_authority = saved_final->channel_values.at("provider_managed_budget").at("data");
+    EXPECT_EQ(restored_authority.at("charged").get<std::uint64_t>(), 5u);
+    EXPECT_EQ(restored_authority.at("reserved").get<std::uint64_t>(), 65u);
+    EXPECT_EQ(restored_authority.at("ceiling").get<std::uint64_t>(), 130u);
+    EXPECT_EQ(restored_authority.at("owner_scope"), owner);
+    EXPECT_EQ(restored_authority.at("thread_id"), run.thread_id);
+    EXPECT_EQ(restored_authority.at("graph_identity"), original_authority.at("graph_identity"));
+    const auto accounted_effects = restored_authority.at("provider_effects");
+    for (const auto effect : original_authority.at("provider_effects")) {
+        bool remembered = false;
+        for (const auto accounted : accounted_effects) {
+            if (accounted == effect) {
+                remembered = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(remembered) << effect.get<std::string_view>();
+    }
+    EXPECT_EQ(restored_authority.at("reports"), neograph::provider_codec::encode_usage(completed.usage));
+}
+#endif

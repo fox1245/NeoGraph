@@ -21,7 +21,7 @@
 // from the process environment takes precedence if already set.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/llm/agent.h>
 
 #include <cppdotenv/dotenv.hpp>
@@ -153,12 +153,7 @@ int main() {
             return 1;
         }
 
-        neograph::llm::OpenAIProvider::Config config;
-        config.api_key = api_key;
-        config.base_url = "https://openrouter.ai/api";
-        config.default_model = "~deepseek/deepseek-v4-flash-latest";
-        config.provider_routing = {{"zdr", true}};
-        auto provider = neograph::llm::OpenAIProvider::create(config);
+        auto provider = examples::make_openrouter_provider(api_key);
 
         // 2. Create tools
         std::vector<std::unique_ptr<neograph::Tool>> tools;
@@ -184,19 +179,26 @@ int main() {
         neograph::llm::Agent agent(
             std::move(provider),
             std::move(tools),
-            react_system
+            react_system,
+            examples::openrouter_model
         );
         agent.set_tool_detection_timeout_seconds(180);
 
         // 4. Run
-        std::vector<neograph::ChatMessage> messages;
-        messages.push_back({"user", "What is 15 * 28 + 7?"});
+        std::vector<sp::Message> messages;
+        messages.push_back(examples::message(sp::Role::User, "What is 15 * 28 + 7?"));
 
         std::cout << "User: What is 15 * 28 + 7?\n";
         std::cout << "Assistant: " << std::flush;
 
-        auto response = agent.run_stream(messages,
-            [](const std::string& token) { std::cout << token << std::flush; });
+        auto response = agent.run_stream(messages, [](const sp::Event& event) {
+            if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+                delta && delta->payload.kind == sp::PartKind::Text &&
+                delta->payload.channel == sp::DeltaChannel::Content) {
+                std::cout << delta->payload.bytes << std::flush;
+            }
+        });
+        auto outcome = examples::require_outcome(std::move(response));
 
         std::cout << "\n";
         return 0;

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=db24e5932e8c6357d88b133d6230abaaffdeeb4c0cf8453e7afd97d0dae66e76 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=0b89132e34b3f81b00ea1a1094e3d311a10bdd1c97ec2ad1a029a8fcd066db26 -->
 # NeoGraph 对比 Python 图/流水线框架 — 引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -225,3 +225,57 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
 
 Numbers will vary on your hardware, but the ratios should be stable to
 within ~20%.
+
+## Typed provider 切换：实际 GraphEngine 前后测量
+
+这是独立于上方 Python 框架比较的 **本地 TLS HTTP/SSE** 测量，不是模型推理时间。static Release/GCC13.3/Linux x64 下，经过生产 `GraphEngine.llm_call/tool_dispatch` 路径的 **16项配置 × 3个独立进程 = 48条记录**全部通过。覆盖3个共同 H1 负载、5个 family 的 buffered/SSE native continuation，以及3个实际 H2 负载。测量期间没有编译或付费调用。
+
+| 共同图负载 | 前 p50 ms | 后 p50 ms | 前图/s | 后图/s | 前 peak RSS MiB | 后 peak RSS MiB |
+|---|---:|---:|---:|---:|---:|---:|
+| H1 buffered text | 0.707 | 1.320 | 1,375.58 | 733.65 | 12.617 | 15.465 |
+| H1 buffered tool loop | 29.337 | 30.510 | 800.30 | 702.64 | 17.832 | 20.219 |
+| H1 SSE tool loop | 600.540 | 37.593 | 51.43 | 615.38 | 14.414 | 20.367 |
+
+数字是3次统计的中位数，单位为 **图执行**，不是 HTTP 请求。text 使用并发1/延迟0；tool 使用并发32/每请求5ms/每图2请求。warmup10、测量100；tool/native 每次另有8项取消。当前全部配置：测量失败0、实际取消336/取消失败0、精确 synthetic native replay3,300、Provider销毁后验证的 owned结果5,280、无效请求0、额外重试0。
+
+完整 owned raw/native/nullable 数据及权限校验增加 text 成本与内存，buffered tool p50 略增；SSE 消除了 legacy buffered 路径延迟。旧实现不支持 native/nullable 权限和部分 worker 控制，因此不声明语义/资源等价或模型加速。
+
+[原始9条记录](provider-cutover-legacy-results.json)、[当前48条](provider-cutover-current-results.json)、[p95/p99、取消、扩展 family](provider-cutover-summary.json)、[准确复现命令](README.md#typed-provider-cutover-actual-graphengine-beforeafter)。
+
+
+## 最终验证 cohort：fresh typed provider GraphEngine 测量
+
+最终 Release GraphEngine/local TLS HTTP/SSE cohort 以 **16配置 × fresh process3次 = 48记录、失败0、38.29秒**完成。全部 actual protocol/owned-outcome check pass。测量期间没有 compiler 执行或付费 model call。这是 fresh final-worktree cohort，不替换上方历史 table。[最终 scalar summary](provider-cutover-final-summary.json) 和 [最终 raw owned synthetic object](provider-cutover-final-results.json) 不同于未修改的 [legacy9记录](provider-cutover-legacy-results.json)、[此前 current48记录](provider-cutover-current-results.json)、[此前 comparison](provider-cutover-summary.json)。约60MB raw file 包含实际 synthetic outcome object，不含 provider secret。
+
+以下为 summary 的独立 process3次中位数，单位是 **graph run**，不是 model token/HTTP request。每项配置验证 negotiated protocol 和 provider 销毁后 retained owned graph outcome。Resource/control 及 native/nullable authority 差异仍保留：**semantic/resource equivalence 为 false**；这是本地测量 tradeoff，不是 model 加速或 vendor qualification。
+
+### 最终16配置测量
+
+| Family | HTTP | 负载 | p50 ms | p95 ms | p99 ms | Graph runs/s | Peak RSS MiB | Peak thread |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `openai.chat` | H1 | text buffered | 1.296943 | 1.349401 | 1.397812 | 769.975584 | 15.898438 | 3 |
+| `openai.chat` | H1 | tool buffered | 30.672507 | 100.492667 | 112.663949 | 678.507993 | 20.585938 | 19 |
+| `openai.chat` | H1 | tool SSE | 35.800113 | 105.431034 | 117.559931 | 627.047345 | 21.042969 | 19 |
+| `openai.chat` | H1 | native buffered | 32.546693 | 102.680190 | 115.244483 | 683.637830 | 20.925781 | 19 |
+| `openai.chat` | H1 | native SSE | 38.135188 | 115.463732 | 126.668501 | 615.357297 | 21.902344 | 19 |
+| `anthropic.messages` | H1 | native buffered | 30.612805 | 103.979300 | 123.110448 | 678.785191 | 20.324219 | 19 |
+| `anthropic.messages` | H1 | native SSE | 44.021986 | 71.548005 | 93.941146 | 604.744184 | 22.125000 | 19 |
+| `openai.responses` | H1 | native buffered | 35.070430 | 100.615954 | 114.597387 | 647.751880 | 22.179688 | 19 |
+| `openai.responses` | H1 | native SSE | 46.670934 | 77.636952 | 89.664406 | 571.458359 | 25.511719 | 19 |
+| `google.generate` | H1 | native buffered | 31.449930 | 99.319459 | 112.385528 | 698.783682 | 21.726562 | 19 |
+| `google.generate` | H1 | native SSE | 37.774704 | 105.703383 | 120.826886 | 627.040287 | 22.500000 | 19 |
+| `google.interactions` | H1 | native buffered | 32.588486 | 101.365734 | 109.841457 | 690.967042 | 21.664062 | 19 |
+| `google.interactions` | H1 | native SSE | 46.786625 | 76.036675 | 92.590316 | 573.469300 | 23.058594 | 19 |
+| `openai.chat` | H2 | text buffered | 1.311873 | 2.443117 | 2.604176 | 701.785481 | 16.148438 | 3 |
+| `openai.chat` | H2 | tool SSE | 40.349311 | 54.813608 | 59.912728 | 714.064349 | 20.386719 | 19 |
+| `google.interactions` | H2 | native SSE | 44.561127 | 56.692743 | 64.665852 | 663.966743 | 22.750000 | 19 |
+
+### 三个共同 H1 负载：未修改 legacy 与最终 cohort
+
+| H1 graph 负载 | 前 p50 ms | 最终 p50 ms | 前 graph runs/s | 最终 graph runs/s |
+|---|---:|---:|---:|---:|
+| text buffered | 0.706631 | 1.296943 | 1375.578826 | 769.975584 |
+| tool buffered | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
+| tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
+
+前值仍为原始7b47ad43 cohort。Text latency 上升、throughput 下降；buffered-tool 变化较小，SSE 去除了旧 buffered-path delay。不重算或覆盖历史值。扩展 family/protocol、first-semantic、cancellation、native replay、retained-outcome 事实保留在最终 summary/raw record；benchmark 证据不加强付费 native-consumption/cryptographic-validation 声明。

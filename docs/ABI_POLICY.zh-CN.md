@@ -1,10 +1,11 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=d2a0d445bf112968279a8efd4c21953f01b3dae5bb9a5b026a821b04e12a99e9 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=eadbd5019a617097b40042dc1f99f69e4ef46d890f562c028484e003fa10f5ce -->
 # 二进制兼容性策略
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
 本策略适用于使用已安装 NeoGraph 静态或共享库的 C++ 程序。Python wheel
 会把匹配的扩展和库作为一个整体发布，不得单独替换 wheel 内的库。
+typed provider 切换是强制重新编译边界，取代旧永久兼容计划。NeoGraph 保留 pre-v1 loader 命名，但不表示旧 provider 对象兼容。必须一并安装匹配的 NeoGraph 和 SchemaProvider SDK 头文件/库。SDK interface revision 3 与 `libsp_*.so.3` 是带 out-of-line capability gate 的独立 shared ABI；不稳定 package `0.0.0` 不是稳定发布。当前 SDK runtime/archive 要求 Linux/POSIX。下方 Windows/macOS 命名示例只是 packaging policy，不是新依赖 runtime 的验证证据。Python provider binding/wrapper 已延期、未移植。
 
 ## 版本约定
 
@@ -45,13 +46,12 @@ NeoGraph 从 `pyproject.toml` 读取项目版本。CMake 把该值设为所有�
 ## 公开虚接口
 
 - `GraphNode` 唯一正式执行虚函数是 `run(NodeInput)`。
-- `Provider` 根据永久兼容性决定保持现有 vtable。新实现推荐继承
-  `CompletionProvider`。
+- `Provider`: `get_name()`, `family()`, `prepare(ProviderRequest)`;
+  `invoke(_async)` / `dispatch(_async)` → `sp::runtime::Result`.
+  这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
 - 未来的 `CheckpointStore` 异步迁移也必须遵守本策略。v1 之后应优先新增
   独立能力接口和适配器，而不是修改稳定的对象布局。
 
 ## 验证
 
-`scripts/test_find_package.sh` 从隔离安装目录构建并运行使用者。`--shared`
-还检查所有库的版本链接以及 ELF SONAME 或 Mach-O install name。CI 同时运行
-静态和共享安装测试，并在 Linux、macOS 上验证共享库元数据。
+`scripts/test_find_package.sh` 描述 installed-consumer 检查，文件存在不代表当前已通过。当前 SDK ABI3 全量重建/CTest 已通过 26/26；shared 安装 consumer 实际执行 local HTTP 两 turn typed 请求、tool/native/refusal/known-zero 结果及 mismatch 拒绝。这不代表 NeoGraph、Python、Windows、macOS、WASM 或付费 live-provider 兼容已验证。NeoGraph 集成验证另行报告。

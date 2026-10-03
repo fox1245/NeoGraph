@@ -222,6 +222,39 @@ TEST(HarnessHostAgentTest, OpenCodeEmitsOnlyFinalJsonAndHonorsExplicitModel) {
               json({{"valid", true}}));
 }
 
+TEST(HarnessHostAgentTest, MissingOpenCodeUsageBandsRetainClaimWithoutInventingSpend) {
+    for (const bool complete : {false, true}) {
+        const std::string tokens = complete
+            ? R"({"input":15,"output":8,"reasoning":0,"cache":{"read":0,"write":0}})"
+            : R"({"input":15,"output":8})";
+        Fixture cli(
+            "printf '%s\\n' "
+            "'{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"{\\\"valid\\\":true}\"}}' "
+            "'{\"type\":\"step_finish\",\"part\":{\"tokens\":" + tokens + "}}'");
+        auto config = cli.config("opencode");
+        config.model = "openai/test-model";
+        auto call = request();
+        call.usage = std::make_shared<UsageAccumulator>();
+        call.model_token_budget = 30000;
+        const auto response = make_host_agent_executor(config)(
+            call, std::make_shared<graph::CancelToken>());
+        const auto reported = call.usage->snapshot();
+        EXPECT_EQ(response.provider_effect_uncertain, !complete);
+        if (complete) {
+            EXPECT_EQ(response.kind, HarnessWorkerResponseKind::VALUE) << response.message;
+            EXPECT_EQ(call.usage->total_tokens_wide(), 23U);
+            ASSERT_TRUE(reported.total);
+            EXPECT_EQ(reported.total->value, 23U);
+        } else {
+            EXPECT_EQ(response.kind, HarnessWorkerResponseKind::TOOL_ERROR) << response.message;
+            EXPECT_EQ(call.usage->total_tokens_wide(), 11000U);
+            EXPECT_FALSE(reported.input_total);
+            EXPECT_FALSE(reported.output_total);
+            EXPECT_FALSE(reported.total);
+        }
+    }
+}
+
 TEST(HarnessHostAgentTest, OpenCodeReportsOAuthOnlyFromHostStatus) {
     Fixture oauth("exit 1", true, "2.2.0", true);
     const auto status = preflight_host_agent(oauth.config("opencode"));
@@ -296,8 +329,19 @@ TEST(HarnessHostAgentTest, DistinguishesStartupTimeoutExitSignalAndOutputLimit) 
     EXPECT_EQ(response.kind, HarnessWorkerResponseKind::PARSE_ERROR);
 }
 
-TEST(HarnessHostAgentTest, CancellationAndTimeoutKillDescendantsAndReleaseReservations) {
+TEST(HarnessHostAgentTest, CancellationAndTimeoutKillDescendantsAndRetainUncertainReservations) {
     Fixture cli("sleep 60 & echo $! > child.pid; wait");
+    const auto expect_descendant_stopped = [&] {
+        std::ifstream pid_file(cli.root / "child.pid");
+        pid_t descendant = 0;
+        ASSERT_TRUE(static_cast<bool>(pid_file >> descendant));
+        ASSERT_GT(descendant, 0);
+        // A reparented zombie is not a running child; its PID may briefly persist.
+        std::ifstream status("/proc/" + std::to_string(descendant) + "/stat");
+        std::string pid_text, command;
+        char process_state = '\0';
+        if (status >> pid_text >> command >> process_state) EXPECT_EQ(process_state, 'Z');
+    };
     auto config = cli.config("codex");
     config.request_timeout = std::chrono::milliseconds(250);
     auto executor = make_host_agent_executor(config);
@@ -306,22 +350,30 @@ TEST(HarnessHostAgentTest, CancellationAndTimeoutKillDescendantsAndReleaseReserv
     call.model_token_budget = 30000;
     const auto timed = executor(call, std::make_shared<graph::CancelToken>());
     EXPECT_EQ(timed.kind, HarnessWorkerResponseKind::TIMEOUT);
-    EXPECT_TRUE(call.usage->try_reserve(25000, 30000));
-    call.usage->release_reservation(25000);
+    EXPECT_TRUE(timed.provider_effect_uncertain);
+    EXPECT_EQ(call.usage->total_tokens_wide(), 11000U);
+    EXPECT_FALSE(call.usage->snapshot().total);
+    EXPECT_FALSE(call.usage->try_reserve(25000, 30000));
+    expect_descendant_stopped();
+    std::filesystem::remove(cli.root / "child.pid");
+    config.request_timeout = std::chrono::seconds(5);
+    auto cancellable_executor = make_host_agent_executor(config);
+    call.attempt = 2;
     auto token = std::make_shared<graph::CancelToken>();
-    auto running = std::async(std::launch::async, [&] { return executor(call, token); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto running = std::async(std::launch::async, [&] { return cancellable_executor(call, token); });
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!std::filesystem::exists(cli.root / "child.pid") &&
+           std::chrono::steady_clock::now() < ready_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(std::filesystem::exists(cli.root / "child.pid"));
     token->cancel();
-    EXPECT_EQ(running.get().kind, HarnessWorkerResponseKind::CANCELLED);
-    std::ifstream pid_file(cli.root / "child.pid");
-    pid_t descendant = 0;
-    ASSERT_TRUE(static_cast<bool>(pid_file >> descendant));
-    ASSERT_GT(descendant, 0);
-    // A reparented zombie is not a running child; its PID may briefly persist.
-    std::ifstream status("/proc/" + std::to_string(descendant) + "/stat");
-    std::string pid_text, command;
-    char process_state = '\0';
-    if (status >> pid_text >> command >> process_state) EXPECT_EQ(process_state, 'Z');
+    const auto cancelled = running.get();
+    EXPECT_EQ(cancelled.kind, HarnessWorkerResponseKind::CANCELLED);
+    EXPECT_TRUE(cancelled.provider_effect_uncertain);
+    EXPECT_EQ(call.usage->total_tokens_wide(), 22000U);
+    EXPECT_FALSE(call.usage->snapshot().total);
+    EXPECT_FALSE(call.usage->try_reserve(9000, 30000));
+    expect_descendant_stopped();
 }
 
 TEST(HarnessHostAgentTest, PreflightRejectsAutoLoggedOutAndNestedDispatch) {

@@ -1,6 +1,70 @@
 # Evolving Harness Chat
 
-**Languages:** [English](README.md) | [한국어](README.ko.md)
+## Current typed Program chat contract
+
+`program_chat.cpp` uses `evolving-chat/v6`, node `chat.step` version `1.5.0`
+(manifest digest `chat.step/v6`) and ledger schema `neograph.program-chat-call/v6`.
+The existing browser and HTTP protocol are unchanged. Alice/Bob owner scopes,
+reviewed-template generation, role-specific prompts, effect/capability grants,
+exact checkpoint lineage and nonrenewable budgets remain host-owned.
+
+```bash
+# Set SCHEMAPROVIDER_SOURCE to the supplied SDK checkout before configuring.
+# From the repository root; configure Program, QuickJS control and SQLite (or PostgreSQL).
+cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
+cmake --build build-chat --target cookbook_program_chatbot
+./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+  --native-archive-dir .chat-native --session demo
+```
+
+The loopback browser remains `http://127.0.0.1:8768`; `alice-demo`/`bob-demo`
+are demonstration bearer tokens, not production authentication. Live mode needs
+an eligible OpenRouter route, key and network; GLM-5.3-Flash is the CLI default.
+The archive path is host-only; default is `DB_PATH.native`. Preserve its independent
+key and owner-private custody together with the database. It is authenticated
+custody, not encryption or vendor-issuer proof. Never export raw native payloads,
+keys, prompts or ledger artifacts to public logs. Archive setup is required for
+this durable recipe, not for a genuine C++ in-memory checkpoint sidecar.
+
+For each `turn:role` call, prepare exactly once, compute the exact
+`Provider::request_digest(prepared)`, reserve
+`Provider::conservative_token_upper_bound(prepared)`, durably persist the pending
+claim, then dispatch that same handle. The whole-window bound uses admitted
+model input limits, the encoded output cap (or declared output limit), hosted
+invocation limits and enabled retry policy; request bytes are not a token bound.
+Missing model facts reject before reservation or dispatch. Select a model with
+admitted limits and a budget large enough for the whole window. Private loopback
+fixtures must supply their own explicit supported-model policy facts; the mock
+does not invent limits or provider usage.
+Use `--descriptor-policy PATH` (C++ `Options::descriptor_policy_file`) for a
+host-owned SDK descriptor-policy JSON file. It is admitted once with the embedded
+codec resource snapshot, then shared by both tenants; no model proposal or
+checkpoint can select it. Without the option, the built-in policy remains active.
+An explicit fixture policy must declare its exact loopback `openrouter_origins`
+and `program-chat-mock` model limits (or the explicitly selected fixture model).
+The admitted policy identity is bound into session settings: changed policy
+content requires a new session, even when the file path is unchanged. Offline
+`--mock` examples require these facts as well; raise budgets only explicitly.
+Nullable wide provider counts remain separate from `charged_tokens`; known zero
+is known, not missing. Consistent final input/output evidence settles the charge
+only without prior unknown usage or transport-internal resends. Otherwise the
+original reservation remains `UnknownHold`. A reported charge above reservation
+remains charged. `cost` stays unknown.
+
+On restart, pending calls become `UnknownHold` and are never automatically
+redispatched. Completed replay requires the same prepared digest/reservation,
+restores the original immutable Outcome and native role history from the archive,
+and verifies settlement/output. Keep the same database, archive/key, session,
+provider/model/settings and build identity; changed settings require a new session.
+The durable ledger disables SDK retry (`max_attempts=1`). No restart or topology
+replacement renews the budget. Model JSON is a proposal, never native authority.
+
+These are source contracts; no new recipe execution or live pass is claimed here.
+
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 A runnable, two-tenant chatbot built on NeoGraph Program. Each turn produces a
 bounded Harness proposal. The host keeps the current topology or compiles and
@@ -16,7 +80,7 @@ checkpoint. The orchestrator keeps waiting on the same logical assistant.
   Program budgets, proposal reason, topology differences and admission outcome.
 - **Persistence:** SQLite or PostgreSQL stores Program artifacts, transitions,
   chat messages, model reservations/results and evolution decisions.
-- **OpenRouter:** uses the existing native OpenAI-compatible provider. An explicit
+- **OpenRouter:** uses the typed SDK Chat provider. An explicit
   offline demo mode exercises the same compiler, admission and runtime APIs.
 
 ## Build and run
@@ -128,11 +192,13 @@ The chatbot template route itself does not expose model-callable compiler tools.
 ## Accounting and recovery
 
 Each tenant has a finite session (default 12 turns / 100 model calls / 200,000
-model tokens). Provider calls reserve tokens before dispatch. Known usage settles
-the reservation; missing usage retains it. Prompt reservation uses UTF-8 bytes
-plus framing/output allowances, not a model-specific tokenizer. Reported usage
-above the reservation remains charged. Monetary cost is shown as unknown: this
-example does not provide a monetary ceiling or assume token prices.
+model tokens). Provider calls reserve their admitted whole-window token bound
+before dispatch. Known consistent final usage settles the reservation only when
+prior usage is not unknown and no transport-internal resend occurred; missing
+usage retains it. Unknown model limits reject before dispatch, rather than
+estimating tokens from request bytes. Reported usage above the reservation remains
+charged. Monetary cost is shown as unknown: this example does not provide a
+monetary ceiling or assume token prices.
 
 Program compile, operation, Core-step, child/depth and wall-time budgets remain
 nonrenewable through replacement and restart. Idle time consumes the session's

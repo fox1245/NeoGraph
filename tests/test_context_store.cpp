@@ -1,4 +1,5 @@
 #include <neograph/context_store.h>
+#include "fixtures/typed_provider.h"
 
 #include <gtest/gtest.h>
 
@@ -20,7 +21,7 @@ RuntimeHistoryRecord record(std::string feed_id,
     data.sequence = sequence;
     data.message_id = "message_" + std::to_string(sequence);
     data.trust = RuntimeTrustClass::UntrustedInput;
-    data.message = ChatMessage{"user", "message " + std::to_string(sequence)};
+    data.message = test::message("message " + std::to_string(sequence), sp::Role::User);
     data.predecessor_id = std::move(predecessor);
     return RuntimeHistoryRecord::create(std::move(data));
 }
@@ -64,7 +65,7 @@ TEST(ContextStore, AppendsWithCasAndTreatsExactRetryAsIdempotent) {
     duplicate_data.sequence = 4;
     duplicate_data.message_id = "message_2";
     duplicate_data.trust = RuntimeTrustClass::UntrustedInput;
-    duplicate_data.message = ChatMessage{"user", "duplicate identity"};
+    duplicate_data.message = test::message("duplicate identity", sp::Role::User);
     duplicate_data.predecessor_id = third.id();
     const auto duplicate = RuntimeHistoryRecord::create(
         std::move(duplicate_data));
@@ -113,7 +114,16 @@ TEST(ContextStore, IsolatesOwnersAndHydratesExactCanonicalJsonl) {
     EXPECT_EQ(snapshot.artifact_uri.find(snapshot.feed_id), std::string::npos);
     EXPECT_EQ(store.hydrate_history(snapshot),
               first.serialize_canonical() + "\n" + second.serialize_canonical());
+    const auto records = store.hydrate_records(snapshot);
+    ASSERT_EQ(records.size(), 2u);
+    EXPECT_EQ(records[0].id(), first.id());
+    EXPECT_EQ(records[1].id(), second.id());
+    EXPECT_EQ(std::get<sp::Text>(records[1].message().parts.at(0)).value, "message 2");
     EXPECT_THROW(store.hydrate_history(ContextHistoryRange{second_owner.owner_id, snapshot.feed_id,
+                                                            1, 2, snapshot.digest,
+                                                            snapshot.artifact_uri}),
+                 std::invalid_argument);
+    EXPECT_THROW(store.hydrate_records(ContextHistoryRange{second_owner.owner_id, snapshot.feed_id,
                                                             1, 2, snapshot.digest,
                                                             snapshot.artifact_uri}),
                  std::invalid_argument);
@@ -121,9 +131,11 @@ TEST(ContextStore, IsolatesOwnersAndHydratesExactCanonicalJsonl) {
     auto tampered = snapshot;
     tampered.digest = sha('f');
     EXPECT_THROW(store.hydrate_history(tampered), std::invalid_argument);
+    EXPECT_THROW(store.hydrate_records(tampered), std::invalid_argument);
     tampered = snapshot;
     tampered.artifact_uri += "tampered";
     EXPECT_THROW(store.hydrate_history(tampered), std::invalid_argument);
+    EXPECT_THROW(store.hydrate_records(tampered), std::invalid_argument);
 }
 
 TEST(ContextStore, UsesOpaqueUriForValidTokenIdentifiersWithUriDelimiters) {

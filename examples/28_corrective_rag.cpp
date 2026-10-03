@@ -15,13 +15,9 @@
 // only OPENROUTER_API_KEY (no Brave / Tavily / DuckDuckGo key). To swap in
 // a different search backend, only web_search() below changes — the routing
 // logic is unchanged.
-// Implementation note: the LLM steps that take *function* tools
-// (evaluate / refine / generate — all zero-tool here) go through
-// SchemaProvider("openai_responses"). The web-search call uses a
-// *hosted* built-in tool, which SchemaProvider's function-shape
-// abstraction doesn't model, so it's a direct POST to /api/v1/responses
-// endpoint and exercise the chunked-response handling in the
-// async HTTP client.
+// Every LLM stage, including hosted web_search, uses the typed SDK
+// Responses path. The complete ordered Outcome is retained for each call;
+// text is projected only for the CRAG grader/refinement/composer inputs.
 //
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
@@ -29,19 +25,14 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
-#include <neograph/async/http_client.h>
-#include <neograph/async/endpoint.h>
-#include <neograph/async/run_sync.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
-#include <asio/this_coro.hpp>
-
 #include <algorithm>
 #include <cctype>
-#include <set>
 #include <chrono>
+#include <set>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -65,8 +56,8 @@ static const std::vector<Doc> KB = {
 
     {"NeoGraph Modules",
      "NeoGraph ships four modules: neograph::core (graph engine, JSON "
-     "loader, scheduler), neograph::llm (OpenAIProvider + SchemaProvider "
-     "for any vendor), neograph::mcp (MCP client over HTTP and stdio), "
+     "loader, scheduler), neograph::llm (typed SchemaProvider SDK runtime "
+     "with pinned descriptors), neograph::mcp (MCP client over HTTP and stdio), "
      "and neograph::util (lock-free RequestQueue for backpressure)."},
 
     {"Send and Command",
@@ -154,14 +145,23 @@ static std::string format_hits(const std::vector<Hit>& hits) {
 // =========================================================================
 enum class Verdict { Correct, Ambiguous, Incorrect };
 
+// Retain every complete native result, including failure partials. The text
+// views below are algorithm inputs, never substitutes for replay authority.
+using StageOutcomes = std::vector<sp::runtime::Result>;
+static std::shared_ptr<const sp::Outcome> run_stage(
+    Provider& provider, ProviderRequest request, StageOutcomes& outcomes) {
+    outcomes.push_back(provider.invoke(std::move(request)));
+    return examples::require_outcome(outcomes.back());
+}
+
 // Evaluator: grades whether `context` actually answers `question`.
 // CRAG's key insight — the LLM that *answers* shouldn't be the one that
 // trusts retrieval blindly; insert a dedicated grader that says "this
 // retrieval is good / partial / garbage".
 static Verdict evaluate(Provider& p, const std::string& question,
-                        const std::string& context) {
-    CompletionParams cp;
-    cp.messages.push_back({"system",
+                        const std::string& context, StageOutcomes& outcomes) {
+    std::vector<sp::Message> messages;
+    messages.push_back(examples::message(sp::Role::System,
         "You grade retrieved documents against a question. Reply with "
         "EXACTLY one word.\n"
         " - CORRECT: every part of the question is fully answered by the "
@@ -171,11 +171,15 @@ static Verdict evaluate(Provider& p, const std::string& question,
         "is missing or only vaguely covered.\n"
         " - INCORRECT: the documents are off-topic for the question.\n"
         "Be strict. If the question asks for two things and the "
-        "documents only cover one, the answer is AMBIGUOUS, not CORRECT."});
-    cp.messages.push_back({"user",
-        "Question: " + question + "\n\nDocuments:\n" + context});
-    cp.temperature = 0.0f;
-    auto raw = p.complete(cp).message.content;
+        "documents only cover one, the answer is AMBIGUOUS, not CORRECT."));
+    messages.push_back(examples::message(sp::Role::User,
+        "Question: " + question + "\n\nDocuments:\n" + context));
+    ProviderControls controls;
+    controls.temperature = 0.0;
+    const auto outcome = run_stage(p, make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls),
+        outcomes);
+    auto raw = examples::visible_text(*outcome);
 
     // Tolerant parsing — small models occasionally pad ("CORRECT.",
     // "ambiguous - the docs..."). Substring is enough.
@@ -237,7 +241,7 @@ static std::vector<std::string> split_into_strips(const std::string& text) {
 // relevant sentences" — that fold-into-one-prompt approach was the
 // pre-audit form and let the model paraphrase or invent.
 static std::string refine(Provider& p, const std::string& question,
-                          const std::string& kb_context) {
+                          const std::string& kb_context, StageOutcomes& outcomes) {
     auto strips = split_into_strips(kb_context);
     if (strips.empty()) return "";
 
@@ -246,19 +250,23 @@ static std::string refine(Provider& p, const std::string& question,
         listing << "[" << (i + 1) << "] " << strips[i] << "\n";
     }
 
-    CompletionParams cp;
-    cp.messages.push_back({"system",
+    std::vector<sp::Message> messages;
+    messages.push_back(examples::message(sp::Role::System,
         "You are scoring text strips for relevance to a question. For "
         "EACH numbered strip, output exactly one line of the form:\n"
         "  N. KEEP    (strip directly helps answer the question)\n"
         "  N. DROP    (strip is off-topic or only loosely related)\n"
         "Be strict — only KEEP strips that contain a fact, definition, "
         "or relationship the answerer would actually quote. Output the "
-        "verdicts in numerical order, one per line, nothing else."});
-    cp.messages.push_back({"user",
-        "Question: " + question + "\n\nStrips:\n" + listing.str()});
-    cp.temperature = 0.0f;
-    auto verdicts = p.complete(cp).message.content;
+        "verdicts in numerical order, one per line, nothing else."));
+    messages.push_back(examples::message(sp::Role::User,
+        "Question: " + question + "\n\nStrips:\n" + listing.str()));
+    ProviderControls controls;
+    controls.temperature = 0.0;
+    const auto outcome = run_stage(p, make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls),
+        outcomes);
+    auto verdicts = examples::visible_text(*outcome);
 
     // Parse "N. KEEP" / "N. DROP" lines tolerantly.
     std::set<size_t> kept;
@@ -295,16 +303,21 @@ static std::string refine(Provider& p, const std::string& question,
 // search; previously this example fed the raw question to OpenRouter's
 // hosted web_search tool, which works but skips the documented rewriting
 // step.
-static std::string rewrite_query(Provider& p, const std::string& question) {
-    CompletionParams cp;
-    cp.messages.push_back({"system",
+static std::string rewrite_query(Provider& p, const std::string& question,
+                                 StageOutcomes& outcomes) {
+    std::vector<sp::Message> messages;
+    messages.push_back(examples::message(sp::Role::System,
         "Rewrite the user's question as a concise keyword query for a "
         "web search engine. Drop articles, modal verbs, polite framing. "
         "Output ONLY the keyword query — no quotes, no commentary, no "
-        "trailing punctuation."});
-    cp.messages.push_back({"user", question});
-    cp.temperature = 0.0f;
-    auto out = p.complete(cp).message.content;
+        "trailing punctuation."));
+    messages.push_back(examples::message(sp::Role::User, question));
+    ProviderControls controls;
+    controls.temperature = 0.0;
+    const auto outcome = run_stage(p, make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls),
+        outcomes);
+    auto out = examples::visible_text(*outcome);
     // Strip trailing newlines / whitespace.
     while (!out.empty()
            && (out.back() == '\n' || out.back() == ' ' || out.back() == '\t'))
@@ -312,108 +325,37 @@ static std::string rewrite_query(Provider& p, const std::string& question) {
     return out;
 }
 
-// Coroutine wrapped in a free function so the GCC frontend doesn't
-// trip on `co_await` inside a function-scope lambda (verified ICE in
-// gcc-13 on the build matrix). main() wraps this in run_sync.
-//
-// Headers are pre-built and bound to a local before the first
-// co_await — gcc-13 ICEs on certain initializer-list temporaries
-// crossing a coroutine suspension; matching the OpenAIProvider
-// pattern (build first, std::move at the call site) sidesteps it.
-static asio::awaitable<neograph::async::HttpResponse>
-post_web_search(neograph::async::AsyncEndpoint endpoint,
-                std::string body,
-                std::string auth_header_value) {
-    namespace na = neograph::async;
-    std::vector<std::pair<std::string, std::string>> headers = {
-        {"Authorization", std::move(auth_header_value)},
-        {"Content-Type",  "application/json"},
-    };
-    na::RequestOptions opts;
-    opts.timeout = std::chrono::seconds(60);
-
-    auto ex = co_await asio::this_coro::executor;
-    co_return co_await na::async_post(
-        ex,
-        endpoint.host,
-        endpoint.port,
-        endpoint.prefix + "/v1/responses",
-        std::move(body),
-        std::move(headers),
-        endpoint.tls,
-        opts);
-}
-
-// Real web search via OpenRouter's built-in `web_search` tool, hosted
-// inside /v1/responses. The model decides when to invoke it, runs the
-// search server-side, and folds the citations back into its final assistant
-// message — we just read the resulting text out of output[].
-//
-// Bypasses SchemaProvider because hosted built-in tools don't follow
-// the function-tool shape (no name/parameters), so they don't fit
-// the schema's tool_definition wrapper.
-static std::string web_search(const std::string& api_key,
-                              const std::string& model,
-                              const std::string& question) {
-    namespace na = neograph::async;
-
-    json body;
-    body["model"] = model;
-    body["input"] = question;
-    body["tools"] = json::array({json{{"type", "web_search"}}});
-    body["provider"] = {{"zdr", true}};
-
-    auto endpoint = na::split_async_endpoint("https://openrouter.ai/api");
-    auto resp = na::run_sync(post_web_search(
-        endpoint, body.dump(), "Bearer " + api_key));
-
-    if (resp.status != 200) {
-        throw std::runtime_error(
-            "web_search HTTP " + std::to_string(resp.status) +
-            ": " + resp.body);
-    }
-
-    // Walk the output[] envelope. A web-search-augmented response
-    // typically contains:
-    //   - one or more {type: "web_search_call", ...} items (the
-    //     tool invocations themselves — useful for debugging,
-    //     ignored here),
-    //   - one {type: "message", content: [{type: "output_text",
-    //     text: "..."}]} item carrying the model's synthesised answer
-    //     plus inline annotations / citations.
-    auto j = json::parse(resp.body);
-    std::string answer;
-    if (j.contains("output") && j["output"].is_array()) {
-        for (const auto& item : j["output"]) {
-            if (item.value("type", "") != "message") continue;
-            const auto& content = item["content"];
-            if (!content.is_array()) continue;
-            for (const auto& part : content) {
-                if (part.value("type", "") == "output_text") {
-                    answer += part.value("text", "");
-                }
-            }
-        }
-    }
-    if (answer.empty()) {
-        throw std::runtime_error(
-            "web_search returned no output_text; raw body: " +
-            resp.body.substr(0, 500));
-    }
+// The SDK declares hosted tools independently from client-executed functions.
+// Keep the native hosted calls, citations, ordered parts, and nullable usage
+// in outcomes; project text only as input to the strip-refinement algorithm.
+static std::string web_search(Provider& provider, const std::string& question,
+                              StageOutcomes& outcomes) {
+    auto request = make_provider_request(provider, examples::openrouter_model,
+        {examples::message(sp::Role::User, question)});
+    auto& responses = std::get<sp::responses::Request>(request.payload);
+    responses.hosted_tools.emplace_back(sp::responses::WebSearchTool{});
+    const auto outcome = run_stage(provider, std::move(request), outcomes);
+    auto answer = examples::visible_text(*outcome);
+    if (answer.empty())
+        throw std::runtime_error("web_search returned no visible text");
     return answer;
 }
 
 // Final answer composer.
 static std::string generate(Provider& p, const std::string& question,
-                            const std::string& context) {
-    CompletionParams cp;
-    cp.messages.push_back({"system",
+                            const std::string& context, StageOutcomes& outcomes) {
+    std::vector<sp::Message> messages;
+    messages.push_back(examples::message(sp::Role::System,
         "Answer the question using ONLY the provided context. Be concise. "
-        "If the context is insufficient, say so explicitly."});
-    cp.messages.push_back({"user",
-        "Question: " + question + "\n\nContext:\n" + context});
-    cp.temperature = 0.2f;
-    return p.complete(cp).message.content;
+        "If the context is insufficient, say so explicitly."));
+    messages.push_back(examples::message(sp::Role::User,
+        "Question: " + question + "\n\nContext:\n" + context));
+    ProviderControls controls;
+    controls.temperature = 0.2;
+    const auto outcome = run_stage(p, make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls),
+        outcomes);
+    return examples::visible_text(*outcome);
 }
 
 // =========================================================================
@@ -430,17 +372,8 @@ int main() {
             return 1;
         }
 
-        // SchemaProvider with the OpenRouter-compatible Responses schema.
-        const std::string model = "~deepseek/deepseek-v4-flash-latest";
-
-        llm::SchemaProvider::Config cfg;
-        cfg.schema_path     = "openai_responses";
-        cfg.api_key         = api_key;
-        cfg.base_url_override = "https://openrouter.ai/api";
-        cfg.default_model   = model;
-        cfg.timeout_seconds = 60;
-        cfg.provider_routing = {{"zdr", true}};
-        auto provider = llm::SchemaProvider::create(cfg);
+        auto provider = examples::make_openrouter_provider(
+            api_key, "responses", std::chrono::seconds(60));
 
         // Three questions chosen to exercise each branch of the router.
         // The verdict is LLM-driven, so the route a given run takes can
@@ -463,6 +396,7 @@ int main() {
         for (const auto& q : questions) {
             std::cout << "\n─────────────────────────────────────────────────────────\n"
                       << "Q: " << q << "\n";
+            StageOutcomes outcomes;
 
             // 1. Retrieve from KB
             auto hits = retrieve(q);
@@ -475,7 +409,7 @@ int main() {
             // 2. Evaluate
             Verdict v = hits.empty()
                 ? Verdict::Incorrect
-                : evaluate(*provider, q, kb_ctx);
+                : evaluate(*provider, q, kb_ctx, outcomes);
             const char* tag = v == Verdict::Correct   ? "CORRECT"
                             : v == Verdict::Ambiguous ? "AMBIGUOUS"
                                                       : "INCORRECT";
@@ -495,32 +429,32 @@ int main() {
             switch (v) {
                 case Verdict::Correct:
                     std::cout << "[route   ] refine(KB) → generate\n";
-                    final_ctx = refine(*provider, q, kb_ctx);
+                    final_ctx = refine(*provider, q, kb_ctx, outcomes);
                     break;
                 case Verdict::Incorrect: {
-                    auto rewritten = rewrite_query(*provider, q);
+                    auto rewritten = rewrite_query(*provider, q, outcomes);
                     std::cout << "[rewrite ] '" << rewritten << "'\n";
                     std::cout << "[route   ] web → refine(web) → generate (KB rejected)\n";
-                    auto web_raw = web_search(api_key, model, rewritten);
-                    final_ctx    = refine(*provider, q, web_raw);
+                    auto web_raw = web_search(*provider, rewritten, outcomes);
+                    final_ctx    = refine(*provider, q, web_raw, outcomes);
                     break;
                 }
                 case Verdict::Ambiguous: {
-                    auto rewritten = rewrite_query(*provider, q);
+                    auto rewritten = rewrite_query(*provider, q, outcomes);
                     std::cout << "[rewrite ] '" << rewritten << "'\n";
                     std::cout << "[route   ] refine(KB) + refine(web) → generate\n";
-                    auto web_raw = web_search(api_key, model, rewritten);
+                    auto web_raw = web_search(*provider, rewritten, outcomes);
                     final_ctx =
                         "## From the local knowledge base\n"
-                        + refine(*provider, q, kb_ctx) +
+                        + refine(*provider, q, kb_ctx, outcomes) +
                         "\n\n## From external web search\n"
-                        + refine(*provider, q, web_raw);
+                        + refine(*provider, q, web_raw, outcomes);
                     break;
                 }
             }
 
             // 4. Generate
-            auto answer = generate(*provider, q, final_ctx);
+            auto answer = generate(*provider, q, final_ctx, outcomes);
             std::cout << "\nA: " << answer << "\n";
         }
         return 0;

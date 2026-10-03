@@ -81,10 +81,11 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
-/** Exact publication binding required before a root Core dispatch can start. */
+/** Shared publication binding; expected_lease must first match the durable lease CAS. */
 NEOGRAPH_PROGRAM_API bool does_program_execution_lease_bind(
     const ProgramExecutionLease& lease,
-    const ProgramTransitionPublication& publication) noexcept;
+    const ProgramTransitionPublication& publication,
+    const ProgramExecutionLease* expected_lease) noexcept;
 
 /** Host-only, non-serializable evidence for one running safe-point publication. */
 class NEOGRAPH_PROGRAM_API ProgramGraphSafePointEvidence final {

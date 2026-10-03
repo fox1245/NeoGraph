@@ -19,13 +19,13 @@
 // Build:  cmake --build build --target cookbook_the_beast_live
 // Run:    ./build/cookbook_the_beast_live
 
-#include <neograph/async/run_sync.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/node.h>
-#include <neograph/llm/openai_provider.h>
+#include <neograph/llm/schema_provider.h>
 #include <neograph/neograph.h>
 
 #include "beast_common.h"
+#include "../../provider_example_support.h"
 #include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
@@ -83,22 +83,20 @@ int main(int argc, char** argv) {
     register_beast_node();
 
     const std::string model            = "~deepseek/deepseek-v4-flash-latest";
-    const json        provider_routing = {
-        {"zdr", true},
-        {"only", json::array({"morph"})},
-        {"allow_fallbacks", false},
-    };
+    sp::OpenRouterRouting provider_routing;
+    provider_routing.zdr = true;
+    provider_routing.only = {"morph"};
+    provider_routing.allow_fallbacks = false;
     // `zdr` enforces retention policy; the `only` constraint pins this sample
     // to Morph. OpenRouter's public provider metadata advertised Morph's
     // datacenters as US on 2026-08-08. This is not a generic residency API.
     // Source: https://openrouter.ai/docs/guides/routing/provider-selection
     // Source: https://openrouter.ai/docs/guides/features/zdr
-    auto provider =
-        neograph::llm::OpenAIProvider::create_shared({.api_key       = key,
-                                                      .base_url      = "https://openrouter.ai/api",
-                                                      .default_model = model,
-                                                      .timeout_seconds = 180,
-                                                      .provider_routing = provider_routing});
+    std::shared_ptr<neograph::Provider> provider =
+        examples::make_openrouter_provider(
+            key, "chat", std::chrono::seconds(180), std::move(provider_routing));
+    auto usage = std::make_shared<neograph::UsageAccumulator>();
+    beast::UsageReport usage_report(usage);
 
     ng::NodeContext ctx;
     ctx.provider = provider;
@@ -141,30 +139,30 @@ int main(int argc, char** argv) {
                              "from __start__ to __end__. Declare a \"trail\" channel with the "
                              "append reducer.";
 
-    std::vector<neograph::ChatMessage> convo = {{"system", sys}, {"user", task}};
+    std::vector<sp::Message> convo = {
+        neograph::portable_message({"system", sys}),
+        neograph::portable_message({"user", task})};
 
     // ---- Author → gate → (reject → repair)* loop, LIVE ----
     json accepted_core;
     for (int attempt = 1; attempt <= 3; ++attempt) {
         std::cout << "── Attempt #" << attempt << ": asking the model to write a harness ──\n";
-        neograph::CompletionParams p;
-        p.model        = model;
-        p.messages     = convo;
-        p.temperature  = 0.2f;
-        p.max_tokens   = 4000;  // reasoning model: leave room for thinking + JSON
-        p.extra_fields = {{"provider", provider_routing}};
-
-        neograph::ChatCompletion resp;
-        // invoke(params, nullptr) is the single-dispatch v1.0 entry; run_sync
-        // drives it to completion on a private io_context — the right sync
-        // bridge for a straight-line CLI driver like this.
+        neograph::ProviderControls controls;
+        controls.temperature = 0.2;
+        controls.max_output_tokens = 4000;
+        sp::runtime::Result resp;
         try {
-            resp = neograph::async::run_sync(provider->invoke(p, nullptr));
+            resp = provider->invoke(
+                neograph::make_provider_request(*provider, model, convo, {}, controls));
+            if (resp) usage->add(neograph::outcome_usage(*resp));
+            resp = neograph::outcome_or_throw(std::move(resp));
         } catch (const std::exception& e) {
             std::cerr << "  LLM error: " << e.what() << "\n";
             return 1;
         }
-        const std::string reply = resp.message.content;
+        const auto& response_messages = neograph::outcome_messages(*resp);
+        convo.insert(convo.end(), response_messages.begin(), response_messages.end());
+        const std::string reply = neograph::outcome_text(*resp);
         std::cout << "  model returned " << reply.size() << " chars of JSON.\n";
 
         json core_candidate;
@@ -172,9 +170,8 @@ int main(int argc, char** argv) {
             core_candidate = beast::extract_json_object(reply);
         } catch (const std::exception& e) {
             std::cout << "  UNPARSEABLE (" << e.what() << "); asking again.\n\n";
-            convo.push_back({"assistant", reply});
-            convo.push_back(
-                {"user", "That was not valid JSON. Output ONLY the JSON harness object."});
+            convo.push_back(neograph::portable_message(
+                {"user", "That was not valid JSON. Output ONLY the JSON harness object."}));
             continue;
         }
 
@@ -183,11 +180,11 @@ int main(int argc, char** argv) {
             std::cout << "  REJECTED at gate '" << v.gate << "':\n";
             std::cout << "    " << v.report.substr(0, 400) << "\n";
             std::cout << "  → feeding the compiler's diagnostics back to the model.\n\n";
-            convo.push_back({"assistant", core_candidate.dump()});
-            convo.push_back({"user", "The compiler REJECTED that harness at the '" + v.gate +
-                                         "' gate:\n" + v.report +
-                                         "\nFix ONLY what the diagnostics name. Output ONLY the "
-                                         "corrected JSON harness."});
+            convo.push_back(neograph::portable_message(
+                {"user", "The compiler REJECTED that harness at the '" + v.gate +
+                             "' gate:\n" + v.report +
+                             "\nFix ONLY what the diagnostics name. Output ONLY the "
+                             "corrected JSON harness."}));
             continue;
         }
 
@@ -215,6 +212,7 @@ int main(int argc, char** argv) {
     rc.thread_id = "beast-live";
     rc.input     = {{"trail", json::array()}};
     rc.max_steps = 20;
+    rc.usage = usage;
     auto result  = engine->run(rc);
 
     json final_trail = result.has_channel("trail") ? result.channel<json>("trail") : json::array();

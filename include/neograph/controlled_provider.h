@@ -1,7 +1,7 @@
 #pragma once
 
 #include <neograph/api.h>
-#include <neograph/completion_provider.h>
+#include <neograph/provider.h>
 #include <neograph/runtime_context.h>
 
 #include <asio/awaitable.hpp>
@@ -20,7 +20,7 @@ struct ProviderDispatchReceiptData {
     std::string assembly_receipt_id;
     std::string normalized_request_digest;
     std::string model;
-    CompletionMode mode = CompletionMode::COLLECT;
+    ProviderMode mode = ProviderMode::Collect;
 };
 
 /** Immutable proof that an assembled request was admitted to provider dispatch. */
@@ -36,7 +36,7 @@ public:
     const std::string& assembly_receipt_id() const noexcept;
     const std::string& normalized_request_digest() const noexcept;
     const std::string& model() const noexcept;
-    CompletionMode mode() const noexcept;
+    ProviderMode mode() const noexcept;
     const std::string& id() const noexcept;
     std::string serialize_canonical() const;
 
@@ -164,6 +164,18 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+class NEOGRAPH_API ProviderDispatchOutcomePersistenceError final : public ProviderOutcomeError {
+public:
+    ProviderDispatchOutcomePersistenceError(sp::runtime::Result outcome, std::exception_ptr cause,
+                                           std::exception_ptr delivery_error = {})
+        : ProviderOutcomeError("Provider outcome settlement could not be persisted",
+                               std::move(outcome), std::move(cause)),
+          delivery_error_(std::move(delivery_error)) {}
+    const std::exception_ptr& delivery_error() const noexcept { return delivery_error_; }
+private:
+    std::exception_ptr delivery_error_;
+};
+
 /**
  * Standalone write-ahead dispatch boundary. It is not wired into graph, Agent,
  * or Harness call sites; callers explicitly supply an assembled turn.
@@ -179,27 +191,31 @@ public:
     ControlledProvider(const ControlledProvider&) = delete;
     ControlledProvider& operator=(const ControlledProvider&) = delete;
 
-    ChatCompletion dispatch(std::string dispatch_id,
-                            const ContextAssemblyReceipt& assembly,
-                            CompletionRequest request);
-    ChatCompletion dispatch(std::string owner_scope, std::string dispatch_id,
-                            const ContextAssemblyReceipt& assembly,
-                            CompletionRequest request);
-    asio::awaitable<ChatCompletion> dispatch_async(std::string dispatch_id,
-                                                    const ContextAssemblyReceipt& assembly,
-                                                    CompletionRequest request);
-    asio::awaitable<ChatCompletion> dispatch_async(std::string owner_scope, std::string dispatch_id,
-                                                    const ContextAssemblyReceipt& assembly,
-                                                    CompletionRequest request);
+    sp::runtime::Result dispatch(std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, ProviderRequest request);
+    sp::runtime::Result dispatch(std::string owner_scope, std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(std::string owner_scope, std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, ProviderRequest request);
+    sp::runtime::Result dispatch_prepared(std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, PreparedProviderRequest request, ProviderBudgetClaim claim = {});
+    sp::runtime::Result dispatch_prepared(std::string owner_scope, std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, PreparedProviderRequest request, ProviderBudgetClaim claim = {});
+    asio::awaitable<sp::runtime::Result> dispatch_prepared_async(std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, PreparedProviderRequest request, ProviderBudgetClaim claim = {});
+    asio::awaitable<sp::runtime::Result> dispatch_prepared_async(std::string owner_scope, std::string dispatch_id,
+        const ContextAssemblyReceipt& assembly, PreparedProviderRequest request, ProviderBudgetClaim claim = {});
 
 private:
     struct Impl;
-    static asio::awaitable<ChatCompletion> dispatch_impl(
+    static asio::awaitable<sp::runtime::Result> dispatch_impl(
         std::shared_ptr<Impl> impl,
         std::string owner_scope,
         std::string dispatch_id,
         ContextAssemblyReceipt assembly,
-        CompletionRequest request);
+        PreparedProviderRequest request, ProviderBudgetClaim claim);
     std::shared_ptr<Impl> impl_;
 };
 

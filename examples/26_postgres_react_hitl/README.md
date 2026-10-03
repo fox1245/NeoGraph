@@ -12,8 +12,8 @@ Demonstrates two NeoGraph features end-to-end:
 
 The demo is intentionally **process-discontinuous**: the binary exits
 after producing the report, so when you `resume` you're a fresh process
-that must reload everything from PG. That's the whole point — proves
-the checkpoint actually crossed a process boundary.
+that reloads PG state and owner-private native history. PG alone is not
+sufficient for typed native resume.
 
 ## The scenario
 
@@ -102,6 +102,9 @@ have exactly one row total.
 
 ### Reference numbers from a real run
 
+Historical pre-cutover measurements, not execution evidence for the current
+typed provider migration. The transcript above is historical/illustrative too.
+
 A complete run-resume-resume cycle on the multimodal-RAG demo above
 (2 supervisor rounds × 2 researchers each, pinned DeepSeek via OpenRouter)
 produced these PG numbers:
@@ -132,13 +135,31 @@ into `supervisor_messages`.
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. Run the demo (see "scenario" above). The first `docker compose run`
-   triggers the `agent` image build (~1 min on a warm machine).
+3. Use Docker Compose >= 2.17 with BuildKit and set `SCHEMAPROVIDER_SOURCE`
+   to the actual SchemaProvider checkout (default `../../../SchemaProvider`,
+   relative to this directory). The Dockerfile installs `SchemaProvider::runtime`
+   from this named additional build context before building NeoGraph.
+4. Set a stable `NEOGRAPH_NATIVE_ARCHIVE_OWNER` in `.env`, then provision once:
+   ```
+   docker compose run --rm agent init-archive
+   ```
+5. Run the demo (see the scenario). Live calls require valid OpenRouter/Crawl4AI
+   credentials, network access, and provider credit; research/feedback rounds
+   incur model charges. No fixed cost or current execution success is asserted.
+
+Keep `pgdata`, `native-history`, and `native-keys` together across invocations.
+The archive and key use separate private volume parents; resume requires the
+same owner, compatible provider descriptor, original key, and archive records.
+`init-archive` provisions custody; do not regenerate keys to resume old threads.
+This is authenticated owner-private host custody, **not encryption or provider
+issuer proof**. Protect PG, backups, prompts, feedback, reports and `.env` too.
+Public diagnostics must not dump raw native records or archive/key contents.
+The CLI prints queries, feedback and reports: use a private terminal/log sink.
 
 When done:
 ```
-docker compose down       # stop services, keep PG volume
-docker compose down -v    # drop the PG volume too
+docker compose down       # keep PG, native-history and native-keys
+docker compose down -v    # delete all three; old native resume is lost
 ```
 
 ## Running the binary directly (no docker-compose for the agent)
@@ -147,9 +168,15 @@ You can also build the binary on the host and point it at the
 docker-compose-managed Postgres + Crawl4AI:
 
 ```
-cmake -B build -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
+# Load .env privately in the binary's working directory; keep archive paths stable.
+mkdir -m 700 .native-keys
+./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
 ./build/example_postgres_react_hitl resume <thread_id> "feedback"
 ./build/example_postgres_react_hitl status <thread_id>
@@ -221,9 +248,11 @@ HITL rounds in the thread.
   (→ Command(supervisor) with the feedback appended to
   `supervisor_messages` and the iteration counter reset). Both paths
   end the run cleanly so PG always has a coherent latest cp.
-- All three steps of the scenario (initial run, resume with feedback,
-  resume with approve) cross process boundaries — the engine state
-  lives entirely in PG between invocations.
+- All three steps cross process boundaries. PG stores portable graph state;
+  native continuation additionally needs the protected archive and original key.
+- C++ requests/events are typed and return the full immutable `sp::Outcome`;
+  portable report text is a projection, not native replay authority. This guide
+  documents source migration only, not a new build, test, or live qualification.
 
 ## Why no frontend?
 

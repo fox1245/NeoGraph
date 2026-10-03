@@ -15,7 +15,7 @@
 //   ./example_mcp_agent http://localhost:8000 "Recommend dog food for me"
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/graph/react_graph.h>
 #include <neograph/mcp/client.h>
 
@@ -45,14 +45,8 @@ int main(int argc, char* argv[]) {
     }
 
     // 2. Create LLM Provider
-    neograph::llm::OpenAIProvider::Config llm_config;
-    llm_config.api_key = api_key;
-    llm_config.base_url = "https://openrouter.ai/api";
-    llm_config.default_model = "~deepseek/deepseek-v4-flash-latest";
-    llm_config.provider_routing = {{"zdr", true}};
     auto provider = std::shared_ptr<neograph::Provider>(
-        neograph::llm::OpenAIProvider::create(llm_config)
-    );
+        examples::make_openrouter_provider(api_key));
 
     // 3. Discover tools from the MCP server
     std::cout << "[*] Connecting to MCP server: " << mcp_url << "\n";
@@ -73,14 +67,19 @@ int main(int argc, char* argv[]) {
         provider,
         std::move(tools),
         "You are a helpful assistant. Use the available tools to answer the user's question. "
-        "Always respond in the same language as the user's question."
+        "Always respond in the same language as the user's question.",
+        examples::openrouter_model
     );
 
     // 5. Execute
     neograph::graph::RunConfig config;
-    config.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", question}}
-    })}};
+    config.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
+    config.on_provider_event = [](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+            delta && delta->payload.kind == sp::PartKind::Text &&
+            delta->payload.channel == sp::DeltaChannel::Content)
+            std::cout << delta->payload.bytes << std::flush;
+    };
     config.max_steps = 20;
 
     std::cout << "User: " << question << "\n\n";
@@ -93,9 +92,6 @@ int main(int argc, char* argv[]) {
                     if (event.node_name == "tools") {
                         std::cerr << "\n[tool call in progress...]\n";
                     }
-                    break;
-                case neograph::graph::GraphEvent::Type::LLM_TOKEN:
-                    std::cout << event.data.get<std::string>() << std::flush;
                     break;
                 default:
                     break;

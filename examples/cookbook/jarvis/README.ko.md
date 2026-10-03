@@ -3,7 +3,15 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-> Cloud 제로 의존성, 단일 Raspberry Pi에서 실행.
+## 타입 제공자 전환 — 소스 상태
+
+C++ 라우터·합성기·전문가 픽스처는 타입 `ProviderRequest`, `sp::Message`, `sp::Event` 및 전체 불변 `sp::Outcome` (`sp::runtime::Result`)을 사용하며 기존 문자열 응답 API가 아니다. `src/provider_support.h`의 Jarvis/coder/researcher mock은 고정 라우터 JSON, 사용자 텍스트 echo, 명시적인 가상 연구 응답을 제공한다. 키나 네트워크 제공자는 필요 없지만 실제 연구·추론은 아니다. 아래 기존 설정/프로필 경로는 이 문서 변경으로 생성하거나 고치지 않는다.
+
+로컬 음성은 선택 사항이며 선택한 whisper/Moonshine 모델, ONNX Runtime/Supertonic 자산, miniaudio 및 사용 가능한 마이크·스피커가 필요하다. 텍스트/mock 실행은 음성 동작의 증거가 아니다. 클라우드 불필요는 로컬/mock에만 해당한다. 라이브 요청에는 승인된 `OPENROUTER_API_KEY`, 네트워크·제공자 용량이 필요하며 프롬프트, 대화 메모리, 첨부 도구/위임 결과를 OpenRouter로 전송한다. 모델은 고정되어 있고 네이티브 요청의 ZDR은 지역 상주 보장이 아니다. 키를 로그·저장소에 넣지 않는다. nullable 토큰 사용량은 청구액이 아니며 비용에는 현재 엔드포인트/모델 가격과 실제 청구 사용량이 필요하다.
+
+`[jarvis:ttft]`는 비어 있지 않은 첫 `sp::PartDelta` 중 `PartKind::Text`와 `DeltaChannel::Content`에만 발생하며 사용량·추론·헤더 이벤트는 제외한다. 첫 합성 텍스트 시점이지 실제 TTS 청취 시작이 아니다. Python REPL/벤치 프로토콜 드라이버는 그대로이고 타입 Python 제공자 바인딩은 유예되었다. 아래 시간·실행 주장은 모두 과거 기록이며 전환된 C++ 실행 증거가 아니다. 이번 변경은 소스 대조 문서화만 했고 빌드·벤치·음성/라이브 실행은 하지 않았다.
+
+> 로컬/mock은 클라우드 제공자가 필요 없으며 선택적 음성은 로컬 자산·장치가 필요하다.
 > 마이크는 Tony, NeoGraph는 JARVIS, 도구/전문가는 JARVIS의 부하.
 
 이 쿡북은 **아닙니다** "음성 TTS 예제". 이는 NeoGraph의 멀티에이전트 프리미티브 — MCP 도구, 양방향 A2A, 비동기 병렬, Store 메모리, ReAct 서브그래프 — **단 한 줄의 음성으로 엮어낸** 데모입니다.

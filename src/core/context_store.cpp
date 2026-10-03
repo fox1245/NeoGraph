@@ -60,6 +60,7 @@ void validate_range(const ContextHistoryRange& range) {
 struct InMemoryContextStore::Impl {
     struct Feed {
         std::map<std::uint64_t, std::string> canonical_records;
+        std::map<std::uint64_t, RuntimeHistoryRecord> records;
         std::map<std::string, std::uint64_t, std::less<>> message_sequences;
         std::string head_id;
     };
@@ -73,6 +74,22 @@ InMemoryContextStore::InMemoryContextStore() : impl_(std::make_unique<Impl>()) {
 InMemoryContextStore::~InMemoryContextStore() = default;
 InMemoryContextStore::InMemoryContextStore(InMemoryContextStore&&) noexcept = default;
 InMemoryContextStore& InMemoryContextStore::operator=(InMemoryContextStore&&) noexcept = default;
+
+std::vector<RuntimeHistoryRecord> ContextStore::hydrate_records(
+    const ContextHistoryRange& range) const {
+    const auto jsonl = hydrate_history(range);
+    std::vector<RuntimeHistoryRecord> records;
+    std::size_t start = 0;
+    while (start < jsonl.size()) {
+        const auto end = jsonl.find('\n', start);
+        records.push_back(RuntimeHistoryRecord::parse(
+            std::string_view(jsonl).substr(start,
+                end == std::string::npos ? jsonl.size() - start : end - start)));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return records;
+}
 
 std::optional<RuntimeHistoryRecord> ContextStore::history_record_by_message_id(
     const ContextStoreFeed& feed, std::string_view message_id) const {
@@ -93,30 +110,18 @@ std::optional<RuntimeHistoryRecord> ContextStore::history_record_by_message_id(
     while (through != 0) {
         const auto from = through > 4 ? through - 3 : 1;
         const auto range = snapshot_history(feed, from, through);
-        const auto hydrated = hydrate_history(range);
-        if (hydrated.size() > 64U * 1024U * 1024U -
-                                  std::min<std::uint64_t>(
-                                      retained_bytes, 64U * 1024U * 1024U)) {
-            throw std::invalid_argument(
-                "Context history lookup exceeds its byte bound");
-        }
-        retained_bytes += static_cast<std::uint64_t>(hydrated.size());
-        std::size_t start = 0;
-        while (start < hydrated.size()) {
-            const auto end = hydrated.find('\n', start);
-            const auto bytes = end == std::string::npos
-                ? hydrated.size() - start : end - start;
-            auto record = RuntimeHistoryRecord::parse(
-                std::string_view(hydrated).substr(start, bytes));
-            if (record.message_id() == message_id) {
-                if (found) {
-                    throw std::invalid_argument(
-                        "Context history message id is not unique");
-                }
-                found = std::move(record);
+        const auto records = hydrate_records(range);
+        for (const auto& record : records) {
+            const auto bytes = record.serialize_canonical().size();
+            if (bytes > 64U * 1024U * 1024U -
+                            std::min<std::uint64_t>(retained_bytes, 64U * 1024U * 1024U)) {
+                throw std::invalid_argument("Context history lookup exceeds its byte bound");
             }
-            if (end == std::string::npos) break;
-            start = end + 1;
+            retained_bytes += static_cast<std::uint64_t>(bytes);
+            if (record.message_id() == message_id) {
+                if (found) throw std::invalid_argument("Context history message id is not unique");
+                found = record;
+            }
         }
         through = from - 1;
     }
@@ -169,6 +174,7 @@ ContextStoreAppendResult InMemoryContextStore::append_history(
                        ? impl_->feeds.emplace(key, Impl::Feed{}).first->second
                        : feed_it->second;
     stored.canonical_records.emplace(record.sequence(), canonical);
+    stored.records.emplace(record.sequence(), record);
     stored.message_sequences.emplace(record.message_id(), record.sequence());
     stored.head_id = record.id();
     return ContextStoreAppendResult::Appended;
@@ -198,11 +204,11 @@ InMemoryContextStore::history_record_by_message_id(
     const auto sequence = found->second.message_sequences.find(
         std::string(message_id));
     if (sequence == found->second.message_sequences.end()) return std::nullopt;
-    const auto encoded = found->second.canonical_records.find(sequence->second);
-    if (encoded == found->second.canonical_records.end()) {
+    const auto stored = found->second.records.find(sequence->second);
+    if (stored == found->second.records.end()) {
         throw std::invalid_argument("Context history message index is corrupt");
     }
-    auto record = RuntimeHistoryRecord::parse(encoded->second);
+    auto record = stored->second;
     if (record.feed_id() != feed.feed_id ||
         record.sequence() != sequence->second ||
         record.message_id() != message_id) {
@@ -241,7 +247,8 @@ ContextHistoryRange InMemoryContextStore::snapshot_history(
     return range;
 }
 
-std::string InMemoryContextStore::hydrate_history(const ContextHistoryRange& range) const {
+std::vector<RuntimeHistoryRecord> InMemoryContextStore::hydrate_records(
+    const ContextHistoryRange& range) const {
     validate_range(range);
     if (range.through_sequence - range.from_sequence >= MAX_RANGE_RECORDS) {
         throw std::invalid_argument("Context history range exceeds the record limit");
@@ -250,13 +257,15 @@ std::string InMemoryContextStore::hydrate_history(const ContextHistoryRange& ran
     const auto found = impl_->feeds.find({range.owner_id, range.feed_id});
     if (found == impl_->feeds.end()) throw std::out_of_range("Context history feed is not present");
     std::string jsonl;
+    std::vector<RuntimeHistoryRecord> records;
+    records.reserve(range.through_sequence - range.from_sequence + 1);
     std::optional<std::string> predecessor;
     if (range.from_sequence > 1) {
-        const auto previous = found->second.canonical_records.find(range.from_sequence - 1);
-        if (previous == found->second.canonical_records.end()) {
+        const auto previous = found->second.records.find(range.from_sequence - 1);
+        if (previous == found->second.records.end()) {
             throw std::invalid_argument("Context history feed has a broken chain");
         }
-        predecessor = RuntimeHistoryRecord::parse(previous->second).id();
+        predecessor = previous->second.id();
     }
     for (std::uint64_t sequence = range.from_sequence; sequence <= range.through_sequence; ++sequence) {
         const auto stored = found->second.canonical_records.find(sequence);
@@ -264,7 +273,7 @@ std::string InMemoryContextStore::hydrate_history(const ContextHistoryRange& ran
             stored->second.size() + (jsonl.empty() ? 0u : 1u) > MAX_RANGE_BYTES - jsonl.size()) {
             throw std::invalid_argument("Context history range cannot be hydrated exactly");
         }
-        const auto record = RuntimeHistoryRecord::parse(stored->second);
+        const auto& record = found->second.records.at(sequence);
         if (record.feed_id() != range.feed_id || record.sequence() != sequence ||
             (sequence == 1 && record.predecessor_id()) ||
             (sequence > 1 && (!record.predecessor_id() ||
@@ -274,9 +283,20 @@ std::string InMemoryContextStore::hydrate_history(const ContextHistoryRange& ran
         predecessor = record.id();
         if (!jsonl.empty()) jsonl.push_back('\n');
         jsonl += stored->second;
+        records.push_back(record);
     }
     if (range_digest(jsonl) != range.digest) {
         throw std::invalid_argument("Context history range digest does not match stored records");
+    }
+    return records;
+}
+
+std::string InMemoryContextStore::hydrate_history(const ContextHistoryRange& range) const {
+    const auto records = hydrate_records(range);
+    std::string jsonl;
+    for (const auto& record : records) {
+        if (!jsonl.empty()) jsonl.push_back('\n');
+        jsonl += record.serialize_canonical();
     }
     return jsonl;
 }

@@ -2,6 +2,7 @@
 
 #include <neograph/runtime_turn_assembler.h>
 #include <neograph/graph/cancel.h>
+#include "fixtures/typed_provider.h"
 
 using namespace neograph;
 
@@ -9,13 +10,54 @@ namespace {
 
 std::string sha(char value) { return "sha256:" + std::string(64, value); }
 
+class AssemblyProvider final : public test::LocalProvider {
+public:
+    AssemblyProvider()
+        : LocalProvider([](ProviderRequest, const PreparedProviderRequest&,
+                           const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+              throw std::logic_error("assembly must not dispatch");
+              co_return test::success("");
+          }) {}
+
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        auto messages = provider_request_messages(request);
+        auto prepared = LocalProvider::prepare(std::move(request));
+        if (prepared.valid()) admitted_messages = std::move(messages);
+        return prepared;
+    }
+    std::vector<sp::Message> admitted_messages;
+};
+
+AssemblyProvider assembly_provider() { return {}; }
+
+ProviderRequest assembly_template(ProviderMode mode = ProviderMode::Collect) {
+    auto request = test::request("model", "", mode);
+    std::get<sp::chat::Request>(request.payload).canonical_messages.clear();
+    return request;
+}
+
+const std::vector<sp::Message>& admitted_messages(
+    const AssemblyProvider& provider, const PreparedProviderRequest& request) {
+    if (!request.valid()) throw std::logic_error("assembly request not admitted");
+    // Observe the actual typed Provider admission boundary, independent of
+    // whether a codec chooses string or content-block wire representation.
+    return provider.admitted_messages;
+}
+
+void expect_text(const sp::Message& message, sp::Role role, std::string_view text) {
+    EXPECT_EQ(message.role, role);
+    ASSERT_EQ(message.parts.size(), 1U);
+    ASSERT_TRUE(std::holds_alternative<sp::Text>(message.parts.front()));
+    EXPECT_EQ(std::get<sp::Text>(message.parts.front()).value, text);
+}
+
 RuntimeHistoryRecord history(std::uint64_t sequence, std::optional<std::string> predecessor) {
     RuntimeHistoryRecordData data;
     data.feed_id = "feed";
     data.sequence = sequence;
     data.message_id = "message_" + std::to_string(sequence);
     data.trust = RuntimeTrustClass::UntrustedInput;
-    data.message = {"user", "user_" + std::to_string(sequence)};
+    data.message = test::message("user_" + std::to_string(sequence), sp::Role::User);
     data.predecessor_id = std::move(predecessor);
     return RuntimeHistoryRecord::create(std::move(data));
 }
@@ -89,25 +131,20 @@ TEST(RuntimeTurnAssembler, VerifiesEpochAndProducesDeterministicMergedRequest) {
     epoch_data.artifact_ids = {late.id(), early.id()};
     const auto epoch = ContextEpoch::create(std::move(epoch_data));
 
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     EXPECT_THROW(RuntimeTurnAssembler(store).assemble(
-                     "owner", epoch, CompletionRequest::stream(params)),
+                     provider, "owner", epoch, assembly_template(ProviderMode::Stream)),
                  std::invalid_argument);
     auto turn = RuntimeTurnAssembler(store, {early.id()}).assemble(
-        "owner", epoch, CompletionRequest::stream(params));
+        provider, "owner", epoch, assembly_template(ProviderMode::Stream));
 
-    ASSERT_EQ(turn.request.mode(), CompletionMode::STREAM);
-    ASSERT_FALSE(turn.request.on_chunk());
-    ASSERT_EQ(turn.request.params().messages.size(), 4u);
-    EXPECT_EQ(turn.request.params().messages[0].content, "user_1");
-    EXPECT_EQ(turn.request.params().messages[0].role, "user");
-    EXPECT_EQ(turn.request.params().messages[1].content, "early");
-    EXPECT_EQ(turn.request.params().messages[1].role, "system");
-    EXPECT_EQ(turn.request.params().messages[2].content, "user_2");
-    EXPECT_EQ(turn.request.params().messages[2].role, "user");
-    EXPECT_EQ(turn.request.params().messages[3].content, "late");
-    EXPECT_EQ(turn.request.params().messages[3].role, "user");
+    ASSERT_EQ(turn.request.mode(), ProviderMode::Stream);
+    const auto& messages = admitted_messages(provider, turn.request);
+    ASSERT_EQ(messages.size(), 4u);
+    expect_text(messages[0], sp::Role::User, "user_1");
+    expect_text(messages[1], sp::Role::System, "early");
+    expect_text(messages[2], sp::Role::User, "user_2");
+    expect_text(messages[3], sp::Role::User, "late");
     EXPECT_EQ(turn.assembly_receipt.context_epoch_id(), epoch.id());
     EXPECT_EQ(turn.assembly_receipt.required_skill_artifact_ids(), std::vector<std::string>{early.id()});
     EXPECT_LE(turn.assembly_receipt.mandatory_input_tokens(),
@@ -125,9 +162,9 @@ TEST(RuntimeTurnAssembler, DeliversOnlyExplicitUntrustedSupplementalAsUserData) 
     assistant_data.sequence = 2;
     assistant_data.message_id = "assistant_2";
     assistant_data.trust = RuntimeTrustClass::ModelOutput;
-    assistant_data.message.role = "assistant";
-    assistant_data.message.content = "working";
-    assistant_data.message.tool_calls = {ToolCall{"call_1", "read", "{}"}};
+    assistant_data.message = test::message("working");
+    assistant_data.message.parts.emplace_back(
+        sp::ToolCall{"call_1", "read", sp::ToolCallKind::ClientExecuted, test::document("{}")});
     assistant_data.predecessor_id = first.id();
     const auto assistant = RuntimeHistoryRecord::create(std::move(assistant_data));
     ASSERT_EQ(store.append_history(feed, assistant, first.id()),
@@ -137,11 +174,8 @@ TEST(RuntimeTurnAssembler, DeliversOnlyExplicitUntrustedSupplementalAsUserData) 
     tool_data.sequence = 3;
     tool_data.message_id = "tool_3";
     tool_data.trust = RuntimeTrustClass::ToolOutput;
-    tool_data.message.role = "tool";
-    tool_data.message.content = "file contents";
-    tool_data.message.tool_call_id = "call_1";
-    tool_data.message.tool_name = "read";
-    tool_data.message.tool_status = "succeeded";
+    tool_data.message.role = sp::Role::Tool;
+    tool_data.message.parts = {sp::ToolResult{"call_1", "file contents", false}};
     tool_data.predecessor_id = assistant.id();
     const auto tool = RuntimeHistoryRecord::create(std::move(tool_data));
     ASSERT_EQ(store.append_history(feed, tool, assistant.id()),
@@ -170,20 +204,22 @@ TEST(RuntimeTurnAssembler, DeliversOnlyExplicitUntrustedSupplementalAsUserData) 
 
     RuntimeContextRequirements requirements;
     requirements.required_artifact_ids = {constraint.id(), supplemental.id()};
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     const auto turn = RuntimeTurnAssembler(store, 4096, requirements).assemble(
-        "owner", epoch, CompletionRequest::collect(params));
-    ASSERT_EQ(turn.request.params().messages.size(), 5u);
-    EXPECT_EQ(turn.request.params().messages[0].role, "system");
-    EXPECT_EQ(turn.request.params().messages[0].content, "Host-owned constraint.");
-    EXPECT_EQ(turn.request.params().messages[1].role, "user");
-    EXPECT_EQ(turn.request.params().messages[1].content, "user_1");
-    EXPECT_EQ(turn.request.params().messages[2].role, "assistant");
-    EXPECT_EQ(turn.request.params().messages[3].role, "tool");
-    EXPECT_EQ(turn.request.params().messages[4].role, "user");
-    EXPECT_EQ(turn.request.params().messages[4].content,
-              supplemental.content().get<std::string>());
+        provider, "owner", epoch, assembly_template());
+    const auto& messages = admitted_messages(provider, turn.request);
+    ASSERT_EQ(messages.size(), 5u);
+    expect_text(messages[0], sp::Role::System, "Host-owned constraint.");
+    expect_text(messages[1], sp::Role::User, "user_1");
+    EXPECT_EQ(messages[2].role, sp::Role::Assistant);
+    ASSERT_EQ(messages[2].parts.size(), 2U);
+    EXPECT_EQ(std::get<sp::ToolCall>(messages[2].parts[1]).id, "call_1");
+    EXPECT_EQ(messages[3].role, sp::Role::Tool);
+    ASSERT_EQ(messages[3].parts.size(), 1U);
+    const auto& result = std::get<sp::ToolResult>(messages[3].parts[0]);
+    EXPECT_EQ(result.tool_use_id, "call_1");
+    EXPECT_EQ(result.content, "file contents");
+    expect_text(messages[4], sp::Role::User, supplemental.content().get<std::string>());
     EXPECT_GT(turn.assembly_receipt.mandatory_input_tokens(), 0u);
 }
 
@@ -199,8 +235,9 @@ TEST(RuntimeTurnAssembler, PlacesDerivedPrefixBeforeARecentTailWithoutUser) {
     assistant_data.sequence = 2;
     assistant_data.message_id = "assistant_2";
     assistant_data.trust = RuntimeTrustClass::ModelOutput;
-    assistant_data.message.role = "assistant";
-    assistant_data.message.tool_calls = {ToolCall{"call_1", "read", "{}"}};
+    assistant_data.message.role = sp::Role::Assistant;
+    assistant_data.message.parts = {
+        sp::ToolCall{"call_1", "read", sp::ToolCallKind::ClientExecuted, test::document("{}")}};
     assistant_data.predecessor_id = first.id();
     const auto assistant = RuntimeHistoryRecord::create(std::move(assistant_data));
     ASSERT_EQ(store.append_history(feed, assistant, first.id()),
@@ -211,10 +248,8 @@ TEST(RuntimeTurnAssembler, PlacesDerivedPrefixBeforeARecentTailWithoutUser) {
     tool_data.sequence = 3;
     tool_data.message_id = "tool_3";
     tool_data.trust = RuntimeTrustClass::ToolOutput;
-    tool_data.message.role = "tool";
-    tool_data.message.content = "recent result";
-    tool_data.message.tool_call_id = "call_1";
-    tool_data.message.tool_name = "read";
+    tool_data.message.role = sp::Role::Tool;
+    tool_data.message.parts = {sp::ToolResult{"call_1", "recent result", false}};
     tool_data.predecessor_id = assistant.id();
     const auto tool = RuntimeHistoryRecord::create(std::move(tool_data));
     ASSERT_EQ(store.append_history(feed, tool, assistant.id()),
@@ -248,17 +283,15 @@ TEST(RuntimeTurnAssembler, PlacesDerivedPrefixBeforeARecentTailWithoutUser) {
     const auto epoch = ContextEpoch::create(std::move(epoch_data));
     RuntimeContextRequirements requirements;
     requirements.required_artifact_ids = {prefix.id()};
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     const auto turn = RuntimeTurnAssembler(store, 4096, requirements).assemble(
-        "owner", epoch, CompletionRequest::collect(params));
+        provider, "owner", epoch, assembly_template());
 
-    ASSERT_EQ(turn.request.params().messages.size(), 3U);
-    EXPECT_EQ(turn.request.params().messages[0].role, "user");
-    EXPECT_EQ(turn.request.params().messages[0].content,
-              prefix.content().get<std::string>());
-    EXPECT_EQ(turn.request.params().messages[1].role, "assistant");
-    EXPECT_EQ(turn.request.params().messages[2].role, "tool");
+    const auto& messages = admitted_messages(provider, turn.request);
+    ASSERT_EQ(messages.size(), 3U);
+    expect_text(messages[0], sp::Role::User, prefix.content().get<std::string>());
+    EXPECT_EQ(messages[1].role, sp::Role::Assistant);
+    EXPECT_EQ(messages[2].role, sp::Role::Tool);
 }
 
 TEST(RuntimeTurnAssembler, StrictAssemblyRequiresAndEnforcesInputBudget) {
@@ -276,16 +309,16 @@ TEST(RuntimeTurnAssembler, StrictAssemblyRequiresAndEnforcesInputBudget) {
     epoch_data.raw_window_digest = raw.digest;
     epoch_data.guarantee_profile = RuntimeGuaranteeProfile::Strict;
     const auto epoch = ContextEpoch::create(std::move(epoch_data));
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     EXPECT_THROW(RuntimeTurnAssembler(store).assemble(
-                     "owner", epoch, CompletionRequest::collect(params)),
+                     provider, "owner", epoch, assembly_template()),
                  std::invalid_argument);
     EXPECT_THROW(RuntimeTurnAssembler(store, {}, 1).assemble(
-                     "owner", epoch, CompletionRequest::collect(params)),
+                     provider, "owner", epoch, assembly_template()),
                  ContextBudgetBlocked);
-    EXPECT_NO_THROW(RuntimeTurnAssembler(store, {}, 1024).assemble(
-        "owner", epoch, CompletionRequest::collect(params)));
+    const auto turn = RuntimeTurnAssembler(store, {}, 1024).assemble(
+        provider, "owner", epoch, assembly_template());
+    expect_text(admitted_messages(provider, turn.request)[0], sp::Role::User, "user_1");
 }
 
 TEST(RuntimeTurnAssembler, EnforcesConfiguredRequiredSkillsAndUserAnchor) {
@@ -297,10 +330,9 @@ TEST(RuntimeTurnAssembler, EnforcesConfiguredRequiredSkillsAndUserAnchor) {
     omitted_data.sequence = 1;
     omitted_data.raw_window_digest = sha('e');
     const auto omitted = ContextEpoch::create(std::move(omitted_data));
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     EXPECT_THROW(RuntimeTurnAssembler(store, {skill.id()}).assemble(
-                     "owner", omitted, CompletionRequest::collect(params)), std::invalid_argument);
+                     provider, "owner", omitted, assembly_template()), std::invalid_argument);
     EXPECT_THROW(RuntimeTurnAssembler(store, {skill.id(), skill.id()}), std::invalid_argument);
     EXPECT_THROW(RuntimeTurnAssembler(store, {"not-an-identity"}), std::invalid_argument);
 
@@ -311,7 +343,7 @@ TEST(RuntimeTurnAssembler, EnforcesConfiguredRequiredSkillsAndUserAnchor) {
     no_user_data.artifact_ids = {skill.id()};
     const auto no_user = ContextEpoch::create(std::move(no_user_data));
     EXPECT_THROW(RuntimeTurnAssembler(store, {skill.id()}).assemble(
-                     "owner", no_user, CompletionRequest::collect(params)), std::invalid_argument);
+                     provider, "owner", no_user, assembly_template()), std::invalid_argument);
 }
 
 TEST(RuntimeTurnAssembler, EnforcesGeneralRequiredContextAndCountsMandatoryTokens) {
@@ -333,12 +365,11 @@ TEST(RuntimeTurnAssembler, EnforcesGeneralRequiredContextAndCountsMandatoryToken
     epoch_data.raw_window_digest = raw.digest;
     epoch_data.artifact_ids = {constraint.id()};
     const auto epoch = ContextEpoch::create(std::move(epoch_data));
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     RuntimeContextRequirements requirements;
     requirements.required_artifact_ids = {constraint.id()};
     const auto turn = RuntimeTurnAssembler(store, 1000, requirements).assemble(
-        "owner", epoch, CompletionRequest::collect(params));
+        provider, "owner", epoch, assembly_template());
     EXPECT_GT(turn.assembly_receipt.mandatory_input_tokens(), 0u);
     EXPECT_TRUE(turn.assembly_receipt.required_skill_artifact_ids().empty());
 
@@ -351,55 +382,61 @@ TEST(RuntimeTurnAssembler, EnforcesGeneralRequiredContextAndCountsMandatoryToken
     omitted_data.raw_window_digest = raw.digest;
     const auto omitted = ContextEpoch::create(std::move(omitted_data));
     EXPECT_THROW(RuntimeTurnAssembler(store, 1000, requirements).assemble(
-                     "owner", omitted, CompletionRequest::collect(params)),
+                     provider, "owner", omitted, assembly_template()),
                  std::invalid_argument);
 }
 
 TEST(RuntimeTurnAssembler, NormalizedDigestCoversRequestShapeButExcludesCancellationIdentity) {
-    CompletionParams params;
-    params.model = "model";
-    params.messages = {{"user", "hello"}};
-    params.temperature = 0.2f;
-    params.max_tokens = 12;
-    params.timeout_seconds = 3;
-    params.extra_fields = json{{"reasoning", "low"}};
-    params.tools = {{"tool", "description", json{{"type", "object"}}}};
-    const auto baseline = RuntimeTurnAssembler::normalized_request_digest(
-        CompletionRequest::collect(params));
-    auto cancellation_variant = params;
+    auto provider = assembly_provider();
+    auto request = test::request("model", "hello");
+    auto& payload = std::get<sp::chat::Request>(request.payload);
+    payload.temperature = 0.2;
+    payload.max_output_tokens = 12;
+    payload.reasoning_effort = "low";
+    payload.tools = {{"tool", "description", test::document(R"({"type":"object"})")}};
+    auto digest = [&provider](ProviderRequest request) {
+        const auto prepared = provider.prepare(std::move(request));
+        if (!prepared.valid()) throw std::logic_error("digest input not admitted");
+        return RuntimeTurnAssembler::normalized_request_digest(prepared);
+    };
+    const auto baseline = digest(request);
+    auto cancellation_variant = request;
     cancellation_variant.cancel_token = std::make_shared<graph::CancelToken>();
-    EXPECT_EQ(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(cancellation_variant)));
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::stream(params)));
-    auto changed = params;
-    changed.model = "other-model";
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
-    changed = params;
-    changed.messages[0].content = "other";
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
-    changed = params;
-    changed.temperature = 0.3f;
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
-    changed = params;
-    changed.extra_fields = json{{"reasoning", "high"}};
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
-    changed = params;
-    changed.tools[0].description = "other description";
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
-    changed = params;
-    changed.max_tokens = 13;
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
-    changed = params;
-    changed.timeout_seconds = 4;
-    EXPECT_NE(baseline, RuntimeTurnAssembler::normalized_request_digest(
-                            CompletionRequest::collect(changed)));
+    EXPECT_EQ(baseline, digest(std::move(cancellation_variant)));
+    auto changed = request;
+    changed.mode = ProviderMode::Stream;
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    changed = request;
+    std::get<sp::chat::Request>(changed.payload).model = "other-model";
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    changed = request;
+    std::get<sp::chat::Request>(changed.payload).canonical_messages[0] =
+        test::message("other", sp::Role::User);
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    changed = request;
+    std::get<sp::chat::Request>(changed.payload).temperature = 0.3;
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    changed = request;
+    std::get<sp::chat::Request>(changed.payload).reasoning_effort = "high";
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    changed = request;
+    std::get<sp::chat::Request>(changed.payload).tools[0].description = "other description";
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    changed = request;
+    std::get<sp::chat::Request>(changed.payload).max_output_tokens = 13;
+    EXPECT_NE(baseline, digest(std::move(changed)));
+    // Deadline authority is pinned on the admitted handle, separate from the
+    // body digest; changing it must not masquerade as a change to wire controls.
+    request.options.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto pinned = provider.prepare(request);
+    ASSERT_TRUE(pinned.valid());
+    EXPECT_EQ(pinned.deadline(), *request.options.deadline);
+    EXPECT_EQ(baseline, RuntimeTurnAssembler::normalized_request_digest(pinned));
+    request.options.deadline = *request.options.deadline + std::chrono::seconds(1);
+    const auto later = provider.prepare(request);
+    ASSERT_TRUE(later.valid());
+    EXPECT_EQ(later.deadline(), *request.options.deadline);
+    EXPECT_EQ(baseline, RuntimeTurnAssembler::normalized_request_digest(later));
 }
 
 TEST(RuntimeTurnAssembler, RendersOnlyExactTextObjectArtifacts) {
@@ -424,11 +461,10 @@ TEST(RuntimeTurnAssembler, RendersOnlyExactTextObjectArtifacts) {
     epoch_data.raw_window_digest = raw.digest;
     epoch_data.artifact_ids = {object.id()};
     const auto epoch = ContextEpoch::create(std::move(epoch_data));
-    CompletionParams params;
-    params.model = "model";
+    auto provider = assembly_provider();
     const auto turn = RuntimeTurnAssembler(store).assemble(
-        "owner", epoch, CompletionRequest::collect(params));
-    EXPECT_EQ(turn.request.params().messages[0].content, "rendered");
+        provider, "owner", epoch, assembly_template());
+    expect_text(admitted_messages(provider, turn.request)[0], sp::Role::User, "rendered");
 
     ContextArtifactData extra_data;
     extra_data.producer_id = "extra";
@@ -446,8 +482,8 @@ TEST(RuntimeTurnAssembler, RendersOnlyExactTextObjectArtifacts) {
     extra_epoch_data.raw_window_digest = raw.digest;
     extra_epoch_data.artifact_ids = {extra.id()};
     EXPECT_THROW(RuntimeTurnAssembler(store).assemble(
-                     "owner", ContextEpoch::create(std::move(extra_epoch_data)),
-                     CompletionRequest::collect(params)),
+                     provider, "owner", ContextEpoch::create(std::move(extra_epoch_data)),
+                     assembly_template()),
                  std::invalid_argument);
 }
 
@@ -467,12 +503,11 @@ TEST(RuntimeTurnAssembler, RejectsTemplateMessagesAndUnsupportedArtifactRenderin
     epoch_data.raw_window_digest = sha('d');
     epoch_data.artifact_ids = {unsupported.id()};
     const auto epoch = ContextEpoch::create(std::move(epoch_data));
-    CompletionParams params;
-    params.model = "model";
-    params.messages.push_back({"user", "injected"});
-    EXPECT_THROW(RuntimeTurnAssembler(store).assemble("owner", epoch, CompletionRequest::collect(params)),
+    auto provider = assembly_provider();
+    auto request = test::request("model", "injected");
+    EXPECT_THROW(RuntimeTurnAssembler(store).assemble(provider, "owner", epoch, request),
                  std::invalid_argument);
-    params.messages.clear();
-    EXPECT_THROW(RuntimeTurnAssembler(store).assemble("owner", epoch, CompletionRequest::collect(params)),
+    std::get<sp::chat::Request>(request.payload).canonical_messages.clear();
+    EXPECT_THROW(RuntimeTurnAssembler(store).assemble(provider, "owner", epoch, request),
                  std::invalid_argument);
 }

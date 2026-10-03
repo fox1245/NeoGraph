@@ -5,6 +5,7 @@
 This policy applies to C++ consumers of installed NeoGraph static and shared
 libraries. Python wheel users receive the matching extension and libraries as
 one package and must not replace individual bundled libraries.
+The typed provider cutover is a mandatory recompile boundary, not the earlier permanent-compatibility plan. NeoGraph retains its pre-v1 loader naming; this does not make old provider objects compatible. Install matching NeoGraph headers/libraries and SchemaProvider SDK headers/libraries atomically. SDK interface revision 3 and `libsp_*.so.3` are a separate shared ABI with out-of-line capability gates; unstable package `0.0.0` is not a stable release. The SDK runtime/archive currently requires Linux/POSIX. Historical Windows/macOS naming examples below are packaging policy, not proof that the new dependency runs there. Python provider bindings/wrappers are deferred and not ported.
 
 ## Version Contract
 
@@ -60,9 +61,9 @@ same release, and rebuild custom subclasses at every announced boundary.
 
 - `GraphNode` has one canonical virtual execution entry,
   `run(NodeInput)`. `SyncGraphNode` is a separate additive adapter.
-- `Provider` keeps its established vtable under the permanent compatibility
-  decision. New implementations should derive from `CompletionProvider`; that
-  migration does not alter the existing `Provider` layout.
+- `Provider`: `get_name()`, `family()`, `prepare(ProviderRequest)`;
+  `invoke(_async)` / `dispatch(_async)` → `sp::runtime::Result`.
+  This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
 - `CheckpointStore` retains its existing vtable and object layout for the
   pre-v1 migration. Sync defaults now fail explicitly instead of crossing to
   async overrides; async defaults offload synchronous overrides. Async-only
@@ -74,8 +75,4 @@ same release, and rebuild custom subclasses at every announced boundary.
 
 ## Verification
 
-`scripts/test_find_package.sh` builds and runs a consumer from an isolated
-install prefix. Its `--shared` mode also checks every installed NeoGraph
-library's version links and ELF SONAME or Mach-O install name. CI runs both
-static and shared installed-consumer checks; platform shared jobs cover Linux
-and macOS metadata.
+`scripts/test_find_package.sh` describes installed-consumer checks; its existence is not a current pass claim. The current SDK ABI3 full rebuild/CTest passed 26/26, and the shared installed consumer exercised real local HTTP two-turn typed requests, tool/native/refusal/known-zero outcomes and mismatch rejection. These results do not qualify NeoGraph, Python, Windows, macOS, WASM or paid live-provider compatibility. NeoGraph integrated verification is reported separately.

@@ -19,6 +19,7 @@
 #include "intent_router_node.h"
 #include "mcp_catalog.h"
 #include "agent_dispatcher.h"
+#include "../provider_support.h"
 
 #include <neograph/neograph.h>
 
@@ -312,27 +313,22 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         "\nLanguage: " + user_lang +
         "\nMemory: " + memory_context;
 
-    // ④ CompletionParams 구성
-    neograph::CompletionParams params;
-    params.model       = model_;
-    params.temperature = 0.1f;   // 결정론적 분류 — 낮게
-    params.max_tokens  = 300;    // 라우팅 JSON 은 작다
-    neograph::ChatMessage sys_msg;
-    sys_msg.role    = "system";
-    sys_msg.content = system_prompt;
-
-    neograph::ChatMessage usr_msg;
-    usr_msg.role    = "user";
-    usr_msg.content = user_msg;
-
-    params.messages = { sys_msg, usr_msg };
-
-    // ⑤ LLM 호출 (invoke — v0.4 권장 단일 진입점, 스트리밍 불필요)
-    neograph::ChatCompletion completion =
-        co_await provider_->invoke(params, nullptr);
+    // ④ Actual typed request; routing consumes a text projection only.
+    std::vector<sp::Message> messages;
+    messages.push_back(examples::message(sp::Role::System, system_prompt));
+    messages.push_back(examples::message(sp::Role::User, user_msg));
+    auto request = jarvis::providers::contextual_request(
+        jarvis::providers::request(*provider_, std::move(messages), 0.1, 300,
+                                  neograph::ProviderMode::Collect, model_), in.ctx);
+    auto completion = co_await neograph::graph::observe_provider_result(in.ctx,
+        invoke_provider(provider_, std::move(request), {}, {},
+            neograph::graph::provider_call_broker(in.ctx),
+            neograph::graph::make_provider_call_identity(in.ctx, name_)));
+    neograph::graph::record_usage(in.ctx, completion);
+    completion = neograph::outcome_or_throw(std::move(completion));
 
     // ⑥ 응답 텍스트 추출 → JSON 검증
-    const std::string raw_content = completion.message.content;
+    const std::string raw_content = neograph::outcome_text(*completion);
     if (debug_on) {
         std::cerr << "[router][debug] raw="
                   << raw_content.substr(0, 240) << "\n";

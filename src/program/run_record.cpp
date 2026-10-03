@@ -467,6 +467,14 @@ struct ProgramRunRecord::Impl {
     std::string          canonical_bytes;
 };
 ProgramRunRecord::ProgramRunRecord(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
+
+ProgramRunRecord ProgramRunRecord::with_hydrated_terminal(ProgramResult result) const {
+    if (!impl_->data.terminal_result || impl_->data.terminal_result->id() != result.id())
+        throw std::invalid_argument("Hydrated terminal result differs from its canonical record");
+    auto record = *this;
+    record.hydrated_terminal_ = std::move(result);
+    return record;
+}
 ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
     if (d.logical_run_id == d.run_id) d.logical_run_id.clear();
     if (d.fork_receipt) {
@@ -661,7 +669,7 @@ std::optional<ProgramPendingEffect> ProgramRunRecord::pending_effect() const {
     return impl_->data.pending_effect;
 }
 std::optional<ProgramResult> ProgramRunRecord::terminal_result() const {
-    return impl_->data.terminal_result;
+    return hydrated_terminal_ ? hydrated_terminal_ : impl_->data.terminal_result;
 }
 std::optional<ForkCompatibilityReceipt> ProgramRunRecord::fork_receipt() const {
     return impl_->data.fork_receipt;

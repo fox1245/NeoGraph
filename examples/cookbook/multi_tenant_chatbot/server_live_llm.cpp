@@ -19,7 +19,7 @@
 // Runtime requires OPENROUTER_API_KEY in the repository-root .env (or environment).
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../provider_example_support.h"
 #include <cppdotenv/dotenv.hpp>
 
 #include <asio/post.hpp>
@@ -31,6 +31,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -136,15 +137,13 @@ public:
     std::string get_name() const override { return name_; }
 };
 
-// ── (2) Compile cache — key = (topology_hash, customer_id).
-//
-// Customer 별 system prompt 가 NodeContext 에 박혀있어서, 같은
-// 토폴로지여도 customer 가 다르면 engine 인스턴스가 별도. 그래도
-// 같은 customer 의 여러 요청은 engine 1개 공유.
+// Compile cache: exact tenant, topology, and captured provider/model/instructions.
+// Shared provider ownership keeps the capability alive while its engine is cached.
 
 class CompileCache {
     std::shared_mutex mu_;
-    std::unordered_map<std::string, std::shared_ptr<GraphEngine>> cache_;
+    using Key = std::pair<std::shared_ptr<Provider>, std::string>;
+    std::map<Key, std::shared_ptr<GraphEngine>> cache_;
     std::atomic<std::size_t> hits_{0}, misses_{0};
 public:
     std::shared_ptr<GraphEngine> get_or_compile(
@@ -152,8 +151,8 @@ public:
         const json& def,
         const NodeContext& ctx)
     {
-        std::string key = customer_id + "::"
-            + std::to_string(std::hash<std::string>{}(def.dump()));
+        Key key{ctx.provider, json::array({customer_id, def, ctx.model,
+            ctx.instructions, ctx.extra_config, ctx.provider_name}).dump()};
         {
             std::shared_lock lk(mu_);
             if (auto it = cache_.find(key); it != cache_.end()) {
@@ -226,12 +225,7 @@ int main() {
     }
 
     // OpenRouter provider — 모든 customer 가 공유.
-    neograph::llm::OpenAIProvider::Config cfg;
-    cfg.api_key = api_key;
-    cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
+    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat");
 
     // MergeNode 만 직접 등록 (llm_call 은 built-in).
     NodeFactory::instance().register_type("merge",
@@ -256,6 +250,7 @@ int main() {
     std::atomic<int> done{0};
     std::promise<void> all_done;
     auto all_done_fut = all_done.get_future();
+    auto reported_usage = std::make_shared<UsageAccumulator>();
 
     // Sample one response per topology — 진짜 LLM 응답 받아오는지 확인.
     std::mutex sample_mu;
@@ -282,6 +277,7 @@ int main() {
 
                 RunConfig rcfg;
                 rcfg.thread_id = cust + "__" + sess;
+                rcfg.usage = reported_usage;
                 rcfg.input = {{"messages", json::array({
                     json{{"role","user"},
                          {"content", "Reply with one word about the topic 'cloud'. Request #" + std::to_string(i)}}
@@ -338,6 +334,8 @@ int main() {
     std::cout << "\n--- Results ---\n";
     std::cout << "OK:               " << ok.load() << "\n";
     std::cout << "Errors:           " << errors.load() << "\n";
+    std::cout << "Reported usage:   " << usage_to_json(reported_usage->snapshot()).dump() << "\n";
+    std::cout << "Monetary charge:  unknown (not inferred from request counts)\n";
     std::cout << "Total wall time:  " << total_ms << " ms ("
               << total_ms / 1000.0 << " sec)\n";
     std::cout << "Mean req latency: " << mean_ms << " ms\n";

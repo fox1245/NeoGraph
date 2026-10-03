@@ -148,7 +148,7 @@ TEST(RegistrySnapshotTest, RequirementResolverIsSnapshotOwnedAndExcludedFromCano
     };
     const auto owned = make_snapshot(resolver, '1');
     resolver         = {};
-    EXPECT_EQ(detail::RegistrySnapshotAccess::resolve_node_requirements(
+    EXPECT_EQ(neograph::program::detail::RegistrySnapshotAccess::resolve_node_requirements(
                   owned, "node", json{{"enabled", true}}),
               (std::vector<ExecutableIdentity>{provider}));
 

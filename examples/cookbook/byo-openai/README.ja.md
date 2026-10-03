@@ -1,6 +1,20 @@
 <!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=ja source_sha256=812a1f340ed6b8f92ddd742cc1c8f239265b501fa010c81929825f0973738e38 -->
 # 自带 OpenAI 客户端（Bring Your Own OpenAI Client）
 
+## 過去の Python recipe — binding 移行は延期
+
+このページは移行前 Python provider API と測定の記録です。以下のコードは
+**現在の型付き C++ 契約と互換性がなく、現在の実行手順ではありません**。
+Python provider binding、subclass trampoline、BYO/OpenRouter adapter は未移植・未検証です。
+C++ 移行から Python 互換性を推論しないでください。現在の C++ は型付き
+`ProviderRequest` を所有し、一度 prepare し、完全な不変 `sp::Outcome`、native history、
+nullable usage を保持します。以下の `complete(params)`/`ChatCompletion` は過去の API です。
+欠落 usage は zero ではなく、最終呼出 usage は tool loop 全体の使用量ではありません。
+durable receipt の背後で SDK retry による隠れた再送を作らず、鍵、prompt、native payload は非公開に保ちます。
+
+## 移行前の手順と観測記録
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 大多数生产环境中的 Python 用户已经拥有一个 `openai.OpenAI()` 客户端实例，其中包含他们自己的重试逻辑、自定义传输层、可观测性钩子或 OpenRouter 路由。本食谱展示了如何将该现有客户端插入 NeoGraph 作为自定义 `Provider` —— 而不是使用 NeoGraph 内置的 `OpenAIProvider`。

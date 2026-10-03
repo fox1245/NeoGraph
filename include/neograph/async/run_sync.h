@@ -2,10 +2,9 @@
  * @file async/run_sync.h
  * @brief Block the calling thread until an asio::awaitable completes.
  *
- * Stage 3 / Semester 2.1 bridge utility. Lets sync code call an
- * awaitable without an ambient io_context. Used by the default
- * `Provider::complete()` implementation to delegate to
- * `complete_async()` when a subclass overrode only the async path.
+ * Bridge utility for synchronous callers of owned coroutine operations.
+ * The Provider::dispatch() facade uses it to drain dispatch_async() while
+ * retaining the same prepared request and genuine SDK outcome.
  *
  * The helper owns a private io_context for the duration of the call;
  * it does not share the caller's executor. This is intentional —
@@ -128,16 +127,15 @@ T run_sync_operation(
 /// v0.3+: when @p cancel is non-null, the inner ``co_spawn`` binds
 /// ``cancel->slot()`` so a concurrent ``cancel->cancel()`` aborts
 /// the coroutine — including any in-flight ``co_await`` on a socket
-/// op. Used by ``Provider::complete()`` to propagate
-/// ``CompletionParams::cancel_token`` (or the thread-local current
-/// token set by the engine before each node dispatch) into the LLM
-/// HTTP request, so a cancelled run stops billable work mid-call.
+/// operation. Provider dispatch passes the explicit
+/// ``ProviderRequest::cancel_token``; there is no ambient thread-local
+/// cancellation authority.
 template <typename T>
 T run_sync(asio::awaitable<T> aw,
            neograph::graph::CancelToken* cancel = nullptr) {
     // v0.3.2: short-circuit if the parent token is already cancelled.
     // Without this, the retry loop in NodeExecutor would re-call
-    // Provider::complete after a first cancel, fresh run_sync would
+    // a provider dispatch after a first cancel, fresh run_sync would
     // bind its slot AFTER add_cancel_hook fired its post-emit (the
     // emit-before-bind race), the cancel signal would be lost, and
     // the new HTTP request would run to completion — burning billable

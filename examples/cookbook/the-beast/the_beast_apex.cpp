@@ -21,8 +21,9 @@
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/async/run_sync.h>
+#include <neograph/llm/schema_provider.h>
+#include "../../provider_example_support.h"
+#include "beast_common.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -35,6 +36,7 @@
 
 using neograph::json;
 namespace ng = neograph::graph;
+namespace beast = neograph::cookbook::beast;
 
 // =================================================================
 // The tool catalog the Beast gets to devour. Deterministic so the run
@@ -112,10 +114,10 @@ int main(int argc, char** argv) {
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
 
-    auto provider = neograph::llm::OpenAIProvider::create_shared(
-        {.api_key = key, .base_url = "https://openrouter.ai/api",
-         .default_model = "~deepseek/deepseek-v4-flash-latest",
-         .provider_routing = {{"zdr", true}}});
+    std::shared_ptr<neograph::Provider> provider =
+        examples::make_openrouter_provider(key, "chat");
+    auto usage = std::make_shared<neograph::UsageAccumulator>();
+    beast::UsageReport usage_report(usage);
 
     // Build the tool catalog to feed the architect, and a live copy to
     // bind into the spawned harness.
@@ -157,38 +159,41 @@ int main(int argc, char** argv) {
         "\n\nAny dangling node, missing route branch, or undeclared channel is "
         "REJECTED by the compiler.";
 
-    std::vector<neograph::ChatMessage> convo = {
-        {"system", sys},
-        {"user", "Author the ReAct agent harness JSON."}};
+    std::vector<sp::Message> convo = {
+        neograph::portable_message({"system", sys}),
+        neograph::portable_message({"user", "Author the ReAct agent harness JSON."})};
 
     json core;
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         std::cout << "── Attempt #" << attempt << ": model authors a tool-calling agent ──\n";
-        neograph::CompletionParams p;
-        p.model = "~deepseek/deepseek-v4-flash-latest";
-        p.messages = convo;
-        p.temperature = 0.2f;
-        p.max_tokens = 4000;
-        neograph::ChatCompletion resp;
-        // v1.0 single-dispatch: invoke(params, nullptr) driven to completion
-        // by run_sync (private io_context), replacing deprecated complete().
-        try { resp = neograph::async::run_sync(provider->invoke(p, nullptr)); }
+        neograph::ProviderControls controls;
+        controls.temperature = 0.2;
+        controls.max_output_tokens = 4000;
+        sp::runtime::Result resp;
+        try {
+            resp = provider->invoke(neograph::make_provider_request(
+                *provider, "~deepseek/deepseek-v4-flash-latest", convo, {}, controls));
+            if (resp) usage->add(neograph::outcome_usage(*resp));
+            resp = neograph::outcome_or_throw(std::move(resp));
+        }
         catch (const std::exception& e) { std::cerr << "  LLM error: " << e.what() << "\n"; return 1; }
+        const auto& response_messages = neograph::outcome_messages(*resp);
+        convo.insert(convo.end(), response_messages.begin(), response_messages.end());
 
         json core_candidate;
-        try { core_candidate = extract_json(resp.message.content); }
+        try { core_candidate = extract_json(neograph::outcome_text(*resp)); }
         catch (const std::exception& e) {
-            convo.push_back({"assistant", resp.message.content});
-            convo.push_back({"user", "Not valid JSON. Output ONLY the JSON harness."});
+            convo.push_back(neograph::portable_message(
+                {"user", "Not valid JSON. Output ONLY the JSON harness."}));
             std::cout << "  unparseable; retry.\n\n"; continue;
         }
         const Verdict v = forge(core_candidate, ctx);
         if (!v.ok) {
             std::cout << "  REJECTED at '" << v.gate << "': " << v.report.substr(0, 300) << "\n";
             std::cout << "  → feeding diagnostics back for self-repair.\n\n";
-            convo.push_back({"assistant", core_candidate.dump()});
-            convo.push_back({"user", "The compiler REJECTED that at the '" + v.gate +
-                "' gate:\n" + v.report + "\nFix only what it names. Output ONLY corrected JSON."});
+            convo.push_back(neograph::portable_message(
+                {"user", "The compiler REJECTED that at the '" + v.gate +
+                    "' gate:\n" + v.report + "\nFix only what it names. Output ONLY corrected JSON."}));
             continue;
         }
         std::cout << "  ACCEPTED — coherent tool-calling agent. Nodes: ";
@@ -212,6 +217,7 @@ int main(int argc, char** argv) {
 
     ng::RunConfig rc;
     rc.max_steps = 12;                     // bound the ReAct loop
+    rc.usage = usage;
     rc.input = {{"messages", json::array({{{"role", "user"}, {"content", task}}})}};
 
     int tool_calls = 0;

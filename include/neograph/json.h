@@ -301,6 +301,8 @@ inline std::ostream& operator<<(std::ostream& os, const json& j) {
 
 template <> NEOGRAPH_API json        json::get<json>() const;
 template <> NEOGRAPH_API std::string json::get<std::string>() const;
+// Borrowed UTF-8 bytes; valid while the owning document lives and is not mutated.
+template <> NEOGRAPH_API std::string_view json::get<std::string_view>() const;
 template <> NEOGRAPH_API bool        json::get<bool>() const;
 template <> NEOGRAPH_API int         json::get<int>() const;
 template <> NEOGRAPH_API unsigned    json::get<unsigned>() const;

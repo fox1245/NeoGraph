@@ -571,8 +571,8 @@ std::string json::dump(int indent) const {
 // ===========================================================================
 
 bool json::operator==(const json& other) const {
-    // Compare by canonical serialization.
-    return dump() == other.dump();
+    if (!val_ || !other.val_) return is_null() && other.is_null();
+    return yyjson_mut_equals(val_, other.val_);
 }
 
 // ===========================================================================
@@ -681,6 +681,14 @@ std::string json::get<std::string>() const {
     const char* s = yyjson_mut_get_str(val_);
     size_t len = yyjson_mut_get_len(val_);
     return s ? std::string(s, len) : std::string();
+}
+
+template <>
+std::string_view json::get<std::string_view>() const {
+    if (!val_ || !yyjson_mut_is_str(val_))
+        throw type_error("json::get<string_view>: not a string");
+    const char* text = yyjson_mut_get_str(val_);
+    return text ? std::string_view(text, yyjson_mut_get_len(val_)) : std::string_view();
 }
 
 template <>

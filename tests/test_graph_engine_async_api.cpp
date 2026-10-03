@@ -290,6 +290,17 @@ public:
 
     void delete_thread(const std::string& thread_id) override { inner_->delete_thread(thread_id); }
 
+    bool requires_managed_budget(const std::string& thread_id) override {
+        return inner_->requires_managed_budget(thread_id);
+    }
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
+        co_return co_await inner_->requires_managed_budget_async(std::move(thread_id));
+    }
+
+    bool retains_native_checkpoint() const noexcept override {
+        return inner_->retains_native_checkpoint();
+    }
+
     void put_writes(const std::string&  thread_id,
                     const std::string&  parent_checkpoint_id,
                     const PendingWrite& write) override {

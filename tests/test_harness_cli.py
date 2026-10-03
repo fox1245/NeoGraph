@@ -56,6 +56,8 @@ async def verify_cli(binary, home):
             "clientInfo": {"name": "harness-cli-regression", "version": "1"}})
         process.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
         await process.stdin.drain()
+        # The shipped private synthetic provider admits exactly 4096 input and
+        # 256 output tokens per call; no hosted model facts or credentials apply.
         request = {
             "task": {"objective": "Exercise the shipped Harness lifecycle",
                      "acceptance": ["Return a structured result"]},

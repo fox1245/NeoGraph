@@ -22,6 +22,7 @@ enum class ProgramEventKind : std::uint8_t {
     Emit,
     CheckpointPublished,
     Terminal,
+    OperationStarted,
 };
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramEventKind kind) noexcept;
@@ -48,14 +49,22 @@ struct ProgramTerminalEvent {
     bool operator==(const ProgramTerminalEvent&) const = default;
 };
 
+/** Compiled-runtime operation coordinate, never a user ng.emit permission. */
+struct ProgramOperationEvent {
+    std::string operation_kind;
+    std::string input_digest;
+    bool operator==(const ProgramOperationEvent&) const = default;
+};
+
 using ProgramEventPayload = std::variant<ProgramStartedEvent,
                                          graph::TypedGraphEvent,
                                          ProgramEmitEvent,
                                          ProgramCheckpointEvent,
-                                         ProgramTerminalEvent>;
+                                         ProgramTerminalEvent,
+                                         ProgramOperationEvent>;
 
 struct NEOGRAPH_PROGRAM_API ProgramEvent {
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     std::string         id;
     std::uint64_t       sequence;

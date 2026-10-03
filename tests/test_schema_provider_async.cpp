@@ -1,245 +1,84 @@
-// Cancellation coverage for SchemaProvider's non-streaming transports and
-// blocking HTTP/SSE bridge. Each case holds a local HTTP response indefinitely;
-// completion before release proves cancellation reached the active socket.
-
 #include <gtest/gtest.h>
-
-#include <neograph/async/run_sync.h>
-#include <neograph/graph/cancel.h>
-#include <neograph/llm/schema_provider.h>
-
-#include <asio/bind_cancellation_slot.hpp>
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/error.hpp>
-#include <asio/io_context.hpp>
-#include <asio/system_error.hpp>
-#include <asio/this_coro.hpp>
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include <httplib.h>
-
-#include <atomic>
-#include <chrono>
-#include <future>
-#include <memory>
-#include <string>
-#include <thread>
+#include "fixtures/typed_wire_peer.h"
 
 using namespace neograph;
+namespace wire = neograph::test::wire;
+using namespace std::chrono_literals;
 
 namespace {
-
-constexpr const char* kResponse = R"({
-    "id": "chatcmpl-schema-cancel",
-    "choices": [{
-        "message": {"role": "assistant", "content": "pong"},
-        "finish_reason": "stop"
-    }],
-    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-})";
-
-struct HoldingServer {
-    httplib::Server svr;
-    std::thread t;
-    int port = 0;
-    std::atomic<int> request_count{0};
-    std::atomic<bool> hold{true};
-
-    HoldingServer() {
-        svr.Post("/v1/chat/completions",
-                 [this](const httplib::Request&, httplib::Response& res) {
-                     request_count.fetch_add(1, std::memory_order_release);
-                     while (hold.load(std::memory_order_acquire)) {
-                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                     }
-                     res.status = 200;
-                     res.set_content(kResponse, "application/json");
-                 });
-        port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-
-    ~HoldingServer() {
-        hold.store(false, std::memory_order_release);
-        svr.stop();
-        if (t.joinable()) t.join();
-    }
-
-    std::string base_url() const {
-        return "http://127.0.0.1:" + std::to_string(port);
-    }
-};
-
-CompletionParams make_params() {
-    CompletionParams params;
-    params.model = "gpt-4o-mini";
-    params.messages.push_back(ChatMessage{"user", "ping"});
-    return params;
-}
-
-void expect_socket_cancel(bool prefer_libcurl) {
-    HoldingServer server;
-    ASSERT_GT(server.port, 0);
-
-    llm::SchemaProvider::Config config;
-    config.schema_path = "openai";
-    config.api_key = "test-key";
-    config.default_model = "gpt-4o-mini";
-    config.base_url_override = server.base_url();
-    config.allow_insecure_loopback = true;
-    config.timeout_seconds = 5;
-    config.prefer_libcurl = prefer_libcurl;
-    auto provider = llm::SchemaProvider::create(config);
-
-    auto params = make_params();
+void socket_cancel(ProviderMode mode) {
+    wire::Peer peer(wire::chat_sse(), true);
+    peer.state->hold = true;
+    auto provider = wire::provider("openai.chat", peer.origin());
+    auto request = wire::request("openai.chat", mode);
     auto token = std::make_shared<graph::CancelToken>();
-    params.cancel_token = token;
-
+    request.cancel_token = token;
     asio::io_context io;
-    std::promise<asio::error_code> completion;
-    auto result = completion.get_future();
-    graph::CancelExecutorLease token_lease(token);
-    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-        try {
-            token->bind_executor(co_await asio::this_coro::executor);
-            (void)co_await provider->complete_async(params);
-            completion.set_value(asio::error::fault);
-        } catch (const asio::system_error& error) {
-            completion.set_value(error.code());
-        } catch (...) {
-            completion.set_value(asio::error::fault);
-        }
-    }, asio::bind_cancellation_slot(token->slot(), asio::detached));
-    std::thread runner([&] { io.run(); });
-
-    const auto start_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (server.request_count.load(std::memory_order_acquire) == 0 &&
-           std::chrono::steady_clock::now() < start_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    if (server.request_count.load(std::memory_order_acquire) != 1) {
-        server.hold.store(false, std::memory_order_release);
-        runner.join();
-        ADD_FAILURE() << "provider request did not reach the local server";
-        return;
-    }
-
+    auto result = asio::co_spawn(io, provider->invoke_async(std::move(request)), asio::use_future);
+    std::thread runner([&io] { io.run(); });
+    const bool entered = peer.await_requests(1);
     token->cancel();
-    const auto completion_status = result.wait_for(std::chrono::seconds(1));
-    if (completion_status != std::future_status::ready) {
-        server.hold.store(false, std::memory_order_release);
-        runner.join();
-        ADD_FAILURE() << "provider cancellation waited for the held response";
-        return;
-    }
-    EXPECT_EQ(result.get(), asio::error::operation_aborted);
-
-    server.hold.store(false, std::memory_order_release);
+    const auto status = result.wait_for(1s);
+    peer.release();
     runner.join();
+    ASSERT_TRUE(entered);
+    ASSERT_EQ(status, std::future_status::ready);
+    const auto outcome = result.get();
+    ASSERT_TRUE(outcome);
+    ASSERT_TRUE(std::holds_alternative<sp::Failure>(*outcome));
+    EXPECT_EQ(wire::failure(outcome).error.kind, sp::ErrorKind::Cancelled);
+    EXPECT_TRUE(wire::failure(outcome).error.attempt.request_may_have_left);
+    const auto& partial = wire::failure(outcome).partial;
+    EXPECT_TRUE(partial.messages.empty());
+    EXPECT_TRUE(partial.raw_events.empty());
+    EXPECT_EQ(partial.usage.stage, sp::UsageStage::Missing);
+    EXPECT_FALSE(partial.usage.input_total);
+    EXPECT_FALSE(partial.usage.output_total);
+    EXPECT_FALSE(partial.usage.total);
+    EXPECT_FALSE(partial.usage.provider_reported_total);
+}
 }
 
-void expect_stream_socket_cancel() {
-    HoldingServer server;
-    ASSERT_GT(server.port, 0);
+TEST(SchemaProviderAsync, CancelTokenAbortsBufferedSocket) { socket_cancel(ProviderMode::Collect); }
+TEST(SchemaProviderAsync, CancelTokenAbortsHttpSseSocket) { socket_cancel(ProviderMode::Stream); }
 
-    llm::SchemaProvider::Config config;
-    config.schema_path = "openai";
-    config.api_key = "test-key";
-    config.default_model = "gpt-4o-mini";
-    config.base_url_override = server.base_url();
-    config.allow_insecure_loopback = true;
-    config.timeout_seconds = 5;
-    auto provider = llm::SchemaProvider::create(config);
-
-    auto params = make_params();
-    auto token = std::make_shared<graph::CancelToken>();
-    params.cancel_token = token;
-
-    asio::io_context io;
-    std::promise<std::exception_ptr> completion;
-    auto result = completion.get_future();
-    graph::CancelExecutorLease token_lease(token);
-    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-        try {
-            token->bind_executor(co_await asio::this_coro::executor);
-            (void)co_await provider->complete_stream_async(params, StreamCallback{});
-            completion.set_value(nullptr);
-        } catch (...) {
-            completion.set_value(std::current_exception());
-        }
-    }, asio::detached);
-    std::thread runner([&] { io.run(); });
-
-    const auto start_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (server.request_count.load(std::memory_order_acquire) == 0 &&
-           std::chrono::steady_clock::now() < start_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    if (server.request_count.load(std::memory_order_acquire) != 1) {
-        server.hold.store(false, std::memory_order_release);
-        runner.join();
-        ADD_FAILURE() << "provider stream did not reach the local server";
-        return;
-    }
-
-    token->cancel();
-    const auto completion_status = result.wait_for(std::chrono::seconds(1));
-    if (completion_status != std::future_status::ready) {
-        server.hold.store(false, std::memory_order_release);
-        runner.join();
-        ADD_FAILURE() << "provider stream cancellation waited for the held response";
-        return;
-    }
-    const auto error = result.get();
-    ASSERT_NE(error, nullptr);
-    EXPECT_THROW(std::rethrow_exception(error), graph::CancelledException);
-
-    server.hold.store(false, std::memory_order_release);
-    runner.join();
+TEST(SchemaProviderAsync, PerCallDeadlineRemainsTyped) {
+    wire::Peer peer(wire::chat_response());
+    peer.state->hold = true;
+    auto provider = wire::provider("openai.chat", peer.origin());
+    auto request = wire::request();
+    request.options.deadline = std::chrono::steady_clock::now() + 100ms;
+    auto result = std::async(std::launch::async, [p = provider.get(), owned = std::move(request)]() mutable {
+        return p->invoke(std::move(owned));
+    });
+    const bool entered = peer.await_requests(1);
+    const auto status = result.wait_for(1s);
+    peer.release();
+    const auto outcome = result.get();
+    ASSERT_TRUE(entered);
+    ASSERT_EQ(status, std::future_status::ready);
+    ASSERT_TRUE(std::holds_alternative<sp::Failure>(*outcome));
+    EXPECT_EQ(wire::failure(outcome).error.kind, sp::ErrorKind::DeadlineExceeded);
+    EXPECT_TRUE(wire::failure(outcome).error.attempt.request_may_have_left);
+    EXPECT_EQ(wire::failure(outcome).partial.usage.stage, sp::UsageStage::Missing);
+    EXPECT_FALSE(wire::failure(outcome).partial.usage.total);
 }
 
-} // namespace
-
-TEST(SchemaProviderAsync, CancelTokenAbortsConnPoolSocket) {
-    expect_socket_cancel(false);
+TEST(SchemaProviderAsync, PreparedDeadlineIsNotRenewedAtDispatch) {
+    wire::Peer peer(wire::chat_response());
+    auto provider = wire::provider("openai.chat", peer.origin());
+    auto request = wire::request();
+    request.options.deadline = std::chrono::steady_clock::now() + 30ms;
+    auto prepared = provider->prepare(std::move(request));
+    ASSERT_TRUE(prepared.valid());
+    std::this_thread::sleep_for(50ms);
+    const auto outcome = provider->dispatch(std::move(prepared));
+    ASSERT_TRUE(std::holds_alternative<sp::Failure>(*outcome));
+    EXPECT_EQ(wire::failure(outcome).error.kind, sp::ErrorKind::DeadlineExceeded);
+    EXPECT_FALSE(wire::failure(outcome).error.attempt.request_may_have_left);
+    EXPECT_EQ(wire::failure(outcome).error.attempt.attempts, 0u);
+    EXPECT_EQ(wire::failure(outcome).partial.usage.stage, sp::UsageStage::Missing);
+    EXPECT_FALSE(wire::failure(outcome).partial.usage.total);
+    std::lock_guard lock(peer.state->mutex);
+    EXPECT_EQ(peer.state->entered, 0u);
 }
-
-TEST(SchemaProviderAsync, CancelTokenAbortsHttpSseSocket) {
-    expect_stream_socket_cancel();
-}
-
-#if defined(NEOGRAPH_TESTS_HAVE_LIBCURL)
-TEST(SchemaProviderAsync, CancelTokenAbortsCurlH2PoolSocket) {
-    expect_socket_cancel(true);
-}
-
-TEST(SchemaProviderAsync, LibcurlPerCallTimeoutRemainsTyped) {
-    HoldingServer server;
-    ASSERT_GT(server.port, 0);
-
-    llm::SchemaProvider::Config config;
-    config.schema_path = "openai";
-    config.api_key = "test-key";
-    config.default_model = "gpt-4o-mini";
-    config.base_url_override = server.base_url();
-    config.allow_insecure_loopback = true;
-    config.timeout_seconds = 5;
-    config.prefer_libcurl = true;
-    auto provider = llm::SchemaProvider::create(config);
-
-    auto params = make_params();
-    params.timeout_seconds = 1;
-    try {
-        (void)async::run_sync(provider->complete_async(params));
-        FAIL() << "expected per-call timeout";
-    } catch (const asio::system_error& error) {
-        EXPECT_EQ(error.code(), asio::error::timed_out);
-    }
-}
-#endif

@@ -32,22 +32,20 @@ struct ProviderBrokerScope {
 ProviderBrokerScope provider_broker_scope(const RunContext& context,
                                           const std::string& node_name) {
     const auto runtime = detail::runtime_for(context);
-    if (!runtime || !runtime->provider_call_broker) return {};
-    if (runtime->invocation_id.empty() || context.thread_id.empty()) {
-        throw std::invalid_argument(
-            "Provider broker requires a thread-scoped Core task identity");
-    }
-    ProviderCallIdentity identity;
-    identity.owner_scope = context.tool_execution_identity.owner_scope;
-    identity.run_id = context.run_id;
-    identity.thread_id = context.thread_id;
-    identity.task_id = runtime->invocation_id;
-    identity.node_name = node_name;
-    return {runtime->provider_call_broker, std::move(identity)};
+    auto identity = make_provider_call_identity(context, node_name);
+    if (runtime && runtime->provider_call_broker &&
+        (identity.task_id.empty() || context.thread_id.empty()))
+        throw std::invalid_argument("Provider broker requires a thread-scoped Core task identity");
+    return {runtime ? runtime->provider_call_broker : nullptr, std::move(identity)};
 }
 
 
 }  // namespace
+
+std::shared_ptr<ProviderCallBroker> provider_call_broker(const RunContext& context) {
+    const auto runtime = detail::runtime_for(context);
+    return runtime ? runtime->provider_call_broker : nullptr;
+}
 
 // v1.0 destructive removal (9b): the 8-virtual `execute*` legacy chain,
 // the ExecuteDefaultGuard recursion guard, and the
@@ -83,89 +81,44 @@ LLMCallNode::LLMCallNode(const std::string& name, const NodeContext& ctx)
     , tools_(tools_owner_.view())
     , model_(ctx.model)
     , instructions_(ctx.instructions)
+    , controls_(ctx.provider_controls)
 {}
 
-CompletionParams LLMCallNode::build_params(const GraphState& state) const {
-    auto messages = state.get_messages();
-
-    // Ensure exactly one system message, carrying `instructions_` (issue #93).
-    //
-    // The contract: when a node is configured with instructions, the model sees
-    // those instructions as its single system prompt. State that already holds a
-    // system message — seeded by the caller, or restored from a checkpoint
-    // written when instructions_ was different — is replaced, not stacked on top
-    // of. Two system messages is malformed for a single-system-prompt API such
-    // as Anthropic's, and undefined for the OpenAI family.
-    //
-    // Replacing (rather than deferring to the state's message) is also what the
-    // previous code effectively did: it inserted instructions_ at position 0,
-    // ahead of any existing system message, so instructions already won on
-    // precedence. Only the duplicate goes away.
+ProviderRequest LLMCallNode::build_params(const GraphState& state) const {
+    auto messages = state.get_provider_messages();
     if (!instructions_.empty()) {
-        if (!messages.empty() && messages[0].role == "system") {
-            messages[0].content = instructions_;
-        } else {
-            ChatMessage sys;
-            sys.role    = "system";
-            sys.content = instructions_;
-            messages.insert(messages.begin(), sys);
-        }
+        auto system = portable_message(ChatMessage{"system", instructions_});
+        if (!messages.empty() && messages.front().role == sp::Role::System)
+            messages.front() = std::move(system);
+        else messages.insert(messages.begin(), std::move(system));
     }
-
-    // Build tool definitions
-    std::vector<ChatTool> tool_defs;
-    tool_defs.reserve(tools_.size());
-    for (auto* tool : tools_) {
-        tool_defs.push_back(tool->get_definition());
-    }
-
-    CompletionParams params;
-    params.model    = model_;
-    params.messages = std::move(messages);
-    params.tools    = std::move(tool_defs);
-    return params;
+    std::vector<ChatTool> tools;
+    tools.reserve(tools_.size());
+    for (auto* tool : tools_) tools.push_back(tool->get_definition());
+    return make_provider_request(*provider_, model_, std::move(messages), std::move(tools), controls_);
 }
 
 asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
-    auto params = build_params(in.state);
-    // v0.4 PR 9a: explicit cancel propagation — no thread-local
-    // smuggling. The provider binds this token's slot to its inner
-    // ConnPool::async_post co_await, so a caller's cancel() aborts
-    // the in-flight HTTPS socket.
-    params.cancel_token = in.ctx.cancel_token;
-
-    // ROADMAP_v1.md Candidate 6 PR2: dispatch through Provider::invoke()
-    // — the v1.0 unified entry point. Same semantic as the previous
-    // `if (in.stream_cb) complete_stream_async else complete_async` pair,
-    // but the stream/non-stream branch lives inside the provider's own
-    // default invoke() body (or its native override), not at every call
-    // site. Native providers that override invoke() get one dispatch
-    // path; legacy 4-virtual subclasses get the chain via the additive
-    // default. See PR #40.
-    StreamCallback on_token;
-    if (in.stream_cb) {
-        const GraphStreamCallback& cb = *in.stream_cb;
-        std::string node_name = name_;
-        on_token = [&cb, node_name](const std::string& token) {
-            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN,
-                          node_name, json(token)});
+    auto request = build_params(in.state);
+    request.cancel_token = in.ctx.cancel_token;
+    request.options.deadline = in.ctx.deadline;
+    request.mode = in.stream_cb || in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+    if (in.stream_cb || in.ctx.on_provider_event)
+        request.on_event = [observer = in.ctx.on_provider_event, cb = in.stream_cb, name = name_](const sp::Event& event) {
+            if (observer) observer(event);
+            if (cb) if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+                delta && delta->payload.kind == sp::PartKind::Text && delta->payload.channel == sp::DeltaChannel::Content)
+                (*cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name, std::string(delta->payload.bytes)});
         };
-    }
-    std::vector<ChatMessage> host_instructions;
-    if (!instructions_.empty()) host_instructions.push_back({"system", instructions_});
-    auto broker_scope = provider_broker_scope(in.ctx, name_);
-    auto completion = co_await invoke_provider(provider_, std::move(params), std::move(on_token),
-                                               std::move(host_instructions), {},
-                                               std::move(broker_scope.broker),
-                                               std::move(broker_scope.identity));
-    record_usage(in.ctx, completion);   // #88
-
-    json msg_json;
-    to_json(msg_json, completion.message);
-
+    std::vector<sp::Message> host;
+    if (!instructions_.empty()) host.push_back(portable_message(ChatMessage{"system", instructions_}));
+    auto broker = provider_broker_scope(in.ctx, name_);
+    auto result = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(request), std::move(host), {},
+                                           std::move(broker.broker), std::move(broker.identity)));
+    record_usage(in.ctx, result);
+    outcome_or_throw(result);
     NodeOutput out;
-    out.writes.push_back(
-        ChannelWrite{"messages", json::array({msg_json})});
+    out.writes.push_back(provider_messages_write(result));
     co_return out;
 }
 
@@ -180,18 +133,10 @@ ToolDispatchNode::ToolDispatchNode(const std::string& name, const NodeContext& c
 {}
 
 asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
-    auto messages = in.state.get_messages();
+    auto messages = in.state.get_provider_messages();
     if (messages.empty()) co_return NodeOutput{};
-
-    // Find the last assistant message with tool_calls
-    const ChatMessage* assistant_msg = nullptr;
-    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        if (it->role == "assistant" && !it->tool_calls.empty()) {
-            assistant_msg = &(*it);
-            break;
-        }
-    }
-    if (!assistant_msg) co_return NodeOutput{};
+    auto calls = pending_client_tool_calls(messages);
+    if (calls.empty()) co_return NodeOutput{};
 
     // Tool execution lives in exactly one place (issue #87): both this node and
     // llm::Agent route through dispatch_tool_calls(). When the two had separate
@@ -206,18 +151,14 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     gctx.step         = in.ctx.step;
     auto execution = make_tool_execution_context(in.ctx);
     auto tool_msgs = co_await dispatch_tool_calls(
-        assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx),
+        std::move(calls), tools_, in.ctx.tool_gate, std::move(gctx),
         std::move(execution));
 
-    json results = json::array();
-    for (const auto& m : tool_msgs) {
-        json mj;
-        to_json(mj, m);
-        results.push_back(mj);
-    }
-
+    std::vector<sp::Message> native;
+    native.reserve(tool_msgs.size());
+    for (const auto& message : tool_msgs) native.push_back(portable_message(message));
     NodeOutput out;
-    out.writes.push_back(ChannelWrite{"messages", results});
+    out.writes.push_back(provider_messages_write(std::move(native)));
     co_return out;
 }
 
@@ -235,16 +176,12 @@ IntentClassifierNode::IntentClassifierNode(
     , valid_routes_(std::move(valid_routes))
 {}
 
-CompletionParams IntentClassifierNode::build_params(const GraphState& state) const {
-    auto messages = state.get_messages();
-
-    // Find last user message
-    std::string user_content;
+ProviderRequest IntentClassifierNode::build_params(const GraphState& state) const {
+    const auto messages = state.get_provider_messages();
+    sp::Message user;
+    user.role = sp::Role::User;
     for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        if (it->role == "user") {
-            user_content = it->content;
-            break;
-        }
+        if (it->role == sp::Role::User) { user = *it; break; }
     }
 
     std::string sys_prompt = prompt_;
@@ -257,21 +194,12 @@ CompletionParams IntentClassifierNode::build_params(const GraphState& state) con
         sys_prompt += "\nNo explanation, just the category name.";
     }
 
-    CompletionParams params;
-    params.model = model_;
-    params.temperature = 0.0f;
-    params.max_tokens = 20;
-
-    ChatMessage sys_msg;
-    sys_msg.role = "system";
-    sys_msg.content = sys_prompt;
-
-    ChatMessage usr_msg;
-    usr_msg.role = "user";
-    usr_msg.content = user_content;
-
-    params.messages = {std::move(sys_msg), std::move(usr_msg)};
-    return params;
+    ProviderControls controls;
+    controls.temperature = 0.0;
+    controls.max_output_tokens = 20;
+    return make_provider_request(*provider_, model_,
+        {portable_message(ChatMessage{"system", sys_prompt}),
+         std::move(user)}, {}, controls);
 }
 
 std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& intent) const {
@@ -291,28 +219,25 @@ asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
     auto params = build_params(in.state);
     params.cancel_token = in.ctx.cancel_token;
 
-    // Candidate 6 PR2: same invoke() unification as LLMCallNode above.
-    StreamCallback on_token;
-    if (in.stream_cb) {
-        const GraphStreamCallback& cb = *in.stream_cb;
-        std::string node_name = name_;
-        on_token = [&cb, node_name](const std::string& token) {
-            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, node_name, json(token)});
+    params.options.deadline = in.ctx.deadline;
+    params.mode = in.stream_cb || in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+    if (in.stream_cb || in.ctx.on_provider_event)
+        params.on_event = [observer = in.ctx.on_provider_event, cb = in.stream_cb, name = name_](const sp::Event& event) {
+            if (observer) observer(event);
+            if (cb) if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+                delta && delta->payload.kind == sp::PartKind::Text && delta->payload.channel == sp::DeltaChannel::Content)
+                (*cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name, std::string(delta->payload.bytes)});
         };
-    }
-    std::vector<ChatMessage> host_instructions;
-    host_instructions.push_back({"system", params.messages.front().content});
-    std::vector<ChatMessage> supplemental{params.messages.back()};
-    auto broker_scope = provider_broker_scope(in.ctx, name_);
-    auto completion = co_await invoke_provider(provider_, std::move(params), std::move(on_token),
-                                                std::move(host_instructions), std::move(supplemental),
-                                                std::move(broker_scope.broker),
-                                                std::move(broker_scope.identity));
-    record_usage(in.ctx, completion);   // #88 — routing costs tokens too
-    ChatMessage reply = std::move(completion.message);
-
+    const auto& messages = provider_request_messages(params);
+    std::vector<sp::Message> host{messages.front()};
+    std::vector<sp::Message> supplemental(messages.begin() + 1, messages.end());
+    auto broker = provider_broker_scope(in.ctx, name_);
+    auto result = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params), std::move(host), std::move(supplemental),
+                                          std::move(broker.broker), std::move(broker.identity)));
+    record_usage(in.ctx, result);
+    outcome_or_throw(result);
     NodeOutput out;
-    out.writes = route_from(reply.content);
+    out.writes = route_from(outcome_text(*result));
     co_return out;
 }
 
@@ -401,6 +326,18 @@ asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     if (persistence_ == SubgraphPersistence::PerThread)
         config.resume_if_exists = true;
     config.input = build_subgraph_input(in.state);
+    if (input_map_.empty()) {
+        config.provider_messages = in.state.captured_provider_messages();
+    } else {
+        // Match the same winning source as build_subgraph_input, including
+        // resetting custody if a later mapping overwrites it with generic data.
+        for (const auto& [parent_channel, child_channel] : input_map_)
+            if (child_channel == "messages")
+                config.provider_messages = in.state.captured_provider_messages(parent_channel);
+    }
+    config.on_provider_event = in.ctx.on_provider_event;
+    config.provider_outcomes = in.ctx.provider_outcomes;
+    config.native_history_archive = in.ctx.native_history_archive;
     config.stream_mode = in.ctx.stream_mode;
     config.cancel_token = in.ctx.cancel_token;
     config.model_token_budget = in.ctx.model_token_budget;

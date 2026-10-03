@@ -128,6 +128,10 @@ private:
     struct Impl;
     explicit ProgramRunRecord(std::shared_ptr<const Impl> impl);
     std::shared_ptr<const Impl> impl_;
+    // Runtime-only typed custody overlay; canonical identity stays unchanged.
+    std::optional<ProgramResult> hydrated_terminal_;
+    ProgramRunRecord with_hydrated_terminal(ProgramResult result) const;
+    friend class detail::RunControl;
 };
 
 }  // namespace neograph::program

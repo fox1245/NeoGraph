@@ -38,8 +38,7 @@
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/async/run_sync.h>
+#include "../../provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -125,6 +124,7 @@ static std::string show(const Genome& g) {
 // Result: the chosen op index per plastic position, or nullopt on failure.
 struct Learner {
     int invocations = 0;   // times the learner actually ran (plastic present)
+    neograph::UsageAccumulator usage;
     virtual ~Learner() = default;
     virtual const char* label() const = 0;
     // returns a fully-committed genome (plastic filled), or nullopt
@@ -179,21 +179,29 @@ struct LLMLearner : Learner {
         for (int i = 0; i < N; ++i) if (g[i] == PLASTIC) plastic.push_back(i);
         if (plastic.empty()) return g;
         ++invocations;
-        neograph::CompletionParams p;
-        p.model = "~deepseek/deepseek-v4-flash-latest"; p.temperature = 0.2f; p.max_tokens = 800;
+        neograph::ProviderControls controls;
+        controls.temperature = 0.2; controls.max_output_tokens = 800;
         std::string committed;
         for (int i = 0; i < N; ++i)
             committed += "  stage " + std::to_string(i) + ": " +
                          (g[i] == PLASTIC ? "?" : OPS[g[i]].name) + "\n";
-        p.messages = {
-            {"system",
+        auto request = neograph::make_provider_request(
+            *prov, "~deepseek/deepseek-v4-flash-latest", {
+            neograph::portable_message({"system",
              "You assemble an arithmetic pipeline. acc starts at 0; each stage applies "
              "acc<-op(acc) in order. Ops: add2(+2) add3(+3) mul2(*2) mul5(*5) sub1(-1). "
              "Choose an op for each '?' stage so the final acc equals the target. Reply "
-             "with just the op name(s) for the '?' stage(s), in stage order."},
-            {"user", "Target acc = " + std::to_string((int)TARGET) + ". Pipeline:\n" + committed}};
+             "with just the op name(s) for the '?' stage(s), in stage order."}),
+            neograph::portable_message(
+                {"user", "Target acc = " + std::to_string((int)TARGET) + ". Pipeline:\n" + committed})},
+            {}, controls);
         std::string reply;
-        try { reply = neograph::async::run_sync(prov->invoke(p, nullptr)).message.content; }
+        try {
+            sp::runtime::Result response = prov->invoke(std::move(request));
+            if (response) usage.add(neograph::outcome_usage(*response));
+            response = neograph::outcome_or_throw(std::move(response));
+            reply = neograph::outcome_text(*response);
+        }
         catch (const std::exception& e) { std::cerr << "   [LLM] error: " << e.what() << "\n"; return std::nullopt; }
         auto out = parse_ops(g, reply);
         if (!out) std::cerr << "   [LLM] unparseable: " << reply.substr(0, 80) << "\n";
@@ -277,10 +285,7 @@ int main(int argc, char** argv) {
 
     std::shared_ptr<neograph::Provider> provider;
     if (live)
-        provider = neograph::llm::OpenAIProvider::create_shared(
-            {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "~deepseek/deepseek-v4-flash-latest",
-             .provider_routing = {{"zdr", true}}});
+        provider = examples::make_openrouter_provider(key, "chat");
 
     // A fresh learner per mode so the invocation counters are independent.
     auto make_learner = [&]() -> std::unique_ptr<Learner> {
@@ -298,6 +303,10 @@ int main(int argc, char** argv) {
     printf("\ntotal learner invocations: Baldwin %d vs Lamarck %d%s\n",
            bald->invocations, lam->invocations,
            lam->invocations < bald->invocations ? "  (Lamarck banked its way to fewer)" : "");
+    std::cout << "Baldwin usage: " << neograph::usage_to_json(bald->usage.snapshot()).dump()
+              << "; monetary charge: unknown\n"
+              << "Lamarck usage: " << neograph::usage_to_json(lam->usage.snapshot()).dump()
+              << "; monetary charge: unknown\n";
     std::cout << "\n===== reading =====\n"
                  "Lamarckian BANKS the learner's fix into heredity: committed genes jump to full\n"
                  "and the learner is consulted less as genomes fill in — the acquired trait is\n"

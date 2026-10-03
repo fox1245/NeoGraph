@@ -12,7 +12,7 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/mcp/client.h>
 
 #include <cppdotenv/dotenv.hpp>
@@ -42,13 +42,8 @@ int main(int argc, char** argv) {
     std::cout << "[*] Discovered " << tools.size() << " MCP tools from " << mcp_url << "\n";
 
     // --- LLM ---
-    neograph::llm::OpenAIProvider::Config cfg;
-    cfg.api_key = api_key;
-    cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
-        neograph::llm::OpenAIProvider::create(cfg);
+        examples::make_openrouter_provider(api_key);
 
     // --- Graph: ReAct with interrupt_before tools ---
     neograph::json definition = {
@@ -70,6 +65,7 @@ int main(int argc, char** argv) {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = examples::openrouter_model;
     ctx.instructions =
         "You are a helpful assistant. Always call a tool when the user's "
         "question can be answered by one.";
@@ -85,9 +81,7 @@ int main(int argc, char** argv) {
     std::cout << "\n=== Phase 1 — run until interrupt_before(\"tools\") ===\n";
     neograph::graph::RunConfig run;
     run.thread_id = "hitl-001";
-    run.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", question}}
-    })}};
+    run.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
 
     auto r1 = engine->run(run);
 
@@ -99,26 +93,14 @@ int main(int argc, char** argv) {
     std::cout << "Paused before node: " << r1.interrupt_node
               << "   checkpoint=" << r1.checkpoint_id.substr(0, 8) << "...\n";
 
-    // Inspect the pending tool call the LLM asked for.
-    // State JSON nests channels: { channels: { messages: { value: [...] } } }
-    auto channel_value = [](const std::optional<neograph::json>& st,
-                            const std::string& ch) -> neograph::json {
-        if (!st.has_value()) return neograph::json::array();
-        auto channels = st->value("channels", neograph::json::object());
-        auto entry    = channels.value(ch, neograph::json::object());
-        return entry.value("value", neograph::json::array());
-    };
-
-    auto state_opt = engine->get_state("hitl-001");
-    auto messages  = channel_value(state_opt, "messages");
-    if (messages.size() > 0) {
-        auto last = messages[messages.size() - 1];
-        if (last.contains("tool_calls") && last["tool_calls"].size() > 0) {
-            auto tc = last["tool_calls"][0];
-            std::cout << "Pending tool: " << tc.value("name", "?") << "\n"
-                      << "Arguments:    "
-                      << tc.value("arguments", neograph::json::object()).dump()
-                      << "\n";
+    // Inspect a portable view of the pending client tool call, while the
+    // checkpoint and r1 keep the full native assistant message intact.
+    if (!r1.native_messages.empty()) {
+        const auto calls = neograph::client_tool_calls(r1.native_messages.back());
+        if (!calls.empty()) {
+            const auto& call = calls.front();
+            std::cout << "Pending tool: " << call.name << "\n"
+                      << "Arguments:    " << call.arguments << "\n";
         }
     }
 
@@ -132,11 +114,14 @@ int main(int argc, char** argv) {
     std::cout << "\n=== Phase 2 — resume past the gate ===\n";
     auto r2 = engine->resume("hitl-001", neograph::json());
 
-    auto final_state = engine->get_state("hitl-001");
-    auto final_msgs  = channel_value(final_state, "messages");
-    if (final_msgs.size() > 0) {
-        auto last = final_msgs[final_msgs.size() - 1];
-        std::cout << "Assistant: " << last.value("content", "") << "\n";
+    if (!r2.native_messages.empty()) {
+        const auto& last = r2.native_messages.back();
+        std::cout << "Assistant: ";
+        if (last.role == sp::Role::Assistant)
+            for (const auto& part : last.parts)
+                if (const auto* text = std::get_if<sp::Text>(&part))
+                    std::cout << text->value;
+        std::cout << "\n";
     }
 
     std::cout << "\nExecution trace: ";

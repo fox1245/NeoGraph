@@ -15,7 +15,6 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace neograph { class RuntimeInterpositionController; }
@@ -31,8 +30,8 @@ namespace neograph::llm {
  *
  * @code
  * auto agent = Agent(provider, std::move(tools), "You are a helpful assistant.");
- * std::vector<ChatMessage> messages = {{.role = "user", .content = "What's 2+2?"}};
- * std::string reply = agent.run(messages);
+ * std::vector<sp::Message> messages = {{.role = sp::Role::User, .parts = {sp::Text{"What's 2+2?"}}}};
+ * auto outcome = agent.run(messages);
  * @endcode
  *
  * @see neograph::graph::create_react_graph for the graph-based equivalent.
@@ -71,31 +70,30 @@ class NEOGRAPH_API Agent {
      *
      * @param[in,out] messages Conversation history (modified in-place with new messages).
      * @param max_iterations Maximum number of LLM call iterations (default: 10).
-     * @return The final text response from the LLM.
+     * @return The full immutable final provider outcome.
      */
-    std::string run(std::vector<ChatMessage>& messages,
+    sp::runtime::Result run(std::vector<sp::Message>& messages,
                     int max_iterations = 10);
     /// Per-run host Tool broker context; caller supplies stable owner/run/thread
     /// and grant identity. An interrupted batch is replayed from messages on
     /// reconnect before another provider turn is requested.
-    std::string run(std::vector<ChatMessage>& messages, int max_iterations,
+    sp::runtime::Result run(std::vector<sp::Message>& messages, int max_iterations,
                     ToolExecutionContext effect_context);
 
     /**
-     * @brief Run the agent loop with streaming token output.
-     *
-     * Same as run(), but streams the final response tokens via the callback.
-     *
-     * @param[in,out] messages Conversation history (modified in-place).
-     * @param on_chunk Callback invoked per token during the final LLM response.
-     * @param max_iterations Maximum LLM call iterations (default: 10).
-     * @return The final text response.
+     * @brief Run the agent loop with the explicit typed streaming mode.
+     * Every provider turn streams typed events exactly once; no response is
+     * discarded and re-requested merely to produce display text.
+     * @param[in,out] messages Full history, extended with every returned message.
+     * @param on_event Callback receiving borrowed SDK event views.
+     * @param max_iterations Maximum LLM call iterations.
+     * @return The full immutable final provider outcome.
      */
-    std::string run_stream(std::vector<ChatMessage>& messages,
-                           const StreamCallback& on_chunk,
+    sp::runtime::Result run_stream(std::vector<sp::Message>& messages,
+                           const std::function<void(const sp::Event&)>& on_event,
                            int max_iterations = 10);
-    std::string run_stream(std::vector<ChatMessage>& messages,
-                           const StreamCallback& on_chunk, int max_iterations,
+    sp::runtime::Result run_stream(std::vector<sp::Message>& messages,
+                           const std::function<void(const sp::Event&)>& on_event, int max_iterations,
                            ToolExecutionContext effect_context);
 
     /**
@@ -103,7 +101,7 @@ class NEOGRAPH_API Agent {
      * @param messages Conversation history (not modified).
      * @return The full completion response.
      */
-    ChatCompletion complete(const std::vector<ChatMessage>& messages);
+    sp::runtime::Result complete(const std::vector<sp::Message>& messages);
 
     /**
      * @brief Token usage accumulated across every call this agent has made (#88).
@@ -117,7 +115,8 @@ class NEOGRAPH_API Agent {
      * makes several LLM calls per run and the interesting number is what the
      * whole conversation cost.
      */
-    ChatCompletion::Usage usage() const { return usage_->snapshot(); }
+    sp::Usage usage() const { return usage_->snapshot(); }
+    const std::vector<sp::runtime::Result>& outcomes() const noexcept { return outcomes_; }
 
     /**
      * @brief Intercept every tool call before it runs (issue #89).
@@ -141,7 +140,7 @@ class NEOGRAPH_API Agent {
         tool_execution_controller_ = std::move(controller);
     }
 
-    /// Override only the initial non-stream request used to detect tool calls.
+    /// Override the initial streamed tool-detection turn's absolute deadline.
     /// Positive values are seconds; -1 keeps the provider's default deadline.
     void set_tool_detection_timeout_seconds(int timeout_seconds) {
         tool_detection_timeout_seconds_ = timeout_seconds;
@@ -158,16 +157,12 @@ class NEOGRAPH_API Agent {
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
-    /// Name → tool* lookup built once at construction. Keeps tool
-    /// dispatch O(1) per call rather than O(n) scan over `tools_` —
-    /// matters when N is large (e.g. an MCP server with 30+ tools)
-    /// and the run loop fires many tool_call iterations.
-    std::unordered_map<std::string, Tool*> tools_by_name_;
     std::string instructions_;
     std::string model_;
 
     /// #88 — Agent's own token accounting; see usage().
     std::shared_ptr<UsageAccumulator> usage_ = std::make_shared<UsageAccumulator>();
+    std::vector<sp::runtime::Result> outcomes_;
 
     /// #89 — tool interception; empty means every call runs.
     ToolGate tool_gate_;
@@ -180,7 +175,10 @@ class NEOGRAPH_API Agent {
     std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition_;
     std::shared_ptr<::neograph::HookRuntime> hook_runtime_;
 
-    void ensure_system_message(std::vector<ChatMessage>& messages);
+    void ensure_system_message(std::vector<sp::Message>& messages);
+    sp::runtime::Result run_loop(std::vector<sp::Message>& messages, int max_iterations,
+                         ToolExecutionContext execution, ProviderMode mode,
+                         std::function<void(const sp::Event&)> on_event);
     std::vector<ChatTool> get_tool_definitions() const;
 
     /// Non-owning view of `tools_` for `dispatch_tool_calls`, the one place

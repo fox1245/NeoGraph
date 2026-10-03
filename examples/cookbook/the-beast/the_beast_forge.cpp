@@ -23,8 +23,10 @@
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
-#include <neograph/llm/openai_provider.h>
+#include <neograph/llm/schema_provider.h>
 #include <neograph/mcp/client.h>
+#include "../../provider_example_support.h"
+#include "beast_common.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -44,6 +46,7 @@
 
 using neograph::json;
 namespace ng = neograph::graph;
+namespace beast = neograph::cookbook::beast;
 
 // ---- strict Core coherence gates (unchanged across the whole cookbook) ----
 struct Verdict { bool ok = false; std::string gate, report; json core; };
@@ -62,14 +65,20 @@ Verdict forge_gate(const json& core, const ng::NodeContext& ctx) {
     } catch (const std::exception& e) { return {false, "compile", e.what(), {}}; }
 }
 
-static std::string ask(std::shared_ptr<neograph::Provider> prov,
-                       std::vector<neograph::ChatMessage>& convo, int max_tokens = 4000) {
-    neograph::CompletionParams p;
-    p.model = "~deepseek/deepseek-v4-flash-latest";
-    p.messages = convo;
-    p.temperature = 0.2f;
-    p.max_tokens = max_tokens;
-    return prov->complete(p).message.content;
+static sp::runtime::Result ask(const std::shared_ptr<neograph::Provider>& prov,
+                               std::vector<sp::Message>& convo,
+                               const std::shared_ptr<neograph::UsageAccumulator>& usage,
+                               int max_tokens = 4000) {
+    neograph::ProviderControls controls;
+    controls.temperature = 0.2;
+    controls.max_output_tokens = max_tokens;
+    auto result = prov->invoke(neograph::make_provider_request(
+        *prov, "~deepseek/deepseek-v4-flash-latest", convo, {}, controls));
+    if (result) usage->add(neograph::outcome_usage(*result));
+    result = neograph::outcome_or_throw(std::move(result));
+    const auto& messages = neograph::outcome_messages(*result);
+    convo.insert(convo.end(), messages.begin(), messages.end());
+    return result;
 }
 
 static json extract_json(const std::string& t) {
@@ -99,10 +108,10 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
-    auto provider = neograph::llm::OpenAIProvider::create_shared(
-        {.api_key = key, .base_url = "https://openrouter.ai/api",
-         .default_model = "~deepseek/deepseek-v4-flash-latest",
-         .provider_routing = {{"zdr", true}}});
+    std::shared_ptr<neograph::Provider> provider =
+        examples::make_openrouter_provider(key, "chat");
+    auto usage = std::make_shared<neograph::UsageAccumulator>();
+    beast::UsageReport usage_report(usage);
 
     // Task deliberately needs a capability the stock server lacks (string
     // reversal), forcing the Beast to FORGE it.
@@ -124,8 +133,8 @@ int main(int argc, char** argv) {
 
     // ---------- PHASE 2+3: identify gap & FORGE the missing tool ----------
     std::cout << "── FORGE · the model writes a Python MCP server for what's missing ──\n";
-    std::vector<neograph::ChatMessage> fconvo = {
-        {"system",
+    std::vector<sp::Message> fconvo = {
+        neograph::portable_message({"system",
          "You write a Model Context Protocol (MCP) stdio server in pure Python "
          "stdlib (no pip). It must speak newline-delimited JSON-RPC on stdin/stdout "
          "and implement exactly: initialize (reply protocolVersion/serverInfo/"
@@ -133,11 +142,11 @@ int main(int argc, char** argv) {
          "{\"tools\":[{name,description,inputSchema}...]}), tools/call (reply "
          "{\"content\":[{\"type\":\"text\",\"text\":<result>}],\"isError\":false}). "
          "Read stdin line by line; flush after every reply. Output ONLY the Python "
-         "code in a single ```python fenced block."},
-        {"user",
+         "code in a single ```python fenced block."}),
+        neograph::portable_message({"user",
          "Task the downstream agent must solve: " + task + "\n"
          "Tools ALREADY available (do NOT reimplement these): " + json(base_names).dump() + "\n"
-         "Write a server exposing ONLY the additional tool(s) needed for the task."}};
+         "Write a server exposing ONLY the additional tool(s) needed for the task."})};
 
     namespace fs = std::filesystem;
     // pid-unique so concurrent forge runs on one host don't clobber each other.
@@ -147,7 +156,12 @@ int main(int argc, char** argv) {
     std::unique_ptr<neograph::mcp::MCPClient> forged_client;
 
     for (int attempt = 1; attempt <= 2 && forged_names.empty(); ++attempt) {
-        const std::string code = extract_code(ask(provider, fconvo, 3000));
+        sp::runtime::Result response;
+        try { response = ask(provider, fconvo, usage, 3000); }
+        catch (const std::exception& e) {
+            std::cerr << "  LLM error: " << e.what() << "\n"; return 1;
+        }
+        const std::string code = extract_code(neograph::outcome_text(*response));
         std::ofstream(forged_path) << code;
         std::cout << "  attempt #" << attempt << ": wrote " << code.size()
                   << " bytes → " << forged_path << "\n";
@@ -160,9 +174,9 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) { std::cout << "  launch error: " << e.what() << "\n"; }
         if (forged_names.empty()) {
             std::cout << "  forged server did not expose tools; asking model to fix.\n";
-            fconvo.push_back({"assistant", code});
-            fconvo.push_back({"user", "That server failed to initialize or list tools over MCP. "
-                                      "Output ONLY corrected Python."});
+            fconvo.push_back(neograph::portable_message(
+                {"user", "That server failed to initialize or list tools over MCP. "
+                         "Output ONLY corrected Python."}));
             forged_client.reset();
         }
     }
@@ -185,32 +199,38 @@ int main(int argc, char** argv) {
 
     // ---------- PHASE 4: AUTHOR the ReAct harness (3 gates + self-repair) ----------
     std::cout << "── AUTHOR · the model writes a ReAct agent over the full catalog ──\n";
-    std::vector<neograph::ChatMessage> hconvo = {
-        {"system",
+    std::vector<sp::Message> hconvo = {
+        neograph::portable_message({"system",
          "You author a NeoGraph agent harness — a graph TOPOLOGY in JSON. Output ONLY "
          "one JSON object. Build a ReAct tool-calling agent: \"schema_version\": 1; channels "
          "{\"messages\":{\"reducer\":\"append\"}}; a node \"agent\" of type \"llm_call\" and "
          "a node \"tools\" of type \"tool_dispatch\"; edges __start__->agent, a conditional "
          "edge {\"from\":\"agent\",\"condition\":\"has_tool_calls\",\"routes\":{\"true\":"
          "\"tools\",\"false\":\"__end__\"}}, and tools->agent. Tools available at runtime "
-         "(handled by tool_dispatch, do not wire individually): " + catalog.dump()},
-        {"user", "Author the harness JSON."}};
+         "(handled by tool_dispatch, do not wire individually): " + catalog.dump()}),
+        neograph::portable_message({"user", "Author the harness JSON."})};
 
     json core;
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
-        json core_candidate;
-        try { core_candidate = extract_json(ask(provider, hconvo)); }
+        sp::runtime::Result response;
+        try { response = ask(provider, hconvo, usage); }
         catch (const std::exception& e) {
-            hconvo.push_back({"user", "Not valid JSON. Output ONLY the JSON harness."});
+            std::cerr << "  LLM error: " << e.what() << "\n"; return 1;
+        }
+        json core_candidate;
+        try { core_candidate = extract_json(neograph::outcome_text(*response)); }
+        catch (const std::exception& e) {
+            hconvo.push_back(neograph::portable_message(
+                {"user", "Not valid JSON. Output ONLY the JSON harness."}));
             std::cout << "  #" << attempt << " unparseable; retry.\n"; continue;
         }
         const Verdict v = forge_gate(core_candidate, ctx);
         if (!v.ok) {
             std::cout << "  #" << attempt << " REJECTED at '" << v.gate << "': "
                       << v.report.substr(0, 200) << " → self-repair.\n";
-            hconvo.push_back({"assistant", core_candidate.dump()});
-            hconvo.push_back({"user", "Compiler REJECTED at '" + v.gate + "':\n" + v.report +
-                                      "\nFix only what it names. Output ONLY corrected JSON."});
+            hconvo.push_back(neograph::portable_message(
+                {"user", "Compiler REJECTED at '" + v.gate + "':\n" + v.report +
+                         "\nFix only what it names. Output ONLY corrected JSON."}));
             continue;
         }
         std::cout << "  ACCEPTED — coherent agent: ";
@@ -229,6 +249,7 @@ int main(int argc, char** argv) {
     auto engine     = ng::GraphEngine::build(core, std::move(engine_config));
     ng::RunConfig rc;
     rc.max_steps = 12;
+    rc.usage = usage;
     rc.input = {{"messages", json::array({{{"role", "user"}, {"content", task}}})}};
     auto result = engine->run_stream(rc, [](const ng::GraphEvent& ev) {
         if (ev.type == ng::GraphEvent::Type::NODE_START && ev.node_name == "tools")

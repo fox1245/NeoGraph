@@ -33,10 +33,10 @@
 //   CRAWL4AI_URL        defaults to http://localhost:11235
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
-#include <neograph/llm/rate_limited_provider.h>
+#include "../provider_example_support.h"
 #include <neograph/graph/deep_research_graph.h>
 #include <neograph/graph/postgres_checkpoint.h>
+#include <core/native_archive.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -199,6 +199,27 @@ private:
 // re-uses the exact same graph layout the cp was saved against.
 // =========================================================================
 
+static std::shared_ptr<sp::NativeArchive> activate_archive(bool provision) {
+    const auto required = [](const char* name) -> std::string {
+        const char* value = std::getenv(name);
+        if (!value || !*value)
+            throw std::runtime_error(std::string(name) + " must be configured");
+        return value;
+    };
+    auto directory = required("NEOGRAPH_NATIVE_ARCHIVE_DIR");
+    auto key_file = required("NEOGRAPH_NATIVE_ARCHIVE_KEY_FILE");
+    auto owner = required("NEOGRAPH_NATIVE_ARCHIVE_OWNER");
+    auto descriptor = examples::openrouter_descriptor();
+    auto activated = provision
+        ? sp::NativeArchive::provision(std::move(directory), std::move(key_file),
+                                      std::move(owner), std::move(descriptor))
+        : sp::NativeArchive::open(std::move(directory), std::move(key_file),
+                                 std::move(owner), std::move(descriptor));
+    if (const auto* error = std::get_if<sp::Error>(&activated))
+        throw std::runtime_error("native archive activation failed: " + error->safe_message);
+    return std::get<std::shared_ptr<sp::NativeArchive>>(std::move(activated));
+}
+
 struct AppCtx {
     std::shared_ptr<graph::PostgresCheckpointStore> store;
     std::unique_ptr<graph::GraphEngine>             engine;
@@ -221,16 +242,8 @@ static AppCtx build_app(bool with_human_review) {
 
     const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
-    auto raw_openrouter = llm::SchemaProvider::create({
-        .schema_path       = "openai_responses",
-        .api_key           = api_key,
-        .default_model     = model,
-        .timeout_seconds   = 120,
-        .base_url_override = "https://openrouter.ai/api",
-        .provider_routing  = {{"zdr", true}}
-    });
     std::shared_ptr<Provider> provider =
-        llm::RateLimitedProvider::create(std::move(raw_openrouter));
+        examples::make_openrouter_provider(api_key);
 
     auto crawl = std::make_shared<Crawl4AIClient>(crawl_url, crawl_token);
     std::vector<std::unique_ptr<Tool>> tools;
@@ -248,6 +261,7 @@ static AppCtx build_app(bool with_human_review) {
     app.model = model;
     app.engine = graph::create_deep_research_graph(
         provider, std::move(tools), cfg);
+    app.engine->set_native_history_archive(activate_archive(false));
 
     app.store = std::make_shared<graph::PostgresCheckpointStore>(pg_url);
     app.engine->set_checkpoint_store(app.store);
@@ -296,11 +310,15 @@ static graph::GraphStreamCallback make_logger() {
 static int print_usage() {
     std::cerr <<
         "Usage:\n"
+        "  example_postgres_react_hitl init-archive\n"
         "  example_postgres_react_hitl run    \"<query>\"\n"
         "  example_postgres_react_hitl resume <thread_id> \"approve|feedback\"\n"
         "  example_postgres_react_hitl status <thread_id>\n"
         "\n"
-        "Required env: OPENROUTER_API_KEY, POSTGRES_URL.\n"
+        "Required env: OPENROUTER_API_KEY, POSTGRES_URL, "
+        "NEOGRAPH_NATIVE_ARCHIVE_DIR, NEOGRAPH_NATIVE_ARCHIVE_KEY_FILE, "
+        "NEOGRAPH_NATIVE_ARCHIVE_OWNER.\n"
+        "Provision the archive once with init-archive; its key parent must be private (0700).\n"
         "Optional env: CRAWL4AI_URL (default http://localhost:11235).\n";
     return 2;
 }
@@ -433,6 +451,11 @@ int main(int argc, char** argv) {
     std::string sub = argv[1];
 
     try {
+        if (sub == "init-archive") {
+            const auto archive = activate_archive(true);
+            std::cout << "Native checkpoint archive provisioned.\n";
+            return 0;
+        }
         if (sub == "run") {
             if (argc < 3) return print_usage();
             std::string query;

@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+namespace sp { class NativeArchive; }
+
 namespace neograph {
 class Provider;
 namespace program {
@@ -73,6 +75,8 @@ struct NEOGRAPH_HARNESS_API HarnessWorkerResponse {
     HarnessWorkerResponseKind kind = HarnessWorkerResponseKind::VALUE;
     json value;
     std::string message;
+    /// An uncertain dispatched provider effect must not be retried by the host.
+    bool provider_effect_uncertain = false;
 
     static HarnessWorkerResponse success(json value);
     static HarnessWorkerResponse empty(std::string message = {});
@@ -96,6 +100,8 @@ struct HarnessProviderExecutorConfig {
     std::string model;
     HarnessCapabilityExecutor capability_executor;
     std::size_t max_tool_rounds = 8;
+    /// Optional trusted custody for native journal outcome references.
+    std::shared_ptr<sp::NativeArchive> native_archive;
 };
 
 /// Build a worker executor that calls a NeoGraph Provider directly.

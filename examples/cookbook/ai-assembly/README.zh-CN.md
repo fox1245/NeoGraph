@@ -46,7 +46,9 @@
 
 ```bash
 # from NeoGraph repo root; A2A and LLM are optional build components
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
 cmake -S . -B build-cookbook \
+    -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
     -DNEOGRAPH_BUILD_EXAMPLES=ON \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
     -DNEOGRAPH_BUILD_A2A=ON \
@@ -54,16 +56,19 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-
-bash examples/cookbook/ai-assembly/scripts/run_session.sh
+# 离线fixture：不加载.env，不进行provider通信
+NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
+  bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
+# live：在环境或.env中私密配置密钥
+NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
+  bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-成员服务器会进行实时OpenRouter调用；需要`OPENROUTER_API_KEY`和网络访问。编译本身是离线的。
+先安装typed SchemaProvider CMake包及构建依赖。这是集成NeoGraph目标，不提供standalone项目。`NEOGRAPH_BUILD_DIR`选择二进制；未设置时依次查找`build-pybind`、`build`、recipe的`build`。`--mock`生成合成弃权，不是模型判断或使用量。live将法案/角色提示发往OpenRouter，需要有效密钥、网络和余额；四个成员调用产生费用，不保证固定成本。私密保管密钥、`.env`、提示和输出记录，不公开raw native记录。A2A仅传递portable回复。C++使用typed `ProviderRequest`/SDK事件和完整不可变`sp::Outcome`；projection不授予native replay权限。这是源码迁移记录，不是新的执行验证。
 
 ## Python演讲者变体（v0.2.1+，跨语言A2A）
 
-相同的演讲者逻辑，约100行Python，针对相同的C++成员服务器——证明A2A协议可以干净地桥接不同语言：
+此切换的Python绑定**deferred（延期）**。`speaker.py`需要另行提供兼容`neograph_engine.a2a`；C++迁移完成不保证该前提。下方是历史用法。
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
@@ -74,26 +79,24 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-Python A2A绑定（`neograph_engine.a2a`）在v0.2.1中发布。服务端（图作为A2A端点）目前仅限定为C++。
+v0.2.1绑定是历史发布结果，不是当前验证。A2A wire client/protocol不变。
 
 ## 摩擦日记——新NeoGraph用户遇到的绊脚石
 
 
-这些是构建过程中发现的粗糙边界。**所有四个问题在v0.2.1中均已修复**——留在这里作为记录。
+以下为切换前历史摩擦记录，不代表当前legacy API可用。上方live记录也是历史记录。
 
 ### 1. A2A仅限C++——Python绑定并未暴露它（在v0.2.1中已修复）
 
-`pip install neograph-engine`可以工作，但pre-v0.2.1的`neograph_engine`没有导出`A2AClient` / `AgentCard`。v0.2.1添加了`neograph_engine.a2a`子模块（客户端 + AgentCard + Task/Message/Part/TaskState/Role）——参见上面的Python演讲者变体。
-
-**服务端绑定仍仅支持 C++**；A2AServer 需要一个 GIL 感知的生命周期合约，这将是 v0.3 的后续工作。
+历史v0.2.1添加了Python A2A client。当前绑定延期，不承诺未来版本交付。
 
 ### 2. 无系统安装 / 轮子中无头文件（已在 README v0.2.1 中修复）
 
-README 中现在有一个“Using NeoGraph from your CMake project”部分，展示了 `FetchContent_Declare` 模式。本指南（cookbook）也位于 NeoGraph 树内，因此可以直接 `add_executable` 使用，无需任何外部依赖——独立版本使用 FetchContent。
+历史README说明了FetchContent。此recipe只有集成目标，没有standalone CMake项目。需要SchemaProvider。
 
 ### 3. `OpenAIProvider::create()` `unique_ptr` 与 `shared_ptr` (FIXED in v0.2.1)
 
-`OpenAIProvider::create_shared(cfg)` 已添加——直接返回`shared_ptr<Provider>`，以便能干净地捕获到`NodeFactory`闭包中。食谱在`member_server.cpp`的第~133行使用它。
+历史`create_shared`解决了旧所有权问题。当前使用`examples::make_openrouter_provider`及typed outcome。
 
 ### 4. `.env`自动加载不会传播到A2A子进程（已在v0.2.1中记录）
 
@@ -105,7 +108,7 @@ README 中现在有一个“Using NeoGraph from your CMake project”部分，�
 - AgentCard 发现（`fetch_agent_card`）直接可用——无需手动 HTTP。
 - 来自`send_message_sync`的并发`std::async` futures——无需客户端锁，无共享会话状态。A2A 规范 / NeoGraph 都能开箱即用地干净处理并行客户端请求。
 - `parse_vote` 对自由格式韩文文本的正则表达式有效，因为模型在被要求时可靠地遵循`vote: support/oppose/abstain`。角色输出保持在格式内，使其成为一个5行的计数函数。
-- 树内 CMake 构建是自包含的；如上所示，使用`NEOGRAPH_BUILD_A2A=ON`和`NEOGRAPH_BUILD_LLM=ON`进行配置。
+- 这是历史in-tree构建体验记录。当前前提见上文。
 
 ## 文件
 

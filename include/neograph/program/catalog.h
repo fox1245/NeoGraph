@@ -28,6 +28,9 @@ struct MaterializedProgram;
 }
 
 class ProgramStore;
+class RecordedBindingSet;
+struct RecordedCapabilityMaterialization;
+struct ProgramEvent;
 
 struct ProgramAdmission {
     std::string                    owner_scope;
@@ -110,6 +113,14 @@ struct CatalogConfig {
      * placed here. Empty retains legacy identity derived from exact receipts.
      */
     std::string                            materialization_context_identity;
+    /**
+     * Trusted host mediation for recorded execution. Receives only persisted
+     * source events, and constructs captured-only capabilities for this exact
+     * admitted version. Public replay callers cannot supply this dispatcher.
+     * Absent mediation rejects recorded execution before source allocation.
+     */
+    std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
+        recorded_capability_binder;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCatalog {

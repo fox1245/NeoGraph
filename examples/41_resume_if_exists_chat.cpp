@@ -25,6 +25,7 @@
 // Usage: ./example_resume_if_exists_chat
 
 #include <neograph/neograph.h>
+#include "provider_example_support.h"
 
 #include <iostream>
 #include <string>
@@ -32,31 +33,37 @@
 using namespace neograph;
 using namespace neograph::graph;
 
-// Mock provider — reply names every prior user message back so we can
-// SEE whether history flowed through.
+// Every request retains complete typed history; only user Text is echoed.
 class EchoProvider : public Provider {
+    std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
 public:
-    ChatCompletion complete(const CompletionParams& params) override {
-        ChatCompletion r;
-        r.message.role = "assistant";
-
-        std::string reply = "Heard so far: ";
-        int n = 0;
-        for (const auto& m : params.messages) {
-            if (m.role == "user") {
-                if (n++ > 0) reply += " | ";
-                reply += m.content;
-            }
-        }
-        reply += " (total user turns: " + std::to_string(n) + ")";
-
-        r.message.content = reply;
-        return r;
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        auto history = std::make_shared<const std::vector<sp::Message>>(
+            examples::request_messages(request));
+        return prepare_local(client_, std::move(request),
+            [history](const PreparedProviderRequest& prepared,
+                      const std::function<void(const sp::Event&)>& observer)
+                -> asio::awaitable<sp::runtime::Result> {
+                std::string reply = "Heard so far: ";
+                std::size_t turns = 0;
+                for (const auto& message : *history) {
+                    if (message.role != sp::Role::User) continue;
+                    if (turns++ != 0) reply += " | ";
+                    for (const auto& part : message.parts)
+                        if (const auto* text = std::get_if<sp::Text>(&part))
+                            reply += text->value;
+                }
+                reply += " (total user turns: " + std::to_string(turns) + ")";
+                sp::Completion completion;
+                completion.messages.push_back(
+                    examples::message(sp::Role::Assistant, std::move(reply)));
+                completion.stop.kind = sp::StopKind::EndTurn;
+                if (prepared.mode() == ProviderMode::Stream)
+                    examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
     }
-    ChatCompletion complete_stream(const CompletionParams& p,
-                                   const StreamCallback&) override {
-        return complete(p);
-    }
+    std::string_view family() const noexcept override { return "openai.chat"; }
     std::string get_name() const override { return "echo"; }
 };
 
@@ -83,6 +90,7 @@ int main() {
 
     NodeContext ctx;
     ctx.provider     = provider;
+    ctx.model = "fixture-echo";
     ctx.instructions = "Echo user turn count.";
 
     json definition = {
@@ -130,10 +138,9 @@ int main() {
         auto r = engine->run(cfg);
         print_messages(r.output, "after turn 2");
 
-        // Assertion: the assistant's last reply should mention BOTH
-        // user messages because the prior checkpoint loaded their
-        // history into params.messages.
-        // (neograph::json has no .back() — use size()-1 indexing.)
+        // The assistant's display reply should mention both user messages
+        // because the trusted checkpoint restored full typed request history.
+        // JSON below is an observation, not native replay authority.
         auto msgs = r.output["channels"]["messages"]["value"];
         std::string last = msgs.size() > 0
                                ? msgs[msgs.size() - 1].value("content", "")

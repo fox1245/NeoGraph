@@ -1,9 +1,9 @@
 """Black-box qualification: real server + Program runtime + SQLite/PostgreSQL.
 
-Usage: python3 test_program_chat.py /path/to/cookbook_program_chatbot
+Usage: python3 test_program_chat.py /path/to/cookbook_program_chatbot /path/to/program_chat_policy_fixture
 Set NEOGRAPH_CHAT_POSTGRES_URL to run the same scenarios on a disposable database.
 No packages or external LLM credentials required. The live-provider case uses a
-local HTTP fixture to exercise the existing OpenAIProvider protocol adapter.
+local HTTP fixture to exercise the typed SchemaProvider Chat protocol.
 """
 import concurrent.futures
 import contextlib
@@ -20,15 +20,25 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 
 EXECUTABLE = str(Path(sys.argv.pop(1)).resolve())
+POLICY_GENERATOR = str(Path(sys.argv.pop(1)).resolve())
 
 
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def message_text(message):
+    """Text projection for this fixture's string/ordered-content HTTP inputs."""
+    content = message["content"]
+    if isinstance(content, str):
+        return content
+    return "".join(part["text"] for part in content if part["type"] == "text")
 
 
 class Server:
@@ -44,6 +54,14 @@ class Server:
         self.env.pop("OPENROUTER_MODEL", None)
         self.env.pop("NEOGRAPH_CHAT_BASE_URL", None)
         self.env.update(env or {})
+        if "--descriptor-policy" not in self.extra:
+            base = urllib.parse.urlsplit(self.env.get("NEOGRAPH_CHAT_BASE_URL", ""))
+            origin = f"{base.scheme}://{base.netloc}" if base.scheme == "http" else ""
+            generated = subprocess.run([POLICY_GENERATOR, origin], check=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            policy_file = self.directory / (self.session + ".policy.json")
+            policy_file.write_text(generated.stdout, encoding="utf-8")
+            self.extra += ["--descriptor-policy", str(policy_file)]
         self.process = None
         self.log = (self.directory / (self.session + ".log")).open("w+")
 
@@ -194,10 +212,10 @@ class ChatTest(unittest.TestCase):
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 seen.append(request)
-                proposal = "Return only JSON" in request["messages"][0]["content"]
-                empty = "empty proposal" in request["messages"][1]["content"]
+                proposal = request.get("response_format", {}).get("type") == "json_object"
+                empty = "empty proposal" in message_text(request["messages"][-1])
                 content = ("" if empty else "{\"plan\":\"execute_shell\",\"reason\":\"untrusted\",\"confidence\":1}") if proposal else "Fixture answer"
-                response = {"id": "fixture", "object": "chat.completion",
+                response = {"id": "fixture", "object": "chat.completion", "model": "fixture-model", "created": 1,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
                                  "finish_reason": "length" if empty and proposal else "stop"}]}
                 if empty:
@@ -222,23 +240,91 @@ class ChatTest(unittest.TestCase):
                 self.assertEqual(state["evolutions"][0]["status"], "rejected")
                 self.assertEqual(self.assistant(state)["generation"], 1)
                 self.assertGreater(state["usage"]["tokens"], 0)
-                self.assertEqual(state["usage"]["prompt_tokens"], 0)
+                self.assertIsNone(state["usage"]["prompt_tokens"])
+                self.assertIsNone(state["usage"]["completion_tokens"])
+                self.assertIsNone(state["usage"]["reported_total_tokens"])
+                self.assertEqual(state["usage"]["uncertain_calls"], 2)
                 self.assertEqual(seen[0]["model"], "fixture-model")
                 self.assertNotIn("response_format",seen[0])
                 self.assertEqual(seen[0]["reasoning_effort"],"low")
                 self.assertEqual(seen[1]["response_format"],{"type":"json_object"})
                 self.assertGreater(seen[0].get("max_completion_tokens", seen[0].get("max_tokens", 0)), 0)
-                skill = (Path(__file__).resolve().parents[3] / "skills/neograph-harness-authoring/SKILL.md").read_text(encoding="utf-8")
-                self.assertIn(skill, seen[1]["messages"][0]["content"].replace("\r\n", "\n"))
                 before=state["usage"]["tokens"]
                 result=s.turn("alice","a2","empty proposal")
                 after=s.state("alice")
                 self.assertEqual(result["status"],"completed")
                 self.assertEqual(result["answer"],"Fixture answer")
                 self.assertEqual(after["usage"]["tokens"],before+18)
-                self.assertEqual(after["usage"]["uncertain_calls"],0)
+                self.assertEqual(after["usage"]["uncertain_calls"], 2)
                 self.assertEqual(after["evolutions"][-1]["status"],"rejected")
-                self.assertEqual(after["evolutions"][-1]["proposal"]["stop_reason"],"max_tokens")
+                self.assertEqual(after["evolutions"][-1]["proposal"]["stop_reason"],"length")
+            finally:
+                provider.shutdown()
+                thread.join()
+
+    def test_nullable_usage_and_native_history_survive_restart(self):
+        seen = []
+        details = [{"type": "reasoning.text", "text": "fixture-native-detail", "signature": "sig",
+                    "index": 0, "extra": {"opaque": [1, None, {"quoted": "<not-executed>"}]}}]
+
+        class Provider(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                seen.append(request)
+                current = json.loads(message_text(request["messages"][-1]))["task"]["message"]
+                proposal = request.get("response_format", {}).get("type") == "json_object"
+                content = json.dumps({"plan": "direct", "reason": "stay", "confidence": 0}) if proposal else "Answer"
+                response = {"id": "fixture", "object": "chat.completion", "model": "fixture-model", "created": 1,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": content,
+                        "reasoning_content": "fixture-native-thinking", "reasoning_details": details},
+                                 "finish_reason": "stop"}]}
+                if "zero usage" in current:
+                    response["usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                body = json.dumps(response).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider) as provider:
+            thread = threading.Thread(target=provider.serve_forever, daemon=True)
+            thread.start()
+            try:
+                s = self.server(["--live", "--allow-loopback-provider"], {
+                    "OPENROUTER_API_KEY": "local-fixture-only", "OPENROUTER_MODEL": "fixture-model",
+                    "NEOGRAPH_CHAT_BASE_URL": f"http://127.0.0.1:{provider.server_port}/v1"})
+                s.turn("alice", "zero", "zero usage")
+                known = s.state("alice")["usage"]
+                self.assertEqual(known["tokens"], 0)
+                self.assertEqual(known["prompt_tokens"], 0)
+                self.assertEqual(known["completion_tokens"], 0)
+                self.assertEqual(known["reported_total_tokens"], 0)
+                self.assertEqual(known["uncertain_calls"], 0)
+                s.stop()
+                s.start()
+                self.assertEqual(s.state("alice")["usage"], known)
+                s.turn("alice", "unknown", "missing usage")
+                unknown = s.state("alice")["usage"]
+                self.assertGreater(unknown["tokens"], 0)
+                self.assertIsNone(unknown["prompt_tokens"])
+                self.assertIsNone(unknown["completion_tokens"])
+                self.assertIsNone(unknown["reported_total_tokens"])
+                self.assertEqual(unknown["uncertain_calls"], 2)
+                replayed = next(message for message in seen[2]["messages"] if message["role"] == "assistant")
+                self.assertEqual(replayed["reasoning_details"], details)
+                self.assertEqual(replayed["reasoning_content"], "fixture-native-thinking")
+                calls = len(seen)
+                s.turn("alice", "unknown", "missing usage")
+                self.assertEqual(len(seen), calls)
+                s.stop()
+                s.start()
+                self.assertEqual(s.state("alice")["usage"], unknown)
             finally:
                 provider.shutdown()
                 thread.join()

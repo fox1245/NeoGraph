@@ -166,6 +166,9 @@ struct ProgramChildQuotaConfig {
       /// Hosts with durable provider effects can forbid raw Core provider calls.
       /// A missing resolver or binding then fails the Core operation closed.
       bool require_core_provider_call_broker = false;
+      /// Host-owned SDK custody for native provider histories and outcomes.
+      /// Null never enables a portable/native fallback during durable restore.
+      std::shared_ptr<sp::NativeArchive> native_history_archive;
   };
 /**
  * Experimental owner-scoped new-run selection. The activation is the exact
@@ -202,14 +205,18 @@ public:
                                   std::shared_ptr<ProgramEventSink> events = {});
     /// Attach a runtime-only event sink without extending the canonical request.
     ProgramHandle start(RunInvocation invocation, std::shared_ptr<ProgramEventSink> events);
+
     /**
-     * Start a top-level Program using exact recorded capability bindings. The
-     * canonical invocation selects the owner and admitted ProgramVersion; the
-     * optional sink is runtime-only and is never persisted in the request.
+     * Replay a retained terminal source without issuing a new spending grant.
+     * Original immutable invocation permissions are authenticated separately
+     * from the source remainder, which is transferred by one durable CAS.
+     * Captured operations/calls do not regain operation or model credit; new
+     * replay CPU/Core work is charged against that transferred remainder.
      */
-    ProgramHandle start_recorded(RunInvocation invocation,
-                                 RecordedBindingSet recorded,
-                                 std::shared_ptr<ProgramEventSink> events = {});
+    ProgramHandle replay_recorded(std::string_view source_run_id,
+                                  RunInvocation invocation,
+                                  RecordedBindingSet recorded,
+                                  std::shared_ptr<ProgramEventSink> events = {});
 
     ProgramHandle start(std::string_view      owner_scope,
                         const ProgramVersion& version,
@@ -260,10 +267,6 @@ public:
     ProgramHandle reconcile(std::string_view          owner_scope,
                             std::string_view          run_id,
                             ProgramEffectResolution  resolution);
-    ProgramHandle start_recorded(std::string_view      owner_scope,
-                                 const ProgramVersion& version,
-                                 ProgramInvocation     invocation,
-                                 RecordedBindingSet    recorded);
     /**
      * Fork an exact checkpoint into the ProgramVersion selected by the
      * canonical top-level invocation. The optional sink is runtime-only.

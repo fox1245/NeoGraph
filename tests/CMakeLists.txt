@@ -11,7 +11,7 @@ add_executable(neograph_tests
     test_node_header.cpp
     test_loader.cpp
     test_schema_export.cpp
-    test_json_path.cpp
+    test_json_array.cpp
     test_pending_writes.cpp
     test_channel_write_mode.cpp
     test_usage_accounting.cpp
@@ -48,29 +48,22 @@ add_executable(neograph_tests
     test_multi_send_routing.cpp
     test_schema_provider_concurrent.cpp
     test_schema_provider_async.cpp
-    test_schema_provider_json_endpoint.cpp
     test_schema_provider_stream_usage.cpp
     test_schema_provider_responses_stream.cpp
     test_schema_provider_stop_reason.cpp
-    test_rate_limited_provider.cpp
     test_admin_api_barrier_preservation.cpp
     test_intent_classifier_streaming.cpp
     test_incremental_checkpoint.cpp
-    test_deep_research_human_review.cpp
     test_async_conn_pool.cpp
-    test_schema_provider_primitives.cpp
     test_schema_provider_wire_contract.cpp
     test_schema_provider_media.cpp
     test_async_http_errors.cpp
     test_async_sse_parser.cpp
     test_async_ws_codec.cpp
     test_async_ws_loopback.cpp
-    test_schema_provider_ws_responses.cpp
     test_async_http_stream.cpp
     test_async_http_options.cpp
-    test_provider_async_default.cpp
-    test_provider_invoke_default.cpp
-    test_completion_provider.cpp
+    test_prepared_provider.cpp
     test_artifact_provider.cpp
     test_run_context_store.cpp
     test_runtime_context.cpp
@@ -92,6 +85,7 @@ add_executable(neograph_tests
     test_concurrent_stress.cpp
     test_openinference_cpp.cpp
     test_schema_provider_stream_async_outer_io.cpp
+    test_schema_provider_stream_async_nested_thread.cpp
     test_graph_invocation.cpp
     test_graph_safe_point.cpp
 )
@@ -126,6 +120,10 @@ if(NEOGRAPH_BUILD_PROGRAM)
         neograph::program
         GTest::gtest_main
     )
+    if(TARGET neograph::llm)
+        target_link_libraries(neograph_program_tests PRIVATE neograph::llm)
+        target_compile_definitions(neograph_program_tests PRIVATE NEOGRAPH_PROGRAM_TESTS_HAVE_LLM)
+    endif()
     if(MSVC)
         # test_program_runtime.cpp intentionally exercises the complete durable
         # state machine and exceeds COFF's default section count in optimized
@@ -437,11 +435,7 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
 endif()
 
-if(NOT NEOGRAPH_USE_LIBCURL)
-    target_sources(neograph_tests PRIVATE test_provider_constructor_exception_safety.cpp)
-else()
-    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_LIBCURL)
-endif()
+target_sources(neograph_tests PRIVATE test_provider_constructor_exception_safety.cpp)
 
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
@@ -588,6 +582,32 @@ target_link_libraries(neograph_runtime_turn_tests PRIVATE
 )
 gtest_discover_tests(neograph_runtime_turn_tests)
 
+if(TARGET neograph::llm)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_executable(neograph_typed_images_tests typed_images_client_test.cpp)
+    add_executable(neograph_typed_veo_tests typed_veo_client_test.cpp)
+    add_executable(neograph_typed_decisions_tests typed_decisions_client_test.cpp)
+    foreach(endpoint IN ITEMS images veo decisions)
+        target_link_libraries(neograph_typed_${endpoint}_tests PRIVATE
+            neograph::llm GTest::gtest_main)
+        target_include_directories(neograph_typed_${endpoint}_tests PRIVATE
+            ${PROJECT_SOURCE_DIR}/deps)
+    endforeach()
+    add_test(NAME TypedImages.LocalHTTPS
+        COMMAND Python3::Interpreter
+            ${CMAKE_CURRENT_SOURCE_DIR}/typed_images_peer.py
+            $<TARGET_FILE:neograph_typed_images_tests>)
+    add_test(NAME TypedVeo.LocalHTTPAndSignedHTTPS
+        COMMAND Python3::Interpreter
+            ${CMAKE_CURRENT_SOURCE_DIR}/typed_veo_peer.py
+            $<TARGET_FILE:neograph_typed_veo_tests>)
+    add_test(NAME TypedDecisions.LocalHTTP
+        COMMAND neograph_typed_decisions_tests)
+    set_tests_properties(
+        TypedImages.LocalHTTPS TypedVeo.LocalHTTPAndSignedHTTPS TypedDecisions.LocalHTTP
+        PROPERTIES TIMEOUT 180 LABELS "provider;typed-endpoint;model-free")
+endif()
+
 # Keep the live safe-point boundary independently runnable from optional
 # backend tests in the aggregate Core binary.
 add_executable(neograph_graph_safe_point_tests
@@ -687,10 +707,13 @@ endif()
 if(TARGET cookbook_program_chatbot AND NEOGRAPH_BUILD_SQLITE)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_executable(program_chat_policy_fixture fixtures/program_chat_policy.cpp)
+        target_link_libraries(program_chat_policy_fixture PRIVATE neograph::core)
         add_test(NAME ProgramChatbot.SQLite
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/examples/cookbook/self_evolving_chatbot/test_program_chat.py
-                $<TARGET_FILE:cookbook_program_chatbot>)
+                $<TARGET_FILE:cookbook_program_chatbot>
+                $<TARGET_FILE:program_chat_policy_fixture>)
         set_tests_properties(ProgramChatbot.SQLite PROPERTIES
             TIMEOUT 240 LABELS "program;example;integration"
             ENVIRONMENT "NEOGRAPH_CHAT_POSTGRES_URL=")

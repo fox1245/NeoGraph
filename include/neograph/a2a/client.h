@@ -112,14 +112,6 @@ class NEOGRAPH_API A2AClient {
     /// `false` to abort early. The final Task (or a status-update with
     /// `final=true`) ends the stream regardless.
     using EventCallback = std::function<bool(const StreamEvent&)>;
-    /// @deprecated Renamed to `EventCallback` to avoid colliding with
-    /// `neograph::StreamCallback` (provider.h: `void(string)`). The
-    /// shapes are different (return type + argument), so a TU pulling
-    /// in both `<neograph/provider.h>` and `<neograph/a2a/client.h>`
-    /// would shadow one with the other. Old name kept as an alias
-    /// for back-compat — prefer `EventCallback` in new code.
-    using StreamCallback [[deprecated("use a2a::A2AClient::EventCallback")]]
-        = EventCallback;
 
     Task send_message_stream(const std::string& text,
                              EventCallback on_event,

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=d2b0e6c51e07b5877e07c5768ade91ce2129fec5f6441f92c7f7b8feae6026b9 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=47da3b0da6a1a0469315657c9eb8079b216d0c51eafce0bed090d91fc5c3c7b5 -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -29,7 +29,7 @@ API 的步骤。
 | 旧虚函数 | 迁移后的形式 |
 |---|---|
 | `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;`（同步主体） |
-| `execute_async(state)` | 原生异步，如 `co_return co_await provider->complete_async(...);` |
+| `execute_async(state)` | 原生异步，如 `co_await provider->invoke_async(std::move(request));` |
 | `execute_stream(state, cb)` | `if (in.stream_cb) (*in.stream_cb)(event); co_return NodeOutput{...};` |
 | `execute_stream_async(state, cb)` | 上述 + 原生异步（`co_await ...`） |
 | `execute_full(state)` | `NodeOutput out; out.writes=...; out.command=...; co_return out;` |
@@ -100,70 +100,83 @@ public:
 
 ### 案例 2 — 异步 LLM 节点（迁移 `execute_async`）
 
-**旧：**
 ```cpp
-class TalkNode : public GraphNode {
-    std::shared_ptr<Provider> prov_;
-public:
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override {
-        auto reply = co_await prov_->complete_async({
-            .messages = state.get_messages(),
-            .model    = "gpt-mock",
-        });
-        co_return std::vector<ChannelWrite>{
-            {"reply", json(reply.message.content)}
-        };
-    }
-    std::string get_name() const override { return "talk"; }
-};
-```
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
 
-**新：**
-```cpp
-class TalkNode : public GraphNode {
-    std::shared_ptr<Provider> prov_;
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto reply = co_await prov_->complete_async({
-            .messages = in.state.get_messages(),
-            .model    = "gpt-mock",
-        });
-        NodeOutput out;
-        out.writes.push_back({"reply", json(reply.message.content)});
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
-    std::string get_name() const override { return "talk"; }
+    std::string get_name() const override { return "chat"; }
 };
 ```
 
 ### 案例 3 — 流式节点（迁移 `execute_stream`）
 
-**旧：**
-```cpp
-std::vector<ChannelWrite>
-execute_stream(const GraphState& state, const GraphStreamCallback& cb) override {
-    auto reply = prov_->complete_stream(params, [&](const std::string& chunk) {
-        cb({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
-    });
-    return {ChannelWrite{"reply", json(reply.message.content)}};
-}
-```
+公开契约是拥有所有权的 typed 准备/dispatch，而非同步/异步 virtual completion 对。`ProviderRequest.payload` 是 Chat、Messages、Responses、Gemini、Interactions 的 SDK 请求 variant。`ProviderMode::Collect` / `Stream` 独立于观察者是否存在来选择传输。`on_event` 接收借用的 typed `sp::Event` view；只复制回调后仍需要的数据。不允许 raw JSON override 或通过 portable projection 导入 native 权限。
 
-**新：**
 ```cpp
-asio::awaitable<NodeOutput> run(NodeInput in) override {
-    // in.stream_cb is a pointer — null means the caller does not want streaming.
-    auto on_chunk = [&](const std::string& chunk) {
-        if (in.stream_cb) {
-            (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
-        }
-    };
-    auto reply = prov_->complete_stream(params, on_chunk);
-    NodeOutput out;
-    out.writes.push_back({"reply", json(reply.message.content)});
-    co_return out;
-}
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+
+class StreamingChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
+public:
+    StreamingChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages(), {}, {},
+            neograph::ProviderMode::Stream);
+        request.on_event = [sink = in.stream_cb](const sp::Event& event) {
+            if (!sink) return;
+            const auto* delta = std::get_if<sp::PartDelta>(&event);
+            if (delta && delta->payload.kind == sp::PartKind::Text &&
+                delta->payload.channel == sp::DeltaChannel::Content)
+                (*sink)({neograph::graph::GraphEvent::Type::LLM_TOKEN,
+                         "chat", neograph::json(std::string(delta->payload.bytes))});
+        };
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
+        co_return out;
+    }
+    std::string get_name() const override { return "chat"; }
+};
 ```
 
 ### 案例 4 — 使用 Command / Send 的节点（迁移 `execute_full`）
@@ -282,151 +295,122 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 ---
 
-# 迁移 2：`Provider` 兼容性策略及新的显式请求 API（v0.9+）
+# 迁移 2：typed lossless Provider 切换（必须重新编译）
 
-现有的 `Provider::complete*` 四个方法和基于回调的 `invoke()` 是稳定 API，
-无移除计划。现有实现和调用者无需迁移。但是，新的 `Provider` 实现应仅重写
-`CompletionProvider::do_invoke()`，新的直接调用应使用
-`invoke_request(CompletionRequest)`。
+这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
 
-## 现有调用模式与推荐的新的调用模式
+Fresh installed find_package Program C++/C ABI/dualQuickJS consumer 与 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer pass。Interface/ABI 声明本身不同于实际 package 结果；不声称更广 platform 或稳定 release。
 
-| 稳定兼容 API | 直接使用 `CompletionProvider` 时推荐的 API |
-|---|---|
-| `complete(params)` | `run_sync(invoke_request(CompletionRequest::collect(params)))` |
-| `complete_async(params)` | `co_await invoke_request(CompletionRequest::collect(params))` |
-| `complete_stream(params, on_chunk)` | `run_sync(invoke_request(CompletionRequest::stream(params, on_chunk)))` |
-| `complete_stream_async(params, on_chunk)` | `co_await invoke_request(CompletionRequest::stream(params, on_chunk))` |
-
-`CompletionRequest` 将回调的存在与传输模式分离。因此，即使没有回调，
-`CompletionRequest::stream(params)` 也明确请求流式传输。仅持有
-`Provider&` 或 `Provider*` 的代码可以不变地使用现有 `complete*` 方法。
-
-## 逐例转换
-
-### 调用 Provider 的用户代码
+公开契约是拥有所有权的 typed 准备/dispatch，而非同步/异步 virtual completion 对。`ProviderRequest.payload` 是 Chat、Messages、Responses、Gemini、Interactions 的 SDK 请求 variant。`ProviderMode::Collect` / `Stream` 独立于观察者是否存在来选择传输。`on_event` 接收借用的 typed `sp::Event` view；只复制回调后仍需要的数据。不允许 raw JSON override 或通过 portable projection 导入 native 权限。
 
 ```cpp
-// Stable compatible API — continues to be supported
-auto completion = co_await provider->complete_async(params);
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <neograph/controlled_provider.h>
+
+// Public operation signatures (the only virtual operation is prepare).
+// ProviderRequest owns the SDK request variant, mode, options and observer.
+// invoke[_async](request) = prepare once, then dispatch the same handle.
+// dispatch[_async](prepared) returns sp::runtime::Result.
 ```
+
+### ProviderRequest / ProviderControls
 
 ```cpp
-// New code using `CompletionProvider` directly — mode is explicit
-auto completion = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result call_provider(
+    neograph::Provider& provider, std::string model,
+    std::vector<sp::Message> history,
+    std::function<void(const sp::Event&)> observer) {
+    neograph::ProviderControls controls;
+    controls.max_output_tokens = 128;  // optional caller-selected wire cap
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history), {},
+        std::move(controls), neograph::ProviderMode::Stream);
+    request.on_event = std::move(observer);
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));  // owns Completion or Failure
+}
 ```
 
-### 自定义 Provider 子类
+### PreparedProviderRequest / ProviderBudgetClaim
+`prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
 
-现有 `Provider` 子类继续工作。新实现应继承 `CompletionProvider` 并仅实现
-`do_invoke()`。现有 `Provider` 虚函数表和 Python `complete()` 约定保持不变。
+可选 `ProviderControls` 是调用方选择，不是强制默认值或暗中 clamp 的 cap。不支持的 family 控制在 dispatch 前拒绝。有界调用需要获准的真实模型 input/output 上限；缺失时为 `LimitUnknown`。预留是保守的支出权限，而非报告使用量、预测或账单。未知/部分/delivery-unknown 结果保留 hold，真实最终报告用于结算，超额报告也全额计入。retry 是显式单层，默认 off，具有有界 window 与 unknown-prior hold；没有隐藏重发。
+
+
+提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、完整 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。使用量是带依据、阶段、质量的 nullable `uint64_t`；缺失表示未知，绝不是零。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+
+实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
+### SchemaProvider
+
+`SchemaProvider` 接收获准的 `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options` 及可选 `SchemaProvider::Defaults`。descriptor 是 closed/versioned 数据 admission，不是请求/响应 interpreter 或任意 primitive registry。credential 应放在 runtime options，而非公开 descriptor。Defaults 仅包含 typed OpenRouter routing 和 Responses 保留 (`responses_store`)，后者仅适用于 Responses。Hosted OpenRouter routing、retention、JSON 格式仍是声明的 typed 控制。Images、Veo、Decisions 使用独立的 NeoGraph typed client 和独立授权，不继承 SDK chat grant。
 
 ```cpp
-// Old pattern — async-native provider
-class MyProvider : public neograph::Provider {
-public:
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override {
-        // ... HTTP call ...
-        co_return result;
-    }
+#include <neograph/llm/schema_provider.h>
+#include <descriptor/descriptor.h>
+#include <stdexcept>
+#include <variant>
 
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override {
-        // ... SSE call ...
-        return result;
-    }
-
-    std::string get_name() const override { return "my"; }
-};
+std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
+    std::string_view descriptor_json, std::string api_key) {
+    auto loaded = sp::descriptor::load(descriptor_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument(error->message);
+    sp::runtime::Options options;
+    options.api_key = std::move(api_key);
+    neograph::llm::SchemaProvider::Defaults defaults;
+    return std::make_shared<neograph::llm::SchemaProvider>(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+        std::move(options), std::move(defaults));
+}
 ```
 
-```cpp
-// New pattern — transport mode is decoupled from callback presence
-class MyProvider : public neograph::CompletionProvider {
-public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        if (request.streaming()) {
-            // Uses SSE/WS transport even without callback.
-            // With callback, invokes request.on_chunk()(token) per token.
-        } else {
-            // ... HTTP call ...
-        }
-        co_return result;
-    }
+### Native 历史 / 预算
 
-    std::string get_name() const override { return "my"; }
-};
-```
+`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式仍为 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
 
-新调用者显式指定模式。
+**Standalone bank journal 修正——当前契约已修订；实际 runtime 证据如下。** Owner-approved protocol 要求单调 trusted-store namespace obligation，以及真实不可变 original owner/thread/graph scope、ceiling、deadline/clock identity、generation。只有对全部 checkpoint commitment/revision 的精确 durable head CAS 才可发放 host-owned opaque lease。精确 pending effect window 必须在 provider I/O 前持久化；结算必须采用真实 SDK outcome 及实际 charge、nullable report、hold、dedup identity。Checkpoint 与 next head 必须在同一 owned actor/revision 下原子 publish。删除 bank metadata、prune checkpoint、replay old authenticated snapshot、覆盖同一 ID 或失去 actor 都不能授予 credit。已有 65 hold 时将 ceiling 130 降至 129，不能再批准另一个 65；已证明 no-effect 的失败可 release unchanged head，使 authentic 130 恢复仍可进行。Crash/unknown/lost-lease window 保持 hold，不 refund/retry/fallback。Plain/pristine archive 配置不授予 money/native spending lease；当前 `config.usage` 不能替换既有 standalone obligation，Program/external-bank journal 所有权不变。这是要求契约。实际 currency/custody 证据与 instrumentation 限制见下文，不是稳定 released API 保证。
 
-```cpp
-auto full = co_await provider.invoke_request(
-    CompletionRequest::collect(params));
+**当前声明；集成 runtime 证据如下:** `<neograph/graph/checkpoint.h>` 声明 `ManagedBudgetLeaseScope`，包含 `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity`。`OwnedManagedBudgetLease` 暴露 read-only `scope()`、`actor_id()`、不可变 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()`，没有公开 authority-import constructor。`ManagedBudgetEffectReceipt` 暴露 `active()`、`effect_id()`、`claim_amount()`、`request_digest()`；default receipt 不授予权限。`CheckpointStore` 声明 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` 及 `_async` counterpart。Sync `CheckpointStoreCore` 与 `AsyncCheckpointStore` 暴露各自 variant。`managed_budget_checkpoint_commitment(checkpoint)` 绑定完整持久 checkpoint，而非仅 bank JSON。这些声明不证明 backend CAS、currency 安全性、installed ABI 兼容性或实际成功的 runtime 路径。
 
-auto streamed = co_await provider.invoke_request(
-    CompletionRequest::stream(params, on_chunk));
+**真实 InMemory shared-bank fork 已保留并实证。** 原始真实 C++ fork 使用 ONE original financial journal 和 trusted current branch head，不复制 grant。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 及 `_async` 要求 authentic current source/full commitment 与实际 same-bank native C++ pointer；durable standalone fork 仍明确 unsupported。`OwnedManagedBudgetLease::scope()` 及 original owner/thread/graph、ceiling、deadline/clock、generation 保持不可变。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` 单独选择 execution branch；`GraphState::budget_original_thread_id()` 标识原始 financial bank。精确 selected-branch head CAS 和 global actor/revision 将所有 branch 对 canonical current counter、pending effect、burned identity 串行化。Original/fork branch 保持可用但不补充额度。Stale snapshot、checkpoint copy、imported JSON 不能发放 alias 或回退 head。原始 root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank 证明在未修改 test_graph_engine.cpp:810–913 中 PASSED；saved original ceiling30 不同于 effective fork ceiling20；widening31 和 JSON-only restore 必须拒绝。Unbounded reported observation 是事实 data，不是 finite grant。只有已证明 zero-effect 的 lease 能 release unchanged head；unknown/pending effect 保留 obligation。
 
-// Can explicitly request streaming transport even without observing tokens.
-auto streamed_without_observer = co_await provider.invoke_request(
-    CompletionRequest::stream(params));
-```
+**当前 release-error 契约；实际 suite/probe 如下。** `<neograph/graph/engine.h>` 中 `graph::ManagedBudgetLeaseReleaseError` 继承 `ProviderOutcomeError`。`cause()` 保留原始 execution exception，`release_error()` 暴露次要 durable lease-disposition 失败。`outcome()` 在存在真实 SDK 证据时保留它，若没有 SDK outcome 则为 null；release 失败不能伪造结果或授权重新 dispatch。Closed `_neograph_managed_budget_scope` metadata 描述原始 logical scope/cap/deadline clock/generation，但只是 data，不是 backend CAS 权限。
 
-旧的四个虚函数和 `invoke(params, on_chunk)` 继续受支持。
-`CompletionProvider` 最终适配器一次性将所有旧入口点连接到 `do_invoke()`，
-防止相互递归。
+**Archive-owner/retention 契约；实际 suite/probe 如下。** 只有 finite standalone root 或 authenticated finite source 才从真实配置的 `sp::NativeArchive::owner_scope()` 继承省略的 original owner；unbounded/plain owner metadata 语义不变。显式冲突的 archive owner 在 lease acquire 前拒绝。`CheckpointStore::retains_native_checkpoint() const noexcept` 及对应 Core/Async storage capability 默认 false；真实 InMemory backend override 为 true，wrapper 必须委托真实 retention。此 read-only 描述允许合法 unleased/plain/unbounded C++ native checkpoint custody，但不授予 spending credit 或 native replay authority。Leased custody 使用真实 store-issued receipt，而非 JSON flag 或猜测的 store type。
 
-## 自动取消传播
+**Native-custody pre-I/O gate；实际 suite/probe 如下。** Managed effect begin 在任何 pending-effect/slot/held-window 修改前要求真实绑定的 NativeArchive 或实际 local store-issued private C++ retention capability。Private capability 不从 JSON import，也不经 wire 传输。C++ sidecar 无法跨越边界，因此即使 remote backend 是 InMemory，gRPC 仍要求真实 client/server archive。Archive 未提供 finite source owner 时，原始 anonymous owner scope 保持空值；真实 archive binding 必须匹配 original scope。Financial head/lease 证据本身不证明 native-custody readiness。
 
-如果需要取消，请指定 `CompletionParams::cancel_token`。内部引擎节点将
-`RunContext` 令牌传递给 params 中的 provider。线程局部隐式传播路径不再使用。
+诊断 JSON 保留原始 raw byte，包括语法有效的 duplicate-key 文档；可执行请求/config admission 仍拒绝重复键。原始 non-2xx 响应 JSON 保留在 `http.error` 证据中，不进行第二次有损 parse。named SSE error 优先于之后的正常 stream close。诊断/provider metadata 按获准 source extent 限制，而非无关的小 error-text cap。
 
-```cpp
-// Node body inside engine — both cancel identically
-co_await provider->invoke(params, nullptr);                    // OK
-neograph::async::run_sync(provider->invoke(params, nullptr));  // OK
-```
+`ProviderRequest::observer_limits` 仅供宿主使用。显式 `max_events`、`max_bytes` 必须为正且只能降低获准 SDK 交付上限。`provider-request/v3` digest 绑定实际 limit、mode、encoded body、retry policy 及全部 semantic descriptor binding。Bridge 在 queued/draining batch 中同时计入真实 PMR vector/map capacity 与拥有的 event/document byte，并在 queue mutex 之外请求 cancellation。名为 `messages` 的 Generic channel 不会被强制转成 chat。将 native `history` channel mapping 到 `messages` 会保留 C++ sidecar，而不是从 JSON 制造 native 权限。
 
-图外的直接调用者（例如 `Agent` 用户代码）遵循相同模式——没有显式的
-cancel_token 则无法接收取消（与之前相同）。
+`ProviderOutcomeError` 是保留结果的共同 host-error base；`ProviderObserverError` 和 `ProviderDispatchOutcomePersistenceError` 保留完整 drain 后的 SDK 结果及原始 `cause()`，后者还通过 `delivery_error()` 保留次要 observer 失败。`ProviderFailure::outcome()` 保留 SDK 失败本身。这些证据不授权 Node/Program 重新 dispatch。SDK 是 provider retry 的唯一所有者，调用方选择的 `max_output_tokens` 不会被暗中 clamp。
 
-## 如果不迁移会发生什么
+`ProgramFailure` 保留 live `provider_outcome`、`provider_cause`。Canonical factual SDK witness 将真实 archive custody 绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复后的失败前立即恢复配置的 custody。公开 data-only `ProgramResult::create()` 不能用预填 witness 绕过；未解析完的 parsed seal 不是可执行结果。进程重启后原始 exception pointer 不可用（`provider_cause == nullptr`），不会从 text 重建。无法持久化的失败不能 serialize/publish/replay。
 
-无需采取任何操作：
-- 旧的虚函数重写和直接调用继续工作。
-- Provider 相关的 `-Wdeprecated-declarations` 警告不再出现。
-- 兼容性和安全性修复同样适用于旧 API。
+`RecordedBindingSet` 是 source-bound move-only data，不是调用方提供的 dispatcher。可信 Catalog `recorded_capability_binder` 独立读取真实持久 source event，materialize captured-only capability。`ProgramRuntime::replay_recorded()` 检查原始 selected-source permission，再通过 durable CAS 转移真实剩余 bank；inherited spend 不是新的 model grant。旧 `start_recorded` 续期 API 已删除。InMemory/File/SQLite/PostgreSQL Program store 在整个执行期间保留精确不可变 owned lease，不因 expiry 续期。Controlled JavaScript 仍验证 underlying capability manifest，消费精确 completed command 结果，不重新 dispatch external effect。
 
-没有移除旧 API 的计划。但是，新功能可能仅添加到显式请求约定中，因此
-使用 `CompletionProvider` 实现新功能更为可取。
+**Recorded-control causal fix 已在 full suite 实证。** Captured command replay 在执行前仅为新的 CPU wall-time/Core work 建立 durable reservation，再通过 result CAS publish 测量 work 与新产生的 Core checkpoint。不消耗新的 model、money、Program-operation allowance，也不重新 dispatch captured external effect。未结算 reservation 保持 debit。Reservation 选择认证 settlement transition，而非曾拒绝首个新 Core checkpoint 的普通 Running→Running transition。Await channel receive、timer wait/cancel、handoff wait 的开始/release 在所属 executor/strand 上串行化；既有 Recorded CPU/Memory await/handoff scenario 在 full suite pass；remote TSan coverage 限制如下明确保留。
 
-## 能否自动转换？
+**付费观测已完成；不是普遍 qualification。** 原始 `SPQUAL1` base630/1000000 microUSD 不变；同一原始 ledger 中 ONE hash-chained `A` 接纳批准的 extension480/3000000，aggregate1110/4000000。Calls/spent/hold/settlement 累积，不产生新 grant ID/header/reset。精确 declaration byte/file identity 和 original authorization/baseline/catalog/activation/ledger-prefix hash/totals 仍固定；删除、替换、变更均 fail closed。最终 canonical ledger 为 calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 是 LOCAL catalogue meter，不是 invoice。记录的 five-family60-pair baseline 完成600 request：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4次）、Interactions57/60（incorrect-vision buffered1次/SSE2次）；合计293/300 pair，不是300/300。其他 old600 financial record 保留，但不是完整 behavioral proof。此前 M5/media one-shot cohort 不变。此前 Google3-round prerequisite 保留 invalid-tool2次/unreadable-positive1次失败状态。不批准更多付费调用。最终 SDK 证据与 native-axis 限制不同于 baseline 成功。 此前 activation/reopen smoke 保留为两次 reopen 后 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass；这是限定的历史 checkpoint，不是最终 ledger totals。此前验证的 Chat60-pair cohort 保留实际 attempt120、UpperBound charge120、无 UnknownHold。
 
-调用点遵循简单模式：
+**Native-axis 观测不是 cryptographic 验证或 native consumption/equivalence。** Generate 接纳 mutation/omission/duplication。Interactions 接纳 isolated genuine source/positive control、one-owner signature mutation、thought-carrier omission、call-carrier omission、duplication。删除全部 thought/signature 返回 generic400；保留 THOUGHT item 而删除全部 signature field 也返回 generic400。最后一次 capture 只有 local encoded-original retention control，没有 same-capture server positive；此前 positive cohort 仍是真实证据。这仅建立 aggregate-carrier-absence boundary，不证明 issuer/signature 验证或 vendor consumption。实际 report：SDK `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json`；prerequisite-failed/not-run/negative-inconclusive 状态保持为事实。 Thought-only/carrier-only omission 在仍有其他 carrier 时被接纳；这不加强 issuer-validation/native-consumption 声明。
 
-```bash
-# Review with dry-run
-grep -rnE '->complete(_async|_stream|_stream_async)?\(' your/code
+**实际集成证明及剩余限制。** 最新 Core full run：2242 test、失败0、skip16（RAM process-loss 不适用14项/live-credential gate2项）、130.17秒。`PgNestedJsonRoundTrips` 精确保留 duplicate key/order/null metadata、blob、residual，0.18秒 pass。未修改的原始 shared-bank fork 和既有 Recorded CPU/Memory await/handoff scenario 均 pass。真实 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe 在 plain 和 ASan+UBSan pass。LOCAL Memory/SQLite/PostgreSQL TSan scope7项 pass、warning0。包含 system Abseil/Protobuf 的 full mixed gRPC TSan 为 exit66，dependency/generated-RPC stack 有 race warning402项。这是 instrumentation/coverage 限制，不是已证明的 false positive；不声称 remote TSan/race-free，不 suppress warning。Installed find_package Program C++/C ABI/dualQuickJS3个 consumer pass。Fresh installed NeoGraph/SchemaProvider typed consumer 实际2个 HTTP request、coroutine 开始前 provider 销毁、native/tool replay、refusal、known-zero/raw 保留、实际 LinkedMismatch 拒绝均 pass。Browser Alice/Bob isolation、generation2 replacement 已实际目视验证；PostgreSQL Program Chat black-box6项18.989秒 pass。最新 SDK26/26、失败0、74.07秒 pass。最终 ReleaseGraph16配置 ×fresh process3次/48记录以38.29秒、失败0、全部 actual protocol/owned-outcome check pass 完成。NeoGraph `benchmarks/provider-cutover-final-results.json` 和 `benchmarks/provider-cutover-final-summary.json` 保留独立最终 cohort。测量期间未执行 compiler/付费 model；历史 cohort 不变，不声明 semantic/resource equivalence。Unstable SDK/ABI3 不是稳定 release 或更广 platform qualification。
 
-# Then manually edit case-by-case (refer to the mapping table above).
-```
+**最小付费证据（2026-10-03）不是广泛 qualification。** 分别批准的三次 one-shot 调用结果：Images—1 个 JPEG，1024×1024，360685 byte，input/output/total token 19/1408/1427，已实际目视检查；Veo—1 个 MP4，1280×720，4 秒，437737 byte，1 次 generation 加 3 次 status GET，usage nullable，在 Chromium 中 decode 并目视检查；Decisions—`typesafe/jev-1.13`，probability 0.93，input/output token 283/21，total 未知，API 报告费用 USD 0.000011886。Image USD 0.0336 base 加 text/thinking、Veo USD 0.20 是 catalog 预期，不是 invoice；最小 image smoke 未取得价格档位分解。结果不续期 one-shot 权限，也不授权重跑。
 
-将旧的 `Provider` 子类合并到单个 `CompletionProvider::do_invoke()` 中
-是可选的，由于交织的逻辑，需要手动编辑。
+已完成的 chat pair 不证明 downstream vendor 对 native-continuation 的消费。
 
-## 相关文档 / Issue
+Stage 3（2026-04）设计及当时实测测试数量作为历史保留。provider 兼容/crossover 决策已由下方 typed lossless 切换取代；旧设计记录不是当前 provider API。
 
-- [`include/neograph/graph/node.h`](../include/neograph/graph/node.h) —
-  新的 `run(NodeInput)` 虚函数的内联 docstring（含示例）
-- [ROADMAP_v1.md](../ROADMAP_v1.md) — 候选 1 的详细设计说明
-  （GraphNode 8 虚函数展平）
-- [troubleshooting.md](troubleshooting.md) — 实际迁移过程中遇到的编译
-  错误和运行时差异
-- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) —
-  Provider 方法实现路径和永久兼容性策略的记录决策
+- [ABI_POLICY.md](ABI_POLICY.md)
+- [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
+- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — historical decision; superseded provider compatibility policy.
 
 ---
 
@@ -502,6 +486,8 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 详见 ROADMAP_v1.md 性能部分的测量数据（单独添加）。
+
+> Stage 3（2026-04）设计及当时实测测试数量作为历史保留。provider 兼容/crossover 决策已由下方 typed lossless 切换取代；旧设计记录不是当前 provider API。
 
 ---
 

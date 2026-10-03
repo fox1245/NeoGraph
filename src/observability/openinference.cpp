@@ -15,12 +15,14 @@
 #include <condition_variable>
 #include <exception>
 #include <list>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+#include <type_traits>
 
 namespace neograph::observability {
 
@@ -518,124 +520,191 @@ OpenInferenceProvider::OpenInferenceProvider(
 OpenInferenceProvider::~OpenInferenceProvider() = default;
 
 std::string OpenInferenceProvider::get_name() const {
-    try {
-        return std::string("openinference(") + impl_->inner->get_name() + ")";
-    } catch (...) {
-        return "openinference(provider)";
-    }
+    return impl_->inner->get_name();
+}
+
+std::string_view OpenInferenceProvider::family() const noexcept {
+    return impl_->inner->family();
 }
 
 namespace {
+const char* role_name(sp::Role role) noexcept {
+    switch (role) {
+        case sp::Role::System: return "system";
+        case sp::Role::Developer: return "developer";
+        case sp::Role::User: return "user";
+        case sp::Role::Assistant: return "assistant";
+        case sp::Role::Tool: return "tool";
+    }
+    return "unknown";
+}
 
-// Drop messages onto an LLM-kind span as input.value + per-message
-// attribute set, matching the Python module's record_input.
-void record_input(Span* span, const CompletionParams& params) {
+std::string visible_text(const sp::Message& message) {
+    std::string text;
+    for (const auto& part : message.parts) {
+        if (const auto* visible = std::get_if<sp::Text>(&part)) text += visible->value;
+    }
+    return text;
+}
+
+json public_input_observation(const ProviderRequest& request) {
+    return std::visit([](const auto& payload) -> json {
+        json messages = json::array();
+        if constexpr (std::is_same_v<std::decay_t<decltype(payload)>, sp::chat::Request>) {
+            if (!payload.messages.empty()) {
+                for (const auto& message : payload.messages) {
+                    messages.push_back({{"role", role_name(message.role)}, {"content", message.text}});
+                }
+            } else {
+                for (const auto& message : payload.canonical_messages) {
+                    messages.push_back({{"role", role_name(message.role)},
+                                        {"content", visible_text(message)}});
+                }
+            }
+        } else {
+            for (const auto& message : payload.messages) {
+                messages.push_back({{"role", role_name(message.role)},
+                                    {"content", visible_text(message)}});
+            }
+        }
+        json invocation = json::object();
+        if constexpr (requires { payload.temperature; }) {
+            if (payload.temperature) invocation["temperature"] = *payload.temperature;
+        }
+        if constexpr (requires { payload.max_output_tokens; }) {
+            if (payload.max_output_tokens) invocation["max_tokens"] = *payload.max_output_tokens;
+        } else {
+            if (payload.max_tokens) invocation["max_tokens"] = *payload.max_tokens;
+        }
+        return {{"messages", std::move(messages)}, {"invocation", std::move(invocation)}};
+    }, request.payload);
+}
+
+void record_input(Span* span, const PreparedProviderRequest& request,
+                  const json& observation) noexcept {
     if (!span) return;
     try {
         span->set_attribute(kSpanKind, "LLM");
-        if (!params.model.empty()) {
-            span->set_attribute(kLlmModel, params.model);
+        span->set_attribute(kLlmModel, request.model());
+        if (observation.is_null()) return;
+        span->set_attribute(kLlmInvocation, observation.at("invocation").dump());
+        const auto& messages = observation.at("messages");
+        for (size_t i = 0; i < messages.size(); ++i) {
+            const auto base = "llm.input_messages." + std::to_string(i) + ".message";
+            span->set_attribute(base + ".role", messages[i].at("role").get<std::string>());
+            span->set_attribute(base + ".content", messages[i].at("content").get<std::string>());
         }
-
-        json invocation = json::object();
-        invocation["temperature"] = params.temperature;
-        if (params.max_tokens >= 0) {
-            invocation["max_tokens"] = params.max_tokens;
-        }
-        try {
-            span->set_attribute(kLlmInvocation, invocation.dump());
-        } catch (...) {}
-
-        json messages_blob = json::array();
-        for (size_t i = 0; i < params.messages.size(); ++i) {
-            const auto& m = params.messages[i];
-            std::string base = "llm.input_messages." + std::to_string(i)
-                             + ".message";
-            span->set_attribute(base + ".role", m.role);
-            span->set_attribute(base + ".content", m.content);
-            json one;
-            one["role"] = m.role;
-            one["content"] = m.content;
-            messages_blob.push_back(std::move(one));
-        }
-        if (!params.messages.empty()) {
-            try { span->set_attribute(kInputValue, messages_blob.dump()); }
-            catch (...) {}
+        if (!messages.empty()) {
+            span->set_attribute(kInputValue, messages.dump());
             span->set_attribute(kInputMime, "application/json");
         }
     } catch (...) {}
 }
 
-void record_output(Span* span, const ChatCompletion& result) {
+void record_count(Span* span, const char* key,
+                  const std::optional<sp::Count>& count) {
+    if (!count) return;
+    // Span's numeric sink is signed; never wrap a genuine uint64 report.
+    if (count->value <= static_cast<std::uint64_t>(std::numeric_limits<int64_t>::max())) {
+        span->set_attribute(key, static_cast<int64_t>(count->value));
+    } else {
+        span->set_attribute(key, std::to_string(count->value));
+    }
+}
+
+void record_output(Span* span, const sp::Outcome& outcome) noexcept {
     if (!span) return;
     try {
-        const auto& m = result.message;
-        span->set_attribute("llm.output_messages.0.message.role", m.role);
-        span->set_attribute("llm.output_messages.0.message.content", m.content);
-        span->set_attribute(kOutputValue, m.content);
+        const auto& messages = outcome_messages(outcome);
+        std::string output;
+        for (size_t i = 0; i < messages.size(); ++i) {
+            const auto text = visible_text(messages[i]);
+            const auto base = "llm.output_messages." + std::to_string(i) + ".message";
+            span->set_attribute(base + ".role", role_name(messages[i].role));
+            span->set_attribute(base + ".content", text);
+            output += text;
+        }
+        span->set_attribute(kOutputValue, output);
         span->set_attribute(kOutputMime, "text/plain");
-
-        if (result.usage.prompt_tokens > 0) {
-            span->set_attribute(kLlmTokenPrompt,
-                                static_cast<int64_t>(result.usage.prompt_tokens));
-        }
-        if (result.usage.completion_tokens > 0) {
-            span->set_attribute(kLlmTokenCompletion,
-                                static_cast<int64_t>(result.usage.completion_tokens));
-        }
-        if (result.usage.total_tokens > 0) {
-            span->set_attribute(kLlmTokenTotal,
-                                static_cast<int64_t>(result.usage.total_tokens));
-        }
+        const auto& usage = outcome_usage(outcome);
+        record_count(span, kLlmTokenPrompt, usage.input_total);
+        record_count(span, kLlmTokenCompletion, usage.output_total);
+        record_count(span, kLlmTokenTotal, usage.total);
     } catch (...) {}
 }
 
 class ProviderSpanState {
 public:
-    explicit ProviderSpanState(std::unique_ptr<Span> span)
-        : span_(std::move(span)) {}
-
     ~ProviderSpanState() { end(); }
 
-    void record(const CompletionParams& params) noexcept {
+    void start(Tracer* tracer,
+               const std::function<Span*()>& parent_lookup,
+               const OpenInferenceTracerSession::ChildSpanStarter& child_span_starter,
+               const std::string& name,
+               const PreparedProviderRequest& request,
+               const json& messages) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mu_);
-            if (!ended_) record_input(span_.get(), params);
+            if (started_ || ended_) return;
+            started_ = true;
+            if (child_span_starter) {
+                span_ = child_span_starter(*tracer, name);
+            } else {
+                Span* parent = nullptr;
+                if (parent_lookup) {
+                    try { parent = parent_lookup(); } catch (...) {}
+                }
+                span_ = tracer->start_span(name, parent);
+            }
+            record_input(span_.get(), request, messages);
         } catch (...) {}
     }
 
-    void add_token(const std::string& chunk) noexcept {
+    void event(const sp::Event& event) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mu_);
-            if (!ended_ && span_) {
-                try { span_->add_event("llm.token", chunk); } catch (...) {}
+            const auto* delta = std::get_if<sp::PartDelta>(&event);
+            if (!ended_ && span_ && delta && delta->payload.kind == sp::PartKind::Text &&
+                delta->payload.channel == sp::DeltaChannel::Content) {
+                // Only public visible-text deltas are telemetry. The original
+                // typed event still reaches the caller unchanged.
+                span_->add_event("llm.token", delta->payload.bytes);
             }
         } catch (...) {}
     }
 
-    void finish_ok(const ChatCompletion& result,
-                   const std::string* streamed_output = nullptr) noexcept {
+    void finish(const sp::runtime::Result& result) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mu_);
             if (ended_) return;
-            record_output(span_.get(), result);
-            if (span_ && streamed_output) {
-                try { span_->set_attribute(kOutputValue, *streamed_output); }
-                catch (...) {}
-            }
-            if (span_) {
-                try { span_->set_status_ok(); } catch (...) {}
+            if (span_ && result) {
+                record_output(span_.get(), *result);
+                try {
+                    if (const auto* failure = std::get_if<sp::Failure>(result.get())) {
+                        span_->set_status_error(failure->error.safe_message);
+                    } else {
+                        span_->set_status_ok();
+                    }
+                } catch (...) {}
             }
             end_locked();
         } catch (...) {}
     }
 
-    void finish_error(std::string_view message) noexcept {
+    void finish_error(std::exception_ptr error) noexcept {
+        // Exceptions are observed, not translated into synthetic provider
+        // results. The dispatch layer retains and rethrows the original.
         try {
             std::lock_guard<std::mutex> lock(mu_);
             if (ended_) return;
-            if (span_) {
-                try { span_->set_status_error(message); } catch (...) {}
+            if (span_ && error) {
+                try {
+                    std::rethrow_exception(error);
+                } catch (const std::exception& exception) {
+                    try { span_->set_status_error(exception.what()); } catch (...) {}
+                } catch (...) {
+                    try { span_->set_status_error("non-standard dispatch exception"); } catch (...) {}
+                }
             }
             end_locked();
         } catch (...) {}
@@ -659,168 +728,47 @@ private:
 
     std::mutex mu_;
     std::unique_ptr<Span> span_;
+    bool started_ = false;
     bool ended_ = false;
 };
 
-class ProviderSpanGuard {
-public:
-    explicit ProviderSpanGuard(std::shared_ptr<ProviderSpanState> state)
-        : state_(std::move(state)) {}
-
-    ~ProviderSpanGuard() {
-        if (state_) state_->end();
-    }
-
-private:
-    std::shared_ptr<ProviderSpanState> state_;
-};
-
-std::shared_ptr<ProviderSpanState> start_provider_span(
-    Tracer* tracer,
-    const std::function<Span*()>& parent_lookup,
-    const OpenInferenceTracerSession::ChildSpanStarter& child_span_starter,
-    const std::string& span_name,
-    const CompletionParams& params) noexcept {
-    std::unique_ptr<Span> span;
-    try {
-        if (child_span_starter) {
-            span = child_span_starter(*tracer, span_name);
-        } else {
-            Span* parent = nullptr;
-            if (parent_lookup) {
-                try { parent = parent_lookup(); } catch (...) {}
-            }
-            span = tracer->start_span(span_name, parent);
-        }
-    } catch (...) {
-        return {};
-    }
-    if (!span) return {};
-
-    try {
-        auto state = std::make_shared<ProviderSpanState>(std::move(span));
-        state->record(params);
-        return state;
-    } catch (...) {
-        if (span) {
-            try { span->end(); } catch (...) {}
-        }
-        return {};
-    }
-}
-
 } // namespace
 
-// Keep wrapping every stable Provider entry point so callers get the same
-// tracing behavior regardless of which compatibility surface they use.
+PreparedProviderRequest OpenInferenceProvider::prepare(ProviderRequest request) {
+    // Snapshot only the existing public text/scalar telemetry surface before
+    // ownership moves. Private native parts never enter this observation.
+    json observation;
+    try { observation = public_input_observation(request); } catch (...) {}
+    // Prepare first: invalid admission must precede any tracer callbacks.
+    auto prepared = impl_->inner->prepare(std::move(request));
+    if (!prepared.valid()) return prepared;
 
-ChatCompletion OpenInferenceProvider::complete(const CompletionParams& params) {
-    auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
-        impl_->span_name, params);
-    ProviderSpanGuard guard(trace);
+    // Observation setup is best effort. If allocation/capture fails, return the
+    // original admitted handle; never retry preparation or alter dispatch.
     try {
-        auto result = impl_->inner->complete(params);
-        if (trace) trace->finish_ok(result);
-        return result;
-    } catch (const std::exception& e) {
-        if (trace) trace->finish_error(e.what());
-        throw;
+        auto trace = std::make_shared<ProviderSpanState>();
+        std::function<void(const PreparedProviderRequest&)> before = [trace, tracer = impl_->tracer,
+                       parent = impl_->parent_lookup,
+                       starter = impl_->child_span_starter,
+                       name = impl_->span_name,
+                       observation = std::move(observation)](const PreparedProviderRequest& admitted) noexcept {
+            trace->start(tracer, parent, starter, name, admitted, observation);
+        };
+        std::function<void(sp::runtime::Result)> after = [trace](sp::runtime::Result result) noexcept {
+            trace->finish(result);
+        };
+        std::function<void(const sp::Event&)> event = [trace](const sp::Event& value) noexcept {
+            trace->event(value);
+        };
+        std::function<void(std::exception_ptr)> error = [trace](std::exception_ptr exception) noexcept {
+            trace->finish_error(std::move(exception));
+        };
+        return observe_prepared(std::move(prepared),
+                                std::move(before), std::move(after), std::move(event),
+                                std::move(error));
     } catch (...) {
-        if (trace) trace->finish_error("unknown error");
-        throw;
+        return prepared;
     }
-}
-
-asio::awaitable<ChatCompletion>
-OpenInferenceProvider::complete_async(const CompletionParams& params) {
-    auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
-        impl_->span_name, params);
-    ProviderSpanGuard guard(trace);
-    try {
-        auto result = co_await impl_->inner->complete_async(params);
-        if (trace) trace->finish_ok(result);
-        co_return result;
-    } catch (const std::exception& e) {
-        if (trace) trace->finish_error(e.what());
-        throw;
-    } catch (...) {
-        if (trace) trace->finish_error("unknown error");
-        throw;
-    }
-}
-
-ChatCompletion OpenInferenceProvider::complete_stream(
-    const CompletionParams& params,
-    const StreamCallback& on_chunk) {
-    auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
-        impl_->span_name, params);
-    ProviderSpanGuard guard(trace);
-
-    std::string accumulated;
-    StreamCallback wrapped = [&accumulated, &on_chunk, trace]
-        (const std::string& chunk) {
-        try { accumulated += chunk; } catch (...) {}
-        if (trace) trace->add_token(chunk);
-        if (on_chunk) on_chunk(chunk);
-    };
-
-    try {
-        auto result = impl_->inner->complete_stream(params, wrapped);
-        if (trace) trace->finish_ok(result, &accumulated);
-        return result;
-    } catch (const std::exception& e) {
-        if (trace) trace->finish_error(e.what());
-        throw;
-    } catch (...) {
-        if (trace) trace->finish_error("unknown error");
-        throw;
-    }
-}
-
-asio::awaitable<ChatCompletion>
-OpenInferenceProvider::complete_stream_async(
-    const CompletionParams& params,
-    const StreamCallback& on_chunk) {
-    auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
-        impl_->span_name, params);
-    ProviderSpanGuard guard(trace);
-
-    std::shared_ptr<std::string> accumulated;
-    try { accumulated = std::make_shared<std::string>(); } catch (...) {}
-    StreamCallback wrapped = [accumulated, on_chunk, trace]
-        (const std::string& chunk) {
-        if (accumulated) {
-            try { *accumulated += chunk; } catch (...) {}
-        }
-        if (trace) trace->add_token(chunk);
-        if (on_chunk) on_chunk(chunk);
-    };
-
-    try {
-        auto result = co_await impl_->inner->complete_stream_async(params, wrapped);
-        if (trace) trace->finish_ok(result, accumulated.get());
-        co_return result;
-    } catch (const std::exception& e) {
-        if (trace) trace->finish_error(e.what());
-        throw;
-    } catch (...) {
-        if (trace) trace->finish_error("unknown error");
-        throw;
-    }
-}
-
-// Compatibility callback-selected override. Route through the existing
-// overrides so each call still emits exactly one span.
-asio::awaitable<ChatCompletion>
-OpenInferenceProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
-    if (on_chunk) {
-        co_return co_await complete_stream_async(params, on_chunk);
-    }
-    co_return co_await complete_async(params);
 }
 
 } // namespace neograph::observability

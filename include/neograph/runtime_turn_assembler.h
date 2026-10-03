@@ -1,7 +1,7 @@
 #pragma once
 
 #include <neograph/api.h>
-#include <neograph/completion_provider.h>
+#include <neograph/provider.h>
 #include <neograph/context_store.h>
 #include <neograph/runtime_context.h>
 
@@ -20,7 +20,7 @@ public:
 
 /** A normalized request and its immutable evidence of context assembly. */
 struct NEOGRAPH_API RuntimeTurn {
-    CompletionRequest request;
+    PreparedProviderRequest request;
     ContextAssemblyReceipt assembly_receipt;
 };
 
@@ -51,19 +51,19 @@ public:
     RuntimeTurnAssembler(const RuntimeTurnAssembler&) = delete;
     RuntimeTurnAssembler& operator=(const RuntimeTurnAssembler&) = delete;
 
-    RuntimeTurn assemble(std::string owner_id,
+    RuntimeTurn assemble(Provider& provider, std::string owner_id,
                           const ContextEpoch& epoch,
-                          CompletionRequest request) const;
-    RuntimeTurn assemble(std::string owner_id,
+                          ProviderRequest request) const;
+    RuntimeTurn assemble(Provider& provider, std::string owner_id,
                          const ContextEpoch& epoch,
-                         CompletionRequest request,
-                         std::vector<ChatMessage> host_instructions,
-                         std::vector<ChatMessage> trusted_supplemental) const;
+                         ProviderRequest request,
+                         std::vector<sp::Message> host_instructions,
+                         std::vector<sp::Message> trusted_supplemental) const;
 
     /** Conservative, provider-neutral estimate: three canonical bytes per token. */
-    static std::uint64_t estimate_input_tokens(const CompletionParams& params);
+    static std::uint64_t estimate_input_tokens(const PreparedProviderRequest& request);
     /** Canonical digest of dispatch-relevant request data, excluding callback and cancellation identity. */
-    static std::string normalized_request_digest(const CompletionRequest& request);
+    static std::string normalized_request_digest(const PreparedProviderRequest& request);
 
 private:
     struct Impl;

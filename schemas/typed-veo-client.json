@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "endpoint": {
+    "origin": "https://generativelanguage.googleapis.com",
+    "api_path": "/v1beta",
+    "allow_insecure_loopback": false
+  },
+  "models": [
+    "veo-3.1-lite-generate-preview",
+    "veo-3.1-generate-preview",
+    "veo-3.1-fast-generate-preview"
+  ],
+  "defaults": {
+    "model": "veo-3.1-lite-generate-preview",
+    "aspect_ratio": "16:9",
+    "person_generation": "allow_all",
+    "duration_seconds": 4,
+    "resolution": "720p"
+  },
+  "limits": {
+    "deadline_ms": 360000,
+    "poll_interval_ms": 10000,
+    "max_prompt_bytes": 8192,
+    "max_image_bytes": 20971520,
+    "max_json_bytes": 1048576,
+    "max_video_bytes": 134217728,
+    "max_status_queries": 36
+  },
+  "adult_only_region": false,
+  "download": {
+    "allowed_origins": [
+      "https://generativelanguage.googleapis.com",
+      "https://storage.googleapis.com"
+    ],
+    "max_redirects": 3
+  }
+}

@@ -1,9 +1,7 @@
 // NeoGraph Example 31: Local LLM backend (OpenAI-compatible server)
 //
-// Demonstrates pointing NeoGraph's OpenAIProvider at a local OpenAI-
-// compatible inference server — such as llama.cpp's server or vLLM's
-// OpenAI-compatible mode. Zero NeoGraph code changes — just override
-// `base_url`.
+// Demonstrates an admitted typed SchemaProvider Chat descriptor pointed at
+// a local OpenAI-compatible inference server, such as llama.cpp or vLLM.
 //
 // The two-process topology (NeoGraph agent ←HTTP→ inference server)
 // keeps the model weights out of the agent's address space. The agent
@@ -24,12 +22,11 @@
 //   ./example_local_transformer                          # defaults: http://localhost:8090, N=3
 //   ./example_local_transformer http://localhost:8080 10 # 10 sequential calls
 //
-// The measurement loop reports per-call TTFT + total wall + tok/s, then
-// summarizes p50/p95. Useful for verifying that an in-house inference
-// server is actually serving OpenAI-compatible streaming before wiring
-// up a real agent graph.
+// The measurement loop reports first-content latency, total wall time and
+// callback chunks/s, then summarizes p50/p95. Callback chunks are not billed
+// model tokens; nullable reported usage is printed separately.
 
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/async/run_sync.h>
 
 #include <algorithm>
@@ -62,23 +59,23 @@ int main(int argc, char** argv) {
     const std::string base_url = (argc > 1) ? argv[1] : "http://127.0.0.1:8090";
     const int N = (argc > 2) ? std::atoi(argv[2]) : 3;
 
-    neograph::llm::OpenAIProvider::Config config;
-    config.api_key       = "local-no-key";     // inference server ignores auth
-    config.base_url      = base_url;           // ← the only change from stock cloud usage
-    config.default_model = "local-llm";        // server may ignore this (already loaded)
-    config.allow_insecure_loopback = true;      // explicit plaintext local-dev opt-in
-
-    auto provider = neograph::llm::OpenAIProvider::create(config);
+    const std::string model = "local-llm";
+    sp::runtime::Options options;
+    options.api_key = "local-no-key";  // inference server ignores auth
+    // The descriptor loader admits plaintext only for loopback hosts.
+    auto provider = neograph::llm::SchemaProvider::create(
+        examples::admitted_descriptor(base_url, "openai.chat",
+            "/v1/chat/completions", "neograph-example-local-transformer"),
+        std::move(options));
 
     std::cerr << "[bench] base_url=" << base_url << "  N=" << N << "\n";
     std::cerr << "[bench] warmup (1 token ping)...\n";
     {
-        neograph::CompletionParams p;
-        p.model = config.default_model;
-        p.max_tokens = 4;
-        neograph::ChatMessage m; m.role = "user"; m.content = "hi";
-        p.messages = {m};
-        try { (void)neograph::async::run_sync(provider->invoke(p, nullptr)); }
+        neograph::ProviderControls controls;
+        controls.max_output_tokens = 4;
+        auto request = neograph::make_provider_request(*provider, model,
+            {examples::message(sp::Role::User, "hi")}, {}, controls);
+        try { (void)examples::require_outcome(provider->invoke(std::move(request))); }
         catch (const std::exception& e) {
             std::cerr << "[bench] warmup failed: " << e.what()
                       << "\n[bench] is the server up on " << base_url << " ?\n";
@@ -87,32 +84,38 @@ int main(int argc, char** argv) {
     }
 
     std::vector<long> total_us, ttft_us;
-    int total_tokens = 0;
+    std::uint64_t total_chunks = 0;
     long total_wall_us = 0;
 
     const std::string prompt =
         "In one short sentence, name one interesting fact about cache memory.";
 
     for (int i = 0; i < N; ++i) {
-        neograph::CompletionParams p;
-        p.model = config.default_model;
-        p.max_tokens = 64;
-        neograph::ChatMessage m; m.role = "user"; m.content = prompt;
-        p.messages = {m};
+        neograph::ProviderControls controls;
+        controls.max_output_tokens = 64;
+        auto request = neograph::make_provider_request(*provider, model,
+            {examples::message(sp::Role::User, prompt)}, {}, controls,
+            neograph::ProviderMode::Stream);
 
         const auto t0 = std::chrono::steady_clock::now();
         long ttft = -1;
-        int  n_tok = 0;
-        auto on_tok = [&](const std::string&) {
+        std::uint64_t chunks = 0;
+        request.on_event = [&](const sp::Event& event) {
+            const auto* delta = std::get_if<sp::PartDelta>(&event);
+            if (!delta || delta->payload.kind != sp::PartKind::Text ||
+                delta->payload.channel != sp::DeltaChannel::Content ||
+                delta->payload.bytes.empty()) return;
             if (ttft < 0) {
                 ttft = std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - t0).count();
             }
-            ++n_tok;
+            ++chunks;
         };
 
+        sp::runtime::Result outcome;
         try {
-            (void)neograph::async::run_sync(provider->invoke(p, on_tok));
+            outcome = examples::require_outcome(neograph::async::run_sync(
+                provider->invoke_async(std::move(request))));
         } catch (const std::exception& e) {
             std::cerr << "[bench] iter " << i << " failed: " << e.what() << "\n";
             return 2;
@@ -123,15 +126,21 @@ int main(int argc, char** argv) {
 
         total_us.push_back(total);
         ttft_us.push_back(ttft);
-        total_tokens += n_tok;
+        total_chunks += chunks;
         total_wall_us += total;
 
         std::cerr << "[bench] iter " << i
                   << "  ttft=" << ttft / 1000.0 << " ms"
                   << "  total=" << total / 1000.0 << " ms"
-                  << "  tokens=" << n_tok
-                  << "  tok/s=" << (n_tok * 1e6 / std::max(1L, total))
-                  << "\n";
+                  << "  chunks=" << chunks
+                  << "  chunks/s=" << (chunks * 1e6 / std::max(1L, total));
+        const auto& usage = neograph::outcome_usage(*outcome);
+        const auto print_count = [](const std::optional<sp::Count>& count) {
+            return count ? std::to_string(count->value) : std::string("unknown");
+        };
+        std::cerr << "  reported_input=" << print_count(usage.input_total)
+                  << "  reported_output=" << print_count(usage.output_total)
+                  << "  reported_reasoning=" << print_count(usage.reasoning) << "\n";
     }
 
     std::sort(total_us.begin(), total_us.end());
@@ -147,9 +156,9 @@ int main(int argc, char** argv) {
               << " / " << pct(ttft_us, 0.95)  / 1000.0 << " ms\n"
               << "total p50/p95   : " << pct(total_us, 0.50) / 1000.0
               << " / " << pct(total_us, 0.95) / 1000.0 << " ms\n"
-              << "total tokens    : " << total_tokens << "\n"
-              << "aggregate tok/s : "
-              << (total_tokens * 1e6 / std::max(1L, total_wall_us)) << "\n"
+              << "callback chunks : " << total_chunks << "\n"
+              << "aggregate chunks/s : "
+              << (total_chunks * 1e6 / std::max(1L, total_wall_us)) << "\n"
               << "NeoGraph RSS    : " << (read_vmhwm_kb() / 1024.0) << " MB\n";
 
     return 0;

@@ -1,7 +1,8 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=42ecb573fd2ab6fe94a978425fd0016579262109ded26afa124e3f8649fa9ab5 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=3d01320c4796b2b8fae399c9660352bcb3eaadefa460b54c1e15664cb04bd537 -->
 # NeoGraph 异步指南
 
-**Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
+
+> Stage 3（2026-04）设计及当时实测测试数量作为历史保留。provider 兼容/crossover 决策已由下方 typed lossless 切换取代；旧设计记录不是当前 provider API。
 
 第三阶段 / 2026-04 发布。目标受众：正在将现有 NeoGraph 代码迁移到异步
 API，或正在编写针对异步 API 的新代码的用户。
@@ -17,9 +18,9 @@ API，或正在编写针对异步 API 的新代码的用户。
 
 引擎中的每个同步 I/O 点现在都有一个可等待的对应版本：
 
-| 层 | 同步（不变） | 异步对应版本 |
+| 层 | 同步 | 异步 |
 |---|---|---|
-| Provider | `complete` / `complete_stream` | `complete_async` / `complete_stream_async` |
+| Provider | `invoke` / `dispatch` | `invoke_async` / `dispatch_async` |
 | CheckpointStore | `save` / `load_latest` / `load_by_id` / `list` / `delete_thread` / `put_writes` / `get_writes` / `clear_writes` | 每个都有 `*_async` 版本 |
 | GraphNode | — | `run(NodeInput) -> asio::awaitable<NodeOutput>` 是唯一的正式重写入口 |
 | GraphEngine | `run` / `run_stream` / `resume` | `run_async` / `run_stream_async` / `resume_async` |
@@ -31,50 +32,18 @@ API，或正在编写针对异步 API 的新代码的用户。
 `io_context` 可以承载数千个并发的 `run_async` 调用，而不必为每次运行
 分配一个 OS 线程——这正是推动整个重构的并发模型。
 
-同步接口被保留。调用 `engine->run(cfg)` 或任何 `provider->complete*`
-入口点的现有代码仍然受支持。第三阶段之前存在的 276+ 个测试用例在同步
-路径上仍然通过。
+旧 Stage 3 报告记录了既有 276+ 测试通过当时的 sync 路径；这不是当前切换验证结果。
 
 ---
 
-## 2. 交叉默认模式
+<a id="2-the-crossover-default-pattern"></a>
+## 2. 已准备 provider dispatch（移除 crossover）
 
-Provider 和持久化抽象上的每个剩余同步/异步对通过一对默认实现连接，这些
-实现桥接两个方向：
+公开契约是拥有所有权的 typed 准备/dispatch，而非同步/异步 virtual completion 对。`ProviderRequest.payload` 是 Chat、Messages、Responses、Gemini、Interactions 的 SDK 请求 variant。`ProviderMode::Collect` / `Stream` 独立于观察者是否存在来选择传输。`on_event` 接收借用的 typed `sp::Event` view；只复制回调后仍需要的数据。不允许 raw JSON override 或通过 portable projection 导入 native 权限。
 
-```cpp
-class Provider {
-  public:
-    // Sync default: drive the async peer on a private io_context.
-    virtual ChatCompletion complete(const CompletionParams& params);
+`prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
 
-    // Async default: co_return the sync peer (single-threaded on
-    // the resuming coroutine).
-    virtual asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params);
-
-    // ...
-};
-```
-
-**约定：至少重写两者之一。** 如果两者都不重写，调用任一方法都会在两个
-默认实现之间无限递归，直到栈溢出。已文档化；没有运行时守卫（会减慢
-每个实现者的每次调用）。
-
-### 重写哪一侧
-
-| 代码形态 | 重写 |
-|---|---|
-| 执行真正的非阻塞 I/O（HTTP、MCP、DB、定时器） | **异步对应版本** — 继承同步门面 |
-| 纯 CPU 工作，或在同步库上短暂阻塞 | **同步对应版本** — 继承异步桥接 |
-| 自定义 `GraphNode` | 重写 `run(NodeInput)`；在一个 `NodeOutput` 中返回写入、`Command` 和 `Send` |
-
-### 为什么不使用单一统一 API？
-
-将每个公共抽象都折叠为异步会强制每个现有的 Tool 和每个 CheckpointStore
-子类都承认异步机制——包括那些买不到任何好处的场景（一个做两个数加法的
-工具）。交叉对仍然是这些抽象零迁移成本的路径。`GraphNode` 在 v1.0 中
-有意地折叠为一个协程重写。
+这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
 
 ---
 
@@ -112,26 +81,28 @@ io.run();
 
 ### 3.2 编写新的异步 provider
 
-继承 `CompletionProvider` 并仅实现 `do_invoke()`。其最终适配器保持每个
-现有的 `Provider` 入口点正常工作，而 `CompletionRequest` 使收集模式与
-流式模式变得明确。
+`prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
 
 ```cpp
-class MyProvider : public CompletionProvider {
-  public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        auto ex = co_await asio::this_coro::executor;
-        const auto& params = request.params();
-        auto res = co_await neograph::async::async_post(
-            ex, host, port, path, body, headers, /*tls=*/true);
-        if (request.streaming() && request.on_chunk()) {
-            // Deliver parsed chunks through request.on_chunk().
-        }
-        co_return parse_response(res);
-    }
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <runtime/client.h>
 
+class MyProvider final : public neograph::Provider {
+    std::string family_;
+    std::shared_ptr<sp::runtime::Client> client_;
+public:
+    MyProvider(sp::descriptor::ValidatedDescriptor descriptor,
+               sp::runtime::Options options)
+        : family_(descriptor.family()),
+          client_(std::make_shared<sp::runtime::Client>(
+              std::move(descriptor), std::move(options))) {}
     std::string get_name() const override { return "my-provider"; }
+    std::string_view family() const noexcept override { return family_; }
+    neograph::PreparedProviderRequest
+    prepare(neograph::ProviderRequest request) override {
+        return prepare_runtime(client_, std::move(request));
+    }
 };
 ```
 
@@ -162,31 +133,37 @@ class FetchTool : public neograph::AsyncTool {
 ### 3.4 编写使用异步 provider 的图节点
 
 ```cpp
-class MyNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        CompletionParams params = build_params(in.state);
-        params.cancel_token = in.ctx.cancel_token;
-        auto completion = co_await provider_->complete_async(params);
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
 
-        neograph::json msg;
-        to_json(msg, completion.message);
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"messages", json::array({msg})});
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
+public:
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
-
-    std::string get_name() const override { return name_; }
-  private:
-    std::shared_ptr<Provider> provider_;
-    std::string name_;
+    std::string get_name() const override { return "chat"; }
 };
 ```
-
-引擎从同步和异步入口点驱动同一协程。通过 `engine->run_async()`，节点
-参与 io_context 重叠，而无需每次运行时占用一个 OS 线程。
-
----
 
 ## 4. 注意事项与陷阱
 
@@ -408,15 +385,14 @@ int result = neograph::async::run_sync_pool(
 
 ## 9. 重写决策指南
 
-`GraphNode` 有一个正式的重写入口。Provider 和持久化接口保留了独立的
-同步/异步对应版本以保持兼容性。
+公开契约是拥有所有权的 typed 准备/dispatch，而非同步/异步 virtual completion 对。`ProviderRequest.payload` 是 Chat、Messages、Responses、Gemini、Interactions 的 SDK 请求 variant。`ProviderMode::Collect` / `Stream` 独立于观察者是否存在来选择传输。`on_event` 接收借用的 typed `sp::Event` view；只复制回调后仍需要的数据。不允许 raw JSON override 或通过 portable projection 导入 native 权限。
 
 ### 9.1 两分钟版本
 
 | 你写的是… | 重写 | 按原样继承 |
 |---|---|---|
 | 任何自定义 `GraphNode` | `run(NodeInput)` | `get_name()` 是唯一其他必需的虚函数 |
-| 新的自定义 LLM 后端 | 继承 `CompletionProvider`，重写 `do_invoke()` | 所有现有 `Provider` 入口点是最终适配器 |
+| Provider | `get_name()`, `family()`, `prepare(ProviderRequest)` | `invoke(_async)`, `dispatch(_async)` |
 | 自定义 `CheckpointStore`，支持异步后端 | 全部八个 `*_async` 对应版本 | 同步对应版本通过 `run_sync` 桥接 |
 | 自定义 `CheckpointStore`，仅同步后端 | 全部八个同步对应版本 | 异步对应版本通过 `run_sync` 桥接 |
 | 自定义同步 `Tool` | 继承 `Tool`，重写 `execute()` | — |
@@ -435,22 +411,16 @@ resume 和 Send 扇出调用同一方法，因此没有重写选择矩阵，也�
 
 ### 9.3 `Provider`
 
-现有 `Provider` 子类可以继续使用四个同步/异步收集/流的虚函数。它们是稳定
-兼容 API，没有移除计划，也没有弃用警告。每对仍然需要至少一个重写：
+公开契约是拥有所有权的 typed 准备/dispatch，而非同步/异步 virtual completion 对。`ProviderRequest.payload` 是 Chat、Messages、Responses、Gemini、Interactions 的 SDK 请求 variant。`ProviderMode::Collect` / `Stream` 独立于观察者是否存在来选择传输。`on_event` 接收借用的 typed `sp::Event` view；只复制回调后仍需要的数据。不允许 raw JSON override 或通过 portable projection 导入 native 权限。
 
-| 重写 | 行为 |
-|---|---|
-| 仅 `complete()` | 同步直接工作；异步 `complete_async` 通过基类默认实现 `co_return complete()` 桥接。适用于仅 CPU 的 mock provider。 |
-| 仅 `complete_async()` | 异步直接工作；同步 `complete` 通过 `run_sync(complete_async())` 桥接。 |
-| 仅 `complete_stream()` | 同步流式直接工作；异步对应版本在工作线程上运行它，并在等待执行器上传递回调。 |
-| 仅 `complete_stream_async()` | 原生异步流式直接工作；如果直接同步流式调用必须避免默认收集回退，也实现同步对应版本。 |
+`prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
 
-对于**新的**后端，不要在这些对之间选择。继承 `CompletionProvider`，
-实现 `do_invoke(CompletionRequest)`，并使用 `request.streaming()` 选择
-传输方式。新的直接调用者应使用带有 `CompletionRequest::collect(...)` 或
-`CompletionRequest::stream(...)` 的 `invoke_request()`。兼容性和安全性
-修复继续适用于旧入口点，但新能力可能仅限显式请求。
+可选 `ProviderControls` 是调用方选择，不是强制默认值或暗中 clamp 的 cap。不支持的 family 控制在 dispatch 前拒绝。有界调用需要获准的真实模型 input/output 上限；缺失时为 `LimitUnknown`。预留是保守的支出权限，而非报告使用量、预测或账单。未知/部分/delivery-unknown 结果保留 hold，真实最终报告用于结算，超额报告也全额计入。retry 是显式单层，默认 off，具有有界 window 与 unknown-prior hold；没有隐藏重发。
 
+
+提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、完整 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。使用量是带依据、阶段、质量的 nullable `uint64_t`；缺失表示未知，绝不是零。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+
+实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
 ### 9.4 `CheckpointStore`
 
 八个同步方法，八个异步对应版本，1:1 匹配。已发布的存储

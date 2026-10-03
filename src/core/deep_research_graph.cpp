@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -19,6 +20,19 @@ namespace neograph::graph {
 namespace {
 
 constexpr const char* kResearcherNodeName = "researcher";
+
+std::vector<sp::Message> portable_prompts(std::span<const ChatMessage> messages) {
+    std::vector<sp::Message> result;
+    result.reserve(messages.size());
+    for (const auto& message : messages) result.push_back(portable_message(message));
+    return result;
+}
+
+ChannelWrite supervisor_write(std::vector<sp::Message> messages, ChannelWrite::Mode mode = ChannelWrite::Mode::Reduce) {
+    auto write = provider_messages_write(std::move(messages), mode);
+    write.channel = "supervisor_messages";
+    return write;
+}
 
 // =========================================================================
 // Prompts — inspired by langchain-ai/open_deep_research/prompts.py.
@@ -142,14 +156,12 @@ ChatTool think_tool_def() {
         });
 }
 
-// Look up the last assistant message with tool_calls in the message log.
-const ChatMessage* last_assistant_with_calls(
-    const std::vector<ChatMessage>& msgs) {
-    for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
-        if (it->role == "assistant" && !it->tool_calls.empty()) return &(*it);
-    }
-    return nullptr;
-}
+class ThinkTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return think_tool_def(); }
+    std::string get_name() const override { return "think_tool"; }
+    std::string execute(const json&) override { return "noted"; }
+};
 
 // Build a tool-result message in OpenAI-ish shape (SchemaProvider normalises
 // this to Claude's {tool_use_id, content} on the wire).
@@ -181,55 +193,38 @@ public:
     std::string get_name() const override { return name_; }
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        std::vector<ChatMessage> convo;
-
-        // System prompt first.
-        {
-            ChatMessage s;
-            s.role = "system";
-            s.content = SUPERVISOR_SYSTEM;
-            convo.push_back(std::move(s));
-        }
-
-        // Then the supervisor's running conversation.
-        auto sv = in.state.get("supervisor_messages");
-        if (sv.is_array()) {
-            for (auto it = sv.begin(); it != sv.end(); ++it) {
-                ChatMessage m;
-                from_json(*it, m);
-                convo.push_back(std::move(m));
-            }
-        }
+        std::vector<sp::Message> convo{portable_message(ChatMessage{"system", SUPERVISOR_SYSTEM})};
+        auto history = in.state.get_provider_messages("supervisor_messages");
+        convo.insert(convo.end(), history.begin(), history.end());
 
         // If the conversation is empty, seed it with the research brief as
         // the first user message.
         bool has_user = false;
-        for (const auto& m : convo) if (m.role == "user") { has_user = true; break; }
+        for (const auto& m : convo) if (m.role == sp::Role::User) { has_user = true; break; }
         if (!has_user) {
             auto brief = in.state.get("research_brief");
             ChatMessage u;
             u.role = "user";
             u.content = brief.is_string() ? brief.get<std::string>()
                                           : "Please research the given query.";
-            convo.push_back(std::move(u));
+            convo.push_back(portable_message(u));
         }
 
-        CompletionParams params;
-        params.model = model_;
-        params.messages = convo;
-        params.tools = supervisor_tool_defs();
-        params.temperature = 0.3f;
-        params.max_tokens = 2048;
-
+        ProviderControls controls;
+        controls.temperature = 0.3;
+        controls.max_output_tokens = 2048;
+        auto params = make_provider_request(*provider_, model_, convo, supervisor_tool_defs(), controls);
         params.cancel_token = in.ctx.cancel_token;
-        std::vector<ChatMessage> host{{"system", SUPERVISOR_SYSTEM}};
-        std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-        auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                   std::move(host), std::move(supplemental));
-        record_usage(in.ctx, completion);   // #88
-
-        json asst;
-        to_json(asst, completion.message);
+        params.options.deadline = in.ctx.deadline;
+        params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+        params.on_event = in.ctx.on_provider_event;
+        std::vector<sp::Message> host{portable_message(ChatMessage{"system", SUPERVISOR_SYSTEM})};
+        std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
+        auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
+                std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
+                make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, completion);
+        outcome_or_throw(completion);
 
         // Track how many supervisor rounds have run — dispatcher uses this
         // as a safety cap.
@@ -238,7 +233,9 @@ public:
         if (cur.is_number_integer()) iter = cur.get<int>();
 
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"supervisor_messages", json::array({asst})});
+        convo.insert(convo.end(), outcome_messages(*completion).begin(), outcome_messages(*completion).end());
+        out.writes.push_back(supervisor_write(std::vector<sp::Message>(convo.begin() + 1, convo.end()),
+                                             ChannelWrite::Mode::Overwrite));
         out.writes.push_back(ChannelWrite{"supervisor_iterations", json(iter + 1)});
         co_return out;
     }
@@ -276,17 +273,10 @@ public:
         if (cur.is_number_integer()) iter = cur.get<int>();
 
         // Parse supervisor_messages and find the tail assistant tool-calls.
-        std::vector<ChatMessage> sv_msgs;
-        auto sv = in.state.get("supervisor_messages");
-        if (sv.is_array()) {
-            for (auto it = sv.begin(); it != sv.end(); ++it) {
-                ChatMessage m;
-                from_json(*it, m);
-                sv_msgs.push_back(std::move(m));
-            }
-        }
-
-        const ChatMessage* last = last_assistant_with_calls(sv_msgs);
+        ChatMessage pending;
+        const auto history = in.state.get_provider_messages("supervisor_messages");
+        pending.tool_calls = pending_client_tool_calls(history);
+        const ChatMessage* last = pending.tool_calls.empty() ? nullptr : &pending;
         if (!last) {
             // No tool call — supervisor either answered prose or bailed.
             // Route to final report; whatever prose it produced will be
@@ -509,68 +499,58 @@ public:
         for (auto* t : tools_) tool_defs.push_back(t->get_definition());
         tool_defs.push_back(think_tool_def());
 
-        std::vector<ChatMessage> convo;
-        {
-            ChatMessage s; s.role = "system"; s.content = RESEARCHER_SYSTEM;
-            convo.push_back(std::move(s));
-            ChatMessage u; u.role = "user"; u.content = topic;
-            convo.push_back(std::move(u));
+        const auto task = make_tool_execution_context(in.ctx).effect_task_id + ":" + name_;
+        auto histories = in.ctx.provider_loop_history ? in.ctx.provider_loop_history : std::make_shared<ProviderLoopHistory>();
+        auto continuation = histories->get(task);
+        auto& convo = continuation.messages;
+        if (convo.empty()) {
+            convo = {portable_message(ChatMessage{"system", RESEARCHER_SYSTEM}),
+                     portable_message(ChatMessage{"user", topic})};
+            histories->set(task, continuation);
         }
+        ThinkTool think;
+        auto dispatch_tools = tools_;
+        dispatch_tools.push_back(&think);
 
-        std::string final_text;
 
-        for (int iter = 0; iter < max_iter_; ++iter) {
-            CompletionParams params;
-            params.model = model_;
-            params.messages = convo;
-            params.tools = tool_defs;
-            params.temperature = 0.3f;
-            params.max_tokens = 2048;
-
+        for (;;) {
+            auto calls = continuation.client_calls_ready ? pending_client_tool_calls(convo) : std::vector<ToolCall>{};
+            if (calls.empty()) {
+            if (continuation.turns >= static_cast<std::uint64_t>(std::max(0, max_iter_))) break;
+            ProviderControls controls;
+            controls.temperature = 0.3;
+            controls.max_output_tokens = 2048;
+            auto params = make_provider_request(*provider_, model_, convo, tool_defs, controls);
             params.cancel_token = in.ctx.cancel_token;
-            std::vector<ChatMessage> host{{"system", RESEARCHER_SYSTEM}};
-            std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-            auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                       std::move(host), std::move(supplemental));
-            record_usage(in.ctx, completion);   // #88
-            auto& msg = completion.message;
-            convo.push_back(msg);
-
-            if (msg.tool_calls.empty()) {
-                final_text = msg.content;
-                break;
+            params.options.deadline = in.ctx.deadline;
+            params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+            params.on_event = in.ctx.on_provider_event;
+            std::vector<sp::Message> host{portable_message(ChatMessage{"system", RESEARCHER_SYSTEM})};
+            std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
+            auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
+                std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
+                make_provider_call_identity(in.ctx, name_, continuation.turns)));
+            record_usage(in.ctx, completion);
+            const auto& returned = outcome_messages(*completion);
+            convo.insert(convo.end(), returned.begin(), returned.end());
+            ++continuation.turns;
+            continuation.client_calls_ready = std::holds_alternative<sp::Completion>(*completion);
+            histories->set(task, continuation);
+            outcome_or_throw(completion);
+            calls = pending_client_tool_calls(returned);
+            if (calls.empty()) break;
             }
-
-            // Execute each tool call, append paired tool-result messages.
-            for (const auto& tc : msg.tool_calls) {
-                ChatMessage tm;
-                tm.role = "tool";
-                tm.tool_call_id = tc.id;
-                tm.tool_name = tc.name;
-
-                if (tc.name == "think_tool") {
-                    tm.content = "noted";
-                    convo.push_back(std::move(tm));
-                    continue;
-                }
-
-                auto it = std::find_if(tools_.begin(), tools_.end(),
-                    [&](Tool* t) { return t->get_name() == tc.name; });
-
-                if (it == tools_.end()) {
-                    tm.content = std::string(R"({"error":"unknown tool: )")
-                        + tc.name + "\"}";
-                } else {
-                    try {
-                        auto args = json::parse(tc.arguments);
-                        tm.content = (*it)->execute(args);
-                    } catch (const std::exception& e) {
-                        tm.content = std::string(R"({"error":")")
-                            + e.what() + "\"}";
-                    }
-                }
-                convo.push_back(std::move(tm));
-            }
+            ToolGateContext gate;
+            gate.resume_value = in.ctx.resume_value;
+            gate.thread_id = in.ctx.thread_id;
+            gate.step = in.ctx.step;
+            auto execution = make_tool_execution_context(in.ctx);
+            execution.effect_task_id += ":turn:" + std::to_string(continuation.turns);
+            auto results = co_await dispatch_tool_calls(std::move(calls), dispatch_tools, in.ctx.tool_gate,
+                                                        std::move(gate), std::move(execution));
+            for (const auto& result : results) convo.push_back(portable_message(result));
+            continuation.client_calls_ready = false;
+            histories->set(task, continuation);
         }
 
         // Compress the transcript into a dense summary. Reuses the same
@@ -585,11 +565,12 @@ private:
     // This helper makes a real LLM call; without the context its cost would be
     // invisible in RunResult::usage, and a deep-research run would under-report
     // by one call per researcher per round.
-    asio::awaitable<std::string> compress(const std::vector<ChatMessage>& convo,
+    asio::awaitable<std::string> compress(const std::vector<sp::Message>& convo,
                                           const std::string& topic,
                                           const RunContext& ctx) {
         std::ostringstream transcript;
-        for (const auto& m : convo) {
+        for (const auto& message : convo) {
+            const auto m = project_message(message); // Explicit summary text projection, not replay history.
             if (m.role == "system") continue;
             transcript << "[" << m.role;
             if (!m.tool_name.empty()) transcript << ":" << m.tool_name;
@@ -610,20 +591,24 @@ private:
             compress_msgs.push_back(std::move(u));
         }
 
-        CompletionParams cp;
-        cp.model = model_;
-        cp.messages = compress_msgs;
-        cp.temperature = 0.2f;
-        cp.max_tokens = 2048;
+        ProviderControls controls;
+        controls.temperature = 0.2;
+        controls.max_output_tokens = 2048;
+        auto cp = make_provider_request(*provider_, model_, portable_prompts(compress_msgs), {}, controls);
         cp.cancel_token = ctx.cancel_token;
+        cp.options.deadline = ctx.deadline;
+        cp.mode = ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+        cp.on_event = ctx.on_provider_event;
 
         try {
-            std::vector<ChatMessage> host{{"system", COMPRESS_SYSTEM}};
-            std::vector<ChatMessage> supplemental(compress_msgs.begin() + 1, compress_msgs.end());
-            auto completion = co_await invoke_provider(provider_, std::move(cp), {},
-                                                       std::move(host), std::move(supplemental));
-            record_usage(ctx, completion);   // #88
-            std::string out = completion.message.content;
+            std::vector<sp::Message> host{portable_message(ChatMessage{"system", COMPRESS_SYSTEM})};
+            auto supplemental = portable_prompts(std::span<const ChatMessage>(compress_msgs).subspan(1));
+            auto completion = co_await observe_provider_result(ctx, invoke_provider(provider_, std::move(cp),
+                std::move(host), std::move(supplemental), provider_call_broker(ctx),
+                make_provider_call_identity(ctx, name_, static_cast<std::uint64_t>(std::max(0, max_iter_)))));
+            record_usage(ctx, completion);
+            outcome_or_throw(completion);
+            std::string out = outcome_text(*completion);
             // Hard cap regardless of what the model produced. Protects the
             // supervisor's accumulated context from unbounded growth across
             // research rounds — each round appends one tool_result per
@@ -738,30 +723,35 @@ public:
                 convo.push_back(std::move(u));
             }
 
-            CompletionParams params;
-            params.model = model_;
-            params.messages = convo;
-            params.temperature = 0.4f;
-            params.max_tokens = 4096;
+            ProviderControls controls;
+            controls.temperature = 0.4;
+            controls.max_output_tokens = 4096;
+            auto params = make_provider_request(*provider_, model_, portable_prompts(convo), {}, controls);
+            params.cancel_token = in.ctx.cancel_token;
+            params.options.deadline = in.ctx.deadline;
+            params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+            params.on_event = in.ctx.on_provider_event;
 
             // GCC-13 coroutine codegen: catch around co_await can miss the
             // exception type. Capture via exception_ptr and rethrow in a
             // non-coroutine try/catch (same pattern used elsewhere).
-            ChatCompletion completion;
+            sp::runtime::Result completion;
             std::exception_ptr eptr;
             try {
-                std::vector<ChatMessage> host{{"system", FINAL_REPORT_SYSTEM}};
-                std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-                completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                      std::move(host), std::move(supplemental));
+                std::vector<sp::Message> host{portable_message(ChatMessage{"system", FINAL_REPORT_SYSTEM})};
+                auto supplemental = portable_prompts(std::span<const ChatMessage>(convo).subspan(1));
+                completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
+                    std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
+                    make_provider_call_identity(in.ctx, name_, static_cast<std::uint64_t>(attempt))));
                 record_usage(in.ctx, completion);   // #88
+                outcome_or_throw(completion);
             } catch (...) {
                 eptr = std::current_exception();
             }
             if (!eptr) {
                 NodeOutput out;
                 out.writes.push_back(ChannelWrite{"final_report",
-                    json(completion.message.content)});
+                    json(outcome_text(*completion))});
                 co_return out;
             }
             try {
@@ -847,7 +837,7 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
 
         // GCC-13 coroutine codegen: catch around co_await must dispatch
         // via exception_ptr — same pattern as FinalReportNode above.
-        ChatCompletion completion;
+        sp::runtime::Result completion;
         std::exception_ptr eptr;
         {
             std::vector<ChatMessage> convo;
@@ -857,18 +847,23 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             u.content = "User research question:\n" + user_query;
             convo.push_back(std::move(u));
 
-            CompletionParams params;
-            params.model = model_;
-            params.messages = convo;
-            params.temperature = 0.2f;
-            params.max_tokens = 800;
+            ProviderControls controls;
+            controls.temperature = 0.2;
+            controls.max_output_tokens = 800;
+            auto params = make_provider_request(*provider_, model_, portable_prompts(convo), {}, controls);
+            params.cancel_token = in.ctx.cancel_token;
+            params.options.deadline = in.ctx.deadline;
+            params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+            params.on_event = in.ctx.on_provider_event;
 
             try {
-                std::vector<ChatMessage> host{{"system", BRIEF_SYSTEM}};
-                std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-                completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                      std::move(host), std::move(supplemental));
+                std::vector<sp::Message> host{portable_message(ChatMessage{"system", BRIEF_SYSTEM})};
+                auto supplemental = portable_prompts(std::span<const ChatMessage>(convo).subspan(1));
+                completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
+                    std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
+                    make_provider_call_identity(in.ctx, name_)));
                 record_usage(in.ctx, completion);   // #88
+                outcome_or_throw(completion);
             } catch (...) {
                 eptr = std::current_exception();
             }
@@ -880,7 +875,7 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             out.writes.push_back(ChannelWrite{"research_brief", json(user_query)});
             co_return out;
         }
-        std::string brief = completion.message.content;
+        std::string brief = outcome_text(*completion);
         if (brief.empty()) brief = user_query;  // pass-through guard
         NodeOutput out;
         out.writes.push_back(ChannelWrite{"research_brief", json(std::move(brief))});
@@ -966,20 +961,24 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
             ChatMessage u; u.role = "user"; u.content = "Request:\n" + query;
             convo.push_back(std::move(u));
 
-            CompletionParams params;
-            params.model = model_;
-            params.messages = convo;
-            params.temperature = 0.0f;
-            params.max_tokens = 200;
+            ProviderControls controls;
+            controls.temperature = 0.0;
+            controls.max_output_tokens = 200;
+            auto params = make_provider_request(*provider_, model_, portable_prompts(convo), {}, controls);
+            params.options.deadline = in.ctx.deadline;
+            params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+            params.on_event = in.ctx.on_provider_event;
 
             try {
                 params.cancel_token = in.ctx.cancel_token;
-                std::vector<ChatMessage> host{{"system", CLARIFY_SYSTEM}};
-                std::vector<ChatMessage> supplemental(convo.begin() + 1, convo.end());
-                auto completion = co_await invoke_provider(provider_, std::move(params), {},
-                                                           std::move(host), std::move(supplemental));
+                std::vector<sp::Message> host{portable_message(ChatMessage{"system", CLARIFY_SYSTEM})};
+                auto supplemental = portable_prompts(std::span<const ChatMessage>(convo).subspan(1));
+                auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
+                    std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
+                    make_provider_call_identity(in.ctx, name_)));
                 record_usage(in.ctx, completion);   // #88
-                verdict = completion.message.content;
+                outcome_or_throw(completion);
+                verdict = outcome_text(*completion);
             } catch (...) {
                 eptr = std::current_exception();
             }

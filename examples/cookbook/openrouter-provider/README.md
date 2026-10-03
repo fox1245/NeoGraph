@@ -1,5 +1,23 @@
 # NeoGraph + OpenRouter (pinned DeepSeek)
 
+## Historical Python recipe — binding migration deferred
+
+This page archives the pre-cutover Python provider API and its measurements.
+The source examples below are **not compatible with the current typed C++
+contract** and are not current runnable instructions. Python provider bindings,
+subclass trampolines and these BYO/OpenRouter adapters have not been ported or
+exercised; do not infer compatibility from the C++ migration.
+
+The current C++ path owns a typed `ProviderRequest`, prepares it once and retains
+full immutable `sp::Outcome` terminals, native history and nullable usage.
+Old `complete(params)` / `ChatCompletion` examples below are historical only;
+missing usage must not become zero and final-call usage cannot stand for an
+entire tool loop. SDK retries must not create hidden redispatch behind a durable
+receipt. Retained keys, prompts and native payloads must remain private.
+
+## Archived pre-cutover instructions and observations
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 Run NeoGraph graphs against OpenRouter's pinned

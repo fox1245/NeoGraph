@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/provider-message-v2.schema.json",
+  "title": "NeoGraph full provider message projection v2",
+  "description": "Full ordered data projection only. The native boolean cannot grant replay authority; authenticated host archive custody is verified independently.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "role",
+    "parts",
+    "native",
+    "wire_output"
+  ],
+  "properties": {
+    "schema": {
+      "const": "neograph.provider-message/v2"
+    },
+    "id": {
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "parts": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "value"
+            ],
+            "properties": {
+              "type": {
+                "const": "text"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "text",
+              "raw_code"
+            ],
+            "properties": {
+              "type": {
+                "const": "refusal"
+              },
+              "text": {
+                "type": "string"
+              },
+              "raw_code": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "name",
+              "kind",
+              "input",
+              "wire_type",
+              "wire_metadata"
+            ],
+            "properties": {
+              "type": {
+                "const": "tool_call"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  0,
+                  1,
+                  2
+                ]
+              },
+              "input": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "wire_metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "name",
+              "kind",
+              "raw_fragment",
+              "reason",
+              "wire_type",
+              "wire_metadata"
+            ],
+            "properties": {
+              "type": {
+                "const": "invalid_tool_call"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  0,
+                  1,
+                  2
+                ]
+              },
+              "raw_fragment": {
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5
+                ]
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "wire_metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "text",
+              "signature"
+            ],
+            "properties": {
+              "type": {
+                "const": "thinking"
+              },
+              "text": {
+                "type": "string"
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "data"
+            ],
+            "properties": {
+              "type": {
+                "const": "redacted_thinking"
+              },
+              "data": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "tool_use_id",
+              "wire_type",
+              "content"
+            ],
+            "properties": {
+              "type": {
+                "const": "server_tool_result"
+              },
+              "tool_use_id": {
+                "type": "string"
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "content": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "tool_use_id",
+              "content",
+              "is_error",
+              "host"
+            ],
+            "properties": {
+              "type": {
+                "const": "tool_result"
+              },
+              "tool_use_id": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "host": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "status",
+                      "retryable",
+                      "effect_uncertain"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "retryable": {
+                        "type": "boolean"
+                      },
+                      "effect_uncertain": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "summary",
+              "encrypted_content",
+              "status",
+              "content"
+            ],
+            "properties": {
+              "type": {
+                "const": "reasoning"
+              },
+              "id": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "content": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "wire_type",
+              "wire_metadata"
+            ],
+            "properties": {
+              "type": {
+                "const": "opaque"
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "wire_metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "mime",
+              "data",
+              "detail"
+            ],
+            "properties": {
+              "type": {
+                "const": "image"
+              },
+              "mime": {
+                "type": "string"
+              },
+              "data": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "enum": [
+                  0,
+                  1,
+                  2,
+                  3
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "summary",
+              "signature"
+            ],
+            "properties": {
+              "type": {
+                "const": "thought"
+              },
+              "summary": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "native": {
+      "type": "boolean"
+    },
+    "wire_output": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "json"
+          ],
+          "properties": {
+            "json": {
+              "type": "string",
+              "contentMediaType": "application/json"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

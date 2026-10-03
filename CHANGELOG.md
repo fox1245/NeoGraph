@@ -2,6 +2,8 @@
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
 
+Dated entries below preserve historical APIs and measurements. Their old Provider compatibility guarantees are superseded by the breaking C++ typed contract in [Unreleased]; they are not current API guidance.
+
 All notable changes to NeoGraph are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -12,6 +14,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Breaking C++ typed provider/custody contract.** Rebuild every consumer and custom provider with matching headers/libraries. Core now requires external `SchemaProvider::runtime` even with `NEOGRAPH_BUILD_LLM=OFF`; providers use owned `ProviderRequest` → move-only `PreparedProviderRequest` → immutable `sp::runtime::Result`, explicit Collect/Stream mode and declared family controls. Completion compatibility types, the JSON descriptor interpreter, primitive registry and Responses WebSocket path are removed without aliases or shims. SDK `0.0.0`, interface revision/shared ABI 3 is unstable, not a stable release; Python wrappers are deferred and runtime/archive qualification is Linux/POSIX only.
+
+  Fresh installed find_package Program C++/C ABI/dualQuickJS consumers and the NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed. Interface/ABI declarations alone remain distinct from this exercised package result; broader platforms and stable release are not claimed.
+  Native custody is closed v3 / `spna3` (v2 rejected), binding every semantic descriptor field and exact owner/custody. Diagnostic duplicate keys retain original raw evidence but cannot become executable configuration; non-2xx JSON and named SSE errors remain factual SDK evidence. Host-positive `observer_limits` tighten only, and digest v3 binds their effective ceilings. PMR ownership includes queued and draining containers, with cancellation outside the queue mutex. Generic messages stay generic; mapped native history retains its C++ sidecar.
+  Common `ProviderOutcomeError`, `ProviderFailure` and `ProgramFailure` retain full SDK outcomes and original/secondary live causes; no outer Node/Program redispatch occurs. Native failure witnesses require genuine archive custody and Runtime hydration; data-only prefilled witnesses cannot bypass admission, nonpersistable failures cannot publish/replay, and restart leaves the original exception pointer null.
+  `RecordedBindingSet` is source-bound data authenticated by trusted Catalog capture from source events. `replay_recorded` transfers actual remaining credit by durable CAS after checking original selected-source permissions; inherited spend is not a new grant. The renewable `start_recorded` API is removed; exact owned Program leases never renew on expiry, and captured JavaScript commands cannot repeat external effects. Archive possession never grants spending authority. Three separately authorized minimal Images/Veo/Decisions calls succeeded, not broad qualification or invoice proof. Actual integrated verification and remaining limits are reported below; older M5 measurements are historical.
+
+  **Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
+
+  **Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
+
+  **Native-axis observations, not cryptographic verification or native consumption/equivalence.** Generate accepted mutation, omission and duplication. Interactions accepted the isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission and duplication. Removing all thoughts/signatures returned generic400; removing all signature fields while keeping THOUGHT items also returned generic400. The last capture had a local encoded-original retention control, not a same-capture server positive; the earlier positive cohort remains genuine. These observations establish an aggregate-carrier-absence boundary only, not issuer/signature validation or vendor consumption. Actual reports: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`; prerequisite-failed/not-run/negative-inconclusive states remain factual. Thought-only/carrier-only omissions were accepted while another carrier remained; this does not strengthen issuer-validation or native-consumption claims.
+
+  **Actual integrated proof and remaining limits.** Latest Core full run:2242 tests, zero failures,16 skips (14 RAM process-loss cases not applicable; two live-credential gates),130.17seconds. `PgNestedJsonRoundTrips` preserved exact duplicate keys/order/null metadata, blob and residual in0.18seconds. The unchanged original shared-bank fork and existing Recorded CPU/Memory await/handoff scenarios passed. Real wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probes passed plain and ASan+UBSan. LOCAL Memory/SQLite/PostgreSQL TSan scopes:seven passed,zero warnings. Full mixed gRPC plus system Abseil/Protobuf TSan exited66 with402 race warnings in dependency/generated-RPC stacks: an instrumentation/coverage limit, not a proven false positive; remote TSan/race-freedom is NOT claimed and no warning is suppressed. Installed find_package Program C++/C ABI/dualQuickJS three consumers passed. Fresh installed NeoGraph/SchemaProvider typed consumer passed two real HTTP requests, provider destruction before coroutine start, native/tool replay, refusal,known-zero/raw retention and actual LinkedMismatch rejection. Browser Alice/Bob isolation and generation2 replacement were visually verified; PostgreSQL Program Chat six black-box tests passed18.989seconds. Latest SDK26/26 passed,zero failures,74.07seconds. Final ReleaseGraph16 configurations ×3 fresh process repetitions/48 records completed38.29seconds,zero failures,all actual protocol/owned-outcome checks passed. NeoGraph `benchmarks/provider-cutover-final-results.json` and `benchmarks/provider-cutover-final-summary.json` retain this separate final cohort. No compiler or paid model ran during measurement; historical cohorts stay unchanged and semantic/resource equivalence is not claimed. Unstable SDK/ABI3 is not a stable release or broader-platform qualification.
+
+  The completed chat pairs do not establish native-continuation consumption by a downstream vendor.
+- **Standalone bank journal correction — current contract revised; exercised runtime evidence below.** The owner-approved protocol requires a monotonic trusted-store namespace obligation and a real immutable original owner/thread/graph scope, ceiling, deadline/clock identity and generation. Only exact durable head CAS over the full checkpoint commitment and revision may issue a host-owned opaque lease. Exact pending effect windows must persist before provider I/O; settlement must use genuine SDK outcomes and actual charges, nullable reports, holds and dedup identities. Checkpoint and next head must publish atomically under the same owned actor/revision. Removing bank metadata, pruning a checkpoint, replaying an old authenticated snapshot, overwriting the same ID or losing the actor must not grant credit. Tightening a 130 ceiling to 129 with an existing 65 hold cannot admit another 65; a proven no-effect failure may release the unchanged head so authentic 130 recovery can still proceed. Crash/unknown/lost-lease windows remain held without refund, retry or fallback. Plain/pristine archive configuration grants no money or native spending lease, and current `config.usage` cannot replace an existing standalone obligation; Program/external-bank journal ownership is unchanged. This is the required contract; actual currency/custody evidence and instrumentation limits are reported below, not a stable released API guarantee.
+  Actual declarations now include `ManagedBudgetLeaseScope`, `OwnedManagedBudgetLease`, `ManagedBudgetEffectReceipt` and the checkpoint-store acquire/begin/settle/publish/release operations. `begin_managed_budget_effect` binds the exact claim and prepared request digest. Actual backend/runtime currency probes and installed-consumer results are reported below; declarations alone are not runtime evidence.
+
+  **Genuine InMemory shared-bank fork retained and exercised.** The original genuine C++ fork uses ONE original financial journal and trusted current branch heads, not cloned grants. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` (and `_async`) requires the authentic current source/full commitment and actual same-bank native C++ pointer; durable standalone forks remain explicitly unsupported. `OwnedManagedBudgetLease::scope()` and original owner/thread/graph, ceiling, deadline/clock and generation remain immutable. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` select the execution branch separately; `GraphState::budget_original_thread_id()` identifies the original financial bank. Exact selected-branch head CAS and global actor/revision serialize all branches against canonical current counters, pending effects and burned identities. Original and fork branches remain usable without replenishment; stale snapshots, copied checkpoints and imported JSON cannot mint aliases or rewind heads. The original root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank proof PASSED in the unchanged test_graph_engine.cpp:810–913; saved original ceiling30 is separate from effective fork ceiling20; widening31 and JSON-only restore must reject. Unbounded reported observations are factual data, not finite grants. Only a proven zero-effect lease can release an unchanged head; unknown/pending effects keep their obligations.
+
+  **Current release-error contract; exercised suite/probes below.** `graph::ManagedBudgetLeaseReleaseError` in `<neograph/graph/engine.h>` derives from `ProviderOutcomeError`. `cause()` preserves the original execution exception and `release_error()` exposes the secondary durable lease-disposition failure. `outcome()` retains genuine SDK evidence when available and is null when no SDK outcome exists; release failure cannot invent an outcome or permit redispatch. Closed `_neograph_managed_budget_scope` metadata describes original logical scope/cap/deadline clock/generation, but is data rather than backend CAS authority.
+
+  **Archive-owner/retention contract; exercised suite/probes below.** Only finite standalone roots or authenticated finite sources inherit an omitted original owner from the genuinely configured `sp::NativeArchive::owner_scope()`; unbounded/plain owner metadata semantics are unchanged. An explicitly conflicting archive owner is rejected before lease acquisition. `CheckpointStore::retains_native_checkpoint() const noexcept` and the corresponding Core/Async storage capability default to false; the real InMemory backend overrides true, and wrappers must delegate actual retention. This read-only description permits legitimate unleased/plain/unbounded C++ native checkpoint custody; it grants neither spending credit nor native replay authority. Leased custody uses the actual store-issued receipt rather than a JSON flag or guessed store type.
+
+  **Native-custody pre-I/O gate; exercised suite/probes below.** Beginning a managed effect requires a genuinely bound NativeArchive or the actual local store-issued private C++ retention capability before any pending-effect, slot or held-window mutation. The private capability is never imported from JSON or transferred over the wire. gRPC requires real client and server archives even when the remote backend is InMemory, because a C++ sidecar cannot cross that boundary. Original anonymous owner scope remains empty when no archive supplies a finite source owner; a real archive binding must match the original scope. Financial head/lease evidence alone does not prove native-custody readiness.
 - **Portable WASM smoke builds.** Distro Emscripten 3.1.x now enables
   Asio's available coroutine header explicitly and avoids unsupported
   stack-protector symbols only for WASM targets; native hardening is unchanged.
@@ -25,13 +53,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reassignment does not invalidate earlier engines; the unsafe post-compile
   `GraphEngine::own_tools()` transfer has been removed. Python-defined,
   MCP-discovered and native C++ tools use the same compile-time lifetime rule.
-- **SchemaProvider internal responsibilities (#220).** Schema-driven request
-  serialization and response decoding now live in a network-free mapping unit;
-  SSE and WebSocket event state machines consume fixture values independently
-  of sockets. The provider continues to own its HTTP/SSE bridge, native
-  WebSocket path, and pooled HTTP/1.1 or optional libcurl HTTP/2 selection.
-  Chat and arbitrary JSON calls share operation-local cancellation and HTTP
-  error handling. Public provider and schema contracts are unchanged.
 
 ### Added
 - **Non-recursive async-primary checkpoint adapters.** Native coroutine
@@ -51,24 +72,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   calls now reject while an engine executes, and execution rejects during
   administration. Legacy engine constructors and methods remain compatible
   through the documented pre-v1 migration window.
-- **Schema-generated media and long-running operations (#241).** Built-in
-  OpenAI Responses, Images and Gemini/Veo schemas now project generated image
-  and video outputs into typed C++/Python artifacts, including encoded data,
-  MIME, URLs, file handles and provider metadata. JSON prompt envelopes and
-  generic submit/poll/finalize mappings share the provider's deadline,
-  cancellation and typed operation errors. Deterministic loopback coverage
-  includes mixed chat/tools/images, Veo completion, file finalization,
-  cancellation, timeout and provider failures.
 
-- **Public SchemaProvider primitive registry (#242).** Added an explicitly
-  injected, provider-scoped C++ `SchemaPrimitiveRegistry` for custom
-  transport, execution-mode, and artifact-parser factories. Built-in names
-  remain automatic; duplicate names reject unless replacement is explicit,
-  providers copy factory ownership at creation, and concurrent use is safe.
-  Schema paths, primitive categories, and missing names are included in
-  creation-time diagnostics. Python registration remains intentionally
-  unsupported, and shared-library loading is documented as a possible linked
-  ABI arrangement rather than an implemented dynamic plugin system.
 - **Credentialless OpenCode global MCP adoption.** Added inspection-only,
   redacted discovery of user-global local stdio definitions plus explicit
   pinned/trusted-mutable launch and tool-manifest approvals. Adopted clients
@@ -148,9 +152,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   continuation identity; retained children distinguish a new parent call from
   a same-call resume. Stateless static interrupts reject before effects, and
   interrupt recovery uses asynchronous checkpoint loading.
-- **Schema callback and streamed-media parity.** Selected custom primitives
-  remain selected with callbacks; Responses/Gemini streams retain artifacts.
-  Veo accepts omitted pending status without accepting wrong status types.
 - **MCP and host-process isolation.** Adopted tools require independent pinned
   approvals and exact argument values; revocation/schema drift drain retained
   clients. Hardened subprocesses enforce startup/stderr bounds, handle/FD

@@ -29,7 +29,7 @@
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -331,6 +331,7 @@ int main(int argc, char** argv) {
 
     ng::NodeContext ctx;
     std::shared_ptr<neograph::Provider> provider;
+    auto usage = std::make_shared<neograph::UsageAccumulator>();
     json core;
 
     if (selftest) {
@@ -351,10 +352,7 @@ int main(int argc, char** argv) {
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!selftest) {
         if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set (or use --selftest)\n"; return 2; }
-        provider = neograph::llm::OpenAIProvider::create_shared(
-            {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "~deepseek/deepseek-v4-flash-latest",
-             .provider_routing = {{"zdr", true}}});
+        provider = examples::make_openrouter_provider(key, "chat");
         ctx.provider = provider;
     }
 
@@ -374,21 +372,37 @@ int main(int argc, char** argv) {
         "NO backslash-n inside the code string (e.g. "
         "\"import json,sys; d=json.load(open(sys.argv[1])); n=d['state'].get('counter',0); ...\").";
 
-    std::vector<neograph::ChatMessage> convo = {{"system", sys}, {"user", "Author the harness JSON."}};
+    std::vector<sp::Message> convo = {
+        neograph::portable_message({"system", sys}),
+        neograph::portable_message({"user", "Author the harness JSON."})};
 
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         std::cout << "── Attempt #" << attempt << ": model writes node logic ──\n";
-        neograph::CompletionParams p;
-        p.model = "~deepseek/deepseek-v4-flash-latest"; p.messages = convo;
-        p.temperature = 0.2f; p.max_tokens = 4000;
-        neograph::ChatCompletion resp;
-        try { resp = provider->complete(p); }
-        catch (const std::exception& e) { std::cerr << "  LLM error: " << e.what() << "\n"; return 1; }
+        neograph::ProviderControls controls;
+        controls.temperature = 0.2; controls.max_output_tokens = 4000;
+        sp::runtime::Result response;
+        try {
+            response = provider->invoke(neograph::make_provider_request(*provider,
+                "~deepseek/deepseek-v4-flash-latest", convo, {}, controls));
+            if (response) usage->add(neograph::outcome_usage(*response));
+            response = neograph::outcome_or_throw(std::move(response));
+        } catch (const std::exception& e) {
+            std::cerr << "  LLM error: " << e.what() << "\n"
+                      << "  usage: " << neograph::usage_to_json(usage->snapshot()).dump()
+                      << "; monetary charge: unknown\n";
+            return 1;
+        }
+
+        // Native history is authoritative on every repair, even when the text
+        // cannot be parsed. Keep all ordered parts and their replay seals.
+        const auto& messages = neograph::outcome_messages(*response);
+        convo.insert(convo.end(), messages.begin(), messages.end());
 
         json core_candidate;
-        try { core_candidate = extract_json(resp.message.content); }
+        try { core_candidate = extract_json(neograph::outcome_text(*response)); }
         catch (const std::exception&) {
-            convo.push_back({"user", "Not valid JSON. Output ONLY the JSON harness."});
+            convo.push_back(neograph::portable_message(
+                {"user", "Not valid JSON. Output ONLY the JSON harness."}));
             std::cout << "  unparseable; retry.\n\n"; continue;
         }
 
@@ -398,9 +412,9 @@ int main(int argc, char** argv) {
             const std::string gate = v.ok ? "contract" : v.gate;
             const std::string report = v.ok ? cerr_ : v.report;
             std::cout << "  REJECTED at '" << gate << "':\n    " << report.substr(0, 300) << "\n";
-            convo.push_back({"assistant", core_candidate.dump()});
-            convo.push_back({"user", "Compiler/contract REJECTED at '" + gate + "':\n" + report +
-                "\nFix only what it names. Output ONLY corrected JSON."});
+            convo.push_back(neograph::portable_message(
+                {"user", "Compiler/contract REJECTED at '" + gate + "':\n" + report +
+                    "\nFix only what it names. Output ONLY corrected JSON."}));
             std::cout << "  → self-repair.\n\n";
             continue;
         }
@@ -408,12 +422,18 @@ int main(int argc, char** argv) {
                      "contract-checked.\n";
         core = v.core;
     }
-    if (core.is_null()) { std::cout << "no coherent harness.\n"; return 1; }
+    if (core.is_null()) {
+        std::cout << "no coherent harness.\n"
+                  << "usage: " << neograph::usage_to_json(usage->snapshot()).dump()
+                  << "; monetary charge: unknown\n";
+        return 1;
+    }
 
     // ---- spawn: the loop is driven by model-written goto logic ----
     std::cout << "\n── Spawning — the node's own code drives the loop via goto ──\n";
     auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc;
+    rc.usage = usage;
     rc.max_steps = 20;
     rc.input = {{"counter", 0}};
     int ticks = 0;
@@ -434,9 +454,13 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cout << "  RUNTIME CONTRACT VIOLATION: " << e.what()
                   << "\n  (the script broke its declared surface — rejected at runtime)\n";
+        std::cout << "usage: " << neograph::usage_to_json(usage->snapshot()).dump()
+                  << "; monetary charge: unknown\n";
         return 1;
     }
     std::cout << "\nThe model wrote the node's logic AND its flow. The compiler proved the "
                  "shape; the contract proved the surface.\n";
+    std::cout << "usage: " << neograph::usage_to_json(usage->snapshot()).dump()
+              << "; monetary charge: unknown\n";
     return 0;
 }

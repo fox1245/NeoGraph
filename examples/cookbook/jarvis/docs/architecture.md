@@ -2,6 +2,14 @@
 
 **Languages:** [English](architecture.md) | [한국어](architecture.ko.md) | [日本語](architecture.ja.md) | [简体中文](architecture.zh-CN.md)
 
+## Typed provider migration — source status
+
+The C++ router, synthesizer and specialist fixtures use typed `ProviderRequest`, `sp::Message` and `sp::Event`; provider results are full immutable `sp::Outcome` values (`sp::runtime::Result`), not legacy response strings. `src/provider_support.h` implements local Jarvis/coder/researcher mock profiles: deterministic router JSON, user-text echo, and an explicitly synthetic researcher reply. These fixtures require neither credentials nor a network provider, but do not supply real research or expert reasoning. Existing configuration/profile paths below are not repaired or created by this documentation update.
+
+Local voice is optional and needs the selected whisper/Moonshine models, ONNX Runtime/Supertonic assets, miniaudio and usable microphone/speaker devices; text/mock operation is not proof of working voice. Cloud-free applies only to local/mock operation. Live requests require an authorized `OPENROUTER_API_KEY`, network access and provider capacity, and send prompts, conversation memory and attached tool/delegation results to OpenRouter. The live model is pinned; the native request sets ZDR, not a residency guarantee. Keep keys out of logs and version control. Provider token usage is nullable accounting, not a monetary bill: cost requires current endpoint/model pricing and billable usage.
+
+`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. All timings and execution statements retained below are historical, not evidence that this migrated C++ path was executed. This update aligns documentation with source only; no build, benchmark or voice/live run was performed.
+
 What each node in `config/jarvis_graph.json` does and why it's in that position.
 Best read alongside the diagram in README.md.
 

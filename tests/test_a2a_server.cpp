@@ -16,6 +16,7 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 
+#include "fixtures/typed_provider.h"
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -191,27 +192,22 @@ struct DependencyProbe {
     std::shared_ptr<neograph::graph::CancelToken> token;
 };
 
-class CancellableProvider final : public neograph::Provider {
+class CancellableProvider final : public neograph::test::LocalProvider {
   public:
     explicit CancellableProvider(std::shared_ptr<DependencyProbe> probe)
-        : probe_(std::move(probe)) {}
-    asio::awaitable<neograph::ChatCompletion> complete_async(
-        const neograph::CompletionParams& params) override {
-        probe_->provider_started.store(true, std::memory_order_release);
-        while (true) {
-            if (params.cancel_token && params.cancel_token->is_cancelled()) {
-                probe_->provider_cancelled.store(true, std::memory_order_release);
-                throw neograph::graph::CancelledException();
+        : LocalProvider([probe = std::move(probe)](
+              neograph::ProviderRequest request, const neograph::PreparedProviderRequest&,
+              const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            probe->provider_started.store(true, std::memory_order_release);
+            while (true) {
+                if (request.cancel_token && request.cancel_token->is_cancelled()) {
+                    probe->provider_cancelled.store(true, std::memory_order_release);
+                    throw neograph::graph::CancelledException();
+                }
+                std::this_thread::sleep_for(1ms);
             }
-            std::this_thread::sleep_for(1ms);
-        }
-    }
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        throw std::runtime_error("sync provider path not expected");
-    }
-    std::string get_name() const override { return "cancellable"; }
-  private:
-    std::shared_ptr<DependencyProbe> probe_;
+            co_return neograph::test::success("");
+        }, "cancellable") {}
 };
 
 class ProviderNode final : public GraphNode {
@@ -222,10 +218,9 @@ class ProviderNode final : public GraphNode {
           probe_(std::move(probe)) {}
     asio::awaitable<NodeOutput> run(NodeInput in) override {
         probe_->token = in.ctx.cancel_token;
-        neograph::CompletionParams params;
-        params.model = "mock";
-        params.cancel_token = in.ctx.cancel_token;
-        (void)co_await provider_->complete_async(params);
+        auto request = neograph::test::request("mock");
+        request.cancel_token = in.ctx.cancel_token;
+        (void)co_await provider_->invoke_async(std::move(request));
         NodeOutput out;
         out.writes.push_back(ChannelWrite{"response", json("provider")});
         co_return out;
@@ -811,7 +806,7 @@ TEST(A2AServer, DifferentTaskRunsOverlapAndReconnectCanLookup) {
 TEST(A2AServer, GlobalAdmissionRejectsDistinctTaskAtCap) {
     auto probe = std::make_shared<OverlapProbe>();
     A2AServer server(build_overlap_engine(probe), build_card(0));
-    test::A2AServerTestAccess::set_max_inflight_runs(server, 1);
+    neograph::a2a::test::A2AServerTestAccess::set_max_inflight_runs(server, 1);
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
     std::promise<Task> owner_done;

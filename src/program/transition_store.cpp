@@ -874,6 +874,25 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
             throw std::invalid_argument("Program fork source debit does not bind the target");
         }
     }
+    if (publication.recorded_replay_source.has_value() !=
+        publication.recorded_replay_source_lineage.has_value())
+        throw std::invalid_argument("Recorded replay requires its exact source debit receipt");
+    if (publication.recorded_replay_source) {
+        const auto& source = *publication.recorded_replay_source;
+        detail::validate_token(source.run_id, "Recorded replay source run");
+        if (!detail::is_sha256_identity(source.run_record_id) ||
+            !detail::is_sha256_identity(source.journal_head) ||
+            !detail::is_sha256_identity(source.lineage_head_id) ||
+            publication.fork_source_lineage || run.fork_receipt() ||
+            !run.recorded_binding_set_fingerprint() || !publication.run_lineage ||
+            !publication.run_generation || publication.run_generation->generation() != 1 ||
+            journal.sequence != 1 || !journal.previous_id.empty() ||
+            !budget_is_empty(journal.inflight_reservation) ||
+            publication.recorded_replay_source_lineage->owner_scope() != owner ||
+            publication.recorded_replay_source_lineage->lineage_id() ==
+                publication.run_lineage->lineage_id())
+            throw std::invalid_argument("Recorded replay source debit does not bind its initial target");
+    }
 }
 
 constexpr std::size_t MAX_CANONICAL_PUBLICATION_BYTES = 16u * 1024u * 1024u;
@@ -956,6 +975,16 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     } else {
         append_publication_bytes(bytes, "null");
     }
+    if (publication.recorded_replay_source) {
+        const auto& source = *publication.recorded_replay_source;
+        append_publication_bytes(bytes, ",\"recorded_replay_source\":");
+        append_publication_bytes(bytes, detail::canonical_json_bytes(json{
+            {"run_id", source.run_id}, {"run_record_id", source.run_record_id},
+            {"journal_head", source.journal_head}, {"lineage_head_id", source.lineage_head_id}}));
+        append_publication_bytes(bytes, ",\"recorded_replay_source_lineage\":");
+        append_publication_bytes(bytes,
+                                 publication.recorded_replay_source_lineage->serialize_canonical());
+    }
     if (publication.run_lineage) {
         append_publication_bytes(bytes, ",\"run_generation\":");
         if (publication.run_generation) {
@@ -968,12 +997,45 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     }
     append_publication_bytes(bytes, ",\"run_record\":");
     append_publication_bytes(bytes, publication.run_record.serialize_canonical());
-    append_publication_bytes(bytes, publication.child_synthesis_records.empty()
-                                        ? ",\"storage_schema_version\":5}"
-                                        : ",\"storage_schema_version\":6}");
+    append_publication_bytes(bytes, publication.recorded_replay_source
+        ? ",\"storage_schema_version\":7}"
+        : publication.child_synthesis_records.empty()
+            ? ",\"storage_schema_version\":5}" : ",\"storage_schema_version\":6}");
     return bytes;
 }
 }  // namespace
+bool is_valid_program_recorded_replay_allocation(
+    const ProgramTransitionPublication& publication,
+    const ProgramRunLineage& previous,
+    const ProgramRunRecord& source) {
+    if (!publication.recorded_replay_source || !publication.recorded_replay_source_lineage)
+        return false;
+    const auto& receipt = *publication.recorded_replay_source;
+    const auto& target = publication.run_record;
+    const auto terminal = source.terminal_result();
+    return receipt.run_id == source.run_id() && receipt.run_record_id == source.id() &&
+        receipt.journal_head == source.journal_head() && receipt.lineage_head_id == previous.id() &&
+        previous.active_run_record_id() == source.id() &&
+        previous.active_journal_head() == source.journal_head() &&
+        source.owner_scope() == target.owner_scope() && source.run_id() != target.run_id() &&
+        source.program_version_id() == target.program_version_id() &&
+        source.bundle_id() == target.bundle_id() &&
+        source.binding_fingerprint() == target.binding_fingerprint() &&
+        source.invocation().input == target.invocation().input &&
+        source.invocation().budget == target.invocation().budget &&
+        source.child_depth() == 0 && target.child_depth() == 0 &&
+        source.invocation().parent_run_id.empty() && target.invocation().parent_run_id.empty() &&
+        previous.committed_descendant_budget() == RunBudget{} &&
+        previous.inflight_reservation() == RunBudget{} &&
+        terminal && terminal->provider_budget_authority().has_value() &&
+        terminal->status() != ProgramTerminalStatus::Interrupted &&
+        terminal->status() != ProgramTerminalStatus::AmbiguousEffect &&
+        target.recorded_binding_set_fingerprint().has_value() &&
+        is_valid_program_run_lineage_transition(
+            previous, *publication.recorded_replay_source_lineage) &&
+        fork_allocation_fits(previous, *publication.recorded_replay_source_lineage,
+                             publication.journal_record.remaining_budget);
+}
 bool does_program_child_generation_result_bind(const ProgramRunRecord&     parent,
                                                const ProgramChildRecord&   child,
                                                const ProgramRunGeneration& generation,
@@ -1089,6 +1151,12 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
              "effects", "commands", "migration_plan", "run_generation", "run_lineage",
              "fork_source_lineage", "context_publication", "hook_outbox_entries",
              "child_synthesis_records"});
+    } else if (schema_version == 7) {
+        detail::reject_unknown_fields(v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan", "run_generation", "run_lineage",
+             "fork_source_lineage", "context_publication", "hook_outbox_entries",
+             "child_synthesis_records", "recorded_replay_source", "recorded_replay_source_lineage"});
     } else {
         throw std::invalid_argument("Stored Program publication schema unsupported");
     }
@@ -1188,13 +1256,25 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
                                         std::move(commands), std::move(run_generation),
                                         std::move(run_lineage), std::move(fork_source_lineage),
                                          std::move(context_publication), std::move(hook_outbox_entries)};
-    if (schema_version >= 6) {
+    if (schema_version == 6 || v.contains("child_synthesis_records")) {
         const auto& entries = rv(v, "child_synthesis_records");
         if (!entries.is_array() || entries.size() != 1)
             throw std::invalid_argument("Program synthesis publication requires one record");
         for (const auto& entry : entries)
             out.child_synthesis_records.push_back(
                 ProgramChildSynthesisRecord::parse(detail::canonical_json_bytes(entry)));
+    }
+    if (schema_version == 7) {
+        const auto& source = rv(v, "recorded_replay_source");
+        if (!source.is_object())
+            throw std::invalid_argument("Recorded replay source receipt must be an object");
+        detail::reject_unknown_fields(source, "Recorded replay source receipt",
+                                      {"run_id", "run_record_id", "journal_head", "lineage_head_id"});
+        out.recorded_replay_source = ProgramRecordedReplaySource{
+            rs(source, "run_id"), rs(source, "run_record_id"),
+            rs(source, "journal_head"), rs(source, "lineage_head_id")};
+        out.recorded_replay_source_lineage = ProgramRunLineage::parse(
+            detail::canonical_json_bytes(rv(v, "recorded_replay_source_lineage")));
     }
     validate_pub(out, out.run_record.owner_scope());
     return out;
@@ -1817,7 +1897,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     } else if (current_lease != impl_->execution_leases.end()) {
         return ProgramTransitionPublishResult::Conflict;
     }
-    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication)) {
+    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication, expected_lease)) {
         return ProgramTransitionPublishResult::Conflict;
     }
     if (current == impl_->runs.end() && publication.fork_source_lineage) {
@@ -1955,6 +2035,23 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         fork_source_current = found->second;
     } else if (current == impl_->runs.end() && publication.run_record.fork_receipt()) {
         return ProgramTransitionPublishResult::Conflict;
+    }
+    std::string replay_source_key;
+    std::shared_ptr<const Impl::StoredLineage> replay_source_current;
+    if (publication.recorded_replay_source) {
+        if (current != impl_->runs.end()) return ProgramTransitionPublishResult::Conflict;
+        replay_source_key = key(owner, publication.recorded_replay_source_lineage->lineage_id());
+        const auto lineage = impl_->lineages.find(replay_source_key);
+        const auto source = impl_->runs.find(key(owner, publication.recorded_replay_source->run_id));
+        if (lineage == impl_->lineages.end() || source == impl_->runs.end() ||
+            has_blocking_hook_obligation(source->second->hook_outbox_entries) ||
+            !is_valid_program_runtime_context_clone(
+                source->second->context_publications, publication.run_record,
+                publication.context_publication) ||
+            !is_valid_program_recorded_replay_allocation(
+                publication, lineage->second->head, source->second->run))
+            return ProgramTransitionPublishResult::Conflict;
+        replay_source_current = lineage->second;
     }
 
     const auto new_terminal = publication.run_record.terminal_result();
@@ -2137,6 +2234,15 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             fork_source_current->initial_publications,
             std::move(heads)});
     }
+    std::shared_ptr<const Impl::StoredLineage> staged_replay_source;
+    if (publication.recorded_replay_source_lineage) {
+        auto heads = replay_source_current->heads;
+        heads.emplace(publication.recorded_replay_source_lineage->id(),
+                      *publication.recorded_replay_source_lineage);
+        staged_replay_source = std::make_shared<const Impl::StoredLineage>(Impl::StoredLineage{
+            *publication.recorded_replay_source_lineage, replay_source_current->generations,
+            replay_source_current->initial_publications, std::move(heads)});
+    }
     maybe_fail(ProgramTransitionFaultPoint::AfterLineageSnapshot);
 
     std::vector<ProgramEvent>            events;
@@ -2186,7 +2292,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
                                      : std::nullopt,
         std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
-    if (staged_lineage || staged_fork_source || safe_point_capsule ||
+    if (staged_lineage || staged_fork_source || staged_replay_source || safe_point_capsule ||
         expected_lease || next_lease) {
         auto staged_runs     = impl_->runs;
         auto staged_lineages = impl_->lineages;
@@ -2197,6 +2303,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             staged_lineages.insert_or_assign(lineage_key, std::move(staged_lineage));
         if (staged_fork_source)
             staged_lineages.insert_or_assign(fork_source_key, std::move(staged_fork_source));
+        if (staged_replay_source)
+            staged_lineages.insert_or_assign(replay_source_key, std::move(staged_replay_source));
         if (safe_point_capsule) {
             staged_capsules.insert_or_assign(
                 graph_migration_capsule_key(owner, safe_point_capsule->source_run_id(),

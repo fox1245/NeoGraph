@@ -49,6 +49,23 @@ std::string safe_exception_message(const std::exception& error) {
     }
 }
 
+bool has_provider_outcome(std::exception_ptr error) noexcept {
+    while (error) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const ProviderOutcomeError&) {
+            return true;
+        } catch (const ProviderFailure&) {
+            return true;
+        } catch (const NodeExecutionError& node_error) {
+            error = node_error.cause();
+        } catch (...) {
+            return false;
+        }
+    }
+    return false;
+}
+
 // ── FNV-1a 64-bit for Send task_id hashing ─────────────────────────────
 // Deterministic, 0 deps, sufficient for resume's replay map key.
 // Moved here from graph_engine.cpp along with the Send execution path.
@@ -238,7 +255,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     std::string cache_state_hash;
     std::string cache_scope_key;
     if (cache_eligible) {
-        cache_state_hash  = hash_state_for_cache(state.serialize_runtime());
+        cache_state_hash = hash_state_for_cache(state.serialize_cache());
         const auto policy = node_cache_->policy_for(node_name);
         if (policy.scope == CacheScope::Execution) {
             cache_scope_key = "execution:" + std::to_string(ctx.cache_execution_id);
@@ -266,8 +283,15 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             } catch (const std::exception& e) {
                 what = safe_exception_message(e);
             } catch (...) {}
-            cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                          json{{"error", what}, {"attempts", attempts}}});
+            try {
+                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                              json{{"error", what}, {"attempts", attempts}}});
+            } catch (...) {
+                if (!has_provider_outcome(cause)) throw;
+                // Keep provider evidence as the primary node cause; a failing
+                // terminal observer remains inspectable as a nested exception.
+                std::throw_with_nested(NodeExecutionError(node_name, attempts, std::move(cause)));
+            }
         }
         try {
             std::rethrow_exception(cause);
@@ -313,6 +337,19 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // cancel flag, the second HTTP call would slip through,
             // and the cost leak would persist for max_retries × ~3 s.
             throw;
+        } catch (const ProviderOutcomeError&) {
+            // The provider effect has already drained. Retrying a host
+            // observer/settlement failure would issue a fresh provider effect.
+            throw_node_error(std::current_exception(), attempt + 1);
+        } catch (const ProviderFailure&) {
+            // SDK runtime owns provider retry policy and attempt evidence.
+            // Re-running the node would start a fresh unrelated operation.
+            throw_node_error(std::current_exception(), attempt + 1);
+        } catch (const NodeExecutionError&) {
+            auto error = std::current_exception();
+            if (has_provider_outcome(error))
+                throw_node_error(std::move(error), attempt + 1);
+            retryable_err = std::move(error);
         } catch (const asio::system_error& error) {
             // Socket/timer cancellation enters node code as
             // operation_aborted. Once this operation's token is set, that is
@@ -805,6 +842,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
 
         GraphState send_state;
         init_state(send_state);
+        send_state.copy_provider_history_from(state);
         send_state.restore_runtime(state_snapshot);
         apply_input(send_state, s.input);
         // v1.0 (9d): the old `run_cancel_token` smuggling channel is

@@ -1,15 +1,13 @@
-// PR 9a: these tests now drive the v0.4 unified ``run(NodeInput)``
-// virtual on built-in nodes (LLMCallNode, ToolDispatchNode). The few
-// remaining legacy-default-chain tests in this file (e.g.
-// ``DefaultExecuteFullWrapsExecute`` exercising a ``SimpleNode``
-// subclass that overrides only ``execute``) are still covered by
-// ``test_node_default_dispatch.cpp`` / ``test_node_async_default.cpp``;
-// when the legacy chain is deleted in PR 9 those test files go too.
+// Built-in node behavior at the owned typed provider boundary.
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/controlled_provider.h>
+#include <neograph/graph/executor.h>
+#include <neograph/runtime_turn_assembler.h>
+#include "fixtures/typed_provider.h"
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -23,27 +21,65 @@ NodeOutput drive_run(GraphNode& node, const GraphState& state) {
     return neograph::async::run_sync(
         node.run(NodeInput{state, ctx, nullptr}));
 }
+
+class NodeSettlementFailure final : public std::runtime_error {
+public:
+    NodeSettlementFailure() : std::runtime_error("node outcome storage unavailable") {}
+};
+
+class NodeSettlementFaultStore final : public ProviderDispatchReceiptStore,
+                                       public ProviderDispatchOutcomeStore {
+public:
+    explicit NodeSettlementFaultStore(std::exception_ptr failure) : failure_(std::move(failure)) {}
+    ProviderDispatchReceiptPutResult persist(const ProviderDispatchReceipt& receipt) override {
+        return journal.persist(receipt);
+    }
+    ProviderDispatchReceiptPutResult persist(std::string_view owner,
+                                             const ProviderDispatchReceipt& receipt) override {
+        return journal.persist(owner, receipt);
+    }
+    ProviderDispatchOutcomePutResult settle(std::string_view,
+                                            const ProviderDispatchOutcomeReceipt&) override {
+        ++settlements;
+        std::rethrow_exception(failure_);
+    }
+    std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view owner, std::string_view dispatch) const override {
+        return journal.outcome(owner, dispatch);
+    }
+    InMemoryProviderDispatchReceiptStore journal;
+    int settlements = 0;
+private:
+    std::exception_ptr failure_;
+};
+
+ContextAssemblyReceipt node_assembly(const PreparedProviderRequest& request) {
+    ContextEpochData epoch_data;
+    epoch_data.run_id = "graph-settlement";
+    epoch_data.sequence = 1;
+    epoch_data.raw_window_digest = "sha256:" + std::string(64, 'a');
+    const auto epoch = ContextEpoch::create(std::move(epoch_data));
+    ContextAssemblyReceiptData data;
+    data.context_epoch_id = epoch.id();
+    data.normalized_request_digest = RuntimeTurnAssembler::normalized_request_digest(request);
+    data.message_window_digest = "sha256:" + std::string(64, 'b');
+    return ContextAssemblyReceipt::create(std::move(data), epoch, {});
+}
 }  // namespace
 
 static ReducerFn overwrite_fn() { return ReducerRegistry::instance().get("overwrite"); }
 static ReducerFn append_fn()    { return ReducerRegistry::instance().get("append"); }
 
-// ── Mock Provider ──
-
-class MockProvider : public Provider {
+class MockProvider : public test::LocalProvider {
+    explicit MockProvider(std::shared_ptr<sp::Message> response)
+        : LocalProvider([response](ProviderRequest, const PreparedProviderRequest&,
+                                  const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            co_return test::success(std::vector<sp::Message>{*response});
+        }, "mock"), response_(std::move(response)), next_response(*response_) {}
+    std::shared_ptr<sp::Message> response_;
 public:
-    ChatMessage next_response;
-
-    ChatCompletion complete(const CompletionParams& /*params*/) override {
-        ChatCompletion comp;
-        comp.message = next_response;
-        return comp;
-    }
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& /*on_chunk*/) override {
-        return complete(params);
-    }
-    std::string get_name() const override { return "mock"; }
+    MockProvider() : MockProvider(std::make_shared<sp::Message>()) {}
+    sp::Message& next_response;
 };
 
 // ── Mock Tool ──
@@ -63,10 +99,11 @@ public:
 
 TEST(NodeTest, LLMCallNodeExecute) {
     auto provider = std::make_shared<MockProvider>();
-    provider->next_response = ChatMessage{"assistant", "Hello from LLM"};
+    provider->next_response = test::message("Hello from LLM");
 
     NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = "fixture-model";
 
     LLMCallNode node("llm", ctx);
 
@@ -89,42 +126,188 @@ TEST(NodeTest, LLMCallNodeExecute) {
     EXPECT_EQ(msgs[0]["content"], "Hello from LLM");
 }
 
-TEST(NodeTest, LLMCallNodeName) {
-    NodeContext ctx;
-    ctx.provider = std::make_shared<MockProvider>();
-    LLMCallNode node("my_llm", ctx);
-    EXPECT_EQ(node.get_name(), "my_llm");
+TEST(NodeTest, SettlementFailureRetainsActualOutcomeWithoutNodeRedispatch) {
+    const auto cause = std::make_exception_ptr(NodeSettlementFailure{});
+    auto store = std::make_shared<NodeSettlementFaultStore>(cause);
+    auto effects = std::make_shared<int>(0);
+    sp::Completion completion;
+    completion.messages = {test::message("delivered")};
+    completion.messages.front().parts.emplace_back(sp::InvalidToolCall{
+        "partial", "read", sp::ToolCallKind::ClientExecuted, "{\"path\":", sp::InvalidReason::Truncated});
+    completion.usage = test::usage(7, std::nullopt, std::nullopt);
+    completion.stop = {sp::StopKind::MaxTokens, "length"};
+    completion.attempt.request_may_have_left = true;
+    completion.attempt.response_head_seen = true;
+    completion.attempt.attempts = 2;
+    completion.attempt.prior_usage_unknown = true;
+    completion.wire_envelope = test::document(R"({"id":"delivered","unknown":{"value":null}})");
+    completion.raw_events.push_back({"vendor.unknown", test::document(R"({"opaque":[1,null,3]})")});
+    const auto expected = std::make_shared<const sp::Outcome>(std::move(completion));
+    auto transport = std::make_shared<test::LocalProvider>(
+        [effects, expected](ProviderRequest, const PreparedProviderRequest&,
+                            const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            ++*effects;
+            co_return expected;
+        });
+    // Use the actual ControlledProvider settlement path, not an exception
+    // manufactured in node code. Only terminal storage is fault-injected.
+    auto provider = std::make_shared<test::LocalProvider>(
+        [transport, store](ProviderRequest request, const PreparedProviderRequest&,
+                           const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            auto prepared = transport->prepare(std::move(request));
+            auto assembly = node_assembly(prepared);
+            ControlledProvider controlled(transport, store, "sha256:" + std::string(64, 'f'));
+            co_return co_await controlled.dispatch_prepared_async(
+                "owner", "graph-effect", assembly, std::move(prepared));
+        });
+    NodeContext context;
+    context.provider = provider;
+    context.model = "fixture-model";
+    std::map<std::string, std::unique_ptr<GraphNode>> nodes;
+    nodes.emplace("llm", std::make_unique<LLMCallNode>("llm", context));
+    const std::vector<ChannelDef> channels;
+    RetryPolicy policy;
+    policy.max_retries = 3;
+    policy.initial_delay_ms = 1;
+    NodeExecutor executor(nodes, channels, [policy](const std::string&) { return policy; });
+    GraphState state;
+    const auto original_messages = json::array({{{"role", "user"}, {"content", "question"}}});
+    state.init_channel("messages", ReducerType::APPEND, append_fn(), original_messages);
+    RunContext run;
+    run.usage = std::make_shared<UsageAccumulator>();
+    run.provider_outcomes = std::make_shared<ProviderOutcomes>();
+    const auto terminal_observer_cause = std::make_exception_ptr(
+        std::range_error("terminal error observer unavailable"));
+    GraphStreamCallback observer = [terminal_observer_cause](const GraphEvent& event) {
+        if (event.type == GraphEvent::Type::ERROR)
+            std::rethrow_exception(terminal_observer_cause);
+    };
+    try {
+        (void)neograph::async::run_sync(executor.execute_node_with_retry_async(
+            "llm", state, observer, StreamMode::EVENTS, run));
+        FAIL() << "post-effect storage failure must remain a node failure";
+    } catch (const NodeExecutionError& error) {
+        EXPECT_EQ(error.attempts(), 1);
+        EXPECT_THROW(std::rethrow_if_nested(error), std::range_error);
+        try {
+            std::rethrow_exception(error.cause());
+            FAIL() << "expected owned provider outcome failure";
+        } catch (const ProviderOutcomeError& outcome_error) {
+            EXPECT_EQ(outcome_error.outcome(), expected);
+            EXPECT_EQ(outcome_error.cause(), cause);
+            EXPECT_THROW(std::rethrow_exception(outcome_error.cause()), NodeSettlementFailure);
+        }
+    }
+    EXPECT_EQ(*effects, 1);
+    EXPECT_EQ(store->settlements, 1);
+    EXPECT_EQ(store->journal.state("owner", "graph-effect"), ProviderDispatchState::AdmittedPending);
+    const auto outcomes = run.provider_outcomes->snapshot();
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), expected);
+    const auto report = run.usage->snapshot();
+    ASSERT_TRUE(report.input_total);
+    EXPECT_EQ(report.input_total->value, 7u);
+    EXPECT_FALSE(report.output_total);
+    EXPECT_FALSE(report.total);
+    EXPECT_EQ(report.stage, sp::UsageStage::Final);
+    EXPECT_EQ(state.get("messages"), original_messages);
+}
+
+TEST(NodeTest, SdkPartialFailureStopsOuterRetryAndRetainsEvidence) {
+    sp::Failure failure;
+    failure.error.kind = sp::ErrorKind::Truncated;
+    failure.error.retry_class = sp::RetryClass::Transient;
+    failure.error.retry_safety = sp::RetrySafety::OutputObserved;
+    failure.error.safe_message = "response ended during a tool call";
+    failure.error.attempt.request_may_have_left = true;
+    failure.error.attempt.response_head_seen = true;
+    failure.error.attempt.attempts = 2;
+    failure.error.attempt.transport_internal_resends = 1;
+    failure.error.attempt.prior_usage_unknown = true;
+    failure.partial.messages = {test::message("partial text")};
+    failure.partial.messages.front().parts.emplace_back(sp::InvalidToolCall{
+        "partial", "read", sp::ToolCallKind::ClientExecuted, "{\"path\":", sp::InvalidReason::Truncated});
+    failure.partial.usage = test::usage(0, 2, std::nullopt, sp::UsageStage::Partial);
+    failure.partial.wire_envelope = test::document(R"({"id":"partial-response","metadata":{"unrecognized":true}})");
+    failure.partial.raw_events.push_back({"unknown.event", test::document(R"({"partial":[null,{"value":9}]})")});
+    const auto expected = std::make_shared<const sp::Outcome>(std::move(failure));
+    auto effects = std::make_shared<int>(0);
+    auto provider = std::make_shared<test::LocalProvider>(
+        [expected, effects](ProviderRequest, const PreparedProviderRequest&,
+                            const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            ++*effects;
+            co_return expected;
+        });
+    NodeContext context;
+    context.provider = provider;
+    context.model = "fixture-model";
+    std::map<std::string, std::unique_ptr<GraphNode>> nodes;
+    nodes.emplace("llm", std::make_unique<LLMCallNode>("llm", context));
+    const std::vector<ChannelDef> channels;
+    RetryPolicy policy;
+    policy.max_retries = 3;
+    policy.initial_delay_ms = 1;
+    NodeExecutor executor(nodes, channels, [policy](const std::string&) { return policy; });
+    GraphState state;
+    const auto original_messages = json::array({{{"role", "user"}, {"content", "question"}}});
+    state.init_channel("messages", ReducerType::APPEND, append_fn(), original_messages);
+    RunContext run;
+    run.usage = std::make_shared<UsageAccumulator>();
+    run.provider_outcomes = std::make_shared<ProviderOutcomes>();
+    try {
+        (void)neograph::async::run_sync(executor.execute_node_with_retry_async(
+            "llm", state, nullptr, StreamMode::ALL, run));
+        FAIL() << "an SDK partial failure must not become a successful node";
+    } catch (const NodeExecutionError& error) {
+        EXPECT_EQ(error.attempts(), 1);
+        try {
+            std::rethrow_exception(error.cause());
+            FAIL() << "expected the original typed SDK failure";
+        } catch (const ProviderFailure& sdk_failure) {
+            EXPECT_EQ(sdk_failure.outcome(), expected);
+        }
+    }
+    EXPECT_EQ(*effects, 1);
+    const auto outcomes = run.provider_outcomes->snapshot();
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), expected);
+    const auto report = run.usage->snapshot();
+    ASSERT_TRUE(report.input_total);
+    EXPECT_EQ(report.input_total->value, 0u);
+    ASSERT_TRUE(report.output_total);
+    EXPECT_EQ(report.output_total->value, 2u);
+    EXPECT_FALSE(report.total);
+    EXPECT_EQ(report.stage, sp::UsageStage::Partial);
+    EXPECT_EQ(state.get("messages"), original_messages);
 }
 
 // ── System-message contract (issue #93) ──
 //
-// build_params() is private, so these assert on what the provider actually
-// received. That is the honest surface anyway: the contract we care about is
-// the shape of the outgoing request, not the shape of an internal helper.
+// Assert the admitted outgoing request's system-message shape.
 
-class RecordingProvider : public Provider {
+class RecordingProvider : public test::LocalProvider {
+    explicit RecordingProvider(std::shared_ptr<json> request)
+        : LocalProvider([](ProviderRequest, const PreparedProviderRequest&,
+                           const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            co_return test::success("ok");
+        }, "recording"), request_(std::move(request)), last_request(*request_) {}
+    std::shared_ptr<json> request_;
 public:
-    CompletionParams last_params;
-    ChatMessage      next_response{"assistant", "ok"};
-
-    ChatCompletion complete(const CompletionParams& params) override {
-        last_params = params;
-        ChatCompletion comp;
-        comp.message = next_response;
-        return comp;
+    RecordingProvider() : RecordingProvider(std::make_shared<json>()) {}
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        auto prepared = LocalProvider::prepare(std::move(request));
+        if (prepared.valid()) *request_ = json::parse(prepared.encoded_body());
+        return prepared;
     }
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& /*on_chunk*/) override {
-        return complete(params);
-    }
-    std::string get_name() const override { return "recording"; }
+    json& last_request;
 };
 
 namespace {
-std::size_t count_system(const std::vector<ChatMessage>& msgs) {
-    return static_cast<std::size_t>(
-        std::count_if(msgs.begin(), msgs.end(),
-                      [](const ChatMessage& m) { return m.role == "system"; }));
+std::size_t count_system(const json& msgs) {
+    std::size_t count = 0;
+    for (const auto& message : msgs)
+        if (message.at("role") == "system") ++count;
+    return count;
 }
 
 // Seed a messages channel with the given messages. GraphState holds a
@@ -147,6 +330,7 @@ TEST(NodeTest, AddsSystemMessageWhenAbsent) {
     auto provider = std::make_shared<RecordingProvider>();
     NodeContext ctx;
     ctx.provider     = provider;
+    ctx.model = "fixture-model";
     ctx.instructions = "You are a helpful assistant.";
 
     LLMCallNode node("llm", ctx);
@@ -154,8 +338,7 @@ TEST(NodeTest, AddsSystemMessageWhenAbsent) {
     seed_messages(state, {{"user", "Hi"}});
     drive_run(node, state);
 
-    ASSERT_EQ(count_system(provider->last_params.messages), 1u);
-    EXPECT_EQ(provider->last_params.messages[0].content, "You are a helpful assistant.");
+    ASSERT_EQ(count_system(provider->last_request.at("messages")), 1u);
 }
 
 // Existing behavior — must stay green. A system message that already matches
@@ -164,6 +347,7 @@ TEST(NodeTest, DoesNotDuplicateMatchingSystemMessage) {
     auto provider = std::make_shared<RecordingProvider>();
     NodeContext ctx;
     ctx.provider     = provider;
+    ctx.model = "fixture-model";
     ctx.instructions = "You are a helpful assistant.";
 
     LLMCallNode node("llm", ctx);
@@ -171,7 +355,7 @@ TEST(NodeTest, DoesNotDuplicateMatchingSystemMessage) {
     seed_messages(state, {{"system", "You are a helpful assistant."}, {"user", "Hi"}});
     drive_run(node, state);
 
-    EXPECT_EQ(count_system(provider->last_params.messages), 1u);
+    EXPECT_EQ(count_system(provider->last_request.at("messages")), 1u);
 }
 
 // RED (issue #93). The guard tests role AND content, so a system message whose
@@ -182,6 +366,7 @@ TEST(NodeTest, DoesNotPrependSecondSystemMessage) {
     auto provider = std::make_shared<RecordingProvider>();
     NodeContext ctx;
     ctx.provider     = provider;
+    ctx.model = "fixture-model";
     ctx.instructions = "Instructions B";
 
     LLMCallNode node("llm", ctx);
@@ -189,7 +374,7 @@ TEST(NodeTest, DoesNotPrependSecondSystemMessage) {
     seed_messages(state, {{"system", "System prompt A"}, {"user", "Hi"}});
     drive_run(node, state);
 
-    EXPECT_EQ(count_system(provider->last_params.messages), 1u)
+    EXPECT_EQ(count_system(provider->last_request.at("messages")), 1u)
         << "a second system message was prepended in front of the existing one";
 }
 
@@ -267,45 +452,3 @@ TEST(NodeTest, ToolDispatchToolNotFound) {
                 content.find("not found") != std::string::npos ||
                 content.find("Tool not found") != std::string::npos);
 }
-
-// ── NodeResult / Send / Command ──
-
-TEST(NodeTest, NodeResultFromWrites) {
-    std::vector<ChannelWrite> writes = {{"result", json("ok")}};
-    NodeResult nr(writes);
-    EXPECT_EQ(nr.writes.size(), 1);
-    EXPECT_FALSE(nr.command.has_value());
-    EXPECT_TRUE(nr.sends.empty());
-}
-
-TEST(NodeTest, NodeResultWithCommand) {
-    NodeResult nr;
-    nr.command = Command{"next_node", {ChannelWrite{"status", json("routed")}}};
-    EXPECT_TRUE(nr.command.has_value());
-    EXPECT_EQ(nr.command->goto_node, "next_node");
-}
-
-TEST(NodeTest, NodeResultWithSend) {
-    NodeResult nr;
-    nr.sends.push_back(Send{"worker", json{{"topic", "AI"}}});
-    nr.sends.push_back(Send{"worker", json{{"topic", "ML"}}});
-    EXPECT_EQ(nr.sends.size(), 2);
-}
-
-// ── NodeInterrupt ──
-
-TEST(NodeTest, NodeInterruptThrows) {
-    try {
-        throw NodeInterrupt("test reason");
-        FAIL() << "Should have thrown";
-    } catch (const NodeInterrupt& ni) {
-        EXPECT_EQ(ni.reason(), "test reason");
-        EXPECT_EQ(std::string(ni.what()), "test reason");
-    }
-}
-
-// v1.0 removal (9b): the `DefaultExecuteFullWrapsExecute` test verified
-// the legacy 8-virtual default chain (execute_full default wrapping
-// execute output into NodeResult::writes). The chain is gone — run() is
-// the only dispatch surface and NodeResult/NodeOutput is the only
-// return shape — so the test has nothing left to assert.

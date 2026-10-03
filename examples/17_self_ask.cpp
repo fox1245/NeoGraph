@@ -31,13 +31,14 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using namespace neograph;
 
@@ -60,29 +61,25 @@ static std::string extract_after(const std::string& text,
     return text.substr(start, end - start);
 }
 
-static ChatCompletion ask(Provider& p,
-                          const std::vector<ChatMessage>& messages,
-                          float temperature) {
-    CompletionParams params;
-    params.model = "~deepseek/deepseek-v4-flash-latest";
-    params.temperature = temperature;
-    params.messages = messages;
-    return p.complete(params);
+static sp::runtime::Result ask(Provider& p,
+                               const std::vector<sp::Message>& messages,
+                               float temperature) {
+    ProviderControls controls;
+    controls.temperature = temperature;
+    return p.invoke(make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest", messages, {}, std::move(controls)));
 }
 
 // The "knowledge source" — a second LLM instance with a terse-answerer
 // system prompt. In production this would be a search tool or RAG lookup.
-static std::string lookup(Provider& p, const std::string& sub_question) {
-    CompletionParams params;
-    params.model = "~deepseek/deepseek-v4-flash-latest";
-    params.temperature = 0.0f;
-    params.messages.push_back({"system",
-        "You are a reference database. Given a factual question, answer with "
-        "the shortest possible correct answer — usually a name, number, or "
-        "date. Do not add explanation, do not add punctuation beyond what is "
-        "necessary."});
-    params.messages.push_back({"user", sub_question});
-    return p.complete(params).message.content;
+static sp::runtime::Result lookup(Provider& p, const std::string& sub_question) {
+    return ask(p, {
+        examples::message(sp::Role::System,
+            "You are a reference database. Given a factual question, answer with "
+            "the shortest possible correct answer — usually a name, number, or "
+            "date. Do not add explanation, do not add punctuation beyond what is "
+            "necessary."),
+        examples::message(sp::Role::User, sub_question)}, 0.0f);
 }
 
 int main() {
@@ -96,13 +93,7 @@ int main() {
         return 1;
     }
 
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "openai_responses";
-    cfg.api_key = api_key;
-    cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = llm::SchemaProvider::create(cfg);
+    auto provider = examples::make_openrouter_provider(api_key);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 17: Self-Ask                        ║\n"
@@ -167,17 +158,22 @@ int main() {
         "So the final answer is: December 6, 1952.\n\n"
         "Now do the same for the question below.";
 
-    std::vector<ChatMessage> history;
-    history.push_back({"system", system});
-    history.push_back({"user", exemplar + "\n\nQuestion: " + question});
+    std::vector<sp::Message> history;
+    history.push_back(examples::message(sp::Role::System, system));
+    history.push_back(examples::message(sp::Role::User, exemplar + "\n\nQuestion: " + question));
 
     std::cout << "Question: " << question << "\n\n";
 
     const int MAX_HOPS = 6;
+    std::vector<std::shared_ptr<const sp::Outcome>> outcomes;
+    outcomes.reserve(MAX_HOPS * 2);
     for (int hop = 1; hop <= MAX_HOPS; ++hop) {
-        auto reply = ask(*provider, history, 0.0f);
-        const std::string text = reply.message.content;
-        history.push_back({"assistant", text});
+        auto reply = examples::require_outcome(ask(*provider, history, 0.0f));
+        outcomes.push_back(reply);
+        const auto& output = std::get<sp::Completion>(*reply).messages;
+        // Copy every ordered part and the original native replay authority.
+        history.insert(history.end(), output.begin(), output.end());
+        const std::string text = examples::visible_text(*reply);
 
         std::cout << "── Hop " << hop << " ─────────────────────────────\n"
                   << text << "\n";
@@ -194,10 +190,12 @@ int main() {
             return 1;
         }
 
-        std::string sub_a = lookup(*provider, sub_q);
+        auto knowledge = examples::require_outcome(lookup(*provider, sub_q));
+        outcomes.push_back(knowledge);
+        const std::string sub_a = examples::visible_text(*knowledge);
         std::cout << "  → Intermediate answer: " << sub_a << "\n\n";
 
-        history.push_back({"user", "Intermediate answer: " + sub_a});
+        history.push_back(examples::message(sp::Role::User, "Intermediate answer: " + sub_a));
     }
 
     std::cout << "⚠ Reached max hops (" << MAX_HOPS << ") without final answer.\n";

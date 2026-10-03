@@ -4,6 +4,7 @@
 #include <neograph/tool.h>
 #include <neograph/types.h>
 #include <neograph/json.h>
+#include "fixtures/typed_provider.h"
 
 #include <mutex>
 #include <queue>
@@ -13,55 +14,37 @@ using namespace neograph;
 using namespace neograph::graph;
 
 // --------------------------------------------------------------------------
-// Scripted provider: returns a queue of canned responses, one per complete()
+// Scripted provider: returns a queue of typed Outcomes, one per dispatch.
 // call. Tests use this to validate that the Plan & Execute graph walks
 // planner -> executor (N times) -> responder in order.
 // --------------------------------------------------------------------------
-class ScriptedProvider : public Provider {
+class ScriptedProvider : public test::LocalProvider {
+    struct State {
+        mutable std::mutex mutex;
+        std::queue<std::string> queue;
+        int calls = 0;
+    };
+    explicit ScriptedProvider(std::shared_ptr<State> state)
+        : LocalProvider([state](ProviderRequest, const PreparedProviderRequest&,
+                               const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            std::lock_guard lock(state->mutex);
+            ++state->calls;
+            if (state->queue.empty()) throw std::logic_error("scripted responses exhausted");
+            auto text = std::move(state->queue.front());
+            state->queue.pop();
+            co_return test::success(std::move(text));
+        }, "scripted"), state_(std::move(state)) {}
+    std::shared_ptr<State> state_;
 public:
+    ScriptedProvider() : ScriptedProvider(std::make_shared<State>()) {}
     void push_response(const std::string& content) {
-        ChatMessage m;
-        m.role = "assistant";
-        m.content = content;
-        std::lock_guard<std::mutex> g(mu_);
-        queue_.push(std::move(m));
-    }
-    std::vector<std::string> call_log() const {
-        std::lock_guard<std::mutex> g(mu_);
-        return log_;
+        std::lock_guard lock(state_->mutex);
+        state_->queue.push(content);
     }
     int call_count() const {
-        std::lock_guard<std::mutex> g(mu_);
-        return static_cast<int>(log_.size());
+        std::lock_guard lock(state_->mutex);
+        return state_->calls;
     }
-
-    ChatCompletion complete(const CompletionParams& params) override {
-        std::lock_guard<std::mutex> g(mu_);
-        // Log the first message content so we can assert prompts if needed.
-        std::string first;
-        if (!params.messages.empty()) first = params.messages.front().content;
-        log_.push_back(first);
-
-        ChatCompletion c;
-        if (!queue_.empty()) {
-            c.message = std::move(queue_.front());
-            queue_.pop();
-        } else {
-            c.message.role = "assistant";
-            c.message.content = "<exhausted>";
-        }
-        return c;
-    }
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback&) override {
-        return complete(params);
-    }
-    std::string get_name() const override { return "scripted"; }
-
-private:
-    mutable std::mutex mu_;
-    std::queue<ChatMessage> queue_;
-    std::vector<std::string> log_;
 };
 
 TEST(PlanExecuteGraph, WalksPlannerExecutorResponderAndCollectsResults) {
@@ -133,7 +116,7 @@ TEST(PlanExecuteGraph, EmptyPlanSkipsExecutorGoesStraightToResponder) {
     auto engine = create_plan_execute_graph(
         provider, {},
         "planner", "executor", "responder",
-        "", 5);
+        "fixture-model", 5);
 
     RunConfig cfg;
     cfg.input = json::object();
@@ -159,7 +142,7 @@ TEST(PlanExecuteGraph, AcceptsFencedJsonAndNumberedListFallbacks) {
     provider->push_response("final");
 
     auto engine = create_plan_execute_graph(
-        provider, {}, "p", "e", "r", "", 3);
+        provider, {}, "p", "e", "r", "fixture-model", 3);
 
     RunConfig cfg;
     cfg.input["messages"] = json::array({

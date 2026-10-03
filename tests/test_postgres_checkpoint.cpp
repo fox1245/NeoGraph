@@ -970,6 +970,7 @@ TEST_F(PostgresCheckpointTest, NestedJsonRoundTrips) {
     json m1 = json::object();
     m1["role"] = "user";
     m1["content"] = "안녕하세요";
+    m1["raw_diagnostic"] = json::parse(R"({"z":true,"duplicate":1,"duplicate":2,"a":null})");
     msgs.push_back(m1);
     json m2 = json::object();
     m2["role"] = "assistant";
@@ -977,6 +978,8 @@ TEST_F(PostgresCheckpointTest, NestedJsonRoundTrips) {
     msgs.push_back(m2);
 
     auto cp = make_state_cp("t", 0, {{"messages", {msgs, 1}}});
+    cp.metadata = json::parse(R"({"z":"original metadata","duplicate":1,"duplicate":2,"a":null})");
+    cp.channel_values["structural_residue"] = json::parse(R"({"z":7,"duplicate":3,"duplicate":4,"a":null})");
     store->save(cp);
     auto loaded = store->load_latest("t");
     ASSERT_TRUE(loaded.has_value());
@@ -984,6 +987,10 @@ TEST_F(PostgresCheckpointTest, NestedJsonRoundTrips) {
     ASSERT_EQ(loaded_msgs.size(), 2u);
     EXPECT_EQ(loaded_msgs[0]["content"].get<std::string>(), "안녕하세요");
     EXPECT_EQ(loaded_msgs[1]["role"].get<std::string>(), "assistant");
+    EXPECT_EQ(loaded_msgs.dump(), msgs.dump());
+    EXPECT_EQ(loaded->metadata.dump(), cp.metadata.dump());
+    EXPECT_EQ(loaded->channel_values.at("structural_residue").dump(),
+              cp.channel_values.at("structural_residue").dump());
 }
 
 // ─────────────────────────────────────────────────────────────────────

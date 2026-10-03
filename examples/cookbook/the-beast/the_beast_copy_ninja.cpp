@@ -10,14 +10,14 @@
 // Run:   ./build/cookbook_the_beast_copy_ninja "Grace"
 
 #include <neograph/a2a/agent_card_candidate.h>
-#include <neograph/async/run_sync.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
-#include <neograph/llm/openai_provider.h>
+#include <neograph/llm/schema_provider.h>
 #include <neograph/neograph.h>
 
 #include "beast_common.h"
+#include "../../provider_example_support.h"
 #include <cppdotenv/dotenv.hpp>
 #include <httplib.h>
 
@@ -218,17 +218,15 @@ int main(int argc, char** argv) {
     register_local_copy_ninja_node(harness);
 
     const std::string model            = "~deepseek/deepseek-v4-flash-latest";
-    const json        provider_routing = {
-        {"zdr", true},
-        {"only", json::array({"morph"})},
-        {"allow_fallbacks", false},
-    };
-    auto provider =
-        neograph::llm::OpenAIProvider::create_shared({.api_key       = key,
-                                                      .base_url      = "https://openrouter.ai/api",
-                                                      .default_model = model,
-                                                      .timeout_seconds = 180,
-                                                      .provider_routing = provider_routing});
+    sp::OpenRouterRouting provider_routing;
+    provider_routing.zdr = true;
+    provider_routing.only = {"morph"};
+    provider_routing.allow_fallbacks = false;
+    std::shared_ptr<neograph::Provider> provider =
+        examples::make_openrouter_provider(
+            key, "chat", std::chrono::seconds(180), std::move(provider_routing));
+    auto usage = std::make_shared<neograph::UsageAccumulator>();
+    beast::UsageReport usage_report(usage);
 
     ng::NodeContext context;
     context.provider = provider;
@@ -244,36 +242,37 @@ int main(int argc, char** argv) {
         "copy_ninja -> __end__. Do not include legacy composition keys, any other node type, config, source "
         "URL, "
         "tool, credential, or executable text. The node reads prompt and writes response.";
-    std::vector<neograph::ChatMessage> conversation = {
-        {"system", system_prompt},
-        {"user", "Author the exact local Copy Ninja topology now."},
+    std::vector<sp::Message> conversation = {
+        neograph::portable_message({"system", system_prompt}),
+        neograph::portable_message({"user", "Author the exact local Copy Ninja topology now."}),
     };
 
     json accepted_core;
     for (int attempt = 1; attempt <= 3; ++attempt) {
         std::cout << "── Attempt #" << attempt << ": authoring the local topology ──\n";
-        neograph::CompletionParams params;
-        params.model        = model;
-        params.messages     = conversation;
-        params.temperature  = 0.0f;
-        params.max_tokens   = 4000;
-        params.extra_fields = {{"provider", provider_routing}};
-
-        neograph::ChatCompletion response;
+        neograph::ProviderControls controls;
+        controls.temperature = 0.0;
+        controls.max_output_tokens = 4000;
+        sp::runtime::Result response;
         try {
-            response = neograph::async::run_sync(provider->invoke(params, nullptr));
+            response = provider->invoke(
+                neograph::make_provider_request(*provider, model, conversation, {}, controls));
+            if (response) usage->add(neograph::outcome_usage(*response));
+            response = neograph::outcome_or_throw(std::move(response));
         } catch (const std::exception& error) {
             std::cerr << "  LLM error: " << error.what() << "\n";
             return 1;
         }
+        const auto& response_messages = neograph::outcome_messages(*response);
+        conversation.insert(conversation.end(), response_messages.begin(), response_messages.end());
 
         json core_candidate;
         try {
-            core_candidate = beast::extract_json_object(response.message.content);
+            core_candidate = beast::extract_json_object(neograph::outcome_text(*response));
         } catch (const std::exception& error) {
             std::cout << "  UNPARSEABLE (" << error.what() << "); asking again.\n";
-            conversation.push_back({"assistant", response.message.content});
-            conversation.push_back({"user", "Output only the required JSON topology object."});
+            conversation.push_back(neograph::portable_message(
+                {"user", "Output only the required JSON topology object."}));
             continue;
         }
 
@@ -281,19 +280,19 @@ int main(int argc, char** argv) {
         if (!verdict.ok) {
             std::cout << "  REJECTED at generic gate '" << verdict.gate
                       << "': " << verdict.report.substr(0, 400) << "\n";
-            conversation.push_back({"assistant", core_candidate.dump()});
-            conversation.push_back({"user", "The generic compiler rejected it at '" + verdict.gate +
-                                                "': " + verdict.report +
-                                                "\nFix only that error. Output only JSON."});
+            conversation.push_back(neograph::portable_message(
+                {"user", "The generic compiler rejected it at '" + verdict.gate +
+                             "': " + verdict.report +
+                             "\nFix only that error. Output only JSON."}));
             continue;
         }
 
         const auto binding_error = local_binding_error(verdict.core);
         if (!binding_error.empty()) {
             std::cout << "  REJECTED at local-binding gate: " << binding_error << "\n";
-            conversation.push_back({"assistant", core_candidate.dump()});
-            conversation.push_back({"user", "The local-binding gate rejected it: " + binding_error +
-                                                ". Output the exact required JSON topology."});
+            conversation.push_back(neograph::portable_message(
+                {"user", "The local-binding gate rejected it: " + binding_error +
+                             ". Output the exact required JSON topology."}));
             continue;
         }
 
@@ -314,6 +313,7 @@ int main(int argc, char** argv) {
     run_config.thread_id = "beast-copy-ninja";
     run_config.input     = {{"prompt", local_prompt}};
     run_config.max_steps = 10;
+    run_config.usage = usage;
 
     const auto result = engine->run(run_config);
     if (!result.has_channel("response")) {

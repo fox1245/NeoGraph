@@ -29,6 +29,7 @@
 #include <neograph/graph/types.h>
 #include <neograph/tool_dispatch.h>   // ToolGate (issue #89)
 #include <neograph/tool_set.h>
+#include <neograph/provider.h>
 
 #include <asio/awaitable.hpp>
 #include <asio/thread_pool.hpp>
@@ -51,6 +52,19 @@ namespace neograph::graph {
 
 class ValidatedTopology;
 namespace detail { struct SubgraphWriteJournal; }
+
+/// Both execution evidence and the failed durable disposition remain visible.
+class NEOGRAPH_API ManagedBudgetLeaseReleaseError final : public ProviderOutcomeError {
+public:
+    ManagedBudgetLeaseReleaseError(sp::runtime::Result outcome, std::exception_ptr execution_error,
+                                  std::exception_ptr release_error)
+        : ProviderOutcomeError("Managed budget lease release failed", std::move(outcome),
+                               std::move(execution_error)),
+          release_error_(std::move(release_error)) {}
+    const std::exception_ptr& release_error() const noexcept { return release_error_; }
+private:
+    std::exception_ptr release_error_;
+};
 
 /**
  * @brief Construction-time configuration for a GraphEngine.
@@ -108,6 +122,7 @@ struct EngineConfig {
 
     /// Controlled provider dispatch for built-in LLMCallNode instances.
     std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
 };
 
 /**
@@ -177,6 +192,12 @@ struct RunConfig {
     json        input;                              ///< Initial channel writes (e.g., {"messages": [...]}).
     int         max_steps  = 50;                    ///< Safety limit for maximum super-steps per run.
     StreamMode  stream_mode = StreamMode::ALL;      ///< Which event types to emit during streaming.
+    /// Full history input; when set, replaces only the messages channel.
+    std::optional<std::vector<sp::Message>> provider_messages;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
+    std::function<void(const sp::Event&)> on_provider_event;
+    std::shared_ptr<ProviderOutcomes> provider_outcomes;
+    std::shared_ptr<ProviderLoopHistory> provider_loop_history;
 
     /**
      * @brief Optional cooperative cancel handle (v0.3+).
@@ -297,10 +318,9 @@ struct RunResult {
     /// Token usage for the whole run, subgraphs included (issue #88). Zero for
     /// a graph that made no LLM calls — not an error, just nothing to count.
     ///
-    /// **This is what THIS call to run() spent, not the whole bill.** A previous
-    /// attempt that threw never produced a RunResult, so its tokens are not
-    /// here — even though they were really spent. Spend 15 tokens, crash, retry,
-    /// spend 15 more, and this field says 15 against a bill of 30.
+    /// A graph-managed bank spans checkpoint/resume operations; its actual
+    /// nullable reports remain cumulative and never include conservative holds.
+    /// Caller-supplied banks retain the caller's own lifetime/accounting scope.
     ///
     /// For cost accounting that survives retries, hand the engine your own
     /// accumulator via ``RunConfig::usage``: it outlives the failed attempt
@@ -308,7 +328,9 @@ struct RunResult {
     ///
     /// @see UsageAccounting.ACrashedAttemptIsInvisibleToRunResult
     /// @see UsageAccounting.ACallerSuppliedAccumulatorSeesTheCrashedAttempt
-    ChatCompletion::Usage usage;
+    sp::Usage usage;
+    std::vector<sp::Message> native_messages;
+    std::vector<sp::runtime::Result> provider_outcomes;
 
     /// True only when execution stopped at RunConfig::max_steps while work
     /// remained ready. The status is stored in output rather than as a data
@@ -465,6 +487,9 @@ struct RunResult {
  */
 class NEOGRAPH_API GraphEngine {
 public:
+    void set_native_history_archive(std::shared_ptr<sp::NativeArchive> archive) {
+        native_history_archive_ = std::move(archive);
+    }
     /**
      * @brief Link an already compiled graph into a configured runtime.
      *
@@ -811,6 +836,10 @@ public:
      *
      * Copies the specified checkpoint (or the latest) to a new thread ID,
      * enabling branching execution paths.
+     * In-memory branches share the original live managed bank and pinned ceiling.
+     * A bounded durable managed-bank branch requires a real shared host bank or
+     * Program journal supplied at the original invocation; otherwise fork refuses
+     * before creating a checkpoint or effect. Unbounded durable forks are unchanged.
      *
      * @param source_thread_id Thread to fork from.
      * @param new_thread_id Thread ID for the new fork.
@@ -1017,6 +1046,7 @@ private:
     };
 
     GraphEngine() = default;
+    std::shared_ptr<sp::NativeArchive> native_history_archive_;
 
     static std::unique_ptr<GraphEngine> link_impl(CompiledGraph graph,
                                                    EngineConfig config,
@@ -1105,9 +1135,11 @@ private:
 
     RetryPolicy get_retry_policy(const std::string& node_name) const;
     const GraphGenerationIdentity* bound_generation_identity() const noexcept;
+    std::string managed_budget_graph_identity() const;
 
     // --- Graph definition ---
     std::string name_;
+    std::string budget_graph_identity_;
 
     /// Populated by GraphCompiler during compile(); consumed at runtime
     /// by init_state() to construct GraphState channels.

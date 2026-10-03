@@ -11,10 +11,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
-JARVIS_BIN_DIR="$BUILD_DIR/examples/cookbook/jarvis"
-if [[ -n "${JARVIS_BUILD_CONFIG:-}" ]]; then
-    JARVIS_BIN_DIR="$JARVIS_BIN_DIR/$JARVIS_BUILD_CONFIG"
+BUILD_DIR="${NEOGRAPH_BUILD_DIR:-${BUILD_DIR:-$ROOT/build}}"
+CONFIG_SUFFIX="${JARVIS_BUILD_CONFIG:+/$JARVIS_BUILD_CONFIG}"
+JARVIS_BIN_DIR="$BUILD_DIR/examples/cookbook/jarvis$CONFIG_SUFFIX"
+if [[ ! -x "$JARVIS_BIN_DIR/cookbook_jarvis" && -x "$BUILD_DIR$CONFIG_SUFFIX/cookbook_jarvis" ]]; then
+    JARVIS_BIN_DIR="$BUILD_DIR$CONFIG_SUFFIX"
 fi
 
 required_bins=(

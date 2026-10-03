@@ -8,7 +8,7 @@
  *
  * @code
  * #include <neograph/neograph.h>          // Core + graph engine
- * #include <neograph/llm/openai_provider.h> // OpenAI provider (optional)
+ * #include <neograph/llm/schema_provider.h> // Typed LLM provider (optional)
  * #include <neograph/mcp/client.h>          // MCP client (optional)
  * #include <neograph/mcp/server.h>          // MCP server (optional)
  * @endcode
@@ -16,7 +16,6 @@
 #pragma once
 
 // Foundation types
-#include <neograph/completion_provider.h>
 #include <neograph/artifact_provider.h>
 #include <neograph/provider.h>
 #include <neograph/context_store.h>

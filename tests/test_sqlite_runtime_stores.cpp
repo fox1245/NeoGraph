@@ -8,6 +8,10 @@
 #include <neograph/llm/agent.h>
 #endif
 #include <neograph/tool_dispatch.h>
+#include "fixtures/typed_provider.h"
+#include <neograph/provider_outcome_codec.h>
+#include <codecs/messages.h>
+#include <core/native.h>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -39,7 +43,7 @@ std::string database(std::string_view name) {
 }
 RuntimeHistoryRecord record(std::uint64_t sequence, std::optional<std::string> predecessor = std::nullopt) {
     RuntimeHistoryRecordData d; d.feed_id = "feed"; d.sequence = sequence; d.message_id = "message_" + std::to_string(sequence);
-    d.trust = RuntimeTrustClass::UntrustedInput; d.message = {"user", "message"}; d.predecessor_id = std::move(predecessor);
+    d.trust = RuntimeTrustClass::UntrustedInput; d.message = test::message("message", sp::Role::User); d.predecessor_id = std::move(predecessor);
     return RuntimeHistoryRecord::create(std::move(d));
 }
 HookInvocation invocation(const RuntimeEvent& event) {
@@ -72,7 +76,7 @@ TEST(SQLiteRuntimeStores, ContextReopensWithOwnerIsolationAndCas) {
     duplicate_data.sequence = 3;
     duplicate_data.message_id = "message_1";
     duplicate_data.trust = RuntimeTrustClass::UntrustedInput;
-    duplicate_data.message = {"user", "duplicate identity"};
+    duplicate_data.message = test::message("duplicate identity", sp::Role::User);
     duplicate_data.predecessor_id = second.id();
     EXPECT_EQ(reopened.append_history(
                   owner, RuntimeHistoryRecord::create(std::move(duplicate_data)),
@@ -97,7 +101,7 @@ TEST(SQLiteRuntimeStores, HookLeaseSurvivesReopenAndFencesStaleWorker) {
 
 TEST(SQLiteRuntimeStores, ProviderReceiptReopensAndFailsClosedOnCorruption) {
     const auto path = database("receipt_reopen");
-    const auto receipt = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('b'), sha('c'), "model", CompletionMode::COLLECT});
+    const auto receipt = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('b'), sha('c'), "model", ProviderMode::Collect});
     const auto outcome = ProviderDispatchOutcomeReceipt::create(
         {"dispatch", receipt.id(), ProviderDispatchState::Succeeded, sha('d'), {}});
     { SQLiteProviderDispatchReceiptStore store(path);
@@ -116,8 +120,8 @@ TEST(SQLiteRuntimeStores, ProviderReceiptReopensAndFailsClosedOnCorruption) {
 
 TEST(SQLiteRuntimeStores, ProviderReceiptsAreOwnerIsolated) {
     SQLiteProviderDispatchReceiptStore store(database("receipt_owner_isolation"));
-    const auto first = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('b'), sha('c'), "model", CompletionMode::COLLECT});
-    const auto second = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('d'), sha('e'), "model", CompletionMode::COLLECT});
+    const auto first = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('b'), sha('c'), "model", ProviderMode::Collect});
+    const auto second = ProviderDispatchReceipt::create({"dispatch", sha('a'), sha('d'), sha('e'), "model", ProviderMode::Collect});
     EXPECT_EQ(store.persist("owner_a", first), ProviderDispatchReceiptPutResult::Stored);
     EXPECT_EQ(store.persist("owner_b", second), ProviderDispatchReceiptPutResult::Stored);
     EXPECT_EQ(store.persist("owner_a", second), ProviderDispatchReceiptPutResult::Conflict);
@@ -169,12 +173,16 @@ public:
         path_ = std::filesystem::temp_directory_path() / ("ng-tool-effect-" + token);
         if (!std::filesystem::create_directory(path_))
             throw std::runtime_error("cannot reserve Tool effect test directory");
+        std::filesystem::permissions(path_, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
     }
     ~ToolEffectTestFiles() { std::error_code ignored; std::filesystem::remove_all(path_, ignored); }
     ToolEffectTestFiles(const ToolEffectTestFiles&) = delete;
     ToolEffectTestFiles& operator=(const ToolEffectTestFiles&) = delete;
     std::string journal() const { return (path_ / "journal.sqlite").string(); }
     std::string ledger() const { return (path_ / "sdk.sqlite").string(); }
+    std::string archive() const { return (path_ / "native-archive").string(); }
+    std::string key() const { return (path_ / "archive.key").string(); }
 private:
     std::filesystem::path path_;
 };
@@ -187,6 +195,43 @@ FixtureDb fixture_db(const std::string& path) {
     FixtureDb db(raw, sqlite3_close);
     if (status != SQLITE_OK) throw std::runtime_error("cannot open fixture SQLite database");
     return db;
+}
+
+sp::messages::Request native_request() {
+    sp::messages::Request request;
+    request.model = "fixture-model";
+    request.account_scope = "fixture-account";
+    request.messages = {test::message("message", sp::Role::User)};
+    request.tools.push_back({"read", "read fixture",
+                             test::document(R"({"type":"object"})"), {}, {}});
+    return request;
+}
+
+sp::Message captured_native_message(const sp::descriptor::ValidatedDescriptor& descriptor) {
+    const auto request = native_request();
+    auto encoded = sp::messages::encode(descriptor, request, false);
+    const auto context = std::get<sp::messages::EncodedRequest>(std::move(encoded)).context;
+    sp::Accumulator accumulator;
+    sp::messages::Codec codec(descriptor, sp::messages::Mode::Buffered, accumulator, context);
+    codec.buffered(R"({"id":"msg-native","type":"message","role":"assistant","model":"fixture-model",
+        "content":[{"type":"thinking","thinking":"inspect","signature":"fixture-signature"},
+                   {"type":"tool_use","id":"call-native","name":"read","input":{"path":"a"}},
+                   {"type":"text","text":"pending"}],
+        "stop_reason":"tool_use","stop_sequence":null,
+        "usage":{"input_tokens":2,"output_tokens":3}})", {});
+    codec.finish();
+    return std::get<sp::Completion>(*accumulator.outcome()).messages.at(0);
+}
+
+RuntimeHistoryRecord native_record(const sp::Message& message, const RuntimeHistoryRecord& first) {
+    RuntimeHistoryRecordData data;
+    data.feed_id = first.feed_id();
+    data.sequence = 2;
+    data.message_id = "native-message";
+    data.trust = RuntimeTrustClass::ModelOutput;
+    data.message = message;
+    data.predecessor_id = first.id();
+    return RuntimeHistoryRecord::create(std::move(data));
 }
 
 class LedgerTool final : public Tool {
@@ -287,6 +332,105 @@ std::vector<ChatMessage> broker_dispatch(std::vector<ToolCall> calls,
                                                 std::move(gate), {}, std::move(execution)));
 }
 } // namespace
+
+#if defined(__unix__) || defined(__APPLE__)
+TEST(SQLiteRuntimeStores, NativeHistoryRequiresIndependentArchiveCustodyAndReplaysAfterReopen) {
+    ToolEffectTestFiles files;
+    const auto descriptor = test::descriptor("anthropic.messages");
+    const ContextStoreFeed feed{"owner", "feed"};
+    const auto first = record(1);
+    const auto original = captured_native_message(descriptor);
+    ASSERT_TRUE(original.native);
+    ASSERT_TRUE(original.native->complete());
+    const auto second = native_record(original, first);
+    {
+        InMemoryContextStore memory;
+        ASSERT_EQ(memory.append_history(feed, first, {}), ContextStoreAppendResult::Appended);
+        ASSERT_EQ(memory.append_history(feed, second, first.id()), ContextStoreAppendResult::Appended);
+        const auto hydrated = memory.hydrate_records(memory.snapshot_history(feed, 1, 2));
+        ASSERT_EQ(hydrated.size(), 2u);
+        EXPECT_EQ(hydrated[1].message().native, original.native);
+        EXPECT_EQ(provider_codec::encode_message(hydrated[1].message()),
+                  provider_codec::encode_message(original));
+        EXPECT_THROW(RuntimeHistoryRecord::parse(hydrated[1].serialize_canonical()), std::exception);
+    }
+    auto activation = sp::NativeArchive::provision(files.archive(), files.key(), feed.owner_id, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(activation));
+    auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(activation));
+    {
+        SQLiteContextStore no_archive(files.ledger());
+        ASSERT_EQ(no_archive.append_history(feed, first, {}), ContextStoreAppendResult::Appended);
+        EXPECT_THROW(no_archive.append_history(feed, second, first.id()), std::invalid_argument);
+        EXPECT_EQ(no_archive.history_head(feed).record_id, first.id());
+    }
+    ContextHistoryRange range;
+    {
+        SQLiteContextStore store(files.journal(), archive);
+        ASSERT_EQ(store.append_history(feed, first, {}), ContextStoreAppendResult::Appended);
+        ASSERT_EQ(store.append_history(feed, second, first.id()), ContextStoreAppendResult::Appended);
+        EXPECT_EQ(store.append_history(feed, second, first.id()), ContextStoreAppendResult::AlreadyPresent);
+        range = store.snapshot_history(feed, 1, 2);
+        EXPECT_THROW(store.append_history({"other-owner", feed.feed_id}, second, first.id()),
+                     std::invalid_argument);
+    }
+    archive.reset();
+    auto reopened_archive = sp::NativeArchive::open(files.archive(), files.key(), feed.owner_id, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(reopened_archive));
+    archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(reopened_archive));
+    SQLiteContextStore reopened(files.journal(), archive);
+    const auto restored = reopened.hydrate_records(range);
+    ASSERT_EQ(restored.size(), 2u);
+    EXPECT_EQ(restored[0].id(), first.id());
+    EXPECT_EQ(restored[1].id(), second.id());
+    EXPECT_EQ(provider_codec::encode_message(restored[1].message()),
+              provider_codec::encode_message(original));
+    ASSERT_TRUE(restored[1].message().native);
+    EXPECT_TRUE(restored[1].message().native->complete());
+    auto replay = native_request();
+    replay.messages = {restored[0].message(), restored[1].message(),
+                       sp::Message{{}, sp::Role::User,
+                                   {sp::ToolResult{"call-native", "read result", false}}}};
+    const auto encoded = sp::messages::encode(descriptor, replay, false);
+    ASSERT_TRUE(std::holds_alternative<sp::messages::EncodedRequest>(encoded));
+    const auto wire = json::parse(std::get<sp::messages::EncodedRequest>(encoded).body);
+    EXPECT_EQ(wire.at("messages").at(1).at("content").at(0).at("signature"), "fixture-signature");
+    EXPECT_EQ(wire.at("messages").at(1).at("content").at(1).at("input").at("path"), "a");
+    EXPECT_EQ(wire.at("messages").at(2).at("content").at(0).at("tool_use_id"), "call-native");
+
+    SQLiteContextStore untrusted_reopen(files.journal());
+    EXPECT_THROW(untrusted_reopen.hydrate_records(range), std::invalid_argument);
+    EXPECT_THROW(RuntimeHistoryRecord::parse(restored[1].serialize_canonical()), std::invalid_argument);
+    EXPECT_THROW(RuntimeHistoryRecord::parse(restored[1].serialize_canonical(), archive, "other-owner"),
+                 std::invalid_argument);
+}
+
+TEST(SQLiteRuntimeStores, NativeHistoryRejectsTamperedProjectionEvenWithAuthenticReference) {
+    ToolEffectTestFiles files;
+    const auto descriptor = test::descriptor("anthropic.messages");
+    const ContextStoreFeed feed{"owner", "feed"};
+    const auto first = record(1);
+    const auto second = native_record(captured_native_message(descriptor), first);
+    auto activation = sp::NativeArchive::provision(files.archive(), files.key(), feed.owner_id, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(activation));
+    auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(activation));
+    SQLiteContextStore store(files.journal(), archive);
+    ASSERT_EQ(store.append_history(feed, first, {}), ContextStoreAppendResult::Appended);
+    ASSERT_EQ(store.append_history(feed, second, first.id()), ContextStoreAppendResult::Appended);
+    const auto range = store.snapshot_history(feed, 2, 2);
+    auto projection = json::parse(store.hydrate_history(range));
+    projection["message"]["parts"][0]["signature"] = "forged-signature";
+    const auto bytes = projection.dump();
+    const auto db = fixture_db(files.journal());
+    sqlite3_stmt* raw = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db.get(), "UPDATE ng_runtime_history SET canonical=? WHERE sequence=2",
+                                 -1, &raw, nullptr), SQLITE_OK);
+    FixtureStmt update(raw, sqlite3_finalize);
+    ASSERT_EQ(sqlite3_bind_text(update.get(), 1, bytes.c_str(), -1, SQLITE_TRANSIENT), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(update.get()), SQLITE_DONE);
+    EXPECT_THROW(store.hydrate_records(range), std::invalid_argument);
+    EXPECT_THROW(store.history_record_by_message_id(feed, "native-message"), std::invalid_argument);
+}
+#endif
 
 TEST(SQLiteToolEffects, ReopenReplaysExactReceiptWithoutSDKWriteAndRejectsChangedAuthority) {
     ToolEffectTestFiles files;
@@ -653,22 +797,22 @@ TEST(SQLiteToolEffects, StandaloneCoreRunResourcesBrokerReplaysWithoutEngineMuta
 
 #ifdef NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM
 namespace {
-class SDKAgentProvider final : public Provider {
+class SDKAgentProvider final : public test::LocalProvider {
 public:
-    ChatCompletion complete(const CompletionParams& params) override {
-        ChatCompletion result;
-        if (std::any_of(params.messages.begin(), params.messages.end(),
-                        [](const ChatMessage& message) { return message.role == "tool"; })) {
-            result.message = ChatMessage{"assistant", "done"};
-        } else {
-            result.message.role = "assistant";
-            result.message.tool_calls.push_back(sdk_call("untrusted-model-id", "write", R"({"item":"agent"})"));
-        }
-        return result;
-    }
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback&) override { return complete(params); }
-    std::string get_name() const override { return "sdk-agent-fixture"; }
+    SDKAgentProvider() : LocalProvider(
+        [](ProviderRequest request, const PreparedProviderRequest&,
+           const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            const auto& messages = std::get<sp::chat::Request>(request.payload).canonical_messages;
+            if (std::any_of(messages.begin(), messages.end(),
+                            [](const sp::Message& message) { return message.role == sp::Role::Tool; }))
+                co_return test::success("done");
+            sp::Message assistant;
+            assistant.role = sp::Role::Assistant;
+            assistant.parts.emplace_back(sp::ToolCall{
+                "untrusted-model-id", "write", sp::ToolCallKind::ClientExecuted,
+                test::document(R"({"item":"agent"})")});
+            co_return test::success(std::vector<sp::Message>{std::move(assistant)});
+        }, "sdk-agent-fixture") {}
 };
 } // namespace
 
@@ -676,34 +820,34 @@ TEST(SQLiteToolEffects, StandaloneAgentDeniesAndReplaysPendingAssistantOnRestart
     ToolEffectTestFiles files;
     const auto ledger_path = files.ledger();
     const auto journal_path = files.journal();
-    std::vector<ChatMessage> denied_messages{{"user", "write"}};
+    std::vector<sp::Message> denied_messages{test::message("write", sp::Role::User)};
     {
         auto effect = std::make_unique<LedgerTool>("write", ledger_path);
         auto* tool = effect.get();
         std::vector<std::unique_ptr<Tool>> tools;
         tools.push_back(std::move(effect));
-        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools));
+        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools), "", "fixture-model");
         agent.set_tool_gate([](ToolCall, ToolGateContext) -> asio::awaitable<ToolDecision> {
             co_return ToolDecision::deny("no SDK writes");
         });
         auto context = tool_context(std::make_shared<SQLiteToolEffectBroker>(
             journal_path, std::vector<SQLiteToolExecutableBinding>{{tool, "sdk-build:v1"}}),
             "denied-agent-run");
-        EXPECT_EQ(agent.run(denied_messages, 3, context), "done");
+        EXPECT_EQ(test::text(agent.run(denied_messages, 3, context)), "done");
         EXPECT_EQ(LedgerTool::count(ledger_path), 0);
     }
 
-    std::vector<ChatMessage> messages{{"user", "write"}};
+    std::vector<sp::Message> messages{test::message("write", sp::Role::User)};
     {
         auto effect = std::make_unique<LedgerTool>("write", ledger_path);
         auto* tool = effect.get();
         std::vector<std::unique_ptr<Tool>> tools;
         tools.push_back(std::move(effect));
-        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools));
+        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools), "", "fixture-model");
         auto context = tool_context(std::make_shared<SQLiteToolEffectBroker>(
             journal_path, std::vector<SQLiteToolExecutableBinding>{{tool, "sdk-build:v1"}}),
             "allowed-agent-run");
-        EXPECT_EQ(agent.run(messages, 3, context), "done");
+        EXPECT_EQ(test::text(agent.run(messages, 3, context)), "done");
         EXPECT_EQ(LedgerTool::count(ledger_path), 1);
     }
     messages.pop_back(); // Reconnect with the committed assistant, not its final answer.
@@ -713,12 +857,12 @@ TEST(SQLiteToolEffects, StandaloneAgentDeniesAndReplaysPendingAssistantOnRestart
         auto* tool = effect.get();
         std::vector<std::unique_ptr<Tool>> tools;
         tools.push_back(std::move(effect));
-        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools));
+        llm::Agent agent(std::make_shared<SDKAgentProvider>(), std::move(tools), "", "fixture-model");
         auto context = tool_context(std::make_shared<SQLiteToolEffectBroker>(
             journal_path, std::vector<SQLiteToolExecutableBinding>{{tool, "sdk-build:v1"}}),
             "allowed-agent-run");
         context.effect_grant.attempt = 2;
-        EXPECT_EQ(agent.run(messages, 3, context), "done");
+        EXPECT_EQ(test::text(agent.run(messages, 3, context)), "done");
         EXPECT_EQ(LedgerTool::count(ledger_path), 1);
     }
 }

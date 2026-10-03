@@ -1,21 +1,18 @@
-/**
- * @file types.h
- * @brief Foundation types for NeoGraph: messages, tool calls, and LLM completions.
- *
- * Defines the core data structures shared across all NeoGraph modules,
- * including ChatMessage, ToolCall, ChatCompletion, and their JSON
- * serialization helpers (ADL-based, nlohmann/json compatible).
- */
+// Portable NeoGraph projections and full typed SDK outcome consumer helpers.
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <limits>
+#include <map>
+#include <unordered_set>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <neograph/json.h>
+#include <core/value.h>
+#include <neograph/provider_outcome_codec.h>
+#include <json/json.h>
 
 namespace neograph {
 
@@ -79,159 +76,184 @@ struct GeneratedArtifact {
     json metadata = json::object();
 };
 
-/**
- * @brief LLM completion response including the message and token usage.
- */
-struct ChatCompletion {
-    ChatMessage message;  ///< The response message from the LLM.
-    std::vector<GeneratedArtifact> artifacts; ///< Generated media in provider order.
 
-    /// Normalized reason the provider stopped: `end_turn`, `max_tokens`,
-    /// `stop_sequence`, `tool_use`, `content_filter`, `refusal`, or `unknown`.
-    /// Adding this field changes the C++ ABI; recompile consumers with this release.
-    std::string stop_reason = "unknown";
-
-    /// Token usage statistics for the completion.
-    struct Usage {
-        int prompt_tokens = 0;      ///< Number of tokens in the prompt.
-        int completion_tokens = 0;  ///< Number of tokens in the completion.
-        int total_tokens = 0;       ///< Total tokens used (prompt + completion).
-        int cached_prompt_tokens = 0; ///< Prompt-token subset served from cache.
-        int reasoning_tokens = 0;   ///< Completion-token subset spent on reasoning.
-    } usage;
-};
-
-/**
- * @brief Running total of the token usage of a graph run (issue #88).
- *
- * One of these rides on `RunContext` for the length of a run, exactly as the
- * cancel token does, and is surfaced as `RunResult::usage` when the run ends.
- * It is shared — by the parent run and every subgraph beneath it, and by every
- * branch of a fan-out — so the counters are atomic.
- *
- * **Where it gets fed.** At the node that *receives* a completion, never at the
- * provider that produced it. `RateLimitedProvider` wraps another provider and
- * delegates to it, so a provider-layer counter would count the same completion
- * once per layer. A completion reaches a node exactly once, whatever it went
- * through on the way.
- */
+// Provider reports and conservative budget authority are intentionally separate.
 class NEOGRAPH_API UsageAccumulator {
 public:
-    /// Fold one completion's usage into the running total.
-    ///
-    /// Providers that report only `prompt_tokens` and `completion_tokens` and
-    /// leave `total_tokens` at zero are normalized here rather than at every
-    /// call site. Invalid negative values are ignored, and a total smaller
-    /// than the component sum is promoted to that sum so a provider cannot
-    /// bypass a model-token ceiling by under-reporting usage.
-    void add(const ChatCompletion::Usage& u) {
+    struct AuthoritySnapshot {
+        std::uint64_t charged = 0, reserved = 0;
+        std::vector<std::string> provider_effects;
+        sp::Usage reports;
+        bool has_report = false;
+    };
+    AuthoritySnapshot authority_snapshot() const {
         std::lock_guard lock(mutex_);
-        add_locked(u);
+        AuthoritySnapshot result;
+        result.charged = charged_;
+        result.reserved = reserved_;
+        result.provider_effects.assign(provider_effects_.begin(), provider_effects_.end());
+        std::sort(result.provider_effects.begin(), result.provider_effects.end());
+        result.reports = reports_;
+        result.has_report = has_report_;
+        return result;
     }
-
-    /// Reserve tokens before dispatching a bounded provider request.
-    bool try_reserve(long long tokens, long long ceiling) {
-        if (tokens <= 0 || ceiling <= 0) return false;
+    // Recorded playback may observe authenticated custody, never spend/refund it.
+    void seal_observation() {
         std::lock_guard lock(mutex_);
-        const auto actual    = total_.load(std::memory_order_relaxed);
-        const auto committed = saturating_sum(actual, reserved_);
+        observation_only_ = true;
+    }
+    // Caller must authenticate custody and original scope/ceiling first.
+    // Restoration is one-shot into a pristine bank, never replacement/reset.
+    void restore_authority(AuthoritySnapshot snapshot) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        if (authority_restored_ || charged_ != 0 || reserved_ != 0 || has_report_ || !provider_effects_.empty())
+            throw std::logic_error("Spending authority may only restore into a pristine bank");
+        std::unordered_set<std::string> effects;
+        effects.reserve(snapshot.provider_effects.size());
+        for (auto& key : snapshot.provider_effects)
+            if (!effects.insert(std::move(key)).second)
+                throw std::invalid_argument("Spending authority snapshot has duplicate effect identities");
+        charged_ = snapshot.charged;
+        reserved_ = snapshot.reserved;
+        reports_ = std::move(snapshot.reports);
+        has_report_ = snapshot.has_report;
+        provider_effects_ = std::move(effects);
+        authority_restored_ = true;
+    }
+    bool remember_provider_effect(std::string key) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        return provider_effects_.insert(std::move(key)).second;
+    }
+    void observe(const sp::Usage& usage) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        add_report(usage);
+    }
+    void add(const sp::Usage& usage) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        add_report(usage);
+        if (const auto charge = final_charge(usage)) charged_ = sum(charged_, *charge);
+    }
+    bool try_reserve(std::uint64_t tokens, std::uint64_t ceiling) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        if (tokens == 0 || ceiling == 0) return false;
+        const auto committed = sum(charged_, reserved_);
         if (committed > ceiling || tokens > ceiling - committed) return false;
-        reserved_ = saturating_sum(reserved_, tokens);
+        reserved_ = sum(reserved_, tokens);
         return true;
     }
-
-    /// Release a reservation when a provider request is not dispatched.
-    ///
-    /// The separate reservation count makes an over-sized release harmless:
-    /// it can consume only reservations, never usage already reported by a provider.
-    void release_reservation(long long tokens) {
-        if (tokens <= 0) return;
+    // Only for operations proven not dispatched. Unknown delivery retains authority.
+    void release_reservation(std::uint64_t tokens) {
         std::lock_guard lock(mutex_);
-        const auto released = std::min(tokens, reserved_);
-        reserved_ -= released;
+        require_live_authority_locked();
+        reserved_ -= std::min(reserved_, tokens);
     }
-
-    /// Replace a reservation with the provider's actual usage.
-    void settle_reservation(long long reserved,
-                            const ChatCompletion::Usage& u) {
+    void settle_reservation(std::uint64_t reserved, const sp::Usage& usage) {
         std::lock_guard lock(mutex_);
-        const long long requested = std::max(0LL, reserved);
-        const long long held      = std::min(requested, reserved_);
-        if (held != 0) reserved_ -= held;
-        add_locked(u);
+        require_live_authority_locked();
+        add_report(usage);
+        const auto charge = final_charge(usage);
+        if (!charge) return;
+        const auto held = std::min(reserved_, reserved);
+        reserved_ -= held;
+        charged_ = sum(charged_, *charge);
     }
-
-    /// Read the running total. Not a consistent snapshot across the three
-    /// counters under concurrent writes — read it when the run is done.
-    ChatCompletion::Usage snapshot() const noexcept {
-        ChatCompletion::Usage u;
-        u.prompt_tokens     = public_counter(prompt_.load(std::memory_order_relaxed));
-        u.completion_tokens = public_counter(completion_.load(std::memory_order_relaxed));
-        u.total_tokens      = public_counter(total_.load(std::memory_order_relaxed));
-        return u;
+    sp::Usage snapshot() const {
+        std::lock_guard lock(mutex_);
+        return reports_;
     }
-
-    /// Read the wide running total for hard budget comparisons.
-    long long total_tokens_wide() const noexcept {
-        return total_.load(std::memory_order_relaxed);
+    std::uint64_t total_tokens_wide() const noexcept {
+        std::lock_guard lock(mutex_);
+        return sum(charged_, reserved_);
     }
-
+    // Only trusted durable journals restore conservative spending authority.
+    // This neither invents a provider report nor releases a reservation.
+    void restore_charge(std::uint64_t amount) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        charged_ = sum(charged_, amount);
+    }
+    void restore_reservation(std::uint64_t amount) {
+        std::lock_guard lock(mutex_);
+        require_live_authority_locked();
+        reserved_ = sum(reserved_, amount);
+    }
+    static std::optional<std::uint64_t> conservative_final_charge(const sp::Usage& usage) {
+        return final_charge(usage);
+    }
 private:
-    static long long nonnegative(int value) noexcept {
-        return value > 0 ? static_cast<long long>(value) : 0;
+    void require_live_authority_locked() const {
+        if (observation_only_)
+            throw std::logic_error("Recorded replay bank is observation-only");
     }
-
-    static long long normalized_total(const ChatCompletion::Usage& u,
-                                      long long                    prompt,
-                                      long long                    completion) noexcept {
-        const long long components =
-            prompt > std::numeric_limits<long long>::max() - completion
-                ? std::numeric_limits<long long>::max()
-                : prompt + completion;
-        const long long reported = u.total_tokens > 0
-                                        ? static_cast<long long>(u.total_tokens)
-                                        : 0;
-        return std::max(reported, components);
+    static std::uint64_t sum(std::uint64_t a, std::uint64_t b) noexcept {
+        return b > std::numeric_limits<std::uint64_t>::max() - a
+            ? std::numeric_limits<std::uint64_t>::max() : a + b;
     }
-
-    static long long saturating_sum(long long current, long long delta) noexcept {
-        if (current < 0) current = 0;
-        if (delta <= 0) return current;
-        const auto available = std::numeric_limits<long long>::max() - current;
-        return delta > available ? std::numeric_limits<long long>::max()
-                                 : current + delta;
+    static std::optional<std::uint64_t> final_charge(const sp::Usage& usage) {
+        if (usage.stage != sp::UsageStage::Final || usage.quality != sp::UsageQuality::Consistent ||
+            !usage.input_total || !usage.output_total) return {};
+        const auto input = usage.input_total->value, output = usage.output_total->value;
+        if (output > std::numeric_limits<std::uint64_t>::max() - input) return {};
+        const auto total = input + output;
+        if ((usage.total && usage.total->value < total) ||
+            (usage.provider_reported_total && usage.provider_reported_total->value < total)) return {};
+        return std::max({total, usage.total ? usage.total->value : total,
+            usage.provider_reported_total ? usage.provider_reported_total->value : total});
     }
-
-    void add_locked(const ChatCompletion::Usage& u) {
-        const long long prompt     = nonnegative(u.prompt_tokens);
-        const long long completion = nonnegative(u.completion_tokens);
-        const long long total      = normalized_total(u, prompt, completion);
-        add_counters_locked(prompt, completion, total);
+    void add_report(const sp::Usage& usage) {
+        if (!has_report_) { reports_ = usage; has_report_ = true; return; }
+        auto fold = [&](std::string_view counter, std::optional<sp::Count>& target,
+                        const std::optional<sp::Count>& value) {
+            if (!target || !value) { target.reset(); return; }
+            if (value->value > std::numeric_limits<std::uint64_t>::max() - target->value) {
+                target.reset();
+                reports_.quality = sp::UsageQuality::Inconsistent;
+                reports_.conflicts.push_back({std::string(counter), "aggregate counter overflow"});
+                return;
+            }
+            target->value += value->value;
+            target->evidence = sp::Evidence::Derived;
+        };
+        fold("input_total", reports_.input_total, usage.input_total);
+        fold("output_total", reports_.output_total, usage.output_total);
+        fold("total", reports_.total, usage.total);
+        fold("provider_reported_total", reports_.provider_reported_total, usage.provider_reported_total);
+        fold("input_uncached", reports_.input_uncached, usage.input_uncached);
+        fold("cache_read", reports_.cache_read, usage.cache_read);
+        fold("cache_write", reports_.cache_write, usage.cache_write);
+        fold("reasoning", reports_.reasoning, usage.reasoning);
+        for (auto entry = reports_.extra.begin(); entry != reports_.extra.end();) {
+            const auto value = usage.extra.find(entry->first);
+            if (value == usage.extra.end()) { entry = reports_.extra.erase(entry); continue; }
+            if (value->second.value > std::numeric_limits<std::uint64_t>::max() - entry->second.value) {
+                reports_.quality = sp::UsageQuality::Inconsistent;
+                reports_.conflicts.push_back({entry->first, "aggregate counter overflow"});
+                entry = reports_.extra.erase(entry);
+                continue;
+            }
+            entry->second.value += value->second.value;
+            entry->second.evidence = sp::Evidence::Derived;
+            ++entry;
+        }
+        if (reports_.stage == sp::UsageStage::Missing && usage.stage == sp::UsageStage::Missing)
+            reports_.stage = sp::UsageStage::Missing;
+        else if (reports_.stage != sp::UsageStage::Final || usage.stage != sp::UsageStage::Final)
+            reports_.stage = sp::UsageStage::Partial;
+        if (usage.quality == sp::UsageQuality::Inconsistent) reports_.quality = usage.quality;
+        reports_.conflicts.insert(reports_.conflicts.end(), usage.conflicts.begin(), usage.conflicts.end());
     }
-
-    void add_counters_locked(long long prompt,
-                             long long completion,
-                             long long total) {
-        prompt_.store(saturating_sum(prompt_.load(std::memory_order_relaxed), prompt),
-                      std::memory_order_relaxed);
-        completion_.store(
-            saturating_sum(completion_.load(std::memory_order_relaxed), completion),
-            std::memory_order_relaxed);
-        total_.store(saturating_sum(total_.load(std::memory_order_relaxed), total),
-                     std::memory_order_relaxed);
-    }
-
-    static int public_counter(long long value) noexcept {
-        if (value <= 0) return 0;
-        const auto maximum = static_cast<long long>(std::numeric_limits<int>::max());
-        return static_cast<int>(std::min(value, maximum));
-    }
-
-    mutable std::mutex     mutex_;
-    std::atomic<long long> prompt_{0};
-    std::atomic<long long> completion_{0};
-    std::atomic<long long> total_{0};
-    long long              reserved_ = 0;
+    mutable std::mutex mutex_;
+    sp::Usage reports_;
+    bool has_report_ = false;
+    bool authority_restored_ = false;
+    bool observation_only_ = false;
+    std::uint64_t charged_ = 0, reserved_ = 0;
+    std::unordered_set<std::string> provider_effects_;
 };
 
 // --- ADL serialization: ChatMessage/ToolCall <-> json ---
@@ -307,127 +329,166 @@ inline void from_json(const json& j, ChatMessage& msg) {
         : json::array();
 }
 
-// --- JSON serialization helpers ---
 
-/**
- * @brief Convert a vector of ChatMessages to OpenAI-compatible JSON format.
- *
- * Handles tool call messages, tool result messages, and multi-modal
- * messages (text + images in OpenAI Vision format).
- *
- * @param messages Vector of ChatMessage objects to convert.
- * @return JSON array in OpenAI messages format.
- */
-inline json messages_to_json(const std::vector<ChatMessage>& messages) {
-    json arr = json::array();
-    for (const auto& msg : messages) {
-        json j;
-        j["role"] = msg.role;
+class NEOGRAPH_API ProviderFailure final : public std::runtime_error {
+public:
+    explicit ProviderFailure(std::shared_ptr<const sp::Outcome> outcome)
+        : std::runtime_error(std::get<sp::Failure>(*outcome).error.safe_message),
+          outcome_(std::move(outcome)) {}
+    const std::shared_ptr<const sp::Outcome>& outcome() const noexcept { return outcome_; }
+private:
+    std::shared_ptr<const sp::Outcome> outcome_;
+};
 
-        if (msg.role == "tool") {
-            j["content"] = msg.content;
-            j["tool_call_id"] = msg.tool_call_id;
-        } else if (!msg.tool_calls.empty()) {
-            j["content"] = msg.content.empty() ? json(nullptr) : json(msg.content);
-            json tc_arr = json::array();
-            for (const auto& tc : msg.tool_calls) {
-                tc_arr.push_back({
-                    {"id", tc.id},
-                    {"type", "function"},
-                    {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}
-                });
-            }
-            j["tool_calls"] = tc_arr;
-        } else if (!msg.image_urls.empty()) {
-            // Multi-modal: text + images (OpenAI Vision format)
-            json parts = json::array();
-            if (!msg.content.empty()) {
-                parts.push_back({{"type", "text"}, {"text", msg.content}});
-            }
-            for (auto& url : msg.image_urls) {
-                parts.push_back({{"type", "image_url"}, {"image_url", {{"url", url}}}});
-            }
-            j["content"] = parts;
-        } else {
-            j["content"] = msg.content;
-        }
-
-        if (msg.role == "assistant") {
-            if (!msg.reasoning_details.empty()) {
-                if (!msg.reasoning_details.is_array()) {
-                    throw std::invalid_argument(
-                        "ChatMessage reasoning_details must be an array");
-                }
-                j["reasoning_details"] = msg.reasoning_details;
-            } else if (!msg.reasoning.empty()) {
-                j["reasoning_content"] = msg.reasoning;
-            }
-        }
-
-        arr.push_back(j);
-    }
-    return arr;
+inline std::shared_ptr<const sp::Outcome> outcome_or_throw(std::shared_ptr<const sp::Outcome> result) {
+    if (!result) throw std::invalid_argument("Provider returned no owned outcome");
+    if (std::holds_alternative<sp::Failure>(*result)) throw ProviderFailure(result);
+    return result;
 }
-
-/**
- * @brief Convert a vector of ChatTools to OpenAI-compatible JSON format.
- *
- * @param tools Vector of ChatTool objects to convert.
- * @return JSON array in OpenAI tool definition format.
- */
-inline json tools_to_json(const std::vector<ChatTool>& tools) {
-    json arr = json::array();
-    for (const auto& tool : tools) {
-        arr.push_back({
-            {"type", "function"},
-            {"function", {
-                {"name", tool.name},
-                {"description", tool.description},
-                {"parameters", tool.parameters}
-            }}
-        });
-    }
-    return arr;
+inline const std::vector<sp::Message>& outcome_messages(const sp::Outcome& outcome) noexcept {
+    if (const auto* completion = std::get_if<sp::Completion>(&outcome)) return completion->messages;
+    return std::get<sp::Failure>(outcome).partial.messages;
 }
-
-/**
- * @brief Parse an OpenAI API response choice into a ChatMessage.
- *
- * Extracts the message content, role, and any tool calls from
- * the `choices[n]` object of an OpenAI completion response.
- *
- * @param choice A single choice object from the OpenAI response (must contain "message").
- * @return Parsed ChatMessage with role, content, and tool_calls populated.
- * @throws json::exception If required fields are missing.
- */
-inline ChatMessage parse_response_message(const json& choice) {
-    ChatMessage msg;
-    auto m = choice.at("message");
-    msg.role = m.value("role", "assistant");
-    msg.content = (m.contains("content") && !m["content"].is_null())
-                  ? m["content"].get<std::string>() : "";
-    if (m.contains("reasoning") && m["reasoning"].is_string()) {
-        msg.reasoning = m["reasoning"].get<std::string>();
-    } else if (m.contains("reasoning_content") &&
-               m["reasoning_content"].is_string()) {
-        msg.reasoning = m["reasoning_content"].get<std::string>();
-    }
-    if (m.contains("reasoning_details") && m["reasoning_details"].is_array()) {
-        msg.reasoning_details = m["reasoning_details"];
-    }
-
-    if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
-        for (const auto& tc : m["tool_calls"]) {
-            ToolCall call;
-            call.id = tc.value("id", "");
-            auto fn = tc.at("function");
-            call.name = fn.value("name", "");
-            call.arguments = fn.value("arguments", "");
-            msg.tool_calls.push_back(std::move(call));
+inline const sp::Usage& outcome_usage(const sp::Outcome& outcome) noexcept {
+    if (const auto* completion = std::get_if<sp::Completion>(&outcome)) return completion->usage;
+    return std::get<sp::Failure>(outcome).partial.usage;
+}
+inline bool provider_failure_proves_not_sent(const sp::Failure& failure) noexcept {
+    const auto& attempt = failure.error.attempt;
+    const auto& usage = failure.partial.usage;
+    return failure.error.retry_safety == sp::RetrySafety::NotSent &&
+        !attempt.request_may_have_left && attempt.request_body_bytes == 0 &&
+        !attempt.response_head_seen && attempt.transport_internal_resends == 0 && !attempt.prior_usage_unknown &&
+        failure.partial.messages.empty() && !failure.partial.stop && !failure.partial.wire_envelope &&
+        failure.partial.raw_events.empty() && usage.stage == sp::UsageStage::Missing &&
+        usage.quality == sp::UsageQuality::Consistent &&
+        !usage.input_total && !usage.output_total && !usage.total && !usage.provider_reported_total &&
+        !usage.input_uncached && !usage.cache_read && !usage.cache_write && !usage.reasoning &&
+        usage.extra.empty() && usage.conflicts.empty();
+}
+inline std::string outcome_text(const sp::Outcome& outcome) {
+    std::string text;
+    for (const auto& message : outcome_messages(outcome))
+        for (const auto& part : message.parts)
+            if (const auto* value = std::get_if<sp::Text>(&part)) text += value->value;
+    return text;
+}
+inline std::vector<ToolCall> client_tool_calls(const sp::Message& message) {
+    std::vector<ToolCall> result;
+    for (const auto& part : message.parts) if (const auto* call = std::get_if<sp::ToolCall>(&part);
+        call && call->kind == sp::ToolCallKind::ClientExecuted && call->input && call->input->root().is_object())
+        result.push_back({call->id, call->name, call->input->root().dump()});
+    return result;
+}
+inline std::vector<ToolCall> pending_client_tool_calls(const std::vector<sp::Message>& history) {
+    std::map<std::string_view, const sp::ToolCall*> pending;
+    std::vector<const sp::ToolCall*> order;
+    for (const auto& message : history) for (const auto& part : message.parts) {
+        if (const auto* call = std::get_if<sp::ToolCall>(&part);
+            call && call->kind == sp::ToolCallKind::ClientExecuted && call->input &&
+            call->input->root().is_object()) {
+            if (!pending.emplace(call->id, call).second)
+                throw std::invalid_argument("Client tool call history has duplicate unresolved identities");
+            order.push_back(call);
+        } else if (const auto* result = std::get_if<sp::ToolResult>(&part)) {
+            pending.erase(result->tool_use_id);
         }
     }
-
-    return msg;
+    std::vector<ToolCall> result;
+    result.reserve(pending.size());
+    for (const auto* call : order) {
+        const auto found = pending.find(call->id);
+        if (found != pending.end() && found->second == call)
+            result.push_back({call->id, call->name, call->input->root().dump()});
+    }
+    return result;
 }
+inline sp::Role portable_role(std::string_view role) {
+    if (role == "system") return sp::Role::System;
+    if (role == "developer") return sp::Role::Developer;
+    if (role == "user") return sp::Role::User;
+    if (role == "assistant") return sp::Role::Assistant;
+    if (role == "tool") return sp::Role::Tool;
+    throw std::invalid_argument("Invalid portable message role");
+}
+inline std::string_view portable_role_name(sp::Role role) {
+    switch (role) {
+        case sp::Role::System: return "system";
+        case sp::Role::Developer: return "developer";
+        case sp::Role::User: return "user";
+        case sp::Role::Assistant: return "assistant";
+        case sp::Role::Tool: return "tool";
+    }
+    throw std::invalid_argument("Invalid typed message role");
+}
+inline sp::Message portable_message(const ChatMessage& source) {
+    if (!source.reasoning.empty() || !source.reasoning_details.empty())
+        throw std::invalid_argument("Portable projection cannot import native reasoning authority");
+    sp::Message message;
+    message.role = portable_role(source.role);
+    if (message.role == sp::Role::Tool) {
+        if (!source.tool_calls.empty() || !source.image_urls.empty())
+            throw std::invalid_argument("Portable tool result cannot contain calls or images");
+        message.parts.emplace_back(sp::ToolResult{source.tool_call_id, source.content,
+            source.tool_status != "succeeded" && !source.tool_status.empty(),
+            sp::ToolResultHostMetadata{source.tool_name, source.tool_status,
+                source.tool_retryable, source.tool_effect_uncertain}});
+        return message;
+    }
+    if (!source.content.empty()) message.parts.emplace_back(sp::Text{source.content});
+    for (const auto& url : source.image_urls) {
+        const auto separator = url.find(";base64,");
+        if (!url.starts_with("data:") || separator == std::string::npos)
+            throw std::invalid_argument("Portable images require admitted inline base64, not URL fetching");
+        sp::Image image;
+        image.mime = url.substr(5, separator - 5);
+        image.data = std::make_shared<const std::string>(url.substr(separator + 8));
+        if (!sp::valid_image(image)) throw std::invalid_argument("Invalid portable inline image");
+        message.parts.emplace_back(std::move(image));
+    }
+    for (const auto& call : source.tool_calls) {
+        auto parsed = sp::json::parse(call.arguments);
+        auto* document = std::get_if<sp::json::Document>(&parsed);
+        if (!document || !document->root().is_object())
+            throw std::invalid_argument("Portable tool call requires admitted object arguments");
+        sp::ToolCall typed;
+        typed.id = call.id;
+        typed.name = call.name;
+        typed.input = std::make_shared<const sp::json::Document>(std::move(*document));
+        message.parts.emplace_back(std::move(typed));
+    }
+    return message;
+}
+// Deliberately an observational projection, never used to replay provider history.
+inline ChatMessage project_message(const sp::Message& message) {
+    ChatMessage result;
+    result.role = portable_role_name(message.role);
+    result.tool_calls = client_tool_calls(message);
+    for (const auto& part : message.parts) {
+        if (const auto* text = std::get_if<sp::Text>(&part)) result.content += text->value;
+        else if (const auto* thinking = std::get_if<sp::Thinking>(&part)) result.reasoning += thinking->text;
+        else if (const auto* tool = std::get_if<sp::ToolResult>(&part)) {
+            result.tool_call_id = tool->tool_use_id;
+            result.content += tool->content;
+            result.tool_status = tool->is_error ? "failed" : "succeeded";
+            if (tool->host) {
+                result.tool_name = tool->host->name;
+                result.tool_status = tool->host->status;
+                result.tool_retryable = tool->host->retryable;
+                result.tool_effect_uncertain = tool->host->effect_uncertain;
+            }
+        } else if (const auto* image = std::get_if<sp::Image>(&part); image && image->data)
+            result.image_urls.push_back("data:" + image->mime + ";base64," + *image->data);
+    }
+    return result;
+}
+inline json message_projection_json(const sp::Message& message) {
+    return provider_codec::encode_message(message);
+}
+inline json usage_to_json(const sp::Usage& usage) { return provider_codec::encode_usage(usage); }
+inline json outcome_projection_json(const sp::Outcome& outcome) {
+    return provider_codec::observe_outcome(outcome);
+}
+NEOGRAPH_API std::string message_digest(const sp::Message& message);
 
 } // namespace neograph

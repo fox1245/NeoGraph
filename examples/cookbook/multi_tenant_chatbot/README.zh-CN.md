@@ -1,6 +1,18 @@
 <!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
 # 多租户聊天机器人服务器
 
+## 当前源代码边界与历史测量
+
+C++ mock/live 使用类型化 SDK request 与完整不可变 Outcome。engine cache identity 绑定
+ tenant/topology 与捕获的 provider/model/host instruction。可信 host 的 tenant 选择、quota/store 边界、
+thread 隔离保持不变。portable JSON 摘要不是 native authority。
+以下数值/运行记录是历史资料，不是新迁移的执行或 live pass。
+live binary 固定 **1,000 request / 32 worker**，没有低成本 small-smoke flag。
+不要作为单次调用验证运行；它需要 live 密钥/network 和单独批准的大量 provider 费用。
+不保证价格或 zero-error。密钥/prompt/artifact 保持私密，不公开 raw native payload。
+provider retry 是一个显式 layer，默认 off；当前 public API 没有旧 throttle-provider wrapper。
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **一个进程同时为N个客户提供N种不同的智能体拓扑。** 测量结果：1000个并发真实OpenAI调用 / 6个客户 / 3种拓扑 / **峰值29 MB / 0错误**。
@@ -104,7 +116,7 @@ cmake --build build --target cookbook_multi_tenant_live
 关键数字：
 
 - **1000个并发在途 LLM 协程 + 连接内存成本约 29 MB**。100 请求 → 1000 请求增加 +7 MB ⇒ 每个额外连接约 8 KB。asio 协程 + httplib SSL 连接池的组合。
-- **1000 并发时零错误** — NG 优雅地吸收速率限制 / 网络抖动 / TLS 握手抖动而无需重试。可以用 `RateLimitedProvider` 包装器增强提供商侧限流。
+- 历史1000 request 运行的零错误不是当前 reliability 保证。
 - **缓存命中率 99.4%** — 即使客户更多，只要拓扑数量保持不变，命中率也能维持。**1000 客户场景内存也保持在约 30 MB**。
 
 ## LangGraph 对比 — 真实意义

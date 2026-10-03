@@ -16,7 +16,7 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/mcp/client.h>
 
 #include <cppdotenv/dotenv.hpp>
@@ -24,23 +24,14 @@
 #include <iostream>
 #include <cstdlib>
 
-static neograph::json channel_messages(neograph::graph::GraphEngine* eng,
-                                       const std::string& thread) {
-    auto st = eng->get_state(thread);
-    if (!st.has_value()) return neograph::json::array();
-    auto channels = st->value("channels", neograph::json::object());
-    auto entry    = channels.value("messages", neograph::json::object());
-    return entry.value("value", neograph::json::array());
-}
-
-static std::string last_assistant(const neograph::json& messages) {
-    if (!messages.is_array()) return {};
-    for (size_t i = messages.size(); i-- > 0; ) {
-        auto m = messages[i];
-        if (m.value("role", "") == "assistant") {
-            auto c = m.value("content", "");
-            if (!c.empty()) return c;
-        }
+// Explicit display projection; messages remain the full trusted history.
+static std::string last_assistant(const std::vector<sp::Message>& messages) {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->role != sp::Role::Assistant) continue;
+        std::string text;
+        for (const auto& part : it->parts)
+            if (const auto* value = std::get_if<sp::Text>(&part)) text += value->value;
+        if (!text.empty()) return text;
     }
     return "(empty)";
 }
@@ -71,13 +62,8 @@ int main(int argc, char** argv) {
     std::cout << "[*] " << tools.size()
               << " MCP tools available (agent may or may not call them)\n\n";
 
-    neograph::llm::OpenAIProvider::Config cfg;
-    cfg.api_key = api_key;
-    cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
-        neograph::llm::OpenAIProvider::create(cfg);
+        examples::make_openrouter_provider(api_key);
 
     neograph::json definition = {
         {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
@@ -97,6 +83,7 @@ int main(int argc, char** argv) {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = examples::openrouter_model;
     ctx.instructions =
         "You are an assistant. Answer from your own knowledge first. "
         "Use the provided tools only if the user explicitly asks for "
@@ -115,14 +102,11 @@ int main(int argc, char** argv) {
 
     neograph::graph::RunConfig run1;
     run1.thread_id = "fb-001";
-    run1.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", question}}
-    })}};
+    run1.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
     auto r1 = engine->run(run1);
 
-    auto msgs_r1 = channel_messages(engine.get(), "fb-001");
     std::cout << "Assistant draft:\n  "
-              << last_assistant(msgs_r1) << "\n\n";
+              << last_assistant(r1.native_messages) << "\n\n";
 
     // ---------- Human feedback ----------
     const std::string feedback =
@@ -133,19 +117,16 @@ int main(int argc, char** argv) {
     // ---------- Round 2 — feed full history + feedback to a new run ----------
     std::cout << "=== Round 2 — agent incorporates the feedback ===\n";
 
-    neograph::json round2_messages = msgs_r1;
-    round2_messages.push_back(neograph::json{
-        {"role", "user"}, {"content", feedback}
-    });
-
     neograph::graph::RunConfig run2;
-    run2.thread_id = "fb-002";   // fresh thread so state starts from our fed-in history
-    run2.input = {{"messages", round2_messages}};
+    run2.thread_id = "fb-002";
+    // Retain the engine-owned checkpoint context and native seals by value.
+    // No JSON projection is interpreted as replay authority.
+    run2.provider_messages = r1.native_messages;
+    run2.provider_messages->push_back(examples::message(sp::Role::User, feedback));
     auto r2 = engine->run(run2);
 
-    auto msgs_r2 = channel_messages(engine.get(), "fb-002");
     std::cout << "Assistant (revised):\n  "
-              << last_assistant(msgs_r2) << "\n\n";
+              << last_assistant(r2.native_messages) << "\n\n";
 
     std::cout << "Round-2 trace: ";
     for (size_t i = 0; i < r2.execution_trace.size(); ++i) {

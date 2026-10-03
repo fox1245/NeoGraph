@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "endpoint": "https://openrouter.ai/api/alpha/decisions",
+  "allow_insecure_loopback": false,
+  "default_model": "typesafe/jev-1.13",
+  "models": [
+    {
+      "id": "typesafe/jev-1.13",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    }
+  ],
+  "limits": {
+    "timeout_ms": 30000,
+    "max_questions": 16,
+    "max_criteria": 64,
+    "max_request_bytes": 1048576,
+    "max_response_header_bytes": 16384,
+    "max_response_body_bytes": 1048576,
+    "max_response_chunk_bytes": 1048576
+  }
+}

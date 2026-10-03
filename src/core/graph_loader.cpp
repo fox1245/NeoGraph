@@ -119,13 +119,7 @@ ConditionRegistry::ConditionRegistry() {
     register_condition(
         "has_tool_calls",
         [](const GraphState& state) -> std::string {
-            auto messages = state.get_messages();
-            for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-                if (it->role == "assistant") {
-                    return it->tool_calls.empty() ? "false" : "true";
-                }
-            }
-            return "false";
+            return pending_client_tool_calls(state.get_provider_messages()).empty() ? "false" : "true";
         },
         ConditionSpec{{"false", "true"}, /*open=*/false});
 

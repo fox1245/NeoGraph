@@ -8,7 +8,7 @@
 1. **`PostgresCheckpointStore`** — 실제 PostgreSQL의 durable 체크포인트와 채널-블롭 중복 제거.
 2. **NodeInterrupt 기반 HITL** — Deep Research 그래프가 보고서를 생성한 후 일시 중지하고, 인간이 검토하며, 승인(→ 종료) 또는 피드백(→ 다른 연구 라운드)으로 재개합니다.
 
-데모는 의도적으로 **프로세스 비연속적**입니다: 바이너리는 보고서를 생성한 후 종료하므로, `resume`할 때 모든 것을 PG에서 다시 로드해야 하는 새로운 프로세스입니다. 그것이 핵심입니다 — 체크포인트가 실제로 프로세스 경계를 넘었음을 증명합니다.
+이 데모는 프로세스 경계를 넘습니다. 새 `resume` 프로세스는 PG 상태와 소유자 전용 native 이력을 함께 복원해야 하며, PG만으로는 typed native 재개가 충분하지 않습니다.
 
 ## 시나리오
 
@@ -92,6 +92,8 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 
 ### 실제 실행의 참조 번호
 
+전환 이전 실행의 역사적 수치입니다. 위 출력도 역사적/예시 기록이며 현재 typed provider 전환의 실행 검증이 아닙니다.
+
 위의 multimodal-RAG 데모에서 완전한 실행-재개-재개 사이클(감독자 2라운드 × 연구원 2명 각각, OpenRouter를 통해 DeepSeek 고정)은 다음 PG 번호를 생성했습니다:
 
 | 메트릭                      | 값      | 메모 |
@@ -116,12 +118,19 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. 데모를 실행합니다(위의 "시나리오" 참조). 첫 번째 `docker compose run`가 `agent` 이미지 빌드를 트리거합니다(워밍업된 머신에서 약 1분 소요).
+3. BuildKit과 Docker Compose >= 2.17을 사용하고 `SCHEMAPROVIDER_SOURCE`를 실제 SchemaProvider 소스 경로로 설정하세요(기본 `../../../SchemaProvider`, 이 디렉터리 기준). Dockerfile은 named additional context에서 `SchemaProvider::runtime`을 먼저 설치합니다.
+4. `.env`의 `NEOGRAPH_NATIVE_ARCHIVE_OWNER`를 안정적으로 유지하고 한 번 프로비저닝하세요:
+   ```
+   docker compose run --rm agent init-archive
+   ```
+5. 데모를 실행하세요. 유효한 OpenRouter/Crawl4AI 자격 증명, 네트워크와 provider 크레딧이 필요하며 연구/피드백 라운드는 모델 비용을 발생시킵니다. 고정 비용이나 현재 실행 성공을 주장하지 않습니다.
+
+`pgdata`, `native-history`, `native-keys`를 함께 보존하세요. 이력과 키는 별도의 비공개 볼륨 부모에 저장됩니다. 재개에는 동일한 owner, 호환 provider descriptor, 원래 키와 archive 기록이 필요합니다. 기존 스레드를 재개하기 위해 키를 다시 생성하지 마세요. 이는 인증된 소유자 전용 호스트 보관이지 **암호화나 provider issuer 증명**이 아닙니다. PG, 백업, 프롬프트, 피드백, 보고서와 `.env`도 보호하세요. raw native 기록이나 archive/키 내용을 공개 로그에 출력하지 마세요. CLI는 질의, 피드백, 보고서를 출력하므로 비공개 터미널/로그를 사용하세요.
 
 완료되면:
 ```
-docker compose down       # stop services, keep PG volume
-docker compose down -v    # drop the PG volume too
+docker compose down       # PG와 native-history/native-keys 보존
+docker compose down -v    # 세 볼륨 삭제; 기존 native 재개 불가
 ```
 
 ## 바이너리를 직접 실행(에이전트에 docker-compose 사용 안 함)
@@ -129,9 +138,15 @@ docker compose down -v    # drop the PG volume too
 호스트에서 바이너리를 빌드하여 docker-compose로 관리되는 Postgres + Crawl4AI를 가리킬 수도 있습니다:
 
 ```
-cmake -B build -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
+# 작업 디렉터리의 .env와 archive 경로를 비공개로 유지
+mkdir -m 700 .native-keys
+./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
 ./build/example_postgres_react_hitl resume <thread_id> "feedback"
 ./build/example_postgres_react_hitl status <thread_id>
@@ -179,7 +194,8 @@ SELECT blob_data::text FROM neograph_checkpoint_blobs
 - HITL 게이트는 `DeepResearchConfig::enable_human_review` 플래그 뒤의 Deep Research 그래프에 내장되어 있습니다(기본적으로 꺼져 있어 예제 25는 영향을 받지 않습니다). 이를 켜면 `HumanReviewNode`가 `final_report`와 `__end__` 사이에 위치합니다.
 - 해당 노드는 첫 실행 시 `NodeInterrupt`를 던집니다. 엔진이 이를 포착하고 `NodeInterrupt` 단계에서 체크포인트를 저장한 뒤 호출자에게 다시 throw 합니다. 재개 시 엔진은 사용자의 응답이 `messages` 채널에 기록된 상태로 동일한 노드에 다시 진입합니다.
 - 노드는 "승인"(→ Command(__end__))과 피드백(→ Command(supervisor)에 피드백을 `supervisor_messages`에 추가하고 반복 카운터를 재설정)을 구별합니다. 두 경로 모두 실행을 깨끗하게 종료하므로 PG는 항상 일관된 최신 체크포인트를 보유합니다.
-- 시나리오의 세 단계(초기 실행, 피드백 포함 재개, 승인 포함 재개)는 모두 프로세스 경계를 넘나듭니다 — 엔진 상태는 호출 사이에 전적으로 PG에 상주합니다.
+- PG는 portable 그래프 상태를 보관하고 native 재개에는 보호된 archive와 원래 키도 필요합니다.
+- C++은 typed `ProviderRequest`/이벤트와 완전한 불변 `sp::Outcome`을 사용합니다. 보고서 텍스트는 projection이며 native replay 권한이 아닙니다. 이 문서는 소스 마이그레이션 기록이지 새로운 빌드/테스트/live 검증이 아닙니다.
 
 ## 왜 프론트엔드가 없나요?
 

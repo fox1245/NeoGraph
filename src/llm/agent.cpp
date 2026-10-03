@@ -2,275 +2,145 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/runtime_interposition_controller.h>
 #include <neograph/tool_dispatch.h>
-#include <asio/error.hpp>
-#include <asio/system_error.hpp>
 #include <algorithm>
-#include <iostream>
+#include <chrono>
 #include <stdexcept>
 
 namespace neograph::llm {
 
-void Agent::set_runtime_interposition(
-    std::shared_ptr<::neograph::RuntimeInterpositionController> controller) {
+void Agent::set_runtime_interposition(std::shared_ptr<RuntimeInterpositionController> controller) {
     runtime_interposition_ = std::move(controller);
 }
 
+Agent::Agent(std::shared_ptr<Provider> provider, std::vector<std::unique_ptr<Tool>> tools,
+             const std::string& instructions, const std::string& model)
+    : provider_(std::move(provider)), tools_(std::move(tools)),
+      instructions_(instructions), model_(model) {}
+
 std::vector<Tool*> Agent::tool_ptrs() const {
-    std::vector<Tool*> ptrs;
-    ptrs.reserve(tools_.size());
-    for (const auto& t : tools_) ptrs.push_back(t.get());
-    return ptrs;
+    std::vector<Tool*> result;
+    result.reserve(tools_.size());
+    for (const auto& tool : tools_) result.push_back(tool.get());
+    return result;
 }
 
-Agent::Agent(std::shared_ptr<Provider> provider,
-             std::vector<std::unique_ptr<Tool>> tools,
-             const std::string& instructions,
-             const std::string& model)
-  : provider_(std::move(provider))
-  , tools_(std::move(tools))
-  , instructions_(instructions)
-  , model_(model)
-{
-    // Build the name → tool* index once. Subsequent tool_call
-    // dispatches are O(1) on this map instead of O(n) std::find_if
-    // over `tools_`. Last-write-wins on duplicate names so the
-    // behaviour matches the previous find_if (which returned the
-    // first match).
-    tools_by_name_.reserve(tools_.size());
-    for (auto& t : tools_) {
-        if (!t) continue;
-        tools_by_name_[t->get_name()] = t.get();
-    }
+std::vector<ChatTool> Agent::get_tool_definitions() const {
+    std::vector<ChatTool> result;
+    result.reserve(tools_.size());
+    for (const auto& tool : tools_) result.push_back(tool->get_definition());
+    return result;
 }
 
-void
-Agent::ensure_system_message(std::vector<ChatMessage>& messages)
-{
+void Agent::ensure_system_message(std::vector<sp::Message>& messages) {
     if (instructions_.empty()) return;
-
-    bool has_system = !messages.empty() &&
-                      messages[0].role == "system" &&
-                      messages[0].content == instructions_;
-
-    if (!has_system) {
-        ChatMessage sys;
-        sys.role = "system";
-        sys.content = instructions_;
-        messages.insert(messages.begin(), sys);
-    }
+    const auto instruction = portable_message(ChatMessage{"system", instructions_});
+    if (!messages.empty() && messages.front().role == sp::Role::System) messages.front() = instruction;
+    else messages.insert(messages.begin(), instruction);
 }
 
-std::vector<ChatTool>
-Agent::get_tool_definitions() const
-{
-    std::vector<ChatTool> defs;
-    defs.reserve(tools_.size());
-    for (const auto& tool : tools_) {
-        defs.push_back(tool->get_definition());
+sp::runtime::Result Agent::complete(const std::vector<sp::Message>& messages) {
+    auto request = make_provider_request(*provider_, model_, messages);
+    sp::runtime::Result result;
+    try {
+        result = runtime_interposition_ ? runtime_interposition_->invoke(std::move(request))
+                                      : provider_->invoke(std::move(request));
+    } catch (const ProviderObserverError& error) {
+        outcomes_.push_back(error.outcome());
+        usage_->add(outcome_usage(*error.outcome()));
+        throw;
     }
-    return defs;
-}
-
-ChatCompletion
-Agent::complete(const std::vector<ChatMessage>& messages)
-{
-    CompletionParams params;
-    params.model = model_;
-    params.messages = messages;
-    // Candidate 6 PR3: dispatch via invoke() so the v1.0 single-
-    // dispatch surface is end-to-end. run_sync drives the awaitable
-    // synchronously (Agent::complete is the public sync API).
-    auto completion = runtime_interposition_ ? runtime_interposition_->invoke(params)
-                                             : neograph::async::run_sync(provider_->invoke(params, nullptr));
-    usage_->add(completion.usage);   // #88
-    return completion;
+    if (result) outcomes_.push_back(result);
+    if (result) usage_->add(outcome_usage(*result));
+    return result;
 }
 
 namespace {
-std::vector<ChatMessage> dispatch_agent_batch(
-    const std::vector<ChatMessage>& messages, std::vector<ToolCall> calls,
-    std::vector<Tool*> tools, ToolGate gate, ToolExecutionContext execution) {
+void append_tool_results(std::vector<sp::Message>& history, std::vector<ToolCall> calls,
+                         std::vector<Tool*> tools, ToolGate gate, ToolExecutionContext execution) {
     if (execution.effect_broker) {
-        // The assistant message must already be present in persisted history.
-        // Model ToolCall.id is correlation only, not the logical slot.
-        const auto turns = std::count_if(messages.begin(), messages.end(),
-            [](const ChatMessage& message) {
-                return message.role == "assistant" && !message.tool_calls.empty();
-            });
+        const auto turns = std::count_if(history.begin(), history.end(), [](const sp::Message& message) {
+            return message.role == sp::Role::Assistant && !client_tool_calls(message).empty();
+        });
         execution.effect_task_id = "agent:turn:" + std::to_string(turns - 1);
     }
-    return neograph::async::run_sync(
-        dispatch_tool_calls(std::move(calls), std::move(tools), std::move(gate), {},
-                            std::move(execution)));
+    auto results = neograph::async::run_sync(dispatch_tool_calls(
+        std::move(calls), std::move(tools), std::move(gate), {}, std::move(execution)));
+    for (const auto& result : results) history.push_back(portable_message(result));
 }
-} // namespace
+}
 
-std::string
-Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
-{
+sp::runtime::Result Agent::run(std::vector<sp::Message>& messages, int max_iterations) {
     return run(messages, max_iterations, {});
 }
-
-std::string Agent::run(std::vector<ChatMessage>& messages, int max_iterations,
-                       ToolExecutionContext effect_context) {
-    if (max_iterations <= 0)
-        throw std::runtime_error("Agent exceeded max iterations (" +
-                                 std::to_string(max_iterations) + ")");
-    ensure_system_message(messages);
-    if (effect_context.effect_broker &&
-        (effect_context.identity.owner_scope.empty() ||
-         effect_context.identity.root_run_id.empty() ||
-         effect_context.identity.thread_id.empty() ||
-         effect_context.effect_grant.grant_id.empty() ||
-         effect_context.effect_grant.operation_id.empty()))
-        throw std::invalid_argument("Agent Tool broker requires exact host run and grant identity");
-    if (!effect_context.controller) effect_context.controller = tool_execution_controller_;
-    if (!effect_context.hook_runtime) effect_context.hook_runtime = hook_runtime_;
-    auto tool_defs = get_tool_definitions();
-
-    if (effect_context.effect_broker && !messages.empty() &&
-        messages.back().role == "assistant" && !messages.back().tool_calls.empty()) {
-        auto pending = dispatch_agent_batch(messages, messages.back().tool_calls,
-                                            tool_ptrs(), tool_gate_, effect_context);
-        for (auto& message : pending) messages.push_back(std::move(message));
-    }
-
-    for (int i = 0; i < max_iterations; ++i) {
-        CompletionParams params;
-        params.model = model_;
-        params.messages = messages;
-        params.tools = tool_defs;
-
-        auto completion = runtime_interposition_ ? runtime_interposition_->invoke(params)
-                                                 : neograph::async::run_sync(provider_->invoke(params, nullptr));
-        usage_->add(completion.usage);   // #88
-        auto& msg = completion.message;
-
-        // Append assistant message to history
-        messages.push_back(msg);
-
-        // No tool calls -> final response
-        if (msg.tool_calls.empty()) {
-            return msg.content;
-        }
-
-        // Tool execution is not implemented here — it lives in exactly one
-        // place, shared with graph::ToolDispatchNode (issue #87). This loop
-        // used to call the blocking execute() one tool at a time while the
-        // node fanned the same calls out concurrently; three 300 ms async
-        // tools took 900 ms here and 300 ms there.
-        auto execution = effect_context;
-        auto tool_msgs = dispatch_agent_batch(messages, msg.tool_calls, tool_ptrs(),
-                                              tool_gate_, std::move(execution));
-        for (auto& tm : tool_msgs) {
-            messages.push_back(std::move(tm));
-        }
-    }
-
-    throw std::runtime_error("Agent exceeded max iterations (" +
-                             std::to_string(max_iterations) + ")");
+sp::runtime::Result Agent::run(std::vector<sp::Message>& messages, int max_iterations,
+                             ToolExecutionContext execution) {
+    return run_loop(messages, max_iterations, std::move(execution), ProviderMode::Collect, {});
+}
+sp::runtime::Result Agent::run_stream(std::vector<sp::Message>& messages,
+    const std::function<void(const sp::Event&)>& observer, int max_iterations) {
+    return run_stream(messages, observer, max_iterations, {});
+}
+sp::runtime::Result Agent::run_stream(std::vector<sp::Message>& messages,
+    const std::function<void(const sp::Event&)>& observer, int max_iterations,
+    ToolExecutionContext execution) {
+    return run_loop(messages, max_iterations, std::move(execution), ProviderMode::Stream, observer);
 }
 
-std::string
-Agent::run_stream(std::vector<ChatMessage>& messages,
-                  const StreamCallback& on_chunk,
-                  int max_iterations) {
-    return run_stream(messages, on_chunk, max_iterations, {});
-}
-
-std::string Agent::run_stream(std::vector<ChatMessage>& messages,
-                              const StreamCallback& on_chunk, int max_iterations,
-                              ToolExecutionContext effect_context) {
-    if (max_iterations <= 0)
-        throw std::runtime_error("Agent exceeded max iterations (" +
-                                 std::to_string(max_iterations) + ")");
-    if (effect_context.effect_broker &&
-        (effect_context.identity.owner_scope.empty() ||
-         effect_context.identity.root_run_id.empty() ||
-         effect_context.identity.thread_id.empty() ||
-         effect_context.effect_grant.grant_id.empty() ||
-         effect_context.effect_grant.operation_id.empty()))
+sp::runtime::Result Agent::run_loop(std::vector<sp::Message>& messages, int max_iterations,
+    ToolExecutionContext execution, ProviderMode mode,
+    std::function<void(const sp::Event&)> observer) {
+    if (max_iterations <= 0) throw std::runtime_error("Agent exceeded max iterations (" +
+                                                     std::to_string(max_iterations) + ")");
+    if (execution.effect_broker && (execution.identity.owner_scope.empty() ||
+        execution.identity.root_run_id.empty() || execution.identity.thread_id.empty() ||
+        execution.effect_grant.grant_id.empty() || execution.effect_grant.operation_id.empty()))
         throw std::invalid_argument("Agent Tool broker requires exact host run and grant identity");
     ensure_system_message(messages);
-    if (!effect_context.controller) effect_context.controller = tool_execution_controller_;
-    if (!effect_context.hook_runtime) effect_context.hook_runtime = hook_runtime_;
-    bool has_done_tool_calls = false;
-    if (effect_context.effect_broker && !messages.empty() &&
-        messages.back().role == "assistant" && !messages.back().tool_calls.empty()) {
-        auto pending = dispatch_agent_batch(messages, messages.back().tool_calls,
-                                            tool_ptrs(), tool_gate_, effect_context);
-        for (auto& message : pending) messages.push_back(std::move(message));
-        has_done_tool_calls = true;
-    }
-    auto tool_defs = get_tool_definitions();
-
-    for (int i = 0; i < max_iterations; ++i) {
-        CompletionParams params;
-        params.model = model_;
-        params.messages = messages;
-        params.tools = tool_defs;
-
-        // After tool execution, use streaming for the final response
-        if (has_done_tool_calls) {
-            auto completion = runtime_interposition_ ? runtime_interposition_->invoke(params, on_chunk)
-                : neograph::async::run_sync(provider_->invoke(params, on_chunk));
-            usage_->add(completion.usage);   // #88
-            messages.push_back(completion.message);
-
-            if (completion.message.tool_calls.empty()) {
-                return completion.message.content;
-            }
-            // Rare: another tool call after streaming — fall through to execute
-        } else {
-            // Non-streaming: reliable tool call detection
-            params.timeout_seconds = tool_detection_timeout_seconds_;
-            ChatCompletion completion;
-            try {
-                completion = runtime_interposition_ ? runtime_interposition_->invoke(params)
-                    : neograph::async::run_sync(provider_->invoke(params, nullptr));
-            } catch (const asio::system_error& error) {
-                if (error.code() != asio::error::timed_out) throw;
-                throw asio::system_error(
-                    error.code(),
-                    "Agent::run_stream tool-detection phase timed out: " +
-                    std::string(error.what()));
-            }
-            usage_->add(completion.usage);   // #88
-            messages.push_back(completion.message);
-
-            if (completion.message.tool_calls.empty()) {
-                // No tools needed at all — stream the response
-                // Remove the non-streamed message, re-do with streaming
-                messages.pop_back();
-                params.timeout_seconds = -1;
-                auto streamed = runtime_interposition_ ? runtime_interposition_->invoke(params, on_chunk)
-                    : neograph::async::run_sync(provider_->invoke(params, on_chunk));
-                usage_->add(streamed.usage);   // #88
-                messages.push_back(streamed.message);
-                return streamed.message.content;
-            }
+    if (!execution.controller) execution.controller = tool_execution_controller_;
+    if (!execution.hook_runtime) execution.hook_runtime = hook_runtime_;
+    bool dispatched_tools = false;
+    {
+        auto calls = pending_client_tool_calls(messages);
+        if (!calls.empty()) {
+            append_tool_results(messages, std::move(calls), tool_ptrs(), tool_gate_, execution);
+            dispatched_tools = true;
         }
-
-        // Copy the calls out before touching `messages`. The previous code held
-        // `auto& msg = messages.back()` and push_back'ed tool results into the
-        // same vector while iterating msg.tool_calls — a reallocation there
-        // leaves the reference dangling and the next iteration reads freed
-        // memory. It only bites with two or more tool calls, which is why it
-        // survived this long.
-        auto calls = messages.back().tool_calls;
-
-        auto execution = effect_context;
-        auto tool_msgs = dispatch_agent_batch(messages, std::move(calls), tool_ptrs(),
-                                              tool_gate_, std::move(execution));
-        for (auto& tm : tool_msgs) {
-            messages.push_back(std::move(tm));
-        }
-
-        has_done_tool_calls = true;
     }
-
-    throw std::runtime_error("Agent exceeded max iterations (" +
-                             std::to_string(max_iterations) + ")");
+    const auto tools = get_tool_definitions();
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+        auto request = make_provider_request(*provider_, model_, messages, tools, {}, mode);
+        request.on_event = observer;
+        request.cancel_token = execution.cancel_token;
+        request.options.deadline = execution.deadline;
+        if (mode == ProviderMode::Stream && !dispatched_tools && tool_detection_timeout_seconds_ > 0) {
+            const auto detection_deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(tool_detection_timeout_seconds_);
+            if (!request.options.deadline || detection_deadline < *request.options.deadline)
+                request.options.deadline = detection_deadline;
+        }
+        sp::runtime::Result result;
+        try {
+            result = runtime_interposition_ ? runtime_interposition_->invoke(std::move(request))
+                                          : provider_->invoke(std::move(request));
+        } catch (const ProviderObserverError& error) {
+            usage_->add(outcome_usage(*error.outcome()));
+            outcomes_.push_back(error.outcome());
+            const auto& returned = outcome_messages(*error.outcome());
+            messages.insert(messages.end(), returned.begin(), returned.end());
+            throw;
+        }
+        if (!result) throw std::runtime_error("Provider returned no outcome");
+        usage_->add(outcome_usage(*result));
+        const auto& returned = outcome_messages(*result);
+        messages.insert(messages.end(), returned.begin(), returned.end());
+        outcomes_.push_back(result);
+        outcome_or_throw(result); // Failure retains full partial messages and typed error.
+        auto calls = pending_client_tool_calls(returned);
+        if (calls.empty()) return result;
+        append_tool_results(messages, std::move(calls), tool_ptrs(), tool_gate_, execution);
+        dispatched_tools = true;
+    }
+    throw std::runtime_error("Agent exceeded max iterations (" + std::to_string(max_iterations) + ")");
 }
 
 } // namespace neograph::llm

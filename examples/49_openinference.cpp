@@ -13,6 +13,7 @@
 #include <neograph/neograph.h>
 #include <neograph/observability/openinference.h>
 #include <neograph/observability/tracer.h>
+#include "provider_example_support.h"
 
 #include <iostream>
 #include <map>
@@ -131,34 +132,55 @@ private:
 // ── Mock LLM provider ───────────────────────────────────────────────
 
 class MockProvider : public Provider {
+    std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
 public:
-    ChatCompletion complete(const CompletionParams&) override {
-        ChatCompletion c;
-        c.message.role = "assistant";
-        c.message.content = "Hello from the observed provider!";
-        return c;
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        auto history = std::make_shared<const std::vector<sp::Message>>(
+            examples::request_messages(request));
+        return prepare_local(client_, std::move(request),
+            [history](const PreparedProviderRequest& prepared,
+                      const std::function<void(const sp::Event&)>& observer)
+                -> asio::awaitable<sp::runtime::Result> {
+                bool greeted = false;
+                for (const auto& message : *history)
+                    if (message.role == sp::Role::User)
+                        for (const auto& part : message.parts)
+                            if (const auto* text = std::get_if<sp::Text>(&part))
+                                greeted |= text->value.find("hi") != std::string::npos;
+                sp::Completion completion;
+                completion.messages.push_back(examples::message(sp::Role::Assistant,
+                    greeted ? "Hello from the observed provider!"
+                            : "The observed provider is ready."));
+                completion.stop.kind = sp::StopKind::EndTurn;
+                if (prepared.mode() == ProviderMode::Stream)
+                    examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
     }
-    ChatCompletion complete_stream(const CompletionParams& p,
-                                    const StreamCallback& on_chunk) override {
-        auto c = complete(p);
-        if (on_chunk) on_chunk(c.message.content);
-        return c;
-    }
+    std::string_view family() const noexcept override { return "openai.chat"; }
     std::string get_name() const override { return "mock"; }
 };
 
 // ── Simple non-streaming LLM node ───────────────────────────────────
 
-class TalkNode : public GraphNode {
+class TalkNode : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
     explicit TalkNode(std::shared_ptr<Provider> p) : prov_(std::move(p)) {}
-    asio::awaitable<NodeOutput> run(NodeInput) override {
-        CompletionParams params;
-        params.messages = {{"user", "say hi"}};
-        params.model = "gpt-mock";
-        auto c = co_await prov_->invoke(params, nullptr);
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto request = make_provider_request(*prov_, "gpt-mock",
+            {examples::message(sp::Role::User, "say hi")});
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        request.on_event = in.ctx.on_provider_event;
+        auto outcome = co_await observe_provider_result(in.ctx,
+            invoke_provider(prov_, std::move(request), {}, {}, provider_call_broker(in.ctx),
+                make_provider_call_identity(in.ctx, get_name())));
+        // The graph's synchronized sink retains the immutable full outcome.
+        // The reply channel is only an explicit display projection.
+        record_usage(in.ctx, outcome);
+        outcome = examples::require_outcome(std::move(outcome));
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"reply", json(c.message.content)});
+        out.writes.push_back(ChannelWrite{"reply", json(examples::visible_text(*outcome))});
         co_return out;
     }
     std::string get_name() const override { return "talk"; }
@@ -200,7 +222,7 @@ int main() {
     RunConfig cfg;
     cfg.input = {{"reply", ""}};
     cfg.stream_mode = StreamMode::ALL;
-    engine->run_stream(cfg, session->cb);
+    auto result = engine->run_stream(cfg, session->cb);
     session->close();
 
     tracer.print_tree();

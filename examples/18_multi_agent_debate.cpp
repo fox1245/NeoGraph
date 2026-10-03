@@ -33,7 +33,7 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -44,16 +44,20 @@
 
 using namespace neograph;
 
-static std::string speak(Provider& p,
-                         const std::string& role_system,
-                         const std::string& transcript,
-                         float temperature) {
-    CompletionParams params;
-    params.model = "~deepseek/deepseek-v4-flash-latest";
-    params.temperature = temperature;
-    params.messages.push_back({"system", role_system});
-    params.messages.push_back({"user", transcript});
-    return p.complete(params).message.content;
+static sp::runtime::Result speak(Provider& p,
+                                 const std::string& role_system,
+                                 const std::vector<sp::Message>& transcript,
+                                 const std::string& instruction,
+                                 float temperature) {
+    std::vector<sp::Message> messages;
+    messages.reserve(transcript.size() + 2);
+    messages.push_back(examples::message(sp::Role::System, role_system));
+    messages.insert(messages.end(), transcript.begin(), transcript.end());
+    messages.push_back(examples::message(sp::Role::User, instruction));
+    ProviderControls controls;
+    controls.temperature = temperature;
+    return p.invoke(make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, std::move(controls)));
 }
 
 int main() {
@@ -67,13 +71,7 @@ int main() {
         return 1;
     }
 
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "openai_responses";
-    cfg.api_key = api_key;
-    cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = llm::SchemaProvider::create(cfg);
+    auto provider = examples::make_openrouter_provider(api_key);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 18: Multi-Agent Debate              ║\n"
@@ -108,35 +106,45 @@ int main() {
 
     std::cout << "Claim: " << topic << "\n\n";
 
-    std::string transcript = "Claim: " + topic + "\n\n";
+    std::vector<sp::Message> transcript = {
+        examples::message(sp::Role::User, "Claim: " + topic + "\n\n")};
     const int ROUNDS = 2;
+    std::vector<std::shared_ptr<const sp::Outcome>> outcomes;
+    outcomes.reserve(ROUNDS * 2 + 1);
 
     for (int r = 1; r <= ROUNDS; ++r) {
         std::cout << "── Round " << r << " ─────────────────────────────────\n\n";
 
         // Proponent speaks
-        std::string pro = speak(*provider, researcher_sys,
-            transcript + "It is your turn to argue FOR the claim. "
-                         "Write one paragraph.",
-            0.7f);
-        std::cout << "[Proponent]\n" << pro << "\n\n";
-        transcript += "Proponent (round " + std::to_string(r) + "):\n" + pro + "\n\n";
+        auto pro = examples::require_outcome(speak(*provider, researcher_sys,
+            transcript, "It is your turn to argue FOR the claim. Write one paragraph.",
+            0.7f));
+        outcomes.push_back(pro);
+        std::cout << "[Proponent]\n" << examples::visible_text(*pro) << "\n\n";
+        transcript.push_back(examples::message(
+            sp::Role::User, "Proponent (round " + std::to_string(r) + "):"));
+        const auto& pro_messages = std::get<sp::Completion>(*pro).messages;
+        transcript.insert(transcript.end(), pro_messages.begin(), pro_messages.end());
 
         // Opponent speaks, sees the proponent's turn
-        std::string con = speak(*provider, skeptic_sys,
-            transcript + "It is your turn to argue AGAINST the claim. "
-                         "Rebut the Proponent's most recent point directly.",
-            0.7f);
-        std::cout << "[Opponent]\n" << con << "\n\n";
-        transcript += "Opponent (round " + std::to_string(r) + "):\n" + con + "\n\n";
+        auto con = examples::require_outcome(speak(*provider, skeptic_sys,
+            transcript, "It is your turn to argue AGAINST the claim. "
+                        "Rebut the Proponent's most recent point directly.",
+            0.7f));
+        outcomes.push_back(con);
+        std::cout << "[Opponent]\n" << examples::visible_text(*con) << "\n\n";
+        transcript.push_back(examples::message(
+            sp::Role::User, "Opponent (round " + std::to_string(r) + "):"));
+        const auto& con_messages = std::get<sp::Completion>(*con).messages;
+        transcript.insert(transcript.end(), con_messages.begin(), con_messages.end());
     }
 
     // Judge
     std::cout << "── Verdict ──────────────────────────────────────────\n\n";
-    std::string verdict = speak(*provider, judge_sys,
-        transcript + "\nRender your verdict now.",
-        0.2f);
-    std::cout << verdict << "\n\n";
+    auto verdict = examples::require_outcome(speak(*provider, judge_sys,
+        transcript, "Render your verdict now.", 0.2f));
+    outcomes.push_back(verdict);
+    std::cout << examples::visible_text(*verdict) << "\n\n";
 
     return 0;
     } catch (const std::exception& e) {

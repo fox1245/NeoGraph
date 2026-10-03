@@ -18,6 +18,7 @@
 #include <neograph/llm/agent.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
+#include "fixtures/typed_provider.h"
 
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
@@ -132,6 +133,17 @@ ChatMessage assistant_calling(const std::vector<std::string>& names) {
     return m;
 }
 
+sp::Message typed_assistant_calling(const std::vector<std::string>& names) {
+    sp::Message message;
+    message.role = sp::Role::Assistant;
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        message.parts.emplace_back(sp::ToolCall{
+            "call_" + std::to_string(index), names[index],
+            sp::ToolCallKind::ClientExecuted, test::document("{}")});
+    }
+    return message;
+}
+
 void seed(GraphState& state, const std::vector<ChatMessage>& msgs) {
     state.init_channel("messages", ReducerType::APPEND,
                        ReducerRegistry::instance().get("append"), json::array());
@@ -239,97 +251,95 @@ TEST(ToolDispatchParity, CancellationReachesContextAwareTool) {
     EXPECT_THROW(std::rethrow_exception(error), CancelledException);
 }
 
-// Claim 2b. RED (#87). The same three async tools through Agent run serially,
-// because Agent loops over the calls and invokes the *sync* execute() on each.
 TEST(ToolDispatchParity, AgentOverlapsAsyncTools) {
     // A provider that asks for all three tools once, then answers.
-    class ThreeCallProvider : public Provider {
-    public:
-        int turns = 0;
-        ChatCompletion complete(const CompletionParams& /*p*/) override {
-            ChatCompletion comp;
-            comp.message = (turns++ == 0) ? assistant_calling({"a", "b", "c"})
-                                          : ChatMessage{"assistant", "done"};
-            return comp;
-        }
-        ChatCompletion complete_stream(const CompletionParams& p,
-                                       const StreamCallback& /*cb*/) override {
-            return complete(p);
-        }
-        std::string get_name() const override { return "three-call"; }
-    };
+    auto turns = std::make_shared<int>(0);
+    auto provider = std::make_shared<test::LocalProvider>(
+        [turns](ProviderRequest, const PreparedProviderRequest&,
+                const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            if ((*turns)++ == 0)
+                co_return test::success(std::vector<sp::Message>{typed_assistant_calling({"a", "b", "c"})});
+            co_return test::success("done");
+        }, "three-call");
 
     std::vector<std::unique_ptr<Tool>> tools;
     tools.push_back(std::make_unique<AsyncSleepTool>("a"));
     tools.push_back(std::make_unique<AsyncSleepTool>("b"));
     tools.push_back(std::make_unique<AsyncSleepTool>("c"));
 
-    neograph::llm::Agent agent(std::make_shared<ThreeCallProvider>(), std::move(tools));
+    neograph::llm::Agent agent(provider, std::move(tools), "", "fixture-model");
 
-    std::vector<ChatMessage> messages{{"user", "go"}};
-    auto elapsed = timed([&] { agent.run(messages); });
+    std::vector<sp::Message> messages{test::message("go", sp::Role::User)};
+    auto elapsed = timed([&] { EXPECT_EQ(test::text(agent.run(messages)), "done"); });
     EXPECT_LT(elapsed, 2 * kToolDelay)
         << "Agent ran the tool calls serially; ToolNode overlaps them (#87)";
 }
 
-TEST(ToolDispatchParity, AgentRunStreamStartsWithConfiguredToolDetectionCall) {
-    class PhaseProbeProvider : public Provider {
-    public:
-        std::vector<bool> streaming;
-        std::vector<int> timeouts;
-
-        asio::awaitable<ChatCompletion>
-        invoke(const CompletionParams& params, StreamCallback on_chunk) override {
-            streaming.push_back(static_cast<bool>(on_chunk));
-            timeouts.push_back(params.timeout_seconds);
-            ChatCompletion completion;
-            completion.message = ChatMessage{
-                "assistant", on_chunk ? "streamed" : "buffered"};
-            if (on_chunk) on_chunk("streamed");
-            co_return completion;
-        }
-
-        std::string get_name() const override { return "phase-probe"; }
+TEST(ToolDispatchParity, AgentRunStreamHonorsConfiguredDeadlineAndTypedEvents) {
+    struct Probe {
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+        ProviderMode mode = ProviderMode::Collect;
     };
-
-    auto provider = std::make_shared<PhaseProbeProvider>();
-    neograph::llm::Agent agent(provider, std::vector<std::unique_ptr<Tool>>{});
+    auto probe = std::make_shared<Probe>();
+    auto provider = std::make_shared<test::LocalProvider>(
+        [probe](ProviderRequest request, const PreparedProviderRequest& prepared,
+                const test::LocalProvider::EventCallback& observer) -> asio::awaitable<sp::runtime::Result> {
+            probe->deadline = request.options.deadline;
+            probe->mode = prepared.mode();
+            if (observer) observer(sp::PartDelta{sp::LocalId{1}, {sp::PartKind::Text, "streamed"}});
+            co_return test::success("streamed");
+        }, "phase-probe");
+    neograph::llm::Agent agent(provider, std::vector<std::unique_ptr<Tool>>{}, "", "fixture-model");
     agent.set_tool_detection_timeout_seconds(7);
-
-    std::vector<ChatMessage> messages{{"user", "hello"}};
+    std::vector<sp::Message> messages{test::message("hello", sp::Role::User)};
     std::string streamed;
-    EXPECT_EQ("streamed", agent.run_stream(
-        messages, [&](const std::string& chunk) { streamed += chunk; }));
-    EXPECT_EQ("streamed", streamed);
-    EXPECT_EQ((std::vector<bool>{false, true}), provider->streaming);
-    EXPECT_EQ((std::vector<int>{7, -1}), provider->timeouts);
+    const auto before = std::chrono::steady_clock::now();
+    EXPECT_EQ(test::text(agent.run_stream(messages, [&](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event))
+            streamed.append(delta->payload.bytes);
+    })), "streamed");
+    const auto after = std::chrono::steady_clock::now();
+    EXPECT_EQ(streamed, "streamed");
+    EXPECT_EQ(probe->mode, ProviderMode::Stream);
+    ASSERT_TRUE(probe->deadline);
+    EXPECT_GE(*probe->deadline, before + 7s);
+    EXPECT_LE(*probe->deadline, after + 7s);
 }
 
-TEST(ToolDispatchParity, AgentRunStreamLabelsToolDetectionTimeout) {
-    class TimeoutProvider : public Provider {
-    public:
-        asio::awaitable<ChatCompletion>
-        invoke(const CompletionParams&, StreamCallback) override {
-            throw asio::system_error(
-                asio::error::timed_out, "ConnPool::async_post: timeout");
-            co_return ChatCompletion{};
-        }
-
-        std::string get_name() const override { return "timeout"; }
-    };
-
-    neograph::llm::Agent agent(
-        std::make_shared<TimeoutProvider>(), std::vector<std::unique_ptr<Tool>>{});
-    std::vector<ChatMessage> messages{{"user", "hello"}};
-
+TEST(ToolDispatchParity, AgentFailureRetainsTypedDeadlineAndPartialHistoryWithoutAnotherTurn) {
+    sp::Failure failure;
+    failure.error.kind = sp::ErrorKind::DeadlineExceeded;
+    failure.error.retry_safety = sp::RetrySafety::OutputObserved;
+    failure.error.safe_message = "fixture deadline exceeded";
+    failure.partial.messages = {test::message("unfinished")};
+    failure.partial.messages.front().parts.emplace_back(sp::Refusal{"policy", "refused"});
+    failure.partial.usage = test::usage(3, std::nullopt, std::nullopt, sp::UsageStage::Partial);
+    const auto expected = std::make_shared<const sp::Outcome>(std::move(failure));
+    auto calls = std::make_shared<int>(0);
+    auto provider = std::make_shared<test::LocalProvider>(
+        [expected, calls](ProviderRequest, const PreparedProviderRequest&,
+                          const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            ++*calls;
+            co_return expected;
+        }, "deadline");
+    neograph::llm::Agent agent(provider, std::vector<std::unique_ptr<Tool>>{}, "", "fixture-model");
+    std::vector<sp::Message> messages{test::message("hello", sp::Role::User)};
     try {
-        (void)agent.run_stream(messages, [](const std::string&) {});
-        FAIL() << "expected tool-detection timeout";
-    } catch (const asio::system_error& error) {
-        EXPECT_EQ(error.code(), asio::error::timed_out);
-        EXPECT_NE(std::string(error.what()).find("tool-detection phase"),
-                  std::string::npos);
+        (void)agent.run_stream(messages, [](const sp::Event&) {});
+        FAIL() << "a typed provider failure must terminate the Agent turn";
+    } catch (const ProviderFailure& error) {
+        EXPECT_EQ(error.outcome(), expected);
     }
+    EXPECT_EQ(*calls, 1);
+    ASSERT_EQ(agent.outcomes().size(), 1u);
+    EXPECT_EQ(agent.outcomes().front(), expected);
+    EXPECT_EQ(std::get<sp::Failure>(*agent.outcomes().front()).error.kind, sp::ErrorKind::DeadlineExceeded);
+    ASSERT_EQ(messages.size(), 2u);
+    EXPECT_EQ(std::get<sp::Text>(messages.back().parts.at(0)).value, "unfinished");
+    EXPECT_EQ(std::get<sp::Refusal>(messages.back().parts.at(1)).raw_code, "refused");
+    ASSERT_TRUE(agent.usage().input_total);
+    EXPECT_EQ(agent.usage().input_total->value, 3u);
+    EXPECT_FALSE(agent.usage().output_total);
 }
 
 // How far does the win actually scale? Twenty distinct legacy tools should

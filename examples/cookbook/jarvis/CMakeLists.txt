@@ -23,7 +23,19 @@ if(NOT TARGET neograph::core)
     set(CMAKE_CXX_STANDARD 20)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     message(STATUS "[jarvis] standalone build — looking for installed neograph package")
-    find_package(neograph REQUIRED)
+    find_package(NeoGraph CONFIG REQUIRED)
+endif()
+
+if(NOT TARGET SchemaProvider::runtime)
+    find_package(SchemaProvider CONFIG REQUIRED)
+endif()
+
+if(TARGET cppdotenv)
+    set(_jarvis_dotenv_target cppdotenv)
+elseif(TARGET neograph::cppdotenv)
+    set(_jarvis_dotenv_target neograph::cppdotenv)
+else()
+    message(FATAL_ERROR "[jarvis] installed neograph package must export cppdotenv")
 endif()
 
 # NeoGraph 필수 타깃 확인 — 없으면 건너뜀
@@ -33,6 +45,7 @@ set(_jarvis_required_targets
     neograph::mcp
     neograph::a2a
     neograph::async
+    SchemaProvider::runtime
 )
 foreach(tgt ${_jarvis_required_targets})
     if(NOT TARGET ${tgt})
@@ -208,10 +221,11 @@ endif()
 target_link_libraries(cookbook_jarvis PRIVATE
     neograph::core
     neograph::llm
+    SchemaProvider::runtime
     neograph::mcp
     neograph::a2a
     neograph::async
-    cppdotenv
+    ${_jarvis_dotenv_target}
 )
 
 # ── specialists (별도 A2A 서버 프로세스들) ──────────────────────────────────
@@ -221,12 +235,12 @@ target_link_libraries(cookbook_jarvis PRIVATE
 add_executable(cookbook_jarvis_specialist_coder
     specialists/coder/server.cpp)
 target_link_libraries(cookbook_jarvis_specialist_coder PRIVATE
-    neograph::core neograph::llm neograph::a2a neograph::async cppdotenv)
+    neograph::core neograph::llm neograph::a2a neograph::async SchemaProvider::runtime ${_jarvis_dotenv_target})
 
 add_executable(cookbook_jarvis_specialist_researcher
     specialists/researcher/server.cpp)
 target_link_libraries(cookbook_jarvis_specialist_researcher PRIVATE
-    neograph::core neograph::llm neograph::a2a neograph::async cppdotenv)
+    neograph::core neograph::llm neograph::a2a neograph::async SchemaProvider::runtime ${_jarvis_dotenv_target})
 
 # ── 설치 (assets 경로 보존) ─────────────────────────────────────────────────
 

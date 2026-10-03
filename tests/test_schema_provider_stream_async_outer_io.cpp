@@ -1,396 +1,228 @@
-// Issue #4 downstream verification — drives `SchemaProvider("openai_responses")`
-// HTTP/SSE through the post-#10 native `complete_stream_async` override
-// from inside an outer `asio::io_context` + `co_spawn`, mirroring the
-// ProjectDatePop demo/cpp_backend handler shape.
-//
-// Pre-#10 this exact path segfaulted (the default bridge ran the sync
-// `complete_stream` inline on the engine's io_context worker, and for
-// the WS branch additionally nested a fresh `run_sync` on top — both
-// modes ended up racing on shared SchemaProvider state).
-//
-// Post-#10:
-//   - HTTP/SSE branch → SchemaProvider's long-lived bridge thread runs
-//     sync `complete_stream`; the awaiting coroutine drains queued tokens.
-//   - WS branch → `complete_stream_ws_responses` co_awaited directly,
-//     no worker thread (separate test:
-//     `test_schema_provider_ws_responses.cpp`).
-//
-// The synthetic `SlowStreamingProvider` test in
-// `test_provider_async_default.cpp` proves the bridge mechanics. This
-// test pins the *real* code path (the actual SchemaProvider machinery
-// with its schema_mutex_, ConnPool, httplib client, SSE_EVENTS parser)
-// against the actual failure shape from the issue: outer asio loop +
-// co_spawn coroutine + co_await complete_stream_async.
-
 #include <gtest/gtest.h>
-
-#include <neograph/llm/schema_provider.h>
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include <httplib.h>
-
-#include <asio/awaitable.hpp>
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
+#include "fixtures/typed_wire_peer.h"
+#include <core/native.h>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
-
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <future>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <utility>
-#include <vector>
+#include <algorithm>
+#include <type_traits>
 
 using namespace neograph;
-
-namespace {
-
-struct ResponsesMock {
-    httplib::Server svr;
-    std::thread     t;
-    int             port = 0;
-
-    explicit ResponsesMock(std::string sse_body) {
-        svr.Post("/v1/responses",
-            [body = std::move(sse_body)]
-            (const httplib::Request&, httplib::Response& res) {
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_content(body, "text/event-stream");
-            });
-        port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-    ~ResponsesMock() { svr.stop(); if (t.joinable()) t.join(); }
-};
-
-struct BlockingResponsesMock {
-    httplib::Server svr;
-    std::thread t;
-    int port = 0;
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool entered = false;
-    bool released = false;
-    bool finished = false;
-
-    explicit BlockingResponsesMock(std::string sse_body) {
-        svr.Post("/v1/responses",
-            [this, body = std::move(sse_body)]
-            (const httplib::Request&, httplib::Response& res) {
-                {
-                    std::unique_lock lock(mutex);
-                    entered = true;
-                    cv.notify_all();
-                    cv.wait(lock, [&] { return released; });
-                }
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_content(body, "text/event-stream");
-                {
-                    std::lock_guard lock(mutex);
-                    finished = true;
-                    cv.notify_all();
-                }
-            });
-        port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-
-    ~BlockingResponsesMock() {
-        {
-            std::lock_guard lock(mutex);
-            released = true;
-        }
-        cv.notify_all();
-        svr.stop();
-        if (t.joinable()) t.join();
-    }
-};
-
-llm::SchemaProvider::Config cfg_for(int port) {
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path       = "openai_responses";
-    cfg.api_key           = "test-key";
-    cfg.default_model     = "gpt-test";
-    cfg.timeout_seconds   = 10;
-    cfg.base_url_override = "http://127.0.0.1:" + std::to_string(port);
-    cfg.allow_insecure_loopback = true;
-    return cfg;
-}
-
-// Korean tokens — pinning the user's actual repro language so any
-// UTF-8 truncation or encoding regression surfaces here.
-constexpr const char* kKoreanFull = "안녕하세요, 반갑습니다";
-constexpr const char* kKoreanChunks[] = {
-    "안녕", "하세요, ", "반갑", "습니다"};
-
-std::string make_korean_sse() {
-    std::string body =
-        "event: response.output_item.added\n"
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,"
-              "\"item\":{\"type\":\"message\",\"id\":\"msg_1\","
-              "\"role\":\"assistant\"}}\n"
-        "\n";
-    for (const auto* chunk : kKoreanChunks) {
-        body += "event: response.output_text.delta\n";
-        body += "data: {\"type\":\"response.output_text.delta\","
-                       "\"item_id\":\"msg_1\",\"delta\":\"";
-        body += chunk;
-        body += "\"}\n\n";
-    }
-    body +=
-        "event: response.output_item.done\n"
-        "data: {\"type\":\"response.output_item.done\",\"output_index\":0}\n"
-        "\n"
-        "event: response.completed\n"
-        "data: {\"type\":\"response.completed\","
-              "\"response\":{\"id\":\"resp_1\","
-              "\"usage\":{\"input_tokens\":5,\"output_tokens\":10,"
-                         "\"total_tokens\":15}}}\n"
-        "\n";
-    return body;
-}
-
-CompletionParams params_with(std::string user_msg) {
-    CompletionParams p;
-    p.model = "gpt-test";
-    ChatMessage u; u.role = "user"; u.content = std::move(user_msg);
-    p.messages.push_back(u);
-    return p;
-}
-
-} // namespace
-
-// ---------------------------------------------------------------------------
-// Issue #4 downstream verification — single outer-coroutine repro.
-// ---------------------------------------------------------------------------
+namespace wire = neograph::test::wire;
+using namespace std::chrono_literals;
 
 TEST(SchemaProviderStreamAsyncOuterIo, KoreanResponseStreamsViaOuterCoSpawn) {
-    ResponsesMock mock{make_korean_sse()};
-    ASSERT_GT(mock.port, 0);
-
-    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
-    ASSERT_TRUE(provider);
-
+    const std::string expected = "서울의 날씨를 확인했습니다.";
+    wire::Peer peer(wire::responses_sse(expected), true);
+    auto provider = wire::provider("openai.responses", peer.origin());
+    struct Capture { std::string text; std::thread::id executor; bool wrong_executor = false; };
+    auto capture = std::make_shared<Capture>(); capture->executor = std::this_thread::get_id();
+    auto request = wire::request("openai.responses", ProviderMode::Stream);
+    request.on_event = [owned = capture](const sp::Event& event) {
+        owned->wrong_executor |= std::this_thread::get_id() != owned->executor;
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event); delta && delta->payload.kind == sp::PartKind::Text)
+            owned->text.append(delta->payload.bytes);
+    };
     asio::io_context io;
-    std::vector<std::string> chunks;
-    std::mutex chunks_mu;
-    std::string final_content;
-    std::exception_ptr caught;
-    auto io_thread = std::this_thread::get_id();
-    std::atomic<bool> chunk_off_io_thread{false};
-
-    asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            try {
-                auto p = params_with("ping");
-                auto r = co_await provider->complete_stream_async(
-                    p,
-                    [&](const std::string& tok) {
-                        // Same invariant the post-#10 fix guarantees:
-                        // on_chunk runs on the awaiter's executor —
-                        // here, io_thread. Anything else is a regression.
-                        if (std::this_thread::get_id() != io_thread) {
-                            chunk_off_io_thread.store(true);
-                        }
-                        std::lock_guard<std::mutex> lock(chunks_mu);
-                        chunks.push_back(tok);
-                    });
-                final_content = r.message.content;
-            } catch (...) {
-                caught = std::current_exception();
-            }
-        },
-        asio::detached);
-
+    auto result = asio::co_spawn(io, provider->invoke_async(std::move(request)), asio::use_future);
     io.run();
-
-    ASSERT_FALSE(caught) << "co_await complete_stream_async threw";
-    EXPECT_FALSE(chunk_off_io_thread.load())
-        << "on_chunk fired off the awaiter's io_thread — bridge regressed";
-    EXPECT_EQ(final_content, kKoreanFull);
-    ASSERT_EQ(chunks.size(), std::size(kKoreanChunks));
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        EXPECT_EQ(chunks[i], kKoreanChunks[i])
-            << "chunk #" << i << " content mismatch";
-    }
+    const auto outcome = result.get();
+    ASSERT_TRUE(std::holds_alternative<sp::Completion>(*outcome));
+    EXPECT_EQ(test::text(outcome), expected); EXPECT_EQ(capture->text, expected);
+    EXPECT_FALSE(capture->wrong_executor);
 }
 
-TEST(SchemaProviderStreamAsyncOuterIo, OuterIoStaysResponsiveDuringStream) {
-    // Companion to KoreanResponseStreamsViaOuterCoSpawn: the outer
-    // io_context worker MUST NOT be blocked for the duration of the
-    // stream. Verifies the post-#10 worker-thread bridge by running a
-    // concurrent ticker coroutine that wakes every 5 ms while the
-    // streaming complete_stream_async is in flight.
-    ResponsesMock mock{make_korean_sse()};
-    ASSERT_GT(mock.port, 0);
-
-    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
-    ASSERT_TRUE(provider);
-
+TEST(SchemaProviderStreamAsyncOuterIo, OuterIoStaysResponsiveWhilePeerHoldsResponse) {
+    wire::Peer peer(wire::responses_sse(), true); peer.state->hold = true;
+    auto provider = wire::provider("openai.responses", peer.origin());
     asio::io_context io;
-    std::atomic<int> ticker{0};
-    std::atomic<bool> stream_done{false};
-
-    // Ticker coroutine: every 5ms increment a counter until the stream
-    // coroutine signals done. Pre-#10 this would stall while the
-    // engine's io_context worker thread was blocked inside the inline
-    // sync httplib loop.
-    asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            while (!stream_done.load()) {
-                asio::steady_timer t(co_await asio::this_coro::executor);
-                t.expires_after(std::chrono::milliseconds(5));
-                co_await t.async_wait(asio::use_awaitable);
-                ++ticker;
-            }
-        },
-        asio::detached);
-
-    asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            auto p = params_with("ping");
-            (void)co_await provider->complete_stream_async(
-                p, [](const std::string&) {});
-            stream_done.store(true);
-        },
-        asio::detached);
-
+    auto result = asio::co_spawn(io, provider->invoke_async(wire::request("openai.responses", ProviderMode::Stream)), asio::use_future);
+    auto ticks = std::make_shared<std::atomic<int>>(0);
+    asio::steady_timer timer(io, 20ms);
+    timer.async_wait([owned = ticks, state = peer.state](const asio::error_code& ec) {
+        if (ec) return;
+        ++*owned;
+        std::lock_guard lock(state->mutex); state->released = true; state->cv.notify_all();
+    });
     io.run();
-
-    EXPECT_TRUE(stream_done.load());
-    // The streaming HTTP roundtrip + SSE parse takes some ms (httplib
-    // localhost roundtrip is typically a few ms, plus the worker
-    // thread-spawn overhead). Even on a fast machine the ticker
-    // should land at least a few times. Pre-#10 ticker would be 0.
-    EXPECT_GT(ticker.load(), 0)
-        << "outer io_context worker stayed blocked through the stream";
+    EXPECT_EQ(ticks->load(), 1);
+    EXPECT_EQ(test::text(result.get()), "pong");
 }
 
-TEST(SchemaProviderStreamAsyncOuterIo, ConcurrentOuterCoroutinesDoNotRace) {
-    // Reinforces #6 Gap 2: concurrent complete_stream_async calls on
-    // ONE provider must not race on schema_mutex_-protected state nor
-    // crash. Pre-#4 fix this combined with the outer io_context to
-    // produce the segfault. Now: each call gets its own worker thread,
-    // each on_chunk dispatches back to the awaiter's executor (single
-    // shared io_context), and the per-call parse state stays local.
-    ResponsesMock mock{make_korean_sse()};
-    ASSERT_GT(mock.port, 0);
-
-    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
-    ASSERT_TRUE(provider);
-
+TEST(SchemaProviderStreamAsyncOuterIo, ConcurrentOuterCoroutinesOwnSeparateResults) {
+    wire::Peer peer(wire::responses_sse("동시 응답"), true);
+    auto provider = wire::provider("openai.responses", peer.origin());
     asio::io_context io;
-    constexpr int kCallers = 6;
-    std::atomic<int> succeeded{0};
-    std::vector<std::string> finals(kCallers);
-
-    for (int i = 0; i < kCallers; ++i) {
-        asio::co_spawn(
-            io,
-            [&, i]() -> asio::awaitable<void> {
-                auto p = params_with("ping " + std::to_string(i));
-                auto r = co_await provider->complete_stream_async(
-                    p, [](const std::string&) {});
-                finals[i] = r.message.content;
-                ++succeeded;
-            },
-            asio::detached);
-    }
-
+    std::vector<std::future<sp::runtime::Result>> results;
+    for (int i = 0; i < 6; ++i) results.push_back(asio::co_spawn(io,
+        provider->invoke_async(wire::request("openai.responses", ProviderMode::Stream, "caller " + std::to_string(i))), asio::use_future));
     io.run();
-
-    EXPECT_EQ(succeeded.load(), kCallers);
-    for (int i = 0; i < kCallers; ++i) {
-        EXPECT_EQ(finals[i], kKoreanFull) << "caller " << i;
+    std::vector<sp::runtime::Result> owned;
+    for (auto& result : results) {
+        owned.push_back(result.get());
+        ASSERT_TRUE(owned.back());
+        ASSERT_TRUE(std::holds_alternative<sp::Completion>(*owned.back()));
+        EXPECT_EQ(test::text(owned.back()), "동시 응답");
+        const auto& usage = test::completion(owned.back()).usage;
+        ASSERT_TRUE(usage.input_total); ASSERT_TRUE(usage.output_total);
+        ASSERT_TRUE(usage.total); ASSERT_TRUE(usage.provider_reported_total);
+        EXPECT_EQ(usage.input_total->value, 3u);
+        EXPECT_EQ(usage.output_total->value, 2u);
+        EXPECT_EQ(usage.total->value, 5u);
+        EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
+        EXPECT_EQ(usage.provider_reported_total->value, 5u);
+        EXPECT_EQ(usage.provider_reported_total->evidence, sp::Evidence::Reported);
+        EXPECT_EQ(usage.stage, sp::UsageStage::Final);
+        EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
     }
+    for (std::size_t i = 1; i < owned.size(); ++i) EXPECT_NE(owned[i], owned[i - 1]);
+    EXPECT_EQ(peer.state->entered, 6u);
 }
 
-// Issue #127: destroying the outer io_context must abandon callback delivery
-// without waiting for a blocked synchronous HTTP/SSE request. SchemaProvider
-// itself remains alive until its owned bridge thread finishes.
-TEST(SchemaProviderStreamAsyncOuterIo,
-     AbandonedHttpStreamNeverTouchesDestroyedIoContext) {
-    BlockingResponsesMock mock{make_korean_sse()};
-    ASSERT_GT(mock.port, 0);
-
-    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
-    ASSERT_TRUE(provider);
-    std::atomic<int> callbacks{0};
+TEST(SchemaProviderStreamAsyncOuterIo, AbandonedHttpStreamNeverTouchesDestroyedIoContext) {
+    wire::Peer peer(wire::responses_sse(), true); peer.state->hold = true;
+    auto provider = wire::provider("openai.responses", peer.origin());
+    auto callbacks = std::make_shared<std::atomic<int>>(0);
+    auto request = wire::request("openai.responses", ProviderMode::Stream);
+    request.on_event = [owned = callbacks](const sp::Event&) { ++*owned; };
     auto io = std::make_unique<asio::io_context>();
+    auto result = asio::co_spawn(*io, provider->invoke_async(std::move(request)), asio::use_future);
+    std::thread runner([context = io.get()] { context->run(); });
+    const bool entered = peer.await_requests(1);
+    io->stop(); runner.join();
+    const auto begin = std::chrono::steady_clock::now();
+    io.reset();
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, 1s);
+    peer.release(); provider.reset();
+    ASSERT_TRUE(entered);
+    EXPECT_EQ(callbacks->load(), 0);
+}
 
-    asio::co_spawn(
-        *io,
-        [&]() -> asio::awaitable<void> {
-            auto p = params_with("ping");
-            (void)co_await provider->complete_stream_async(
-                p, [&](const std::string&) { ++callbacks; });
-        },
-        asio::detached);
-
-    std::thread runner([&] { io->run(); });
-    bool entered = false;
+TEST(SchemaProviderStreamAsyncOuterIo, StalledConsumerOverflowRetainsDrainedOwnedOutcome) {
+    sp::runtime::Result retained;
+    auto callbacks = std::make_shared<std::atomic<int>>(0);
+    bool overflow_observed = false;
     {
-        std::unique_lock lock(mock.mutex);
-        entered = mock.cv.wait_for(
-            lock, std::chrono::seconds(2), [&] { return mock.entered; });
-    }
-    if (!entered) {
-        {
-            std::lock_guard lock(mock.mutex);
-            mock.released = true;
+        auto final = json::parse(wire::responses_body("owned overflow text"));
+        const json image = {{"type", "image_generation_call"}, {"id", "overflow-image"},
+            {"status", "completed"}, {"result", "UE5H"}, {"output_format", "png"}};
+        const auto text_item = final.at("output").at(0);
+        final["output"] = json::array({image, text_item});
+        final["usage"] = {{"input_tokens", 0}};
+        auto initial = final; initial["output"] = json::array(); initial["status"] = "in_progress";
+        auto frame = [](std::string type, json body) {
+            body["type"] = type;
+            return "event: " + type + "\ndata: " + body.dump() + "\n\n";
+        };
+        const auto batch = frame("response.created", {{"response", initial}})
+            + frame("response.output_item.added", {{"output_index", 0}, {"item", image}})
+            + frame("response.output_item.done", {{"output_index", 0}, {"item", image}})
+            + frame("response.output_item.added", {{"output_index", 1}, {"item", {
+                {"id", "msg-fixture"}, {"type", "message"}, {"role", "assistant"},
+                {"status", "in_progress"}, {"content", json::array()}}}})
+            + frame("response.content_part.added", {{"output_index", 1}, {"item_id", "msg-fixture"},
+                {"content_index", 0}, {"part", {{"type", "output_text"}, {"text", ""}, {"annotations", json::array()}}}})
+            + frame("response.output_text.delta", {{"output_index", 1}, {"item_id", "msg-fixture"},
+                {"content_index", 0}, {"delta", "owned overflow text"}})
+            + frame("response.output_text.done", {{"output_index", 1}, {"item_id", "msg-fixture"},
+                {"content_index", 0}, {"text", "owned overflow text"}})
+            + frame("response.output_item.done", {{"output_index", 1}, {"item", text_item}})
+            + frame("response.completed", {{"response", final}});
+        wire::Peer peer(batch, true);
+        peer.state->hold = true;
+        sp::runtime::Options options;
+        options.default_timeout = 5s;
+        options.workers = 1;
+        options.retry_tokens = 0;
+        options.retry_tokens_per_second = 0;
+        options.limits.max_operations = 1;
+        options.limits.queued_body_chunks = 17;
+        options.limits.queued_body_bytes = 64 * 1024;
+        auto client = std::make_shared<sp::runtime::Client>(test::descriptor("openai.responses", peer.origin()), options);
+        auto provider = std::make_unique<wire::RuntimeProvider>(client, "openai.responses");
+        auto request = wire::request("openai.responses", ProviderMode::Stream);
+        request.observer_limits.max_events = 17;
+        request.on_event = [owned = callbacks](const sp::Event&) { ++*owned; };
+        asio::io_context io;
+        auto result = asio::co_spawn(io, provider->invoke_async(std::move(request)), asio::use_future);
+        io.poll();
+        const bool entered = peer.await_requests(1);
+        peer.release();
+        ASSERT_TRUE(entered);
+
+        // No outer handlers run here. SDK deliver() calls on_outcome before
+        // releasing admission, so reclaiming its sole slot fences the actual
+        // producer callback rather than merely fencing peer socket writes.
+        bool producer_finished = false;
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (!producer_finished && std::chrono::steady_clock::now() < deadline) {
+            try {
+                auto probe = client->prepare(wire::request("openai.responses").payload);
+                producer_finished = probe.valid();
+            } catch (const sp::runtime::AdmissionError& error) {
+                EXPECT_EQ(std::get<sp::Failure>(*error.outcome()).error.kind, sp::ErrorKind::ResourceLimit);
+            }
+            if (!producer_finished) std::this_thread::sleep_for(1ms);
         }
-        mock.cv.notify_all();
-        io->stop();
-        runner.join();
+        EXPECT_TRUE(producer_finished);
+        EXPECT_EQ(callbacks->load(), 0);
         provider.reset();
-        ADD_FAILURE() << "HTTP stream did not reach the mock server";
-        return;
+        io.restart();
+        io.run();
+        try {
+            retained = result.get();
+            ADD_FAILURE() << "discarded provider events must not return success";
+        } catch (const ProviderObserverError& error) {
+            overflow_observed = true;
+            EXPECT_EQ(error.error_kind(), sp::ErrorKind::ResourceLimit);
+            retained = error.outcome();
+        }
     }
-
-    io->stop();
-    runner.join();
-
-    auto destroyed = std::async(std::launch::async, [&] { io.reset(); });
-    EXPECT_EQ(destroyed.wait_for(std::chrono::seconds(1)),
-              std::future_status::ready)
-        << "io_context destruction waited for a blocking HTTP stream";
-
-    {
-        std::lock_guard lock(mock.mutex);
-        mock.released = true;
+    ASSERT_TRUE(overflow_observed);
+    ASSERT_TRUE(retained);
+    const auto& messages = outcome_messages(*retained);
+    const auto& usage = outcome_usage(*retained);
+    ASSERT_EQ(messages.size(), 1u);
+    ASSERT_EQ(messages[0].parts.size(), 2u);
+    const auto& image = std::get<sp::Opaque>(messages[0].parts[0]);
+    ASSERT_TRUE(image.wire_metadata);
+    EXPECT_EQ(image.wire_type, "image_generation_call");
+    EXPECT_EQ(image.wire_metadata->root().get("result").as_string(), "UE5H");
+    EXPECT_EQ(std::get<sp::Text>(messages[0].parts[1]).value, "owned overflow text");
+    ASSERT_TRUE(usage.input_total);
+    EXPECT_EQ(usage.input_total->value, 0u);
+    EXPECT_EQ(usage.input_total->evidence, sp::Evidence::Reported);
+    EXPECT_FALSE(usage.output_total);
+    EXPECT_FALSE(usage.total);
+    EXPECT_FALSE(usage.provider_reported_total);
+    EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
+    const auto& raw = std::visit([](const auto& outcome) -> const std::vector<sp::RawWire>& {
+        using T = std::decay_t<decltype(outcome)>;
+        if constexpr (std::is_same_v<T, sp::Completion>) return outcome.raw_events;
+        else return outcome.partial.raw_events;
+    }, *retained);
+    ASSERT_FALSE(raw.empty());
+    EXPECT_EQ(raw.front().type, "response.created");
+    ASSERT_TRUE(raw.front().payload);
+    EXPECT_EQ(raw.front().payload->root().get("response").get("id").as_string(), "response-fixture");
+    const auto image_event = std::find_if(raw.begin(), raw.end(), [](const sp::RawWire& event) {
+        return event.type == "response.output_item.added" && event.payload
+            && event.payload->root().get("item").get("id").as_string() == "overflow-image";
+    });
+    ASSERT_NE(image_event, raw.end());
+    EXPECT_EQ(image_event->payload->root().get("item").get("result").as_string(), "UE5H");
+    if (const auto* failure = std::get_if<sp::Failure>(retained.get())) {
+        EXPECT_EQ(failure->error.kind, sp::ErrorKind::Cancelled);
+        EXPECT_EQ(usage.stage, sp::UsageStage::Partial);
+        EXPECT_TRUE(failure->error.attempt.request_may_have_left);
+        EXPECT_FALSE(messages[0].native && messages[0].native->complete());
+        ASSERT_TRUE(failure->partial.wire_envelope);
+        EXPECT_EQ(failure->partial.wire_envelope->root().get("id").as_string(), "response-fixture");
+    } else {
+        EXPECT_EQ(usage.stage, sp::UsageStage::Final);
+        EXPECT_EQ(raw.back().type, "response.completed");
+        ASSERT_TRUE(messages[0].native);
+        EXPECT_TRUE(messages[0].native->complete());
+        ASSERT_TRUE(std::get<sp::Completion>(*retained).wire_envelope);
     }
-    mock.cv.notify_all();
-    bool finished = false;
-    {
-        std::unique_lock lock(mock.mutex);
-        finished = mock.cv.wait_for(
-            lock, std::chrono::seconds(2), [&] { return mock.finished; });
-    }
-    if (!finished) {
-        mock.svr.stop();
-        provider.reset();
-        ADD_FAILURE() << "HTTP stream did not finish after release";
-        return;
-    }
-
-    // Joining SchemaProvider's owned bridge thread proves all late stream work
-    // has ended before checking that no abandoned callback was delivered.
-    provider.reset();
-    EXPECT_EQ(callbacks.load(), 0);
 }

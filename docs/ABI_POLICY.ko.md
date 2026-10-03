@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=d2a0d445bf112968279a8efd4c21953f01b3dae5bb9a5b026a821b04e12a99e9 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=eadbd5019a617097b40042dc1f99f69e4ef46d890f562c028484e003fa10f5ce -->
 # 바이너리 호환성 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -6,6 +6,7 @@
 이 정책은 설치된 NeoGraph 정적·공유 라이브러리를 사용하는 C++ 프로그램에
 적용됩니다. Python wheel은 확장 모듈과 맞는 라이브러리를 한 묶음으로
 배포하므로, wheel 안의 라이브러리만 따로 교체하면 안 됩니다.
+typed provider 전환은 필수 재컴파일 경계이며 과거 영구 호환 계획을 대체한다. NeoGraph의 pre-v1 loader 이름은 유지되지만 예전 provider 객체 호환을 뜻하지 않는다. NeoGraph와 SchemaProvider SDK의 일치하는 헤더/라이브러리를 함께 설치한다. SDK interface revision 3과 `libsp_*.so.3`은 out-of-line capability gate가 있는 별도 shared ABI다. 불안정 패키지 `0.0.0`은 안정 릴리스가 아니다. 현재 SDK runtime/archive는 Linux/POSIX를 요구한다. 아래 Windows/macOS 이름 예시는 패키징 정책이지 새 의존성 runtime 증거가 아니다. Python provider binding/wrapper는 유예되어 미포팅 상태다.
 
 ## 버전 규칙
 
@@ -60,9 +61,9 @@ v1 이전 공유 라이브러리를 새 파일로 덮어쓰기 전에 대상 릴
 
 - `GraphNode`의 정식 실행 가상 함수는 `run(NodeInput)` 하나입니다.
   `SyncGraphNode`는 별도로 더한 보조 클래스입니다.
-- `Provider`는 영구 호환성 결정에 따라 기존 vtable을 유지합니다. 새 구현은
-  `CompletionProvider`를 상속하는 방식을 권장하며, 이 이전은 기존
-  `Provider` 객체 배치를 바꾸지 않습니다.
+- `Provider`: `get_name()`, `family()`, `prepare(ProviderRequest)`;
+  `invoke(_async)` / `dispatch(_async)` → `sp::runtime::Result`.
+  소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 불안정 `0.0.0`, interface revision 3 / shared ABI 3이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 현재 runtime/archive는 Linux/POSIX이며 Windows·macOS·WASM runtime 검증을 뜻하지 않는다. Python provider binding/wrapper는 유예되었고 이 C++ 변경으로 포팅되지 않는다.
 - 앞으로 진행할 `CheckpointStore` 비동기 이전도 이 정책을 따라야 합니다.
   v1 전에는 vtable 변경 시 재빌드 경계를 공지해야 하고, v1 뒤에는 안정된
   `CheckpointStore` 배치를 바꾸는 대신 별도 기능 인터페이스와 어댑터를
@@ -70,8 +71,4 @@ v1 이전 공유 라이브러리를 새 파일로 덮어쓰기 전에 대상 릴
 
 ## 검증
 
-`scripts/test_find_package.sh`는 격리된 설치 경로만 보는 사용자 프로그램을
-빌드하고 실행합니다. `--shared` 모드는 설치된 모든 NeoGraph 라이브러리의
-버전 링크와 ELF SONAME 또는 Mach-O install name도 확인합니다. CI는 정적·공유
-설치 소비 검사를 모두 실행하며, Linux와 macOS 공유 빌드에서 로더 정보를
-검사합니다.
+`scripts/test_find_package.sh`는 installed-consumer 검사 절차이며 파일 존재만으로 현재 통과를 주장하지 않는다. 현재 SDK ABI3 전체 재빌드/CTest는 26/26 통과했고 shared 설치 소비자는 실제 local HTTP 두 turn typed 요청, tool/native/refusal/known-zero 결과와 mismatch 거부를 실행했다. 이는 NeoGraph·Python·Windows·macOS·WASM·유료 live-provider 호환 검증이 아니다. NeoGraph 통합 검증은 별도로 보고한다.

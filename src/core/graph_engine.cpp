@@ -2,6 +2,8 @@
 #include <neograph/graph/node.h>
 
 #include "run_context_runtime.h"
+#include "canonical_json.h"
+#include "managed_budget_journal.h"
 #include <neograph/graph/loader.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/coordinator.h>
@@ -16,6 +18,7 @@
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
+#include <asio/cancellation_state.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <stdexcept>
@@ -105,6 +108,66 @@ void report_validation(const ValidationReport& report, int schema_version) {
 json checkpoint_ephemeral_guard(const json& metadata) {
     return metadata.is_object() && metadata.contains("_neograph_ephemeral_guard")
                ? metadata["_neograph_ephemeral_guard"] : json();
+}
+
+bool checkpoint_has_managed_bank(const json& state) {
+    return state.is_object() && state.contains("provider_managed_budget");
+}
+[[noreturn]] void reject_missing_original_managed_bank() {
+    throw std::invalid_argument("Checkpoint namespace requires original authenticated managed-bank custody");
+}
+
+ManagedBudgetLeaseScope original_managed_budget_scope(
+    const Checkpoint* source, std::uint64_t original_ceiling, std::string_view owner,
+    const std::string& thread, const std::string& graph,
+    std::optional<std::chrono::steady_clock::time_point>& deadline) {
+    ManagedBudgetLeaseScope scope;
+    scope.owner_scope = owner;
+    scope.thread_id = thread;
+    scope.graph_identity = graph;
+    scope.original_ceiling = original_ceiling;
+    if (!source) {
+        if (deadline) {
+            scope.original_deadline_ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline->time_since_epoch()).count();
+            scope.deadline_clock_identity = detail::managed_budget_deadline_clock_identity();
+        }
+        return scope;
+    }
+    if (!source->metadata.is_object() || !source->metadata.contains("_neograph_managed_budget_scope"))
+        throw std::invalid_argument("Managed checkpoint lacks its original journal scope");
+    const auto& data = source->metadata.at("_neograph_managed_budget_scope");
+    if (!data.is_object() || data.size() != 8 ||
+        data.at("schema") != "neograph.graph-managed-bank-scope/v1" ||
+        data.at("owner_scope") != owner || data.at("thread_id") != thread ||
+        data.at("graph_identity") != graph || data.at("original_ceiling").get<std::uint64_t>() != original_ceiling ||
+        !data.at("bank_generation").is_string() || data.at("bank_generation").get<std::string>().size() != 64)
+        throw std::invalid_argument("Managed checkpoint original scope differs from authenticated bank");
+    scope.deadline_clock_identity = data.at("deadline_clock_identity").get<std::string>();
+    if (!data.at("original_deadline_ticks").is_null()) {
+        scope.original_deadline_ticks = data.at("original_deadline_ticks").get<std::int64_t>();
+        if (*scope.original_deadline_ticks < 0 ||
+            scope.deadline_clock_identity != detail::managed_budget_deadline_clock_identity())
+            throw std::invalid_argument("Managed checkpoint original deadline clock is unavailable");
+        const auto original_deadline = std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(*scope.original_deadline_ticks)));
+        if (!deadline || original_deadline < *deadline) deadline = original_deadline;
+    } else if (!scope.deadline_clock_identity.empty()) {
+        throw std::invalid_argument("Managed checkpoint has a clock without an original deadline");
+    }
+    return scope;
+}
+
+sp::runtime::Result exception_provider_outcome(const std::exception_ptr& error) {
+    if (!error) return {};
+    try { std::rethrow_exception(error); }
+    catch (const ProviderOutcomeError& failure) {
+        return failure.outcome() ? failure.outcome() : exception_provider_outcome(failure.cause());
+    }
+    catch (const ProviderFailure& failure) { return failure.outcome(); }
+    catch (const NodeExecutionError& failure) { return exception_provider_outcome(failure.cause()); }
+    catch (...) { return {}; }
 }
 
 } // namespace
@@ -267,6 +330,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     }
 
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
+    engine->budget_graph_identity_ = neograph::detail::sha256_identity(
+        "NeoGraph", "graph-managed-budget/v1", neograph::detail::canonical_json_bytes(cg.to_json()));
     engine->name_              = std::move(cg.name);
     engine->channel_defs_      = std::move(cg.channel_defs);
     engine->nodes_             = std::move(cg.nodes);
@@ -292,6 +357,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->tool_gate_           = std::move(config.tool_gate);
     engine->tool_execution_controller_ = std::move(config.tool_execution_controller);
     engine->hook_runtime_        = std::move(config.hook_runtime);
+    engine->native_history_archive_ = std::move(config.native_history_archive);
     engine->tools_               = cg.tools.empty() ? std::move(resources.tools)
                                                    : std::move(cg.tools);
     engine->node_cache_.set_max_entries(config.node_cache_max_entries);
@@ -370,6 +436,11 @@ const GraphGenerationIdentity* GraphEngine::bound_generation_identity() const no
         if (carrier) return &carrier->identity;
     }
     return nullptr;
+}
+
+std::string GraphEngine::managed_budget_graph_identity() const {
+    const auto* generation = bound_generation_identity();
+    return generation ? budget_graph_identity_ + ":" + generation->core_generation_id : budget_graph_identity_;
 }
 
 void GraphEngine::set_checkpoint_store(std::shared_ptr<CheckpointStore> store) {
@@ -628,10 +699,36 @@ void GraphEngine::update_state_writes(
     if (!cp_opt)
         throw std::runtime_error("No checkpoint found for thread: " + thread_id);
     auto& cp = *cp_opt;
+    if (!checkpoint_has_managed_bank(cp.channel_values) &&
+        checkpoint_store_->requires_managed_budget(thread_id))
+        reject_missing_original_managed_bank();
 
     GraphState state;
     init_state(state);
-    state.restore_checkpoint(cp.channel_values, checkpoint_ephemeral_guard(cp.metadata));
+    state.defer_budget_authority_restore();
+    state.restore_checkpoint(cp.channel_values, checkpoint_ephemeral_guard(cp.metadata), cp.native_history);
+    state.validate_budget_context(managed_budget_graph_identity(), thread_id);
+    std::shared_ptr<OwnedManagedBudgetLease> lease;
+    if (state.budget_original_ceiling() != 0) {
+        const auto& bank_data = cp.channel_values.at("provider_managed_budget").at("data");
+        const auto owner = bank_data.at("owner_scope").get<std::string>();
+        if (native_history_archive_ && native_history_archive_->owner_scope() != owner)
+            throw std::invalid_argument("Managed archive differs from the original bank owner scope");
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+        auto scope = original_managed_budget_scope(&cp, state.budget_original_ceiling(),
+            owner, state.budget_original_thread_id(), managed_budget_graph_identity(), deadline);
+        lease = checkpoint_store_->acquire_managed_budget_lease(scope, cp.id, managed_budget_checkpoint_commitment(cp));
+        if (!lease) throw std::invalid_argument("Checkpoint backend returned no owned budget lease");
+    }
+    std::exception_ptr update_error;
+    try {
+    if (lease) {
+        if (lease->bank_generation() != cp.metadata.at("_neograph_managed_budget_scope").at("bank_generation").get<std::string>())
+            throw std::invalid_argument("Managed checkpoint generation differs from its original journal");
+        if (native_history_archive_)
+            detail::ManagedBudgetJournalAccess::bind_native_archive(lease, native_history_archive_);
+    }
+    state.activate_budget_authority();
 
     state.apply_writes(channel_writes);
     const auto ephemeral_guard = state.ephemeral_checkpoint_guard();
@@ -646,7 +743,13 @@ void GraphEngine::update_state_writes(
     Checkpoint new_cp;
     new_cp.id              = Checkpoint::generate_id();
     new_cp.thread_id       = thread_id;
-    new_cp.channel_values  = state.serialize();
+    if (lease ? detail::ManagedBudgetJournalAccess::retains_native_checkpoint(lease)
+              : checkpoint_store_->retains_native_checkpoint()) {
+        auto snapshot = state.checkpoint_snapshot();
+        new_cp.channel_values = std::move(snapshot.first);
+        new_cp.native_history = std::move(snapshot.second);
+    } else new_cp.channel_values = state.serialize();
+    new_cp.native_subgraph_writes = cp.native_subgraph_writes;
     new_cp.metadata        = cp.metadata;
     new_cp.metadata["_neograph"]["admin_resume_phase"] = to_string(
         as_node.empty() ? detail::checkpoint_resume_phase(cp) : CheckpointPhase::Updated);
@@ -670,7 +773,20 @@ void GraphEngine::update_state_writes(
     // would leave durable stores unable to identify the newer checkpoint.
     new_cp.timestamp       = std::max(now, cp.timestamp + 1);
 
-    checkpoint_store_->save(new_cp);
+    if (lease) checkpoint_store_->publish_managed_budget_checkpoint(lease, new_cp);
+    else checkpoint_store_->save(new_cp);
+    } catch (...) {
+        update_error = std::current_exception();
+    }
+    if (lease) {
+        try { checkpoint_store_->release_managed_budget_lease(lease); }
+        catch (...) {
+            auto outcomes = state.provider_outcomes();
+            throw ManagedBudgetLeaseReleaseError(outcomes.empty() ? sp::runtime::Result{} : outcomes.back(),
+                update_error, std::current_exception());
+        }
+    }
+    if (update_error) std::rethrow_exception(update_error);
 }
 
 std::string GraphEngine::fork(const std::string& source_thread_id,
@@ -693,11 +809,26 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
             "Checkpoint does not belong to fork source thread: " +
             source_thread_id);
     }
+    if (!checkpoint_has_managed_bank(cp_opt->channel_values) &&
+        checkpoint_store_->requires_managed_budget(source_thread_id))
+        reject_missing_original_managed_bank();
 
+    GraphState fork_state;
+    init_state(fork_state);
+    fork_state.defer_budget_authority_restore();
+    fork_state.restore_checkpoint(cp_opt->channel_values, checkpoint_ephemeral_guard(cp_opt->metadata), cp_opt->native_history);
+    fork_state.validate_budget_context(managed_budget_graph_identity(), source_thread_id);
+    fork_state.rebind_fork_budget_thread(new_thread_id, bool(cp_opt->native_history));
+    fork_state.activate_budget_authority();
     Checkpoint forked;
     forked.id              = Checkpoint::generate_id();
     forked.thread_id       = new_thread_id;
-    forked.channel_values  = cp_opt->channel_values;
+    if (checkpoint_store_->retains_native_checkpoint()) {
+        auto snapshot = fork_state.checkpoint_snapshot();
+        forked.channel_values = std::move(snapshot.first);
+        forked.native_history = std::move(snapshot.second);
+    } else forked.channel_values = fork_state.serialize();
+    forked.native_subgraph_writes = cp_opt->native_subgraph_writes;
     forked.channel_versions = cp_opt->channel_versions;
     forked.parent_id       = cp_opt->id;
     forked.current_node    = cp_opt->current_node;
@@ -715,7 +846,9 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     forked.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    checkpoint_store_->save(forked);
+    if (fork_state.budget_managed() && fork_state.budget_original_ceiling() != 0)
+        checkpoint_store_->publish_managed_budget_fork(*cp_opt, forked);
+    else checkpoint_store_->save(forked);
     return forked.id;
 }
 
@@ -725,6 +858,7 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
 
 void GraphEngine::init_state(GraphState& state) const {
     executor_->init_state(state);
+    state.set_native_history_archive(native_history_archive_);
 }
 
 void GraphEngine::apply_input(GraphState& state, const json& input) const {
@@ -1183,7 +1317,8 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
                         config.cancel_token, hook_deadline_for(metadata.deadline)};
     }
     CheckpointCoordinator coordinator(checkpoint_store, config.thread_id, hook_runtime_,
-                                      std::move(hook_context));
+                                      std::move(hook_context),
+                                      config.native_history_archive ? config.native_history_archive : native_history_archive_);
     ResumeContext resume_context;
     if (checkpoint_id) {
         resume_context =
@@ -1202,12 +1337,38 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
 
     if (resume_context.next_nodes.size() == 1 &&
         resume_context.next_nodes[0] == std::string(END_NODE)) {
+        if (!checkpoint_has_managed_bank(resume_context.channel_values) &&
+            co_await checkpoint_store->requires_managed_budget_async(config.thread_id))
+            reject_missing_original_managed_bank();
         GraphState completed_state;
         init_state(completed_state);
+        if (config.native_history_archive) completed_state.set_native_history_archive(config.native_history_archive);
+        const auto archive = config.native_history_archive ? config.native_history_archive : native_history_archive_;
+        const bool finite_standalone = config.model_token_budget != 0 && !config.usage && !resources.provider_call_broker;
+        const std::string_view budget_owner = metadata.owner_scope.empty() && archive && finite_standalone
+            ? archive->owner_scope() : std::string_view(metadata.owner_scope);
+        auto bank = config.usage ? config.usage : std::make_shared<UsageAccumulator>();
+        completed_state.configure_budget_bank(bank, config.model_token_budget,
+            !config.usage && !resources.provider_call_broker, std::string(budget_owner), config.thread_id,
+            managed_budget_graph_identity());
+        completed_state.defer_budget_authority_restore();
         completed_state.restore_checkpoint(
-            resume_context.channel_values, checkpoint_ephemeral_guard(resume_context.metadata));
+            resume_context.channel_values, checkpoint_ephemeral_guard(resume_context.metadata), resume_context.native_history);
+        if (checkpoint_has_managed_bank(resume_context.channel_values) &&
+            completed_state.budget_original_ceiling() != 0) {
+            auto deadline = metadata.deadline;
+            const std::string_view original_owner = metadata.owner_scope.empty() && archive
+                ? archive->owner_scope() : std::string_view(metadata.owner_scope);
+            (void)original_managed_budget_scope(resume_context.managed_budget_source.get(),
+                completed_state.budget_original_ceiling(), original_owner, completed_state.budget_original_thread_id(),
+                managed_budget_graph_identity(), deadline);
+        }
+        completed_state.activate_budget_authority(true);
         RunResult result;
         result.output = resume_context.channel_values;
+        result.native_messages = completed_state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+        result.provider_outcomes = completed_state.provider_outcomes();
+        if (const auto bank = completed_state.budget_bank()) result.usage = bank->snapshot();
 
         result.checkpoint_id = resume_context.checkpoint_id;
         co_return result;
@@ -1287,7 +1448,7 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
                 same_call = stored["_neograph"]["subgraph_parent_call_id"] == journal->parent_call_id;
             }
             if (same_call) {
-                detail::restore_subgraph_write_journal(*checkpoint, journal);
+                detail::restore_subgraph_write_journal(*checkpoint, journal, parent.native_history_archive);
                 const json resume_value = parent.resume_value
                     ? *parent.resume_value
                     : json();
@@ -1334,9 +1495,15 @@ GraphEngine::execute_graph_async(
     // exceptional completion; the resume path holds a second count while
     // loading its checkpoint.
     ExecutionGuard active_run_guard(*this);
+    std::shared_ptr<OwnedManagedBudgetLease> owned_lease;
+    std::shared_ptr<CheckpointStore> lease_store;
+    std::shared_ptr<ProviderOutcomes> owned_outcomes;
+    std::size_t source_outcome_count = 0;
+    auto execute = [&]() -> asio::awaitable<RunResult> {
 
     GraphState state;
     init_state(state);
+    if (config.native_history_archive) state.set_native_history_archive(config.native_history_archive);
 
     // v1.0 (9d): the `state.set_run_cancel_token` smuggling channel is
     // gone — cancel flows through `RunContext::cancel_token` (set just
@@ -1352,7 +1519,9 @@ GraphEngine::execute_graph_async(
                         config.cancel_token, hook_deadline_for(metadata.deadline)};
     }
     CheckpointCoordinator coord(checkpoint_store, config.thread_id, hook_runtime_,
-                                std::move(hook_context));
+                                std::move(hook_context),
+                                config.native_history_archive ? config.native_history_archive : native_history_archive_,
+                                resources ? resources->subgraph_write_journal : nullptr);
     auto safe_point_request = resources ? resources->safe_point_request : nullptr;
     struct SafePointOperationGuard {
         std::shared_ptr<GraphSafePointRequest> request;
@@ -1387,12 +1556,26 @@ GraphEngine::execute_graph_async(
     // separately. See ROADMAP_v1.md "Execution plan" → PR 1.
     RunContext ctx;
     ctx.cancel_token = config.cancel_token;
+    ctx.provider_outcomes = config.provider_outcomes ? config.provider_outcomes : std::make_shared<ProviderOutcomes>();
+    ctx.native_history_archive = config.native_history_archive ? config.native_history_archive : native_history_archive_;
+    ctx.on_provider_event = config.on_provider_event;
+    ctx.provider_loop_history = config.provider_loop_history ? config.provider_loop_history : std::make_shared<ProviderLoopHistory>();
+    owned_outcomes = ctx.provider_outcomes;
+    state.set_provider_run_history(ctx.provider_loop_history, ctx.provider_outcomes);
     // #88: the caller may hand us an accumulator (to total across several runs);
     // otherwise this run gets a fresh one. Either way ctx.usage is non-null, so
     // node bodies never have to check.
     ctx.usage        = config.usage ? config.usage
                                      : std::make_shared<UsageAccumulator>();
     ctx.model_token_budget = config.model_token_budget;
+    const bool finite_standalone = config.model_token_budget != 0 && !config.usage &&
+        !(resources && resources->provider_call_broker);
+    const std::string_view budget_owner = metadata.owner_scope.empty() && ctx.native_history_archive && finite_standalone
+        ? ctx.native_history_archive->owner_scope() : std::string_view(metadata.owner_scope);
+    state.configure_budget_bank(ctx.usage, ctx.model_token_budget,
+        !config.usage && !(resources && resources->provider_call_broker),
+        std::string(budget_owner), config.thread_id, managed_budget_graph_identity());
+    state.defer_budget_authority_restore();
     ctx.budget_exhausted   = config.budget_exhausted;
     ctx.run_id             = metadata.run_id;
     ctx.budget_cancel_token =
@@ -1452,6 +1635,7 @@ GraphEngine::execute_graph_async(
     detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
     std::string last_checkpoint_id;
+    std::shared_ptr<const Checkpoint> budget_source;
     int start_step = 0;
 
     std::unordered_map<std::string, NodeResult> replay_results;
@@ -1460,8 +1644,12 @@ GraphEngine::execute_graph_async(
     std::vector<std::string> ready;
     if (is_resume) {
         auto& loaded = *resume_context;
+        if (!checkpoint_has_managed_bank(loaded.channel_values) && checkpoint_store &&
+            co_await checkpoint_store->requires_managed_budget_async(config.thread_id))
+            reject_missing_original_managed_bank();
         state.restore_checkpoint(
-            loaded.channel_values, checkpoint_ephemeral_guard(loaded.metadata));
+            loaded.channel_values, checkpoint_ephemeral_guard(loaded.metadata), loaded.native_history);
+        budget_source = loaded.managed_budget_source;
         last_checkpoint_id = loaded.checkpoint_id;
         start_step         = loaded.start_step;
         ready              = std::move(loaded.next_nodes);
@@ -1506,17 +1694,72 @@ GraphEngine::execute_graph_async(
                     throw std::runtime_error(
                         "Checkpoint step exceeds the executable range");
                 }
+                if (!checkpoint_has_managed_bank(cp_opt->channel_values) &&
+                    co_await checkpoint_store->requires_managed_budget_async(config.thread_id))
+                    reject_missing_original_managed_bank();
                 state.restore_checkpoint(
-                    cp_opt->channel_values, checkpoint_ephemeral_guard(cp_opt->metadata));
+                    cp_opt->channel_values, checkpoint_ephemeral_guard(cp_opt->metadata), cp_opt->native_history);
                 last_checkpoint_id = cp_opt->id;
                 start_step = static_cast<int>(cp_opt->step + 1);
+                budget_source = std::make_shared<const Checkpoint>(std::move(*cp_opt));
             }
         }
+        if (last_checkpoint_id.empty() && checkpoint_store &&
+            co_await checkpoint_store->requires_managed_budget_async(config.thread_id))
+            reject_missing_original_managed_bank();
         apply_input(state, config.input);
+    }
+    if (state.budget_managed() && state.budget_original_ceiling() != 0 && coord.enabled()) {
+        if (!last_checkpoint_id.empty() && !budget_source)
+            throw std::invalid_argument("Managed resume lacks the full original checkpoint source");
+        const std::string_view original_owner = metadata.owner_scope.empty() && ctx.native_history_archive
+            ? ctx.native_history_archive->owner_scope() : std::string_view(metadata.owner_scope);
+        if (ctx.native_history_archive && ctx.native_history_archive->owner_scope() != original_owner)
+            throw std::invalid_argument("Managed archive differs from the original bank owner scope");
+        auto scope = original_managed_budget_scope(budget_source.get(), state.budget_original_ceiling(),
+            original_owner, state.budget_original_thread_id(), managed_budget_graph_identity(), ctx.deadline);
+        lease_store = checkpoint_store;
+        owned_lease = co_await checkpoint_store->acquire_managed_budget_lease_async(
+            std::move(scope), budget_source ? budget_source->id : std::string{},
+            budget_source ? managed_budget_checkpoint_commitment(*budget_source) : std::string{});
+        if (!owned_lease) throw std::invalid_argument("Checkpoint backend returned no owned budget lease");
+        if (budget_source && owned_lease->bank_generation() !=
+            budget_source->metadata.at("_neograph_managed_budget_scope").at("bank_generation").get<std::string>())
+            throw std::invalid_argument("Managed checkpoint generation differs from its original journal");
+        if (ctx.native_history_archive)
+            detail::ManagedBudgetJournalAccess::bind_native_archive(owned_lease, ctx.native_history_archive);
+        ctx.managed_budget_lease = owned_lease;
+        ctx.managed_budget_store = checkpoint_store;
+        coord.set_managed_budget_lease(owned_lease);
+        ctx.tool_execution_identity.owner_scope = owned_lease->scope().owner_scope;
+    }
+    state.activate_budget_authority();
+    if (owned_lease) {
+        std::lock_guard lock(owned_outcomes->mutex);
+        source_outcome_count = owned_outcomes->values.size();
+    }
+    if (const auto bank = state.budget_bank()) {
+        ctx.usage = bank;
+        ctx.model_token_budget = state.budget_ceiling();
+    }
+    if (config.provider_messages) {
+        json projected = json::array();
+        for (const auto& message : *config.provider_messages) {
+            json item;
+            to_json(item, project_message(message));
+            projected.push_back(std::move(item));
+        }
+        state.apply_writes({ChannelWrite{"messages", std::move(projected), ChannelWrite::Mode::Overwrite,
+            std::make_shared<const std::vector<sp::Message>>(*config.provider_messages)}});
     }
 
     if (!is_resume) {
         ready = scheduler_->plan_start_step();
+    }
+    if (owned_lease && !budget_source) {
+        last_checkpoint_id = co_await coord.save_super_step_async(
+            state, "__managed_bank_root__", ready, CheckpointPhase::Before, start_step,
+            last_checkpoint_id, barrier_state, detail::checkpoint_metadata_for(ctx));
     }
 
     std::vector<std::string> trace;
@@ -1554,7 +1797,9 @@ GraphEngine::execute_graph_async(
             }
             RunResult result;
             result.usage = ctx.usage->snapshot();
-            result.output = state.serialize();
+            result.output = state.serialize_runtime();
+            result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+            result.provider_outcomes = ctx.provider_outcomes->snapshot();
             if (!ready.empty()) result.output["_neograph"] = json{{"max_steps_exhausted", true}};
             result.checkpoint_id = last_checkpoint_id;
             result.execution_trace = std::move(trace);
@@ -1588,7 +1833,9 @@ GraphEngine::execute_graph_async(
 
                     RunResult result;
                     result.usage = ctx.usage->snapshot();   // #88
-                    result.output          = state.serialize();
+                    result.output = state.serialize_runtime();
+                    result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+                    result.provider_outcomes = ctx.provider_outcomes->snapshot();
                     result.interrupted     = true;
                     result.interrupt_node  = node_name;
                     json iv;
@@ -1644,7 +1891,9 @@ GraphEngine::execute_graph_async(
         if (interrupt) {
             RunResult result;
             result.usage = ctx.usage->snapshot();   // #88
-            result.output          = state.serialize();
+            result.output = state.serialize_runtime();
+            result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+            result.provider_outcomes = ctx.provider_outcomes->snapshot();
             result.interrupted     = true;
             // issue #94: the node that paused — not its reason. The executor
             // stamps ni.node(); the fallback covers a NodeInterrupt that
@@ -1689,7 +1938,7 @@ GraphEngine::execute_graph_async(
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
             cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
-                          state.serialize()});
+                          state.serialize_runtime()});
         }
 
         // --- interrupt_after check ---
@@ -1725,7 +1974,9 @@ GraphEngine::execute_graph_async(
 
                 RunResult result;
                 result.usage = ctx.usage->snapshot();   // #88
-                result.output          = state.serialize();
+                result.output = state.serialize_runtime();
+                result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+                result.provider_outcomes = ctx.provider_outcomes->snapshot();
                 result.interrupted     = true;
                 result.interrupt_node  = node_name;
                 json iv;
@@ -1811,7 +2062,9 @@ GraphEngine::execute_graph_async(
                                         ctx.cancel_token.get())) {
             RunResult result;
             result.usage = ctx.usage->snapshot();
-            result.output = state.serialize();
+            result.output = state.serialize_runtime();
+            result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+            result.provider_outcomes = ctx.provider_outcomes->snapshot();
             result.output["_neograph"] = json{{"safe_point", true}};
             result.checkpoint_id = last_checkpoint_id;
             result.execution_trace = std::move(trace);
@@ -1821,7 +2074,9 @@ GraphEngine::execute_graph_async(
 
     RunResult result;
     result.usage = ctx.usage->snapshot();   // #88
-    result.output          = state.serialize();
+    result.output = state.serialize_runtime();
+    result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
+    result.provider_outcomes = ctx.provider_outcomes->snapshot();
     result.execution_trace = std::move(trace);
     if (!ready.empty()) {
         result.output["_neograph"] = json{
@@ -1832,12 +2087,60 @@ GraphEngine::execute_graph_async(
         result.checkpoint_id = last_checkpoint_id;
     }
 
-    auto messages = state.get_messages();
-    if (!messages.empty() && messages.back().role == "assistant") {
-        result.output["final_response"] = messages.back().content;
+    if (!result.native_messages.empty() && result.native_messages.back().role == sp::Role::Assistant) {
+        std::size_t bytes = 0;
+        for (const auto& part : result.native_messages.back().parts)
+            if (const auto* text = std::get_if<sp::Text>(&part)) bytes += text->value.size();
+        std::string response;
+        response.reserve(bytes);
+        for (const auto& part : result.native_messages.back().parts)
+            if (const auto* text = std::get_if<sp::Text>(&part)) response += text->value;
+        result.output["final_response"] = std::move(response);
     }
 
     co_return result;
+    };
+    std::optional<RunResult> result;
+    std::exception_ptr execution_error;
+    try {
+        result.emplace(co_await execute());
+    } catch (...) {
+        execution_error = std::current_exception();
+    }
+    std::exception_ptr release_error;
+    if (owned_lease) {
+        co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+        try {
+            co_await lease_store->release_managed_budget_lease_async(owned_lease);
+        } catch (...) {
+            release_error = std::current_exception();
+        }
+    }
+    if (release_error) {
+        auto outcome = exception_provider_outcome(execution_error);
+        if (!outcome && owned_outcomes) {
+            std::lock_guard lock(owned_outcomes->mutex);
+            if (owned_outcomes->values.size() > source_outcome_count)
+                outcome = owned_outcomes->values.back();
+        }
+        throw ManagedBudgetLeaseReleaseError(std::move(outcome), execution_error, release_error);
+    }
+    if (execution_error) {
+        try { std::rethrow_exception(execution_error); }
+        catch (const ProviderOutcomeError&) { throw; }
+        catch (const ProviderFailure&) { throw; }
+        catch (const NodeExecutionError&) { throw; }
+        catch (...) {
+            if (owned_lease && owned_outcomes) {
+                std::lock_guard lock(owned_outcomes->mutex);
+                if (owned_outcomes->values.size() > source_outcome_count)
+                    throw ProviderOutcomeError("Graph failed after an owned provider outcome",
+                        owned_outcomes->values.back(), execution_error);
+            }
+            throw;
+        }
+    }
+    co_return std::move(*result);
 }
 
 void GraphEngine::set_node_cache_enabled(const std::string& node_name,

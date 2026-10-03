@@ -392,25 +392,16 @@ std::string RecordedCapabilityEvidence::serialize_canonical() const {
 struct RecordedBindingSet::Impl {
     std::vector<CapabilityBindingReceipt>        exact_bindings;
     std::vector<RecordedCapabilityCallReference> expected_calls;
-    CatalogCapabilityBinding                     binding;
     std::vector<RecordedCapabilityEvidence>      evidence;
     std::string                                  fingerprint;
-    bool                                         released = false;
 };
 
 RecordedBindingSet::RecordedBindingSet(
     std::vector<CapabilityBindingReceipt> exact_bindings,
     std::vector<RecordedCapabilityCallReference> expected_calls,
-    CatalogCapabilityBinding owned_binding,
     std::vector<RecordedCapabilityEvidence> evidence)
     : impl_(std::make_unique<Impl>()) {
     normalize_bindings(exact_bindings, "Recorded binding set");
-    auto owned_receipts = owned_binding.receipts;
-    normalize_bindings(owned_receipts, "Recorded owned binding");
-    if (owned_receipts != exact_bindings) {
-        throw std::invalid_argument(
-            "Recorded owned binding receipts do not exactly match pinned receipts");
-    }
     if (expected_calls.size() != evidence.size()) {
         throw std::invalid_argument("Recorded replay evidence is missing or has extra calls");
     }
@@ -469,7 +460,6 @@ RecordedBindingSet::RecordedBindingSet(
 
     impl_->exact_bindings = std::move(exact_bindings);
     impl_->expected_calls = std::move(expected_calls);
-    impl_->binding = std::move(owned_binding);
     impl_->evidence = std::move(evidence);
     impl_->fingerprint = detail::sha256_identity(
         "recorded-binding-set", detail::canonical_json_bytes(fingerprint_body));
@@ -500,14 +490,6 @@ void RecordedBindingSet::validate_target(const ProgramVersion& target) const {
         throw std::invalid_argument(
             "Recorded binding set does not exactly bind the target ProgramVersion");
     }
-}
-
-CatalogCapabilityBinding RecordedBindingSet::release_owned_binding() && {
-    if (impl_->released) {
-        throw std::logic_error("Recorded binding set was already released");
-    }
-    impl_->released = true;
-    return std::move(impl_->binding);
 }
 
 struct ProgramHistoricalReplacementStep::Impl {

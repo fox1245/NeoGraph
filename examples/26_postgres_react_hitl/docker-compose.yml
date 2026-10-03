@@ -10,6 +10,9 @@
 # unauthenticated API traffic.
 # Bring the supporting services up first:
 #   docker compose up -d postgres crawl4ai
+# Provision native checkpoint custody once (before the first agent run):
+#   docker compose run --rm agent init-archive
+# Keep both native-history and native-keys volumes with pgdata across resume.
 #
 # Then run the agent. THREAD_ID is printed at the end of `run`:
 #   docker compose run --rm agent run "current ViT papers"
@@ -58,6 +61,8 @@ services:
       # all of NeoGraph.
       context: ../..
       dockerfile: examples/26_postgres_react_hitl/Dockerfile
+      additional_contexts:
+        schemaprovider: ${SCHEMAPROVIDER_SOURCE:-../../../SchemaProvider}
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,6 +76,14 @@ services:
       # to running the binary directly on the host without re-editing.
       POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-test}@postgres:5432/${POSTGRES_DB:-neograph}
       CRAWL4AI_URL: http://crawl4ai:11235
+      NEOGRAPH_NATIVE_ARCHIVE_DIR: /var/lib/neograph-history/archive
+      NEOGRAPH_NATIVE_ARCHIVE_KEY_FILE: /var/lib/neograph-keys/archive.key
+      NEOGRAPH_NATIVE_ARCHIVE_OWNER: ${NEOGRAPH_NATIVE_ARCHIVE_OWNER:?Set a stable archive owner in .env}
+    volumes:
+      - native-history:/var/lib/neograph-history
+      - native-keys:/var/lib/neograph-keys
 
 volumes:
   pgdata:
+  native-history:
+  native-keys:

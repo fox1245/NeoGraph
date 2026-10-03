@@ -13,14 +13,19 @@
 #   bash scripts/run_jarvis.sh config-demo/mock         # 다른 config 디렉토리
 #   bash scripts/run_jarvis.sh /절대/경로/config        # 임의 config 도 OK
 #
-# 기본 빌드 디렉토리 (NEOGRAPH_BUILD_DIR 환경변수로 변경 가능):
-#   ~/Coding/NeoGraph/build-jarvis
+# Build directory may be either the NeoGraph root build or a standalone
+# Jarvis build against installed neograph and SchemaProvider packages.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # = examples/cookbook/jarvis
 NEOGRAPH_ROOT="$(cd "$ROOT/../../.." && pwd)"             # = NeoGraph 루트
 TP="$ROOT/third_party"
-BIN="${NEOGRAPH_BUILD_DIR:-$NEOGRAPH_ROOT/build-jarvis}/examples/cookbook/jarvis/cookbook_jarvis"
+BUILD_DIR="${NEOGRAPH_BUILD_DIR:-$NEOGRAPH_ROOT/build-jarvis}"
+CONFIG_SUFFIX="${JARVIS_BUILD_CONFIG:+/$JARVIS_BUILD_CONFIG}"
+BIN="$BUILD_DIR/examples/cookbook/jarvis$CONFIG_SUFFIX/cookbook_jarvis"
+if [[ ! -x "$BIN" && -x "$BUILD_DIR$CONFIG_SUFFIX/cookbook_jarvis" ]]; then
+    BIN="$BUILD_DIR$CONFIG_SUFFIX/cookbook_jarvis"
+fi
 
 # CFG: 첫 인자 그대로 받되, 상대경로면 cookbook 디렉토리 기준으로 해석.
 CFG_ARG="${1:-config-demo/real-tools}"

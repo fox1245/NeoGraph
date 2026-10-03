@@ -1,6 +1,32 @@
 <!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+
+## 타입 C++ 전환 상태
+
+현재 C++ recipe는 다섯 타입 SDK family의 소유된 `ProviderRequest`, 순서 있는
+`sp::Event`, 불변 `std::shared_ptr<const sp::Outcome>` (`Completion`/`Failure`)을
+사용합니다. `ChatMessage`/`ChatTool`은 portable 투영이며 native replay 권한이 아닙니다.
+prepare는 정확히 한 번 수행합니다. durable 호출자는
+`Provider::request_digest(prepared)`에 claim/receipt를 연결하고 같은 handle을 dispatch합니다.
+출력 JSON으로 history를 재구성하거나 failure를 최종 텍스트로 축소하지 않습니다.
+
+canonical persistence는 `provider-message-v2`/`runtime-history-record-v2`를 사용하며
+portable 요약은 native record를 대체하지 않습니다. optional control은 호출자가 선택하고
+조용히 clamp하지 않습니다. bounded call에는 진짜 model fact가 필요하며 누락은 `LimitUnknown`입니다.
+reservation/charged/held 값은 nullable provider usage와 별개이며 budget 갱신, 가격, forecast, invoice가 아닙니다.
+
+header-only `examples/provider_example_support.h`는 실제 SDK runtime을 사용합니다.
+LLM 빌드는 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`의 `SchemaProvider::runtime` 또는
+명시적 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`가 필요합니다.
+설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
+수행하며 SDK package는 unstable `0.0.0` (interface 3)입니다.
+
+이 문서는 소스 전환 상태이며 recipe 실행 검증이 아닙니다. 아래 과거 측정은
+새 전환의 qualification이 아닙니다. live 실행에는 키/네트워크/모델 접근과 비용이 필요합니다.
+키, prompt, artifact를 비공개로 유지하세요. envelope/native inspection 출력은 민감하므로
+공개 log에 내보내지 마세요. native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
+
 # C++ API 예제
 
 
@@ -92,9 +118,8 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 |[`01_react_agent.cpp`](01_react_agent.cpp)|OpenRouter|ReAct 루프: `llm_call` ⇔ `tool_dispatch`(`has_tool_calls` 조건부 포함) 계산기 도구.|
 | 12 |[`12_rag_agent.cpp`](12_rag_agent.cpp)|OpenRouter|OpenRouter 호환 embedding + 메모리 내 코사인 검색을 사용하는 RAG.|
-| 13 |[`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp)|OpenRouter|`SchemaProvider::complete_stream()`을 직접 호출하는 단일 요청 OpenRouter Responses SSE 스모크 테스트.|
-| 33 |[`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp)|OpenAI|`use_websocket=true`를 사용하는 OpenAI `/v1/responses` WebSocket 직접 스모크 테스트.|
-| 34 |[`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp)|OpenRouter|OpenRouter Responses 내장 도구 wire shape를 보여 주는 raw HTTP/SSE 예제.|
+| 13 |[`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp)| OpenRouter | 타입 Responses SSE 요청, 순서 있는 `sp::Event` 관찰 및 소유된 `sp::Outcome`. |
+| 34 |[`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp)| OpenRouter | 일곱 hosted-tool 섹션을 모두 타입 SSE로 실행하며 전체 Outcome과 순서 있는 wire 관찰을 보존합니다. |
 | 29 |[`29_responses_envelope.cpp`](29_responses_envelope.cpp)|OpenRouter|한 번의 tool-call 요청에 대한 원시 `/api/v1/responses` JSON envelope 덤프.|
 | 30 |[`30_reasoning_effort.cpp`](30_reasoning_effort.cpp)|OpenRouter|고정 DeepSeek 모델의 reasoning effort를 한 prompt에서 sweep합니다.|
 
@@ -134,7 +159,7 @@ OPENROUTER_API_KEY=sk-or-...
 | # |파일|설정|그것이 보여주는 것|
 |---|------|-------|---------------|
 | 27 |[`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp)|오프라인|3개의 에이전트가 `engine->run_async()`를 통해 하나의 `io_context` 스레드에서 인터리브를 실행합니다. 벽은 3×50ms 대신 50ms입니다. 4단계 비동기 엔드투엔드.|
-| 40 |[`40_react_async_streaming.cpp`](40_react_async_streaming.cpp)|OpenRouter|외부 `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)`는 LLM 노드의 토큰이 `SchemaProvider("openai_responses")`에 대해 `co_await provider->complete_stream_async(...)`를 통해 표준 출력으로 스트리밍되는 ReAct 루프를 구동합니다. **PR-#10 이전에 세그먼트 오류가 발생한 정확한 모양** — 수정 후 깔끔하게 실행됩니다. 도구 왕복 + 최종 답변...|
+| 40 |[`40_react_async_streaming.cpp`](40_react_async_streaming.cpp)| OpenRouter | 타입 공급자 이벤트를 사용하는 비동기 ReAct. text delta는 표시용 투영이며 native history가 아닙니다. |
 | 44 |[`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp)|오프라인|배압이 있는 고정 작업자 풀(`neograph::util::RequestQueue`) — 제한된 기내 작업, 부하 시 무제한 증가가 없습니다.|
 | 46 |[`46_cancel_token.cpp`](46_cancel_token.cpp)|오프라인|협력 취소 — 자녀당 `CancelToken::fork()`, 부모 `cancel()`는 비행 중인 모든 자녀에게 계단식으로 전달됩니다.|
 | 47 |[`47_node_cache.cpp`](47_node_cache.cpp)|오프라인|노드 + 입력에 맞춰진 노드별 결과 캐시 - 실행 전반에 걸쳐 동일한 입력에 대한 재계산을 건너뜁니다.|
@@ -177,7 +202,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 | # |파일|설정|그것이 보여주는 것|
 |---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | local server (llama.cpp / vLLM) | Point `OpenAIProvider` at `http://localhost:8090`. Two-process split keeps model weights out of the agent's address space. |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | llama.cpp / vLLM | `http://localhost:8090`의 타입 Chat 클라이언트. 모델 가중치는 에이전트 프로세스 밖에 있습니다. |
 
 ### 유리 진열장
 
@@ -198,9 +223,7 @@ OPENROUTER_API_KEY=sk-or-...
 정확한 `run(NodeInput)` 본체 — `ChannelWrite`, `Send` 또는
 `Command`부터 `NodeOutput`까지. 여기에서 팬아웃을 보내고
 명령 라우팅이 실시간보다 우선합니다.
-3. **Schema-driven response shape** (13, 15, 16, 17, 33):
-하나의 JSON 스키마로 wire shape를 기술하며 예제는 OpenRouter 호환
-SSE 또는 OpenAI의 네이티브 WebSocket transport를 사용합니다.
+3. **타입 공급자 요청과 Outcome** (13, 15, 16, 17): SDK admission, 순서 있는 이벤트, 불변 Outcome을 사용합니다. descriptor interpreter와 WebSocket adapter는 없습니다.
 
 그래프 정의는 JSON 모양(`std::map<std::string, json>`)입니다.
 어느 쪽이든 — [Python examples](../bindings/python/examples/)의 예제 14 및 15
@@ -211,7 +234,6 @@ SSE 또는 OpenAI의 네이티브 WebSocket transport를 사용합니다.
 |공급자|예|
 |---|---|
 |`OPENROUTER_API_KEY`| 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
-|`OPENAI_API_KEY`| 33 |
 |로컬 서버(키 없음)| 31 |
 |**없음**| 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 
@@ -229,3 +251,20 @@ SSE 또는 OpenAI의 네이티브 WebSocket transport를 사용합니다.
 `example_<short_name>`(예: `example_react_agent`,
 `example_custom_graph`). 정확한 이름은 각 `.cpp` 상단에 있습니다.
 `Usage:` 아래에 댓글을 남겨주세요.
+
+## Responses inspection 계약 (13 / 29 / 30 / 34)
+
+13은 타입 Responses streaming 요청이며 이벤트는 문자열 callback이 아닙니다.
+29는 성공/실패의 전체 Outcome, `wire_envelope`, 순서 있는 모든 `wire_output` item과
+타입 part, function argument, citation, reasoning, opaque hosted output, artifact를 보존합니다.
+raw inspection 출력은 민감하며 안전한 telemetry/export 형식이 아닙니다.
+30은 `none`, `low`, `medium`, `high`를 sweep하면서 전체 Outcome을 보존합니다.
+reasoning/input/output/total/provider-reported-total 및 extra count는 nullable 64-bit evidence이며
+stage/quality/conflict를 포함합니다. 누락은 zero가 아니며 visible text나 예약량은 usage가 아닙니다.
+34의 일곱 섹션은 function(calculator), web search, image generation, file search,
+tool search, `shell.environment`의 skills, shell(`container_auto`)입니다.
+`OPENROUTER_VECTOR_STORE_ID`는 file search 조건이며 `OPENROUTER_SKILL_ID`는 기본
+`openai-spreadsheets` skill을 교체합니다. 이 inspection demo는 function tool을 알리지만 직접 실행하지 않습니다.
+순서 있는 타입/raw event와 전체 terminal을 유지합니다. hosted tool은 route에 따라 지원되지 않거나
+추가 비용이 발생할 수 있습니다. 타입 admission은 live 호환성 보장이 아닙니다.
+WebSocket/primitive 실행 예제는 유지하지 않습니다. Images/Veo/Decisions는 별도 타입 NeoGraph client이며 chat spending grant를 상속하지 않습니다.

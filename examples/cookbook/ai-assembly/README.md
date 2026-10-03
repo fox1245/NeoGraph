@@ -37,6 +37,8 @@ writes a `response` channel; the A2A server's default
 
 ## Live transcript (DeepSeek via OpenRouter, 2026-04-29)
 
+Historical pre-cutover transcript; not current typed-provider execution evidence.
+
 Bill: [`bills/basic_income.txt`](bills/basic_income.txt) — universal
 basic income, 500,000 won/month, funded by land + carbon + progressive tax.
 
@@ -61,7 +63,9 @@ discovery) are pure NeoGraph.
 
 ```bash
 # from NeoGraph repo root; A2A and LLM are optional build components
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
 cmake -S . -B build-cookbook \
+    -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
     -DNEOGRAPH_BUILD_EXAMPLES=ON \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
     -DNEOGRAPH_BUILD_A2A=ON \
@@ -69,19 +73,32 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-
-bash examples/cookbook/ai-assembly/scripts/run_session.sh
+# Offline fixture: no .env loading, credentials or provider transport.
+NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
+  bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
+# Live: privately configure OPENROUTER_API_KEY in the environment or .env.
+NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
+  bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
-The member servers make live OpenRouter calls; `OPENROUTER_API_KEY` and
-network access are required. Compilation itself is offline.
+Install the typed SchemaProvider CMake package and build dependencies first.
+This is an integrated build, not a standalone cookbook project.
+`NEOGRAPH_BUILD_DIR` selects binaries; otherwise the launcher checks
+`build-pybind`, `build`, then recipe-local `build`. `--mock` returns synthetic
+abstentions, not model judgment or usage. Live calls send bill/persona prompts
+to OpenRouter and require a valid key, network and provider credit; four members
+incur model charges with no fixed cost guarantee. Keep keys, `.env`, prompts and
+printed transcripts private; never publish raw native records. A2A publishes
+portable response text only. C++ uses typed `ProviderRequest`/SDK events and full
+immutable `sp::Outcome`; projection does not grant native replay authority.
+The persona node participates in the existing runtime-interposition/provider-broker boundary and records the actual owned outcome once in the shared graph sink, including drained observer-error outcomes. Cancellation/deadlines are propagated; bounded calls require admitted model-limit facts rather than an input-byte estimate.
+This documents source migration, not a new build/test/live qualification.
 
 ## Python speaker variant (v0.2.1+, cross-language A2A)
 
-The same speaker logic, in ~100 lines of Python, against the same
-C++ member servers — proves the A2A protocol bridges languages
-cleanly:
+Python bindings are **deferred** for this cutover. `speaker.py` requires a
+separately available compatible `neograph_engine.a2a`; the C++ migration does
+not establish that prerequisite. The following is historical usage only:
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
@@ -92,38 +109,28 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-The Python A2A binding (`neograph_engine.a2a`) ships in v0.2.1.
-Server side (graph-as-A2A-endpoint) stays C++-only for now.
+The v0.2.1 binding was a historical release result, not current qualification.
+A2A wire clients/protocol are unchanged.
 
 ## Friction journal — what a fresh NeoGraph user tripped over
 
 
-These are the rough edges discovered while building this. **All four
-were fixed in v0.2.1** — left here as a record.
+Historical pre-cutover friction follows, not current legacy API support claims.
 
 ### 1. A2A was C++-only — Python binding didn't expose it (FIXED in v0.2.1)
 
-`pip install neograph-engine` works, but pre-v0.2.1's `neograph_engine`
-didn't export `A2AClient` / `AgentCard`. v0.2.1 adds the
-`neograph_engine.a2a` submodule (client + AgentCard + Task/Message/
-Part/TaskState/Role) — see the Python speaker variant above.
-
-**Server-side binding is still C++-only**; A2AServer needs a
-GIL-aware lifecycle contract that's a follow-up for v0.3.
+Historically v0.2.1 added the Python A2A client. Current bindings are deferred;
+no future release delivery is promised.
 
 ### 2. No system install / no headers in the wheel (FIXED in README v0.2.1)
 
-The README now has a "Using NeoGraph from your CMake project" section
-showing the `FetchContent_Declare` pattern. This cookbook also lives
-inside the NeoGraph tree so it can `add_executable` directly without
-any external dependency — the standalone variant uses FetchContent.
+Historically README described FetchContent. This recipe supplies integrated
+NeoGraph targets only, no standalone CMake project. SchemaProvider is required.
 
 ### 3. `OpenAIProvider::create()` `unique_ptr` vs `shared_ptr` (FIXED in v0.2.1)
 
-`OpenAIProvider::create_shared(cfg)` was added — returns
-`shared_ptr<Provider>` directly so it captures cleanly into
-`NodeFactory` closures. The cookbook uses it on line ~133 of
-`member_server.cpp`.
+Historically `create_shared` addressed the old ownership friction. The current
+recipe instead uses `examples::make_openrouter_provider` and typed outcomes.
 
 ### 4. `.env` autoload doesn't propagate to A2A child processes (DOCUMENTED in v0.2.1)
 
@@ -145,8 +152,7 @@ in the parent shell first. Now documented in
 - `parse_vote` regex on free-form Korean text works because the model
   reliably honors `vote: support/oppose/abstain` when asked. Persona output
   staying inside the format made this a 5-line tally function.
-- In-tree CMake build is self-contained; configure it with
-  `NEOGRAPH_BUILD_A2A=ON` and `NEOGRAPH_BUILD_LLM=ON` as shown above.
+- Historical in-tree build experience; current prerequisites are listed above.
 
 ## Files
 

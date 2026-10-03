@@ -1,4 +1,5 @@
 #include <neograph/runtime_context.h>
+#include <neograph/provider_outcome_codec.h>
 
 #include "canonical_json.h"
 
@@ -127,57 +128,30 @@ void validate_range(std::string_view feed_id,
     detail::validate_token(feed_id, std::string(name) + " feed_id");
 }
 
-json message_body(const ChatMessage& message) {
-    json value;
-    to_json(value, message);
-    return value;
+json message_body(const sp::Message& message) {
+    return provider_codec::encode_message(message);
 }
 
-void validate_message(const ChatMessage& message) {
-    static const std::set<std::string, std::less<>> roles = {
-        "assistant", "system", "tool", "user"};
-    if (roles.find(message.role) == roles.end()) {
-        throw std::invalid_argument("Runtime history message has an unsupported role");
+void validate_message(const sp::Message& message) {
+    switch (message.role) {
+        case sp::Role::Assistant:
+        case sp::Role::System:
+        case sp::Role::Developer:
+        case sp::Role::Tool:
+        case sp::Role::User: break;
+        default: throw std::invalid_argument("Runtime history message has an unsupported role");
     }
-    detail::validate_utf8(message.content);
-    if (message.role == "tool" && message.tool_call_id.empty()) {
-        throw std::invalid_argument("Runtime history tool message requires tool_call_id");
-    }
-    if (message.role != "assistant" && !message.tool_calls.empty()) {
-        throw std::invalid_argument("Only assistant runtime history messages may contain tool_calls");
-    }
-    for (const auto& call : message.tool_calls) {
-        detail::validate_token(call.id, "Runtime history tool call id");
-        detail::validate_token(call.name, "Runtime history tool call name");
-        detail::validate_utf8(call.arguments);
-    }
-    if (message.role != "assistant" &&
-        (!message.reasoning.empty() || !message.reasoning_details.empty())) {
-        throw std::invalid_argument(
-            "Only assistant runtime history messages may contain reasoning");
-    }
-    detail::validate_utf8(message.reasoning);
-    if (!message.reasoning_details.is_array()) {
-        throw std::invalid_argument(
-            "Runtime history reasoning_details must be an array");
-    }
-    if (!message.tool_call_id.empty())
-        detail::validate_token(message.tool_call_id, "Runtime history tool_call_id");
-    if (!message.tool_name.empty())
-        detail::validate_token(message.tool_name, "Runtime history tool_name");
-    if (!message.tool_status.empty())
-        detail::validate_token(message.tool_status, "Runtime history tool_status");
-    for (const auto& image_url : message.image_urls) detail::validate_utf8(image_url);
     (void)detail::canonical_json_bytes(message_body(message));
 }
 
-void validate_history_authority(RuntimeTrustClass trust, std::string_view role) {
+void validate_history_authority(RuntimeTrustClass trust, sp::Role role) {
     const bool valid =
-        (trust == RuntimeTrustClass::UntrustedInput && role == "user") ||
-        (trust == RuntimeTrustClass::ModelOutput && role == "assistant") ||
-        (trust == RuntimeTrustClass::ToolOutput && role == "tool") ||
-        ((trust == RuntimeTrustClass::Developer || trust == RuntimeTrustClass::HostPolicy) &&
-         role == "system");
+        (trust == RuntimeTrustClass::UntrustedInput && role == sp::Role::User) ||
+        (trust == RuntimeTrustClass::ModelOutput && role == sp::Role::Assistant) ||
+        (trust == RuntimeTrustClass::ToolOutput && role == sp::Role::Tool) ||
+        (trust == RuntimeTrustClass::Developer &&
+         (role == sp::Role::Developer || role == sp::Role::System)) ||
+        (trust == RuntimeTrustClass::HostPolicy && role == sp::Role::System);
     if (!valid) {
         throw std::invalid_argument("Runtime history trust class cannot assert this message role");
     }
@@ -190,47 +164,6 @@ void require_known_enum(Enum value, std::string_view name) {
     }
 }
 
-ChatMessage parse_message(const json& value) {
-    require_object(value, "Stored RuntimeHistoryRecord message");
-    detail::reject_unknown_fields(
-        value, "Stored RuntimeHistoryRecord message",
-        {"role", "content", "tool_calls", "tool_call_id", "tool_name", "tool_status",
-         "tool_retryable", "tool_effect_uncertain", "image_urls", "reasoning",
-         "reasoning_details"});
-    if (!value.contains("role") || !value.at("role").is_string() ||
-        !value.contains("content") || !value.at("content").is_string()) {
-        throw std::invalid_argument("Stored RuntimeHistoryRecord message requires role and content");
-    }
-    if (value.contains("tool_calls")) {
-        if (!value.at("tool_calls").is_array())
-            throw std::invalid_argument("Stored runtime tool_calls must be an array");
-        for (const auto& call : value.at("tool_calls")) {
-            require_object(call, "Stored runtime tool call");
-            detail::reject_unknown_fields(call, "Stored runtime tool call", {"id", "name", "arguments"});
-            (void)required_string(call, "id");
-            (void)required_string(call, "name");
-            (void)required_string(call, "arguments");
-        }
-    }
-    if (value.contains("image_urls")) (void)required_string_array(value, "image_urls");
-    if (value.contains("reasoning") && !value.at("reasoning").is_string()) {
-        throw std::invalid_argument("Stored runtime reasoning must be a string");
-    }
-    if (value.contains("reasoning_details") &&
-        !value.at("reasoning_details").is_array()) {
-        throw std::invalid_argument(
-            "Stored runtime reasoning_details must be an array");
-    }
-    if (value.contains("tool_retryable") && !value.at("tool_retryable").is_boolean())
-        throw std::invalid_argument("Stored runtime tool_retryable must be boolean");
-    if (value.contains("tool_effect_uncertain") &&
-        !value.at("tool_effect_uncertain").is_boolean())
-        throw std::invalid_argument("Stored runtime tool_effect_uncertain must be boolean");
-    ChatMessage result;
-    from_json(value, result);
-    validate_message(result);
-    return result;
-}
 
 json seal(json body, std::string_view domain, std::string& id) {
     id = runtime_identity(domain, body);
@@ -351,17 +284,20 @@ RuntimeHistoryRecord RuntimeHistoryRecord::create(RuntimeHistoryRecordData data)
     if (data.predecessor_id) body["predecessor_id"] = *data.predecessor_id;
     auto impl = std::make_shared<Impl>();
     impl->data = std::move(data);
-    impl->canonical = detail::canonical_json_bytes(seal(std::move(body), "runtime-history-record/v1", impl->id));
+    impl->canonical = detail::canonical_json_bytes(seal(std::move(body), "runtime-history-record/v2", impl->id));
     return RuntimeHistoryRecord(std::move(impl));
 }
 
-RuntimeHistoryRecord RuntimeHistoryRecord::parse(std::string_view stored_bytes) {
+RuntimeHistoryRecord RuntimeHistoryRecord::parse(
+    std::string_view stored_bytes, const std::shared_ptr<sp::NativeArchive>& archive,
+    std::string_view owner_id) {
     const auto value = detail::parse_json_strict(stored_bytes);
     require_object(value, "Stored RuntimeHistoryRecord");
     detail::reject_unknown_fields(
         value, "Stored RuntimeHistoryRecord",
         {"format", "storage_schema_version", "id", "feed_id", "sequence", "message_id",
-         "trust", "message", "source_payload", "source_media_type", "predecessor_id"});
+         "trust", "message", "source_payload", "source_media_type", "predecessor_id",
+         "native_archive_reference"});
     require_format(value, "neograph-runtime-history-record", STORAGE_SCHEMA_VERSION,
                    "Stored RuntimeHistoryRecord");
     const auto stored_id = required_string(value, "id");
@@ -371,12 +307,35 @@ RuntimeHistoryRecord RuntimeHistoryRecord::parse(std::string_view stored_bytes) 
     data.message_id = required_string(value, "message_id");
     data.trust = runtime_trust_class_from_string(required_string(value, "trust"));
     if (!value.contains("message")) throw std::invalid_argument("Stored history record has no message");
-    data.message = parse_message(value.at("message"));
+    const auto reference = optional_string(value, "native_archive_reference");
+    if (reference) {
+        if (!archive || archive->owner_scope() != owner_id) {
+            throw std::invalid_argument("Runtime native history requires its owner-scoped archive");
+        }
+        auto loaded = archive->load(*reference,
+            std::string(owner_id) + "/runtime-history/" + stored_id);
+        if (const auto* error = std::get_if<sp::Error>(&loaded)) {
+            throw std::invalid_argument(error->safe_message);
+        }
+        auto& messages = std::get<std::vector<sp::Message>>(loaded);
+        if (messages.size() != 1 ||
+            message_body(messages.front()) != value.at("message")) {
+            throw std::invalid_argument("Runtime native history archive projection mismatch");
+        }
+        data.message = std::move(messages.front());
+    } else {
+        data.message = provider_codec::decode_message(value.at("message"));
+    }
     if (value.contains("source_payload")) data.source_payload = detail::owned_json_copy(value.at("source_payload"));
     data.source_media_type = optional_string(value, "source_media_type");
     data.predecessor_id = optional_string(value, "predecessor_id");
     auto result = create(std::move(data));
     if (result.id() != stored_id) throw std::invalid_argument("Stored RuntimeHistoryRecord id mismatch");
+    if (reference) {
+        auto impl = std::make_shared<Impl>(*result.impl_);
+        impl->canonical = detail::canonical_json_bytes(value);
+        result = RuntimeHistoryRecord(std::move(impl));
+    }
     return result;
 }
 
@@ -384,12 +343,30 @@ const std::string& RuntimeHistoryRecord::feed_id() const noexcept { return impl_
 std::uint64_t RuntimeHistoryRecord::sequence() const noexcept { return impl_->data.sequence; }
 const std::string& RuntimeHistoryRecord::message_id() const noexcept { return impl_->data.message_id; }
 RuntimeTrustClass RuntimeHistoryRecord::trust() const noexcept { return impl_->data.trust; }
-const ChatMessage& RuntimeHistoryRecord::message() const noexcept { return impl_->data.message; }
+const sp::Message& RuntimeHistoryRecord::message() const noexcept { return impl_->data.message; }
 std::optional<json> RuntimeHistoryRecord::source_payload() const { return impl_->data.source_payload; }
 const std::optional<std::string>& RuntimeHistoryRecord::source_media_type() const noexcept { return impl_->data.source_media_type; }
 const std::optional<std::string>& RuntimeHistoryRecord::predecessor_id() const noexcept { return impl_->data.predecessor_id; }
 const std::string& RuntimeHistoryRecord::id() const noexcept { return impl_->id; }
 std::string RuntimeHistoryRecord::serialize_canonical() const { return impl_->canonical; }
+
+std::string RuntimeHistoryRecord::serialize_canonical(
+    const std::shared_ptr<sp::NativeArchive>& archive, std::string_view owner_id) const {
+    if (!message().native) return impl_->canonical;
+    if (!archive || archive->owner_scope() != owner_id) {
+        throw std::invalid_argument("Runtime native history requires its owner-scoped archive");
+    }
+    auto body = detail::parse_json_strict(impl_->canonical);
+    auto saved = archive->save({message()},
+        std::string(owner_id) + "/runtime-history/" + id());
+    if (const auto* error = std::get_if<sp::Error>(&saved)) {
+        throw std::invalid_argument(error->safe_message);
+    }
+    body["native_archive_reference"] = std::get<std::string>(std::move(saved));
+    // The record identity binds the entire full-message projection. The archive
+    // authenticates that identity and owner; references grant no JSON authority.
+    return detail::canonical_json_bytes(body);
+}
 
 struct ContextArtifact::Impl {
     ContextArtifactData data;

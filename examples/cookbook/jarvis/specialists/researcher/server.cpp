@@ -22,7 +22,7 @@
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../src/provider_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -89,36 +89,13 @@ std::string extract_section(const std::string& text, const std::string& section)
 // MockProvider — OPENROUTER_API_KEY 없을 때 사용.
 // 연구 응답 + [SUMMARY] 규약을 흉내낸다.
 // ---------------------------------------------------------------------------
-class MockProvider : public Provider {
-public:
-    ChatCompletion complete(const CompletionParams& /*params*/) override {
-        ChatCompletion result;
-        result.message.role    = "assistant";
-        result.message.content =
-            "이건 mock 응답입니다. 실제 연구 결과가 여기에 들어갑니다.\n"
-            "\n"
-            "[SUMMARY] mock researcher reply — no real data available";
-        return result;
-    }
-
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& /*on_chunk*/) override {
-        return complete(params);
-    }
-
-    asio::awaitable<ChatCompletion>
-    invoke(const CompletionParams& params, StreamCallback /*on_chunk*/) override {
-        co_return complete(params);
-    }
-
-    std::string get_name() const override { return "mock"; }
-};
+using MockProvider = jarvis::providers::MockProvider;
 
 // ---------------------------------------------------------------------------
 // ResearchNode — LLM 한 번 호출. 연구 결과를 `response` 채널에 기록.
 // 실제 웹 검색 도구는 TODO 로 비워 둠 (외부 API 키 없이도 동작하도록).
 // ---------------------------------------------------------------------------
-class ResearchNode : public GraphNode {
+class ResearchNode : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
     ResearchNode(std::string name,
                  std::shared_ptr<Provider> provider,
@@ -137,17 +114,23 @@ public:
         //   auto search_result = web_search_tool_->execute({{"query", user_text}});
         //   user_text += "\n\n[검색 결과]\n" + search_result;
 
-        CompletionParams p;
-        p.model       = provider_->get_name() == "mock"
-                            ? "mock" : "~deepseek/deepseek-v4-flash-latest";
-        p.temperature = 0.3f; // 연구 응답은 정확성 위주 — 온도 낮게
-        p.messages.push_back({"system", system_prompt_});
-        p.messages.push_back({"user",   user_text});
-
-        auto reply = co_await provider_->invoke(p, nullptr);
+        std::vector<sp::Message> messages;
+        messages.push_back(examples::message(sp::Role::System, system_prompt_));
+        messages.push_back(examples::message(sp::Role::User, user_text));
+        auto request = jarvis::providers::contextual_request(
+            jarvis::providers::request(*provider_, messages, 0.3), in.ctx);
+        auto reply = co_await observe_provider_result(in.ctx,
+            invoke_provider(provider_, std::move(request), {}, {},
+                provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, reply);
+        reply = neograph::outcome_or_throw(std::move(reply));
+        const auto& generated = neograph::outcome_messages(*reply);
+        messages.insert(messages.end(), generated.begin(), generated.end());
 
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"response", json(reply.message.content)});
+        out.writes.push_back(ChannelWrite{"response", json(neograph::outcome_text(*reply))});
+        out.writes.push_back(neograph::graph::provider_messages_write(
+            std::move(messages), ChannelWrite::Mode::Overwrite));
         co_return out;
     }
 
@@ -163,7 +146,7 @@ private:
 // SummaryEnforcer — `response` 를 읽어서 [SUMMARY] 가 없으면 LLM 을 한 번 더
 // 불러 추가한다. 있으면 그냥 통과.
 // ---------------------------------------------------------------------------
-class SummaryEnforcer : public GraphNode {
+class SummaryEnforcer : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
     SummaryEnforcer(std::string name,
                     std::shared_ptr<Provider> provider)
@@ -181,21 +164,24 @@ public:
             co_return out;
         }
 
-        // 없으면 LLM 에게 25 단어 이하 요약 한 줄 추가 요청
-        CompletionParams p;
-        p.model       = provider_->get_name() == "mock"
-                            ? "mock" : "~deepseek/deepseek-v4-flash-latest";
-        p.temperature = 0.2f;
-        p.messages.push_back({
-            "system",
-            "You are a summarizer. Given research text, append ONE line at the end: "
+        // Continue the exact research conversation, including all native parts.
+        auto messages = in.state.get_provider_messages();
+        if (messages.empty())
+            throw std::logic_error("research summary requires the original native conversation");
+        messages.push_back(examples::message(sp::Role::User,
+            "Given your research text, append ONE line at the end: "
             "[SUMMARY] <≤25 words natural-language summary>. "
-            "Output the original text unchanged, then the [SUMMARY] line."
-        });
-        p.messages.push_back({"user", text});
-
-        auto reply = co_await provider_->invoke(p, nullptr);
-        std::string enforced = reply.message.content;
+            "Output the original text unchanged, then the [SUMMARY] line."));
+        auto request = jarvis::providers::contextual_request(
+            jarvis::providers::request(*provider_, messages, 0.2), in.ctx);
+        auto reply = co_await observe_provider_result(in.ctx,
+            invoke_provider(provider_, std::move(request), {}, {},
+                provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, reply);
+        reply = neograph::outcome_or_throw(std::move(reply));
+        std::string enforced = neograph::outcome_text(*reply);
+        const auto& generated = neograph::outcome_messages(*reply);
+        messages.insert(messages.end(), generated.begin(), generated.end());
 
         // mock 이 [SUMMARY] 를 또 안 붙였을 때를 대비한 최후 방어
         if (enforced.find("[SUMMARY]") == std::string::npos) {
@@ -204,6 +190,8 @@ public:
 
         NodeOutput out;
         out.writes.push_back(ChannelWrite{"response", json(enforced)});
+        out.writes.push_back(neograph::graph::provider_messages_write(
+            std::move(messages), ChannelWrite::Mode::Overwrite));
         co_return out;
     }
 
@@ -240,6 +228,7 @@ std::shared_ptr<GraphEngine> build_engine(std::shared_ptr<Provider> provider,
         {"channels", {
             {"prompt",   {{"reducer", "overwrite"}}},
             {"response", {{"reducer", "overwrite"}}},
+            {"messages", {{"reducer", "overwrite"}}},
         }},
         {"nodes", {
             {"research",          {{"type", "research"}}},
@@ -314,16 +303,11 @@ int main(int argc, char** argv) {
     std::shared_ptr<Provider> provider;
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (api_key && *api_key) {
-        llm::OpenAIProvider::Config cfg;
-        cfg.api_key       = api_key;
-        cfg.base_url      = "https://openrouter.ai/api";
-        cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-        cfg.provider_routing = {{"zdr", true}};
-        provider = llm::OpenAIProvider::create_shared(cfg);
+        provider = jarvis::providers::live(api_key);
         std::cout << "[researcher-specialist] OpenRouter provider "
                      "(~deepseek/deepseek-v4-flash-latest)\n";
     } else {
-        provider = std::make_shared<MockProvider>();
+        provider = std::make_shared<MockProvider>(jarvis::providers::Fixture::Researcher);
         std::cout << "[researcher-specialist] OPENROUTER_API_KEY 없음 — mock provider 사용\n";
     }
 

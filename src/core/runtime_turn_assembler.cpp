@@ -6,6 +6,7 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -18,43 +19,12 @@ std::string identity(std::string_view domain, const json& value) {
     return detail::sha256_identity(IDENTITY_PREAMBLE, domain, detail::canonical_json_bytes(value));
 }
 
-std::string mode_name(CompletionMode mode) {
-    switch (mode) {
-        case CompletionMode::COLLECT: return "collect";
-        case CompletionMode::STREAM: return "stream";
-    }
-    throw std::invalid_argument("Completion mode is invalid");
-}
-
-json messages_json(const std::vector<ChatMessage>& messages) {
+json messages_json(const std::vector<sp::Message>& messages) {
     json result = json::array();
     for (const auto& message : messages) {
-        json value;
-        to_json(value, message);
-        result.push_back(std::move(value));
+        result.push_back(message_projection_json(message));
     }
     return result;
-}
-
-json tools_json(const std::vector<ChatTool>& tools) {
-    json result = json::array();
-    for (const auto& tool : tools) {
-        result.push_back(json{{"name", tool.name}, {"description", tool.description},
-                              {"parameters", tool.parameters}});
-    }
-    return result;
-}
-
-json request_json(const CompletionRequest& request) {
-    const auto& params = request.params();
-    return json{{"mode", mode_name(request.mode())},
-                {"model", params.model},
-                {"messages", messages_json(params.messages)},
-                {"tools", tools_json(params.tools)},
-                {"temperature", params.temperature},
-                {"max_tokens", params.max_tokens},
-                {"extra_fields", params.extra_fields},
-                {"timeout_seconds", params.timeout_seconds}};
 }
 
 std::uint64_t estimate_json_tokens(const json& value) {
@@ -62,15 +32,11 @@ std::uint64_t estimate_json_tokens(const json& value) {
     return static_cast<std::uint64_t>(bytes / 3u + (bytes % 3u != 0));
 }
 
-void verify_history(const std::string& jsonl, const ContextEpoch& epoch,
-                     std::vector<ChatMessage>& messages) {
-    std::size_t start = 0;
+void verify_history(const std::vector<RuntimeHistoryRecord>& records,
+                    const ContextEpoch& epoch, std::vector<sp::Message>& messages) {
     std::uint64_t expected = epoch.raw_from_sequence();
     std::optional<std::string> predecessor;
-    while (start <= jsonl.size()) {
-        const auto end = jsonl.find('\n', start);
-        const auto line = jsonl.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        const auto record = RuntimeHistoryRecord::parse(line);
+    for (const auto& record : records) {
         if (record.feed_id() != epoch.feed_id() || record.sequence() != expected ||
             (expected > 1 && !predecessor && !record.predecessor_id()) ||
             (predecessor && (!record.predecessor_id() || *record.predecessor_id() != *predecessor))) {
@@ -78,12 +44,10 @@ void verify_history(const std::string& jsonl, const ContextEpoch& epoch,
         }
         predecessor = record.id();
         messages.push_back(record.message());
-        if (end == std::string::npos) break;
-        start = end + 1;
         ++expected;
     }
-    if (messages.size() != epoch.raw_through_sequence() - epoch.raw_from_sequence() + 1 ||
-        expected != epoch.raw_through_sequence()) {
+    if (records.size() != epoch.raw_through_sequence() - epoch.raw_from_sequence() + 1 ||
+        expected - 1 != epoch.raw_through_sequence()) {
         throw std::invalid_argument("Context epoch raw history does not cover its declared range");
     }
 }
@@ -101,21 +65,29 @@ bool artifact_less(const SelectedArtifact& lhs, const SelectedArtifact& rhs) {
     return a.id() < b.id();
 }
 
-ChatMessage render_artifact(const ContextArtifact& artifact) {
+sp::Message render_artifact(const ContextArtifact& artifact) {
     if (artifact.media_type() != "text/plain" && artifact.media_type() != "text/markdown") {
         throw std::invalid_argument("Context assembly only renders text/plain or text/markdown artifacts");
     }
     const auto role = artifact.kind() == ContextArtifactKind::RequiredSkill ||
                       artifact.kind() == ContextArtifactKind::HardConstraint
-        ? "system"
-        : "user";
+        ? sp::Role::System
+        : sp::Role::User;
     const auto content = artifact.content();
-    if (content.is_string()) return {role, content.get<std::string>()};
-    if (!content.is_object() || content.size() != 1 || !content.contains("text") ||
-        !content.at("text").is_string()) {
-        throw std::invalid_argument("Context artifact text content must be a string or exactly {text: string}");
+    std::string text;
+    if (content.is_string()) {
+        text = content.get<std::string>();
+    } else {
+        if (!content.is_object() || content.size() != 1 || !content.contains("text") ||
+            !content.at("text").is_string()) {
+            throw std::invalid_argument("Context artifact text content must be a string or exactly {text: string}");
+        }
+        text = content.at("text").get<std::string>();
     }
-    return {role, content.at("text").get<std::string>()};
+    sp::Message message;
+    message.role = role;
+    message.parts.emplace_back(sp::Text{std::move(text)});
+    return message;
 }
 
 void normalize_required_ids(std::vector<std::string>& ids,
@@ -178,32 +150,35 @@ RuntimeTurnAssembler::~RuntimeTurnAssembler() = default;
 RuntimeTurnAssembler::RuntimeTurnAssembler(RuntimeTurnAssembler&&) noexcept = default;
 RuntimeTurnAssembler& RuntimeTurnAssembler::operator=(RuntimeTurnAssembler&&) noexcept = default;
 
-std::uint64_t RuntimeTurnAssembler::estimate_input_tokens(const CompletionParams& params) {
-    json value{{"model", params.model}, {"messages", messages_json(params.messages)},
-               {"tools", tools_json(params.tools)}, {"temperature", params.temperature},
-               {"max_tokens", params.max_tokens}, {"extra_fields", params.extra_fields},
-               {"timeout_seconds", params.timeout_seconds}};
-    return estimate_json_tokens(value);
+std::uint64_t RuntimeTurnAssembler::estimate_input_tokens(const PreparedProviderRequest& request) {
+    const auto bytes = request.encoded_body().size();
+    return static_cast<std::uint64_t>(bytes / 3u + (bytes % 3u != 0));
 }
 
-std::string RuntimeTurnAssembler::normalized_request_digest(const CompletionRequest& request) {
-    return identity("normalized-completion-request/v1", request_json(request));
-}
-
-RuntimeTurn RuntimeTurnAssembler::assemble(std::string owner_id,
-                                            const ContextEpoch& epoch,
-                                            CompletionRequest request) const {
-    return assemble(std::move(owner_id), epoch, std::move(request), {}, {});
+std::string RuntimeTurnAssembler::normalized_request_digest(const PreparedProviderRequest& request) {
+    return Provider::request_digest(request);
 }
 
 RuntimeTurn RuntimeTurnAssembler::assemble(
-    std::string owner_id, const ContextEpoch& epoch, CompletionRequest request,
-    std::vector<ChatMessage> host_instructions,
-    std::vector<ChatMessage> trusted_supplemental) const {
+    Provider& provider, std::string owner_id, const ContextEpoch& epoch,
+    ProviderRequest request) const {
+    return assemble(provider, std::move(owner_id), epoch, std::move(request), {}, {});
+}
+
+RuntimeTurn RuntimeTurnAssembler::assemble(
+    Provider& provider, std::string owner_id, const ContextEpoch& epoch, ProviderRequest request,
+    std::vector<sp::Message> host_instructions,
+    std::vector<sp::Message> trusted_supplemental) const {
     detail::validate_token(owner_id, "Context assembly owner_id");
-    auto& params = request.params();
-    detail::validate_token(params.model, "Completion model");
-    if (!params.messages.empty()) {
+    const bool has_messages = std::visit([](const auto& payload) {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, sp::chat::Request>) {
+            return !payload.canonical_messages.empty() || !payload.messages.empty();
+        } else {
+            return !payload.messages.empty();
+        }
+    }, request.payload);
+    if (has_messages) {
         throw std::invalid_argument("Runtime turn request template must not contain messages");
     }
     if (!std::includes(epoch.artifact_ids().begin(), epoch.artifact_ids().end(),
@@ -216,7 +191,7 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         throw std::invalid_argument("Strict context assembly requires an input token budget");
     }
 
-    std::vector<ChatMessage> raw_messages;
+    std::vector<sp::Message> raw_messages;
     if (epoch.raw_from_sequence() != 0) {
         const ContextStoreFeed feed{owner_id, epoch.feed_id()};
         const auto range = impl_->store->snapshot_history(feed, epoch.raw_from_sequence(),
@@ -224,7 +199,7 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         if (range.digest != epoch.raw_window_digest()) {
             throw std::invalid_argument("Context epoch raw window digest does not match the feed");
         }
-        verify_history(impl_->store->hydrate_history(range), epoch, raw_messages);
+        verify_history(impl_->store->hydrate_records(range), epoch, raw_messages);
     }
 
     std::vector<SelectedArtifact> selected;
@@ -261,16 +236,16 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         });
     if (needs_latest_user &&
         std::none_of(raw_messages.begin(), raw_messages.end(),
-                     [](const ChatMessage& message) {
-                         return message.role == "user";
+                     [](const sp::Message& message) {
+                         return message.role == sp::Role::User;
                      })) {
         throw std::invalid_argument("Selected context artifacts require a raw history user message");
     }
 
-    std::vector<ChatMessage> before_history;
-    std::vector<ChatMessage> before;
-    std::vector<ChatMessage> after_user;
-    std::vector<ChatMessage> after_history;
+    std::vector<sp::Message> before_history;
+    std::vector<sp::Message> before;
+    std::vector<sp::Message> after_user;
+    std::vector<sp::Message> after_history;
     std::uint64_t mandatory = 0;
     for (const auto& item : selected) {
         const auto rendered = render_artifact(item.artifact);
@@ -288,10 +263,10 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         }
     }
 
-    std::vector<ChatMessage> merged;
+    std::vector<sp::Message> merged;
     merged.insert(merged.end(), before_history.begin(), before_history.end());
     const auto last_user = std::find_if(raw_messages.rbegin(), raw_messages.rend(),
-                                        [](const ChatMessage& message) { return message.role == "user"; });
+                                        [](const sp::Message& message) { return message.role == sp::Role::User; });
     const auto insertion = last_user == raw_messages.rend()
                                ? raw_messages.size()
                                : static_cast<std::size_t>(std::distance(last_user, raw_messages.rend()) - 1);
@@ -307,7 +282,7 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     merged.insert(merged.end(), after_history.begin(), after_history.end());
     // Slots are distinct from caller history: host instructions survive
     // interposition, and supplemental task input is receipt-bound.
-    std::vector<ChatMessage> assembled;
+    std::vector<sp::Message> assembled;
     assembled.reserve(host_instructions.size() + merged.size() + trusted_supplemental.size());
     assembled.insert(assembled.end(), host_instructions.begin(), host_instructions.end());
     assembled.insert(assembled.end(), merged.begin(), merged.end());
@@ -315,19 +290,23 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         // Built-in controlled calls may restate a raw user turn as their task
         // slot. The admitted RAW window remains authoritative and appears once.
         const auto duplicate_raw = std::any_of(raw_messages.begin(), raw_messages.end(),
-            [&message](const ChatMessage& raw) {
-                json left;
-                json right;
-                to_json(left, raw);
-                to_json(right, message);
-                return left == right;
+            [&message](const sp::Message& raw) {
+                return message_digest(raw) == message_digest(message) &&
+                       raw.native == message.native;
             });
         if (!duplicate_raw) assembled.push_back(message);
     }
-    params.messages = std::move(assembled);
-
-    const auto normalized_digest = normalized_request_digest(request);
-    const auto window_digest = identity("assembled-message-window/v1", messages_json(params.messages));
+    const auto window_digest = identity("assembled-message-window/v2", messages_json(assembled));
+    set_provider_request_messages(request, std::move(assembled));
+    auto prepared = provider.prepare(std::move(request));
+    if (!prepared.valid() || prepared.error()) {
+        if (const auto* error = prepared.error()) {
+            throw ProviderFailure(std::make_shared<const sp::Outcome>(
+                sp::Failure{*error, {}}));
+        }
+        throw std::invalid_argument("Runtime provider preparation did not admit a request");
+    }
+    const auto normalized_digest = normalized_request_digest(prepared);
     ContextAssemblyReceiptData receipt_data;
     receipt_data.context_epoch_id = epoch.id();
     receipt_data.normalized_request_digest = normalized_digest;
@@ -338,14 +317,14 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     }
     receipt_data.raw_from_sequence = epoch.raw_from_sequence();
     receipt_data.raw_through_sequence = epoch.raw_through_sequence();
-    receipt_data.estimated_input_tokens = estimate_input_tokens(params);
+    receipt_data.estimated_input_tokens = estimate_input_tokens(prepared);
     receipt_data.mandatory_input_tokens = mandatory;
     if (impl_->max_input_tokens != 0 &&
         receipt_data.estimated_input_tokens > impl_->max_input_tokens) {
         throw ContextBudgetBlocked();
     }
     auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, receipt_artifacts);
-    return {std::move(request), std::move(receipt)};
+    return {std::move(prepared), std::move(receipt)};
 }
 
 }  // namespace neograph

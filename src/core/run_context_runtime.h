@@ -38,11 +38,13 @@ void append_applied_writes(const RunContext& context,
                            const std::vector<ChannelWrite>& writes);
 
 json checkpoint_metadata_for(const RunContext& context);
+json managed_budget_scope_metadata(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
 CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint);
 
 void restore_subgraph_write_journal(
     const Checkpoint& checkpoint,
-    const std::shared_ptr<SubgraphWriteJournal>& journal);
+    const std::shared_ptr<SubgraphWriteJournal>& journal,
+    const std::shared_ptr<sp::NativeArchive>& archive);
 
 class ScopedRunContextRuntime {
 public:

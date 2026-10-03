@@ -12,6 +12,7 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig) {
 } // namespace neograph::mcp
 #else
 #include <neograph/provider.h>
+#include <neograph/provider_outcome_codec.h>
 
 #include "harness_journal_internal.h"
 
@@ -340,7 +341,36 @@ std::optional<json> parse_json(std::string_view input) {
     catch (const json::exception&) { return std::nullopt; }
 }
 
-struct FinalValue { std::optional<json> value; std::string error; std::uint64_t input = 0, output = 0; };
+struct FinalValue {
+    std::optional<json> value;
+    std::string error;
+    sp::Usage usage;
+};
+std::optional<sp::Count> host_count(const json& value, std::string_view key) {
+    const auto name = std::string(key);
+    if (!value.contains(name) || value.at(name).is_null()) return {};
+    return sp::Count{provider_codec::detail::counter(value.at(name)), sp::Evidence::Reported};
+}
+std::optional<sp::Count> sum_host_counts(const std::optional<sp::Count>& a,
+                                        const std::optional<sp::Count>& b,
+                                        sp::Usage& usage) {
+    if (!a || !b) return {};
+    if (b->value > std::numeric_limits<std::uint64_t>::max() - a->value) {
+        usage.quality = sp::UsageQuality::Inconsistent;
+        usage.conflicts.push_back({"total", "Host usage counter overflow"});
+        return {};
+    }
+    return sp::Count{a->value + b->value, sp::Evidence::Derived};
+}
+void finish_host_usage(sp::Usage& usage) {
+    usage.stage = sp::UsageStage::Final;
+    usage.total = sum_host_counts(usage.input_total, usage.output_total, usage);
+    if (usage.total && usage.provider_reported_total &&
+        usage.provider_reported_total->value < usage.total->value) {
+        usage.quality = sp::UsageQuality::Inconsistent;
+        usage.conflicts.push_back({"total", "Host reported total is smaller than input plus output"});
+    }
+}
 FinalValue final_value(const std::string& host, const std::string& output, std::size_t max_events) {
     FinalValue result;
     try {
@@ -353,17 +383,23 @@ FinalValue final_value(const std::string& host, const std::string& output, std::
         if (event->value("is_error", false)) { result.error = classify_error(event->value("result", "")); return result; }
         if (event->contains("usage") && event->at("usage").is_object()) {
             const auto& usage = event->at("usage");
-            result.input = usage.value("input_tokens", std::uint64_t{0}) +
-                           usage.value("cache_read_input_tokens", std::uint64_t{0}) +
-                           usage.value("cache_creation_input_tokens", std::uint64_t{0});
-            result.output = usage.value("output_tokens", std::uint64_t{0});
+            result.usage.input_uncached = host_count(usage, "input_tokens");
+            result.usage.cache_read = host_count(usage, "cache_read_input_tokens");
+            result.usage.cache_write = host_count(usage, "cache_creation_input_tokens");
+            result.usage.input_total = sum_host_counts(
+                sum_host_counts(result.usage.input_uncached, result.usage.cache_read, result.usage),
+                result.usage.cache_write, result.usage);
+            result.usage.output_total = host_count(usage, "output_tokens");
+            result.usage.provider_reported_total = host_count(usage, "total_tokens");
         }
+        finish_host_usage(result.usage);
         if (event->contains("structured_output")) { result.value = event->at("structured_output"); return result; }
         if (event->contains("result") && event->at("result").is_string()) result.value = parse_json(event->at("result").get<std::string>());
     } else {
         std::string text;
         std::size_t events = 0;
         bool complete = false;
+        bool first_step = true;
         for (std::size_t begin = 0; begin < output.size();) {
             if (++events > max_events) { result.error = "host event limit exceeded"; return result; }
             auto end = output.find('\n', begin);
@@ -387,14 +423,37 @@ FinalValue final_value(const std::string& host, const std::string& output, std::
                     if (event->contains("part") && event->at("part").is_object() &&
                         event->at("part").contains("tokens") && event->at("part").at("tokens").is_object()) {
                         const auto& tokens = event->at("part").at("tokens");
-                        result.input += tokens.value("input", std::uint64_t{0});
+                        const auto input = host_count(tokens, "input");
+                        const auto output_count = host_count(tokens, "output");
+                        const auto reasoning = host_count(tokens, "reasoning");
+                        std::optional<sp::Count> cache_read, cache_write;
                         if (tokens.contains("cache") && tokens.at("cache").is_object()) {
-                            result.input += tokens.at("cache").value("read", std::uint64_t{0}) +
-                                            tokens.at("cache").value("write", std::uint64_t{0});
+                            cache_read = host_count(tokens.at("cache"), "read");
+                            cache_write = host_count(tokens.at("cache"), "write");
                         }
-                        result.output += tokens.value("output", std::uint64_t{0}) +
-                                         tokens.value("reasoning", std::uint64_t{0});
+                        const auto input_total = sum_host_counts(
+                            sum_host_counts(input, cache_read, result.usage), cache_write, result.usage);
+                        const auto output_total = sum_host_counts(output_count, reasoning, result.usage);
+                        const auto fold = [&](std::optional<sp::Count>& target,
+                                              const std::optional<sp::Count>& count) {
+                            target = first_step ? count : sum_host_counts(target, count, result.usage);
+                        };
+                        fold(result.usage.input_uncached, input);
+                        fold(result.usage.cache_read, cache_read);
+                        fold(result.usage.cache_write, cache_write);
+                        fold(result.usage.reasoning, reasoning);
+                        fold(result.usage.input_total, input_total);
+                        fold(result.usage.output_total, output_total);
                     }
+                    else {
+                        result.usage.input_uncached.reset();
+                        result.usage.cache_read.reset();
+                        result.usage.cache_write.reset();
+                        result.usage.reasoning.reset();
+                        result.usage.input_total.reset();
+                        result.usage.output_total.reset();
+                    }
+                    first_step = false;
                 }
                 if (type == "error") { result.error = classify_error(event->dump()); return result; }
             } else {
@@ -404,8 +463,9 @@ FinalValue final_value(const std::string& host, const std::string& output, std::
                     complete = true;
                     if (event->contains("usage") && event->at("usage").is_object()) {
                         const auto& usage = event->at("usage");
-                        result.input = usage.value("input_tokens", std::uint64_t{0});
-                        result.output = usage.value("output_tokens", std::uint64_t{0});
+                        result.usage.input_total = host_count(usage, "input_tokens");
+                        result.usage.output_total = host_count(usage, "output_tokens");
+                        result.usage.provider_reported_total = host_count(usage, "total_tokens");
                     }
                 }
                 if (type == "turn.failed" || type == "error") { result.error = classify_error(event->dump()); return result; }
@@ -413,10 +473,11 @@ FinalValue final_value(const std::string& host, const std::string& output, std::
             begin = end + 1;
         }
         if (!complete) { result.error = "host event stream has no completed turn"; return result; }
+        finish_host_usage(result.usage);
         result.value = parse_json(text);
     }
     if (!result.value) result.error = "final host message is not JSON; excerpt=" + redacted_excerpt(output);
-    } catch (const json::exception&) {
+    } catch (const std::exception&) {
         result.value.reset();
         result.error = "invalid host event field types; excerpt=" + redacted_excerpt(output);
     }
@@ -546,6 +607,7 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig config) {
     const auto executable = preflight.executable;
     return [config = std::move(config), cwd, executable](const HarnessWorkerCall& call,
                                                            const std::shared_ptr<graph::CancelToken>& cancel) {
+        const auto request_started = std::chrono::steady_clock::now();
         if (cancel && cancel->is_cancelled()) return HarnessWorkerResponse::cancelled("host worker cancelled before dispatch");
         if (call.policy.value("read_only", true) == false)
             return HarnessWorkerResponse::tool_error("HOST_POLICY: host worker only supports read-only policy");
@@ -554,23 +616,25 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig config) {
         if (call.model_token_budget && !call.usage)
             return HarnessWorkerResponse::tool_error("bounded host execution requires usage accounting");
         const auto budget = call.worker.value("_harness_provider_budget", json::object());
-        const auto timeout_seconds = budget.value("provider_timeout_seconds", 0);
-        const auto output_tokens = budget.value("max_output_tokens", 0);
+        const auto timeout_seconds = budget.value("provider_timeout_seconds", std::uint64_t{0});
+        const auto output_tokens = budget.value("max_output_tokens", std::uint64_t{0});
         const auto input_tokens = budget.value("input_token_ceiling", std::uint64_t{0});
-        if (output_tokens <= 0 || input_tokens == 0)
-            return HarnessWorkerResponse::tool_error("host worker requires finite input/output token budgets");
+        if (output_tokens == 0 || input_tokens == 0 ||
+            output_tokens > std::numeric_limits<std::uint64_t>::max() - input_tokens ||
+            timeout_seconds > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+            return HarnessWorkerResponse::tool_error("host worker requires finite representable provider limits");
         auto prompt = worker_prompt(call, cwd);
+        auto request_timeout = config.request_timeout;
+        if (timeout_seconds > 0)
+            request_timeout = std::min(request_timeout,
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(timeout_seconds)));
+        const auto absolute_deadline = request_started + request_timeout;
         if (prompt.size() > config.max_prompt_bytes || prompt.size() / 4 > input_tokens)
             return HarnessWorkerResponse::tool_error("host worker prompt exceeds configured input ceiling");
-        const auto requested_output = static_cast<std::uint64_t>(output_tokens);
-        const auto reserve = std::min<std::uint64_t>(
-            std::numeric_limits<long long>::max(),
-            input_tokens > std::numeric_limits<std::uint64_t>::max() - requested_output
-                ? std::numeric_limits<std::uint64_t>::max()
-                : input_tokens + requested_output);
+        const auto reserve = input_tokens + output_tokens;
         bool held = false;
         if (call.model_token_budget) {
-            if (!call.usage->try_reserve(static_cast<long long>(reserve), static_cast<long long>(std::min<std::uint64_t>(call.model_token_budget, std::numeric_limits<long long>::max())))) {
+            if (!call.usage->try_reserve(reserve, call.model_token_budget)) {
                 if (call.budget_exhausted) call.budget_exhausted->store(true);
                 return HarnessWorkerResponse::cancelled("Program model-token budget exhausted before host dispatch");
             }
@@ -578,10 +642,13 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig config) {
         }
         struct Reservation {
             const HarnessWorkerCall& call;
-            long long tokens;
+            std::uint64_t tokens;
             bool held;
-            ~Reservation() { if (held && call.usage) call.usage->release_reservation(tokens); }
-        } reservation{call, static_cast<long long>(reserve), held};
+            bool dispatched = false;
+            ~Reservation() {
+                if (held && !dispatched && call.usage) call.usage->release_reservation(tokens);
+            }
+        } reservation{call, reserve, held};
         std::vector<std::string> args;
         if (config.host == "claude") {
             args = {"-p", "--safe-mode", "--output-format", "json", "--json-schema", call.worker.at("output_schema").dump(),
@@ -600,14 +667,25 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig config) {
         }
         const auto correlation = detail::journal_correlation_id("host");
         detail::append_current_harness_journal_event("host.call.started", {{"host", config.host}, {"model", config.model.empty() ? "host default" : config.model}, {"attempt", call.attempt}}, correlation);
+        sp::Usage reported_usage;
+        bool usage_recorded = false;
         try {
-            auto deadline = config.request_timeout;
-            if (timeout_seconds > 0)
-                deadline = std::min(deadline,
-                                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::seconds(timeout_seconds)));
-            const auto process = run_process(executable, args, cwd, deadline, config.max_output_bytes,
-                                             cancel, config.host == "opencode", config.startup_timeout);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                absolute_deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                detail::append_current_harness_journal_event(
+                    "host.call.completed", {{"host", config.host}, {"outcome", "timeout"},
+                                            {"provider_effect_uncertain", false}}, correlation);
+                return HarnessWorkerResponse::timeout("host request deadline elapsed before dispatch");
+            }
+            // Once a host subprocess may start, an exception or missing usage
+            // cannot restore this nonrenewable claim.
+            if (call.usage)
+                call.usage->remember_provider_effect(call.run_id + ":" + correlation);
+            reservation.dispatched = true;
+            const auto process = run_process(executable, args, cwd, remaining, config.max_output_bytes,
+                                             cancel, config.host == "opencode",
+                                             std::min(config.startup_timeout, remaining));
             HarnessWorkerResponse response;
             if ((cancel && cancel->is_cancelled()) || process.cancelled ||
                 (call.budget_exhausted && call.budget_exhausted->load()))
@@ -626,35 +704,48 @@ HarnessWorkerExecutor make_host_agent_executor(HostAgentExecutorConfig config) {
             }
             else {
                 auto final = final_value(config.host, process.out, config.max_events);
-                if (call.usage && (final.input || final.output)) {
-                    ChatCompletion::Usage usage;
-                    usage.prompt_tokens = static_cast<int>(std::min<std::uint64_t>(final.input, std::numeric_limits<int>::max()));
-                    usage.completion_tokens = static_cast<int>(std::min<std::uint64_t>(final.output, std::numeric_limits<int>::max()));
-                    if (held) {
-                        call.usage->settle_reservation(static_cast<long long>(reserve), usage);
-                        reservation.held = false;
-                    } else call.usage->add(usage);
+                reported_usage = final.usage;
+                if (call.usage) {
+                    if (held) call.usage->settle_reservation(reserve, final.usage);
+                    else call.usage->add(final.usage);
                 }
+                usage_recorded = true;
+                const auto input = final.usage.input_total;
+                const auto output_count = final.usage.output_total;
+                const auto reported = call.usage ? call.usage->snapshot() : sp::Usage{};
                 if (call.model_token_budget && call.usage &&
-                    call.usage->total_tokens_wide() >= 0 &&
-                    static_cast<std::uint64_t>(call.usage->total_tokens_wide()) > call.model_token_budget) {
+                    (static_cast<std::uint64_t>(call.usage->total_tokens_wide()) > call.model_token_budget ||
+                     (reported.total && reported.total->value > call.model_token_budget))) {
                     if (call.budget_exhausted) call.budget_exhausted->store(true);
                     response = HarnessWorkerResponse::cancelled("Program model-token budget exhausted during host request");
                 } else if (!final.error.empty())
                     response = final.error.rfind("HOST_", 0) == 0 ?
                         HarnessWorkerResponse::tool_error(final.error) : HarnessWorkerResponse::parse_error(final.error);
-                else if (call.model_token_budget && (final.input == 0 && final.output == 0))
-                    response = HarnessWorkerResponse::tool_error("HOST_USAGE: host did not provide enforceable token usage");
-                else if (final.output > static_cast<std::uint64_t>(output_tokens))
+                else if (call.model_token_budget &&
+                         (!input || !output_count || final.usage.quality != sp::UsageQuality::Consistent))
+                    response = HarnessWorkerResponse::tool_error("HOST_USAGE: host did not provide enforceable final token usage");
+                else if (output_count && output_count->value > static_cast<std::uint64_t>(output_tokens))
                     response = HarnessWorkerResponse::tool_error("HOST_OUTPUT_BUDGET: host exceeded output token ceiling");
-                else if (final.input > input_tokens)
+                else if (input && input->value > input_tokens)
                     response = HarnessWorkerResponse::tool_error("HOST_INPUT_BUDGET: host exceeded input token ceiling");
                 else response = HarnessWorkerResponse::success(std::move(*final.value));
             }
-            detail::append_current_harness_journal_event("host.call.completed", {{"host", config.host}, {"outcome", static_cast<int>(response.kind)}}, correlation);
+            if (!usage_recorded && call.usage) call.usage->observe(reported_usage);
+            response.provider_effect_uncertain =
+                reported_usage.stage != sp::UsageStage::Final ||
+                reported_usage.quality != sp::UsageQuality::Consistent ||
+                !reported_usage.input_total || !reported_usage.output_total;
+            detail::append_current_harness_journal_event(
+                "host.call.completed",
+                {{"host", config.host}, {"outcome", static_cast<int>(response.kind)},
+                 {"provider_effect_uncertain", response.provider_effect_uncertain},
+                 {"usage", provider_codec::encode_usage(reported_usage)}}, correlation);
             return response;
         } catch (const std::exception&) {
-            return HarnessWorkerResponse::tool_error("HOST_PROCESS: host CLI launch failed");
+            if (!usage_recorded && call.usage) call.usage->observe(reported_usage);
+            auto response = HarnessWorkerResponse::tool_error("HOST_PROCESS: host CLI launch failed");
+            response.provider_effect_uncertain = reservation.dispatched;
+            return response;
         }
     };
 }

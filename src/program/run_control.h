@@ -21,6 +21,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <map>
 #include <memory>
 #include <functional>
 #include <mutex>
@@ -53,6 +55,7 @@ struct RunOutcome {
     std::optional<ProgramInterrupt>       interrupt;
     std::optional<ProgramFailure>         failure;
     std::vector<std::string>              execution_trace;
+    std::optional<UsageAccumulator::AuthoritySnapshot> provider_budget_authority;
 };
 
 class RunControl;
@@ -74,6 +77,13 @@ struct AsyncWaiter {
 struct HeldProgramHandoff {
     std::uint64_t       request_id = 0;
     ExactProgramHandoff handoff;
+};
+
+struct RecordedRunReplay {
+    std::string source_run_id;
+    UsageAccumulator::AuthoritySnapshot provider_authority;
+    std::map<std::string, std::deque<ProgramOperationEvent>> operations;
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
 };
 
 class RunControl final : public std::enable_shared_from_this<RunControl> {
@@ -99,7 +109,8 @@ public:
                std::optional<ProgramExecutionLease>       execution_lease = std::nullopt,
                std::string                                logical_run_id  = {});
     RunControl(ProgramRunRecord record,
-               std::shared_ptr<ProgramTransitionStore> transitions);
+               std::shared_ptr<ProgramTransitionStore> transitions,
+               std::shared_ptr<sp::NativeArchive> archive);
 
     using CompletionCallback = std::function<void(const ProgramResult&)>;
     using TerminalCleanup = std::function<void()>;
@@ -172,6 +183,10 @@ public:
     const std::shared_ptr<graph::CancelToken>        cancel_token;
     const std::shared_ptr<std::atomic_bool>          budget_exhausted =
         std::make_shared<std::atomic_bool>(false);
+    /// Installed only from an authenticated source publication, before execution.
+    std::shared_ptr<RecordedRunReplay> recorded_replay;
+    /// Runtime-owned custody installed before any Core execution starts.
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;

@@ -11,8 +11,8 @@
 //   - spawn_ghidra_bridge()— stdio MCP bridge spawn + tool discovery
 //                            + LOCAL_TOOL_SUBSET filter.
 //   - extract_final_response()
-//                          — pull the agent's final assistant message
-//                            from RunResult, with channels.messages fallback.
+//                          — display the final assistant text from the
+//                            full trusted RunResult.native_messages history.
 //
 // Header-only on purpose: keeps commit A a pure refactor (no CMake
 // changes, no new translation unit). All non-trivial functions are
@@ -21,10 +21,10 @@
 #pragma once
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/llm/schema_provider.h>
+#include "provider_example_support.h"
 #include <neograph/mcp/client.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -117,17 +117,11 @@ Be decisive. Do not over-explore. The binary is small (under 10 user functions).
 /// @param api_key  OpenRouter API key; the environment value wins when set.
 /// @return Shared provider; caller stores it in `std::shared_ptr<Provider>`.
 inline std::shared_ptr<neograph::Provider>
-make_provider(const std::string& model, const char* api_key) {
+make_provider(const char* api_key) {
     const char* env_key = std::getenv("OPENROUTER_API_KEY");
-    neograph::llm::SchemaProvider::Config llm_cfg;
-    llm_cfg.schema_path       = "openai_responses";
-    llm_cfg.api_key           = (env_key && *env_key) ? env_key : (api_key ? api_key : "");
-    llm_cfg.base_url_override = "https://openrouter.ai/api";
-    llm_cfg.default_model     = model;
-    llm_cfg.timeout_seconds   = 600;
-    llm_cfg.provider_routing  = {{"zdr", true}};
-    llm_cfg.use_websocket     = false;
-    return neograph::llm::SchemaProvider::create(llm_cfg);
+    return examples::make_openrouter_provider(
+        (env_key && *env_key) ? env_key : (api_key ? api_key : ""),
+        "responses", std::chrono::seconds(600));
 }
 
 /// Result of `spawn_ghidra_bridge` — keeps the MCP client (which owns
@@ -203,40 +197,15 @@ inline GhidraBridge spawn_ghidra_bridge() {
     return out;
 }
 
-/// Pull the agent's final assistant message out of a `RunResult.output`.
-///
-/// Primary path: `result.output["final_response"]` (set by
-/// `graph_engine.cpp` when the last channel message is an assistant
-/// turn). Same convention as examples 02, 04, 06.
-///
-/// Fallback: walk `channels.messages.value` backward for the last
-/// non-empty assistant `content` string. Reached only when the run
-/// hit `max_steps` mid-tool-loop and `final_response` wasn't set.
-///
-/// Returns "" if neither path yields a string. Caller decides how to
-/// handle empty (the sequential example exits 0 with no stdout).
+/// Explicit final-text display projection of the trusted native history.
+/// The RunResult continues to own all messages and full provider outcomes.
 inline std::string extract_final_response(const neograph::graph::RunResult& result) {
-    if (result.output.contains("final_response") &&
-        result.output["final_response"].is_string()) {
-        return result.output["final_response"].get<std::string>();
-    }
-    if (result.output.contains("channels") &&
-        result.output["channels"].contains("messages") &&
-        result.output["channels"]["messages"].contains("value")) {
-        const auto& msgs = result.output["channels"]["messages"]["value"];
-        if (msgs.is_array()) {
-            for (size_t i = msgs.size(); i-- > 0;) {
-                const auto& m = msgs[i];
-                if (m.contains("role") && m["role"] == "assistant" &&
-                    m.contains("content") && m["content"].is_string() &&
-                    !m["content"].get<std::string>().empty()) {
-                    std::cerr << "[*] final_response missing — using "
-                                 "channels.messages["
-                              << i << "] fallback\n";
-                    return m["content"].get<std::string>();
-                }
-            }
-        }
+    for (auto it = result.native_messages.rbegin(); it != result.native_messages.rend(); ++it) {
+        if (it->role != sp::Role::Assistant) continue;
+        std::string text;
+        for (const auto& part : it->parts)
+            if (const auto* value = std::get_if<sp::Text>(&part)) text += value->value;
+        if (!text.empty()) return text;
     }
     return {};
 }

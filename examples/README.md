@@ -2,6 +2,37 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## Typed C++ cutover status
+
+The current C++ recipes use owned `ProviderRequest` payloads from the five typed
+SDK families, ordered `sp::Event` observations and immutable
+`std::shared_ptr<const sp::Outcome>` terminals (`Completion` or `Failure`).
+`ChatMessage` / `ChatTool` are portable projections, not native replay authority.
+Prepare exactly once; durable callers bind their claim/receipt to
+`Provider::request_digest(prepared)` and dispatch that same prepared handle.
+Do not reconstruct history from printed JSON or flatten failures to final text.
+
+Canonical persistence uses `provider-message-v2` and `runtime-history-record-v2`;
+portable summaries never replace native records. Optional controls are caller-chosen,
+not silently clamped. Bounded calls require genuine model facts; missing facts are
+`LimitUnknown`. Reservation/charged/held amounts are distinct from nullable provider
+usage and do not renew a budget or represent a price, forecast or invoice.
+
+The header-only `examples/provider_example_support.h` helper uses the real SDK
+runtime; it is not a replacement transport. LLM builds require
+`SchemaProvider::runtime` through `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)` or an
+explicit `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` configuration.
+Installed SDK include root is `include/SchemaProvider`. Interface/capability
+checks are enforced; the SDK package remains unstable `0.0.0` (interface 3).
+
+This documentation records source migration, not execution of these recipes.
+Historical timings below are not new-cutover qualification. Live runs incur
+provider charges and require explicit keys/network/model access. Keep keys,
+prompts and artifacts private; envelope/native inspection demos print sensitive
+payloads and must not feed public logs. A native archive provides authenticated,
+owner-private custody, not encryption or vendor-issuer authentication.
+
+
 The numbered examples cover the NeoGraph engine surface, with one focused Core
 quickstart and one focused Program quickstart.
 Each is a single file in this directory (with one Docker-Compose
@@ -91,9 +122,8 @@ demonstrate, not by file number.
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | The ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. Calculator tool. |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | RAG with real OpenRouter-compatible embeddings + in-memory cosine search. |
-| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | Direct one-request OpenRouter Responses SSE smoke test via `SchemaProvider::complete_stream()`. |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | Direct OpenAI `/v1/responses` WebSocket smoke test with `use_websocket=true`. |
-| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | Raw HTTP/SSE tour of OpenRouter Responses built-in tool shapes. |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | Typed Responses SSE request, ordered `sp::Event` observations and owned `sp::Outcome`. |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | All seven typed hosted-tool sections over SSE; full Outcomes and ordered wire observations. |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | Debug aid: dump the raw `/api/v1/responses` JSON envelope for one tool-call request. |
 | 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | Sweep the pinned DeepSeek reasoning-effort values on one prompt — see latency / reasoning-token tradeoffs. |
 
@@ -133,7 +163,7 @@ demonstrate, not by file number.
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
 | 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | offline | Three agent runs interleave on one `io_context` thread via `engine->run_async()` — wall ≈ 50 ms instead of 3×50 ms. Stage-4 async-end-to-end. |
-| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | Outer `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` driving a ReAct loop, with the LLM node's tokens streaming to stdout via `co_await provider->complete_stream_async(...)` against `SchemaProvider("openai_responses")`. **Exact shape that segfaulted pre-PR-#10** — runs cleanly post-fix; tool round-trip + final answer in ~4s. |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | Async ReAct with typed provider events; text deltas are display projections, not native history. |
 | 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | offline | Fixed-worker pool with backpressure (`neograph::util::RequestQueue`) — bounded in-flight work, no unbounded growth under load. |
 | 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | offline | Cooperative cancellation — `CancelToken::fork()` per child, parent `cancel()` cascades to all in-flight children. |
 | 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | offline | Per-node result cache keyed on node + input — skip recompute on identical inputs across runs. |
@@ -176,7 +206,7 @@ Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | local server (llama.cpp / vLLM) | Point `OpenAIProvider` at `http://localhost:8090`. Two-process split keeps model weights out of the agent's address space. |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | llama.cpp / vLLM | Typed Chat client at `http://localhost:8090`; model weights stay outside the agent process. |
 
 ### Showcase
 
@@ -197,9 +227,7 @@ Each example is one of three setups:
    exact `run(NodeInput)` body — emit `ChannelWrite`, `Send`, or
    `Command` through `NodeOutput`. This is where Send fan-out and
    Command routing overrides live.
-3. **Schema-driven response shapes** (13, 15, 16, 17, 33):
-   one JSON schema describes the wire shape while examples target either
-   OpenRouter-compatible SSE or OpenAI's native WebSocket transport.
+3. **Typed provider requests and Outcomes** (13, 15, 16, 17): validated SDK admission, ordered events and immutable Outcomes; no descriptor interpreter or WebSocket adapter.
 
 The graph definition is JSON-shaped (`std::map<std::string, json>`)
 either way — examples 14 and 15 in the [Python examples](../bindings/python/examples/)
@@ -210,7 +238,6 @@ show how the same definition round-trips through `json.dumps` and back.
 | Provider | Examples |
 |---|---|
 | `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
-| `OPENAI_API_KEY` | 33 |
 | local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 
@@ -231,3 +258,25 @@ Built binaries land in the build directory's root, named
 `example_<short_name>` (e.g. `example_react_agent`,
 `example_custom_graph`). The exact name is in each `.cpp`'s top
 comment under `Usage:`.
+
+## Responses inspection contracts (13 / 29 / 30 / 34)
+
+13 submits a typed Responses streaming request; events are not a string-only
+callback. 29 retains both successful and failed Outcomes: the full response
+`wire_envelope`, every ordered `wire_output` item and typed part, function
+arguments, citations, reasoning, opaque hosted output and artifacts. Its raw
+inspection output is sensitive, not a sanitized telemetry/export format.
+30 retains each full Outcome while sweeping `none`, `low`, `medium`, `high`;
+reasoning/input/output/total/provider-reported-total and extra counts are nullable
+64-bit evidence with stage, quality and conflicts. Missing is not zero; visible
+answer text does not replace the Outcome or turn a reservation into usage.
+34 keeps all seven sections: function (calculator), web search, image generation,
+file search, tool search, skills mounted in `shell.environment`, and shell
+(`container_auto`). `OPENROUTER_VECTOR_STORE_ID` gates file search;
+`OPENROUTER_SKILL_ID` overrides the curated `openai-spreadsheets` skill.
+Function tools are advertised, not locally executed by this inspection demo.
+All ordered typed/raw events and full terminals are retained. Hosted tools may
+be unsupported by the chosen route or incur additional charges; typed admission
+is not a live compatibility guarantee. No WebSocket/primitive runnable example
+is retained. Images/Veo/Decisions are separate typed NeoGraph clients and do not
+inherit a chat-run spending grant.

@@ -14,41 +14,49 @@
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>
+#include "provider_example_support.h"
 
 #include <iostream>
 #include <iomanip>
 
-// Mock Provider: responds differently based on message content
+// Offline fixture retains every typed message/part while inspecting user text.
 class StateMockProvider : public neograph::Provider {
+    std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
 public:
-    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
-        neograph::ChatCompletion result;
-        result.message.role = "assistant";
-
-        // Check the last user message
-        std::string last_user;
-        for (auto it = params.messages.rbegin(); it != params.messages.rend(); ++it) {
-            if (it->role == "user") { last_user = it->content; break; }
-        }
-
-        if (last_user.find("Seoul") != std::string::npos) {
-            result.message.content = "Seoul is the capital of South Korea, with a population of about 9.5 million.";
-        } else if (last_user.find("Busan") != std::string::npos) {
-            result.message.content = "Busan is the second largest city in South Korea, famous for Haeundae Beach.";
-        } else if (last_user.find("Tokyo") != std::string::npos) {
-            result.message.content = "Tokyo is the capital of Japan and one of the largest metropolitan areas in the world.";
-        } else {
-            result.message.content = "Hello! Please ask me about a city.";
-        }
-        return result;
+    neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
+        auto history = std::make_shared<const std::vector<sp::Message>>(
+            examples::request_messages(request));
+        return prepare_local(client_, std::move(request),
+            [history](const neograph::PreparedProviderRequest& prepared,
+                      const std::function<void(const sp::Event&)>& observer)
+                -> asio::awaitable<sp::runtime::Result> {
+                std::string last_user;
+                for (const auto& message : *history) {
+                    if (message.role != sp::Role::User) continue;
+                    last_user.clear();
+                    for (const auto& part : message.parts)
+                        if (const auto* text = std::get_if<sp::Text>(&part))
+                            last_user += text->value;
+                }
+                std::string reply;
+                if (last_user.find("Seoul") != std::string::npos)
+                    reply = "Seoul is the capital of South Korea, with a population of about 9.5 million.";
+                else if (last_user.find("Busan") != std::string::npos)
+                    reply = "Busan is the second largest city in South Korea, famous for Haeundae Beach.";
+                else if (last_user.find("Tokyo") != std::string::npos)
+                    reply = "Tokyo is the capital of Japan and one of the largest metropolitan areas in the world.";
+                else
+                    reply = "Hello! Please ask me about a city.";
+                sp::Completion completion;
+                completion.messages.push_back(
+                    examples::message(sp::Role::Assistant, std::move(reply)));
+                completion.stop.kind = sp::StopKind::EndTurn;
+                if (prepared.mode() == neograph::ProviderMode::Stream)
+                    examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
     }
-
-    neograph::ChatCompletion complete_stream(
-        const neograph::CompletionParams& p, const neograph::StreamCallback& cb) override {
-        auto r = complete(p);
-        if (cb && !r.message.content.empty()) cb(r.message.content);
-        return r;
-    }
+    std::string_view family() const noexcept override { return "openai.chat"; }
     std::string get_name() const override { return "state_mock"; }
 };
 
@@ -95,6 +103,7 @@ int main() {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = "fixture-state";
 
     auto store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
     auto engine = neograph::graph::GraphEngine::build(
@@ -130,6 +139,8 @@ int main() {
     std::cout << "Modified to:       \"Tell me about Busan\" (question changed)\n\n";
 
     // Add a new user message (reducer=append, so it appends to existing)
+    // Editable JSON carries this portable user input only; it cannot mint a
+    // NativeReplay seal or replace the engine's trusted provider history.
     engine->update_state("thread-001", {
         {"messages", neograph::json::array({
             {{"role", "user"}, {"content", "Tell me about Busan"}}
@@ -173,8 +184,16 @@ int main() {
         })}
     });
 
-    // Execute on the forked thread
-    auto forked_result = engine->resume("thread-001-tokyo");
+    // This fork inherited a completed checkpoint. Start a new turn from its
+    // trusted history; resume alone would return the completed checkpoint.
+    neograph::graph::RunConfig fork_config;
+    fork_config.thread_id = "thread-001-tokyo";
+    fork_config.resume_if_exists = true;
+    fork_config.input = neograph::json::object();
+    auto fork_turn = engine->run(fork_config);
+    auto forked_result = fork_turn.interrupted
+        ? engine->resume("thread-001-tokyo")
+        : std::move(fork_turn);
     std::cout << "Forked thread execution trace: ";
     for (const auto& n : forked_result.execution_trace) std::cout << n << " → ";
     std::cout << "END\n\n";

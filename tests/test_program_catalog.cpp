@@ -3,6 +3,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/program/program.h>
 #include <neograph/provider.h>
+#include "fixtures/typed_provider.h"
 #include <neograph/tool.h>
 #include <neograph/program/store.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
@@ -70,16 +71,14 @@ private:
     std::string name_;
 };
 
-class CatalogProvider final : public neograph::Provider {
+class CatalogProvider final : public neograph::test::LocalProvider {
 public:
-    explicit CatalogProvider(std::string name = "catalog-provider") : name_(std::move(name)) {}
-    std::string get_name() const override { return name_; }
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        ++provider_calls;
-        return {};
-    }
-private:
-    std::string name_;
+    explicit CatalogProvider(std::string name = "catalog-provider")
+        : LocalProvider([](auto, const auto&, const auto&)
+                            -> asio::awaitable<sp::runtime::Result> {
+              ++provider_calls;
+              co_return neograph::test::success("");
+          }, std::move(name)) {}
 };
 
 class CatalogTool final : public neograph::Tool {
@@ -99,21 +98,25 @@ private:
     std::string name_;
 };
 
-class CatalogToolCallingProvider final : public neograph::Provider {
+class CatalogToolCallingProvider final : public neograph::test::LocalProvider {
 public:
-    std::string get_name() const override { return "catalog-provider"; }
-    void request_tool(std::string name) { requested_tool_ = std::move(name); }
-    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
-        ++provider_calls;
-        EXPECT_EQ(params.tools.size(), 1U);
-        neograph::ChatCompletion completion;
-        completion.message.role = "assistant";
-        completion.message.tool_calls.push_back(
-            neograph::ToolCall{"call-1", requested_tool_, "{}"});
-        return completion;
-    }
+    explicit CatalogToolCallingProvider(
+        std::shared_ptr<std::string> requested = std::make_shared<std::string>("catalog-tool"))
+        : LocalProvider([requested](neograph::ProviderRequest request,
+                                    const neograph::PreparedProviderRequest&,
+                                    const auto&) -> asio::awaitable<sp::runtime::Result> {
+              ++provider_calls;
+              const auto& tools = std::get<sp::chat::Request>(request.payload).tools;
+              EXPECT_EQ(tools.size(), 1U);
+              EXPECT_EQ(tools.at(0).name, "catalog-tool");
+              co_return neograph::test::success(std::vector<sp::Message>{
+                  {"tool-request", sp::Role::Assistant, {sp::ToolCall{
+                      "call-1", *requested, sp::ToolCallKind::ClientExecuted,
+                      neograph::test::document("{}")}}}});
+          }, "catalog-provider"), requested_(std::move(requested)) {}
+    void request_tool(std::string name) { *requested_ = std::move(name); }
 private:
-    std::string requested_tool_ = "catalog-tool";
+    std::shared_ptr<std::string> requested_;
 };
 
 RegistrySnapshot registry(bool                     failing_factory = false,
@@ -821,6 +824,7 @@ TEST(ProgramCatalogTest, FixedBrokeredCoreNodesDispatchOnlyThroughRunGate) {
     NodeContext context;
     auto model = std::make_shared<CatalogToolCallingProvider>();
     context.provider = model;
+    context.model = "catalog-model";
     std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
     owned_tools.push_back(std::make_unique<CatalogTool>());
     owned_tools.push_back(std::make_unique<CatalogTool>("out-of-scope"));
@@ -838,7 +842,8 @@ TEST(ProgramCatalogTest, FixedBrokeredCoreNodesDispatchOnlyThroughRunGate) {
     auto run = [&](std::string thread_id, bool allow) {
         RunConfig config;
         config.thread_id = std::move(thread_id);
-        config.input = json::object();
+        config.input = {{"messages", json::array({
+            {{"role", "user"}, {"content", "Inspect the catalog with the declared tool."}}})}};
         RunResources resources;
         resources.tool_gate = [allow](neograph::ToolCall, neograph::ToolGateContext)
             -> asio::awaitable<neograph::ToolDecision> {

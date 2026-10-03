@@ -1,6 +1,57 @@
 <!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=14c932ce835be59435fe30b831344894d899490a1478a3bd34f442e9113414da -->
 # 自进化聊天机器人
 
+## 当前类型化 Program chat 契约
+
+`program_chat.cpp` 使用 `evolving-chat/v6`、`chat.step` version `1.5.0`
+（manifest digest `chat.step/v6`）和 ledger schema `neograph.program-chat-call/v6`。
+现有 browser/HTTP protocol 不变。Alice/Bob owner scope、reviewed-template generation、
+角色 prompt、effect/capability grant、精确 checkpoint lineage 与 nonrenewable budget 均由 host 拥有。
+
+```bash
+# configure 前将 SCHEMAPROVIDER_SOURCE 设置为已提供的 SDK checkout 路径。
+cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
+cmake --build build-chat --target cookbook_program_chatbot
+./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+  --native-archive-dir .chat-native --session demo
+```
+
+loopback browser 仍为 `http://127.0.0.1:8768`；`alice-demo`/`bob-demo` 是 demo bearer token，
+不是 production 认证。live 需要 OpenRouter eligible route、密钥与网络；CLI default 为 GLM-5.3-Flash。
+archive 是 host-only，默认 `DB_PATH.native`；必须将独立密钥与 owner-private custody 和 DB 一起保留。
+它是认证 custody，不是加密或 vendor issuer proof。不要公开 raw native payload、密钥、prompt 或 ledger artifact。
+这个 durable recipe 需要 archive；真实 C++ in-memory checkpoint sidecar 不需要。
+
+每个 `turn:role` 只 prepare 一次，计算精确 `Provider::request_digest(prepared)`，预留
+`Provider::conservative_token_upper_bound(prepared)`，先持久化 pending claim 再 dispatch 同一个 handle。
+整个调用窗口的上限由已准入模型的 input/output 限制、实际 output cap、hosted invocation 限制和
+retry 策略计算。缺少模型事实时，在预留或 dispatch 前拒绝。private loopback fixture 也必须提供
+明确支持的模型策略事实；mock 不会编造限制或 provider usage。
+预留不是 provider usage、forecast 或 invoice。nullable wide provider count 与 `charged_tokens` 独立；
+known zero 不是缺失。只有 consistent final input/output evidence、先前 usage 非 unknown 且没有
+transport 内部重发时才结算；否则保留原始预留为 `UnknownHold`。
+高于预留的 report 仍计入 charge；`cost` 保持 unknown。
+使用 `--descriptor-policy PATH`（C++ `Options::descriptor_policy_file`）指定主机拥有的 SDK
+descriptor-policy JSON。它与内嵌 codec resource snapshot 一起准入一次，再由两个 tenant 共享；
+未指定时仍使用内置策略。明确的 fixture 策略必须声明精确 loopback `openrouter_origins` 和
+`program-chat-mock`（或明确选择的 fixture 模型）的限制。已准入策略 identity 绑定到 session
+settings；即使文件路径不变，内容变更也必须使用新 session。模型提案或 checkpoint 不能选择策略。
+`--mock` 同样需要这些事实；预算只能明确提高。
+
+restart 将 pending 转为 `UnknownHold`，不会自动重新发送。completed replay 要求相同 prepared digest/reservation，
+从 archive 恢复原始不可变 Outcome/native role history 并验证 settlement/output。
+保留相同 DB、archive/key、session、provider/model/settings 和 build identity；改变设置需要新 session。
+SDK retry 关闭（`max_attempts=1`）；restart/替换不会更新 budget。model JSON 是提案而不是 native authority。
+这里记录源代码契约，不声称新 recipe 已执行或 live pass。
+
+## 旧 Core demo 的历史步骤与测量
+
+以下是 `server.cpp`/`server_multi.cpp` 的旧 Core demo；它们选择下一 request 的 graph，
+不展示上述 Program 运行中的 checkpoint 替换，也不是此次迁移的已验证测量。
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **该聊天机器人框架会在运行时根据用户行为重塑*其自身*的拓扑。此能力为 NeoGraph 独有；LangGraph 无法在运行时重塑图结构。**

@@ -6,7 +6,7 @@ std::unique_ptr<GraphEngine> create_react_graph(
     std::shared_ptr<Provider> provider,
     std::vector<std::unique_ptr<Tool>> tools,
     const std::string& instructions,
-    const std::string& model) {
+    const std::string& model, ProviderControls controls) {
 
     // JSON definition equivalent to the Agent::run() ReAct loop:
     //   __start__ -> llm -> (has_tool_calls ? tools : __end__)
@@ -37,6 +37,7 @@ std::unique_ptr<GraphEngine> create_react_graph(
     ctx.tools        = ToolSet(std::move(tools));
     ctx.model        = model;
     ctx.instructions = instructions;
+    ctx.provider_controls = std::move(controls);
 
     auto engine = GraphEngine::compile(definition, ctx);
     return engine;

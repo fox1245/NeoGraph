@@ -1,6 +1,21 @@
 <!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ko source_sha256=4d18b0fee54089948ca59063eb6177567e1b5db09a87123125e808bee6889add -->
 # NeoGraph + OpenRouter(고정 DeepSeek)
 
+## 과거 Python recipe — binding 전환 보류
+
+이 페이지는 전환 이전 Python 공급자 API와 측정의 기록입니다. 아래 코드는
+**현재 타입 C++ 계약과 호환되지 않으며 현재 실행 지침이 아닙니다**.
+Python 공급자 binding, subclass trampoline, BYO/OpenRouter adapter는 아직 port하거나
+실행 검증하지 않았습니다. C++ 전환만으로 Python 호환성을 추론하지 마세요.
+현재 C++은 타입 `ProviderRequest`를 소유하고 한 번 prepare하며 전체 불변
+`sp::Outcome`, native history, nullable usage를 유지합니다. 아래 `complete(params)`/
+`ChatCompletion`은 과거 API입니다. 누락 usage는 zero가 아니며 마지막 호출 usage는
+전체 tool loop 사용량이 아닙니다. durable receipt 뒤에서 SDK retry가 숨은 재전송을
+만들면 안 됩니다. 키, prompt, native payload는 비공개로 유지하세요.
+
+## 전환 이전 지침과 관찰 기록
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 OpenRouter의 고정 `~deepseek/deepseek-v4-flash-latest` 모델에 대해 NeoGraph 그래프를 실행합니다. 이 쿡북은 동일한 API 키, 모델 및 명시적 zero-data-retention(ZDR) 제공업체 선호를 사용하는 동등한 두 개의 공급자 표면을 보여줍니다:

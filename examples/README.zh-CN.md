@@ -1,6 +1,32 @@
 <!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
 # C++ API 示例
 
+
+## 类型化 C++ 迁移状态
+
+当前 C++ recipe 使用五个类型化 SDK family 的拥有所有权的 `ProviderRequest`、
+有序 `sp::Event` 和不可变 `std::shared_ptr<const sp::Outcome>`（`Completion`/`Failure`）。
+`ChatMessage`/`ChatTool` 是 portable 投影，不是 native replay 权限。
+只 prepare 一次；durable 调用者将 claim/receipt 绑定到
+`Provider::request_digest(prepared)`，并 dispatch 同一个 handle。
+不要从打印的 JSON 重建 history，也不要把 failure 简化为最终文本。
+
+canonical persistence 使用 `provider-message-v2`/`runtime-history-record-v2`；
+portable 摘要不能替代 native record。optional control 由调用者选择，不暗中 clamp。
+bounded call 需要真实 model fact；缺失为 `LimitUnknown`。
+reservation/charged/held 与 nullable provider usage 独立，不更新 budget，也不是价格、forecast 或 invoice。
+
+header-only `examples/provider_example_support.h` 使用真实 SDK runtime。
+LLM 构建需要 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)` 的 `SchemaProvider::runtime`，
+或显式 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`。
+安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
+SDK package 仍为 unstable `0.0.0`（interface 3）。
+
+本文记录源代码迁移，不代表这些 recipe 已执行验证。历史测量不是新迁移的 qualification。
+live 运行需要密钥、网络和模型访问并产生费用。密钥、prompt、artifact 必须保持私密；
+envelope/native inspection 输出含敏感内容，不得进入公开 log。
+native archive 是经过认证的 owner-private custody，不是加密或 vendor issuer 认证。
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 五十六个可运行的 C++ 程序，覆盖 NeoGraph 引擎表面。
@@ -86,9 +112,8 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct 循环：`llm_call` ↔ `tool_dispatch`，带 `has_tool_calls` 条件判断。Calculator 工具。 |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | 使用 OpenRouter 兼容 embedding + 内存余弦搜索的 RAG。 |
-| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | 直接调用 `SchemaProvider::complete_stream()` 的单请求 OpenRouter Responses SSE 冒烟测试。 |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | 使用 `use_websocket=true` 的 OpenAI `/v1/responses` WebSocket 直接冒烟测试。 |
-| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | 展示 OpenRouter Responses 内置工具 wire shape 的 raw HTTP/SSE 示例。 |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | 类型化 Responses SSE 请求、有序 `sp::Event` 观察与拥有所有权的 `sp::Outcome`。 |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | 保留全部七个类型化 hosted-tool SSE 部分，以及完整 Outcome 和有序 wire 观察。 |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | 调试辅助：为一次工具调用请求转储原始 `/api/v1/responses` JSON envelope。 |
 | 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | 扫描固定 DeepSeek 模型的 reasoning effort，观察延迟 / reasoning token 取舍。 |
 
@@ -128,7 +153,7 @@ OPENROUTER_API_KEY=sk-or-...
 | # | 文件 | 设置 | 展示内容 |
 |---|------|-------|---------------|
 | 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | 离线 | 三个 agent 运行通过 `engine->run_async()` 在一个 `io_context` 线程上交错运行 — 墙钟时间 ≈ 50 ms，而不是 3×50 ms。Stage-4 端到端异步。 |
-| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | 外层 `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` 驱动 ReAct 循环，LLM node 的 token 通过 `SchemaProvider("openai_responses")` streaming 到 stdout。**这正是 pre-PR-#10 会段错误的形状** — 修复后干净运行；工具往返 + 最终答案约 4s。 |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | 使用类型化 provider 事件的异步 ReAct。text delta 是显示投影，不是 native history。 |
 | 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | 离线 | 带背压的固定 worker 池（`neograph::util::RequestQueue`）— 有界在途工作，负载下不会无界增长。 |
 | 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | 离线 | 协作式取消 — 每个 child 使用 `CancelToken::fork()`，parent `cancel()` 会级联到所有在途 child。 |
 | 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | 离线 | 每 node 结果缓存，key 为 node + input — 跨运行遇到相同输入时跳过重新计算。 |
@@ -171,7 +196,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 | # | 文件 | 设置 | 展示内容 |
 |---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | 本地 server（llama.cpp / vLLM） | 把 `OpenAIProvider` 指向 `http://localhost:8090`。两进程拆分让模型权重留在 agent 地址空间之外。 |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | llama.cpp / vLLM | 位于 `http://localhost:8090` 的类型化 Chat 客户端；模型权重位于代理进程之外。 |
 
 ### 展示
 
@@ -190,9 +215,7 @@ OPENROUTER_API_KEY=sk-or-...
 2. **自定义 `GraphNode` subclass**（05, 09, 10, 25）：你控制精确的
    `run(NodeInput)` body — 通过 `NodeOutput` 发出 `ChannelWrite`、`Send` 或 `Command`。
    Send 扇出与 Command 路由覆盖就在这里。
-3. **Schema-driven response shapes**（13, 15, 16, 17, 33）：
-   一个 JSON schema 描述 wire shape；示例可使用 OpenRouter 兼容 SSE
-   或 OpenAI 原生 WebSocket transport。
+3. **类型化 provider 请求与 Outcome** (13, 15, 16, 17)：SDK admission、有序事件与不可变 Outcome；没有 descriptor interpreter 或 WebSocket adapter。
 无论哪种方式，图定义都是 JSON 形状（`std::map<std::string, json>`）
 — [Python examples](../bindings/python/examples/) 中的示例 14 和 15 展示了同一个定义
 如何通过 `json.dumps` 往返后再回来。
@@ -202,7 +225,6 @@ OPENROUTER_API_KEY=sk-or-...
 | Provider | 示例 |
 |---|---|
 | `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
-| `OPENAI_API_KEY` | 33 |
 | local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 
@@ -217,3 +239,20 @@ gRPC 套件（52–55, 57）也不需要 key，但需要 `-DNEOGRAPH_BUILD_GRPC=
 构建出的二进制文件位于构建目录根部，命名为 `example_<short_name>`
 （例如 `example_react_agent`、`example_custom_graph`）。准确名称在每个 `.cpp`
 顶部注释的 `Usage:` 下。
+
+## Responses inspection 契约 (13 / 29 / 30 / 34)
+
+13 提交类型化 Responses streaming request；事件不是字符串 callback。
+29 保留成功/失败的完整 Outcome、`wire_envelope`、所有有序 `wire_output` item 和类型化 part、
+function argument、citation、reasoning、opaque hosted output 与 artifact。
+raw inspection 输出含敏感内容，不是安全的 telemetry/export 格式。
+30 扫描 `none`、`low`、`medium`、`high` 并保留每个完整 Outcome。
+reasoning/input/output/total/provider-reported-total 及 extra count 是 nullable 64-bit evidence，
+包含 stage、quality、conflict。缺失不等于 zero；visible text 与预留不是 usage。
+34 保留全部七部分：function(calculator)、web search、image generation、file search、
+tool search、`shell.environment` 的 skills 和 shell(`container_auto`)。
+`OPENROUTER_VECTOR_STORE_ID` 是 file search 的前提；`OPENROUTER_SKILL_ID` 覆盖默认
+`openai-spreadsheets` skill。本 inspection demo 只声明 function tool，不在本地执行。
+保留全部有序类型化/raw event 和完整 terminal。hosted tool 可能不被 route 支持或产生额外费用；
+类型化 admission 不是 live 兼容保证。不保留 WebSocket/primitive 可运行示例。
+Images/Veo/Decisions 是独立类型化 NeoGraph client，不继承 chat spending grant。

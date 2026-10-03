@@ -1635,6 +1635,8 @@ public:
     std::function<void(const ProgramTransitionPublication&)> before_publication;
     std::function<std::optional<ProgramRunRecord>(std::string_view,
                                                  std::optional<ProgramRunRecord>)> filter_run_read;
+    std::function<std::vector<ProgramJavaScriptCommandJournalEntry>(
+        std::string_view, std::vector<ProgramJavaScriptCommandJournalEntry>)> filter_command_read;
     mutable std::atomic<unsigned>                            synthesis_read_failures{0};
     mutable std::atomic<unsigned>                            command_head_misses{0};
     std::optional<ProgramCommandPublicationHead> load_command_publication_head(
@@ -1669,7 +1671,9 @@ public:
     }
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_->load_javascript_commands(owner, run_id, sequence);
+        auto commands = inner_->load_javascript_commands(owner, run_id, sequence);
+        return filter_command_read ? filter_command_read(run_id, std::move(commands))
+                                   : std::move(commands);
     }
     std::vector<ProgramContextPublication> load_context_publications(
         std::string_view owner, std::string_view run_id,
@@ -2080,6 +2084,17 @@ public:
         return inner_->load_latest(thread_id);
     }
 
+    bool requires_managed_budget(const std::string& thread_id) override {
+        return inner_->requires_managed_budget(thread_id);
+    }
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
+        co_return co_await inner_->requires_managed_budget_async(std::move(thread_id));
+    }
+
+    bool retains_native_checkpoint() const noexcept override {
+        return inner_->retains_native_checkpoint();
+    }
+
     std::optional<Checkpoint> load_by_id(const std::string& id) override {
         auto       checkpoint = inner_->load_by_id(id);
         const auto call       = exact_loads_.fetch_add(1);
@@ -2330,14 +2345,14 @@ TEST(ProgramRuntimeTest, MediatedCoreToolRequiresExactRunGrant) {
 namespace {
 class ProgramBrokerProbe final : public neograph::graph::ProviderCallBroker {
 public:
-    asio::awaitable<neograph::ChatCompletion> invoke(
+    asio::awaitable<sp::runtime::Result> invoke(
         neograph::graph::ProviderCallIdentity,
         std::shared_ptr<neograph::Provider>,
-        neograph::CompletionParams,
-        neograph::StreamCallback) override {
-        neograph::ChatCompletion completion;
-        completion.message = neograph::ChatMessage{"assistant", "brokered"};
-        co_return completion;
+        neograph::ProviderRequest) override {
+        sp::Completion completion;
+        completion.messages.push_back(sp::Message{
+            "broker-message", sp::Role::Assistant, {sp::Text{"brokered"}}});
+        co_return std::make_shared<const sp::Outcome>(std::move(completion));
     }
 };
 }  // namespace
@@ -3445,8 +3460,11 @@ TEST(ProgramRuntimeTest, ProgramEnvelopePreservesDirectCoreBehavior) {
     EXPECT_EQ(program_result.output(), direct_result.output);
     EXPECT_EQ(program_result.execution_trace(), direct_result.execution_trace);
     EXPECT_EQ(program_events, direct_events);
-    EXPECT_EQ(program_result.usage().model_tokens,
-              static_cast<std::uint64_t>(direct_result.usage.total_tokens));
+    // This topology never dispatches a provider: reports stay missing, while
+    // Program's separate consumed model-token authority remains known zero.
+    EXPECT_FALSE(direct_result.usage.total.has_value());
+    EXPECT_TRUE(direct_result.provider_outcomes.empty());
+    EXPECT_EQ(program_result.usage().model_tokens, 0U);
     ASSERT_TRUE(program_checkpoint.has_value());
     ASSERT_TRUE(direct_checkpoint.has_value());
     EXPECT_EQ(program_result.checkpoint()->checkpoint_schema_version,
@@ -5091,9 +5109,34 @@ TEST(ProgramRuntimeTest, CheckpointEventCanSynchronouslyCommitArmedHandoff) {
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+void configure_captured_control_catalog(AdmittedRuntime& fixture, bool unmanaged_core = false) {
+    fixture.runtime.reset();
+    fixture.registry = runtime_registry(
+        unmanaged_core ? ExecutionGuarantee::Unmanaged : ExecutionGuarantee::Strict);
+    fixture.profile = AdmittedRuntime::make_profile(
+        fixture.registry, ExecutionGuarantee::Unmanaged, true);
+    fixture.policy = AdmittedRuntime::make_policy(
+        fixture.profile, ExecutionGuarantee::Unmanaged, true);
+    fixture.engines = std::make_shared<EngineGenerationCache>();
+    CatalogConfig config{fixture.store, fixture.registry, fixture.engines,
+                         "program-runtime-test/v1"};
+    config.recorded_capability_binder =
+        [](const ProgramVersion& version, const std::vector<ProgramEvent>&) {
+            if (!version.core_materialization_receipt().capability_bindings.empty())
+                throw std::invalid_argument("Pure control fixture has no captured external capabilities");
+            return RecordedCapabilityMaterialization{
+                RecordedBindingSet({}, {}, {}), CatalogCapabilityBinding{}};
+        };
+    fixture.catalog = std::make_shared<ProgramCatalog>(std::move(config));
+    fixture.runtime = fixture.make_runtime();
+}
+
 TEST(ProgramRuntimeTest, RecordedReplayCheckpointCannotAuthorizeLiveReplacement) {
+    completed_calls.store(0);
     auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
     AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    configure_captured_control_catalog(fixture);
     const auto source_version = fixture.admit_javascript(javascript_runtime_source(
         "runtime-completed", R"JS(
     yield ng.checkpoint({cursor: 13}, "replacement:recorded-boundary");
@@ -5104,29 +5147,195 @@ TEST(ProgramRuntimeTest, RecordedReplayCheckpointCannotAuthorizeLiveReplacement)
         "runtime-completed", R"JS(
     return {generation: "target", handoff: input.handoff};
 )JS"));
-
-    auto source = fixture.runtime->start_recorded(
+    auto original = fixture.runtime->start(
         "tenant:runtime", source_version,
-        ProgramInvocation{json::object(), javascript_budget(1, 4),
-                          "trace-recorded-replacement-source", {}},
-        RecordedBindingSet({}, {}, CatalogCapabilityBinding{}, {}));
-    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
-    const auto handoff = source.latest_handoff();
-    ASSERT_TRUE(handoff);
-
+        ProgramInvocation{json::object(), javascript_budget(2, 4),
+                          "trace-authenticated-recorded-source", {}});
+    ASSERT_EQ(original.wait().status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(completed_calls.load(), 1U);
+    auto invocation = original.snapshot().invocation();
+    invocation.run_id = "recorded-replacement-guard";
+    invocation.correlation_id = "trace-recorded-replacement-source";
+    std::optional<ProgramHandoff> held;
+    auto sink = std::make_shared<CallbackSink>();
+    sink->set_callback([&](const ProgramEvent& event) {
+        if (event.kind == ProgramEventKind::Started)
+            held.emplace(fixture.runtime->reconnect("tenant:runtime", invocation.run_id).next_handoff());
+    });
+    auto source = fixture.runtime->replay_recorded(
+        original.run_id(), invocation, RecordedBindingSet({}, {}, {}), sink);
+    ASSERT_TRUE(held);
+    EXPECT_EQ(held->value(), (json{{"cursor", 13}}));
+    EXPECT_FALSE(source.try_result());
+    EXPECT_EQ(completed_calls.load(), 1U);
     try {
         (void)fixture.runtime->replace(
-            "tenant:runtime", handoff->reference, target_version,
+            "tenant:runtime", held->reference(), target_version,
             ProgramInvocation{
-                json{{"handoff", handoff->value}, {"previous_run_id", source.run_id()}},
+                json{{"handoff", held->value()}, {"previous_run_id", source.run_id()}},
                 source.snapshot().remaining_budget(), "trace-recorded-replacement-target", {}});
         FAIL() << "recorded replay checkpoint authorized a live replacement";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_REPLACEMENT_RECORDED_SOURCE");
     }
+    EXPECT_EQ(completed_calls.load(), 1U);
+    source.cancel();
+    held.reset();
+    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
 
+TEST(ProgramRuntimeTest, RecordedControlChargesRealCoreWorkBeforeItsHeldCheckpoint) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
     journal->release_result();
-    (void)source.wait();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    configure_captured_control_catalog(fixture);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        "const observed = yield ng.callCore('main', {}, 'captured:core');"
+        "yield ng.checkpoint({observed}, 'captured:checkpoint');return observed;"));
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4), "real-core-source", {}});
+    const auto terminal = original.wait();
+    ASSERT_EQ(terminal.status(), ProgramTerminalStatus::Completed);
+    const auto source_budget = journal->load_run_lineage(
+        "tenant:runtime", original.run_id())->remaining_budget();
+    auto invocation = original.snapshot().invocation();
+    invocation.run_id = "real-core-recorded-target";
+    std::optional<ProgramHandoff> held;
+    auto sink = std::make_shared<CallbackSink>();
+    sink->set_callback([&](const ProgramEvent& event) {
+        if (event.kind == ProgramEventKind::Started)
+            held.emplace(fixture.runtime->reconnect("tenant:runtime", invocation.run_id).next_handoff());
+    });
+    auto replay = fixture.runtime->replay_recorded(
+        original.run_id(), invocation, RecordedBindingSet({}, {}, {}), sink);
+    ASSERT_TRUE(held);
+    EXPECT_EQ(held->value(), (json{{"observed", terminal.output()}}));
+    const auto at_checkpoint = replay.snapshot().remaining_budget();
+    EXPECT_LT(at_checkpoint.max_core_steps, source_budget.max_core_steps);
+    EXPECT_EQ(at_checkpoint.model_tokens, source_budget.model_tokens);
+    EXPECT_EQ(at_checkpoint.max_program_operations, source_budget.max_program_operations);
+    held.reset();
+    const auto replay_result = replay.wait();
+    ASSERT_EQ(replay_result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(replay_result.output(), terminal.output());
+    EXPECT_GT(replay_result.usage().core_steps, 0U);
+    ASSERT_LE(replay_result.usage().core_steps, source_budget.max_core_steps);
+    EXPECT_EQ(replay_result.remaining_budget().max_core_steps,
+              source_budget.max_core_steps - replay_result.usage().core_steps);
+    EXPECT_EQ(replay_result.usage().program_operations, 0U);
+    EXPECT_EQ(replay_result.remaining_budget().max_program_operations,
+              source_budget.max_program_operations);
+    EXPECT_EQ(replay_result.remaining_budget().model_tokens, source_budget.model_tokens);
+}
+
+TEST(ProgramRuntimeTest, RecordedControlCannotHideUnmanagedCoreBehindSandboxedJavaScript) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    configure_captured_control_catalog(fixture, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed", "return yield ng.callCore('main', {}, 'unmanaged:core');"));
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1, 4), "unmanaged-source", {}});
+    ASSERT_EQ(original.wait().status(), ProgramTerminalStatus::Completed);
+    const auto head = journal->load_run_lineage("tenant:runtime", original.run_id());
+    ASSERT_TRUE(head);
+    auto invocation = original.snapshot().invocation();
+    invocation.run_id = "unmanaged-hidden-target";
+    try {
+        (void)fixture.runtime->replay_recorded(
+            original.run_id(), invocation, RecordedBindingSet({}, {}, {}));
+        FAIL() << "Unmanaged Core received captured replay dispatch";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_REPLAY_GUARANTEE");
+    }
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_FALSE(journal->load("tenant:runtime", invocation.run_id));
+    EXPECT_EQ(journal->load_run_lineage("tenant:runtime", original.run_id())->id(), head->id());
+}
+
+TEST(ProgramRuntimeTest, RecordedControlCannotDispatchAnUncapturedCoreCommand) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    configure_captured_control_catalog(fixture);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        "yield ng.checkpoint({cursor:1}, 'known:checkpoint');"
+        "return yield ng.callCore('main', {}, 'missing:core');"));
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2, 4), "uncaptured-source", {}});
+    ASSERT_EQ(original.wait().status(), ProgramTerminalStatus::Completed);
+    const auto source_id = original.run_id();
+    journal->filter_command_read = [source_id](std::string_view run, auto commands) {
+        if (run == source_id)
+            std::erase_if(commands, [](const auto& entry) {
+                return entry.command().kind() == JavaScriptCommandKind::CallCore;
+            });
+        return commands;
+    };
+    auto invocation = original.snapshot().invocation();
+    invocation.run_id = "uncaptured-command-target";
+    const auto replay = fixture.runtime->replay_recorded(
+        source_id, invocation, RecordedBindingSet({}, {}, {})).wait();
+    ASSERT_EQ(replay.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(replay.failure());
+    EXPECT_EQ(replay.failure()->code, "P_REPLAY_EVIDENCE_REQUIRED");
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(journal->load_run_lineage("tenant:runtime", source_id)->remaining_budget(), RunBudget{});
+}
+
+TEST(ProgramRuntimeTest, RecordedControlRejectsChangedCapturedCommandBeforeCoreWork) {
+    for (const bool changed_effect : {false, true}) {
+        completed_calls.store(0);
+        auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+        journal->release_result();
+        AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+        configure_captured_control_catalog(fixture);
+        const auto version = fixture.admit_javascript(javascript_runtime_source(
+            "runtime-completed",
+            "yield ng.checkpoint({cursor:1}, 'known:checkpoint');"
+            "return yield ng.callCore('main', {}, 'captured:core');"));
+        auto original = fixture.runtime->start(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(2, 4), "changed-source", {}});
+        ASSERT_EQ(original.wait().status(), ProgramTerminalStatus::Completed);
+        const auto source_id = original.run_id();
+        journal->filter_command_read = [source_id, changed_effect](std::string_view run, auto commands) {
+            if (run != source_id) return commands;
+            for (auto& entry : commands) {
+                if (entry.command().kind() != JavaScriptCommandKind::CallCore) continue;
+                auto command = entry.command().to_json();
+                auto effect = entry.effect_identity();
+                if (changed_effect)
+                    effect->back() = effect->back() == '0' ? '1' : '0';
+                else
+                    command["arguments"]["input"] = json{{"tampered", true}};
+                entry = ProgramJavaScriptCommandJournalEntry(
+                    ProgramJavaScriptCommandJournalEntryData{
+                        entry.sequence(), entry.bundle_id(), entry.command_ordinal(),
+                        JavaScriptCommand::from_json(command), std::move(effect),
+                        entry.terminal_result()});
+            }
+            return commands;
+        };
+        auto invocation = original.snapshot().invocation();
+        invocation.run_id = "changed-command-target";
+        const auto replay = fixture.runtime->replay_recorded(
+            source_id, invocation, RecordedBindingSet({}, {}, {})).wait();
+        ASSERT_EQ(replay.status(), ProgramTerminalStatus::Failed);
+        EXPECT_EQ(replay.usage().core_steps, 0U);
+        EXPECT_EQ(replay.usage().program_operations, 0U);
+        EXPECT_EQ(completed_calls.load(), 1U);
+        EXPECT_EQ(journal->load_run_lineage("tenant:runtime", source_id)->remaining_budget(), RunBudget{});
+    }
 }
 
 TEST(ProgramRuntimeTest, JavaScriptPendingHeadFreshRuntimeResumesWithoutRedispatch) {

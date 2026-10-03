@@ -76,21 +76,15 @@ private:
 };
 
 /**
- * Move-only owned replay binding. Construction validates, before Runtime can
- * create a target run, that:
- * - the owned binding has exactly the pinned ProgramVersion receipts;
- * - every expected call/effect coordinate appears once and in source order;
- * - all evidence is FULL, non-redacted, exact-bound, and has one result/failure.
- *
- * The contained CatalogCapabilityBinding is supplied directly to Catalog's
- * explicit-owned materialization path; the configured live binder is never
- * consulted and there is no live fallback.
+ * Move-only captured evidence proposal. Contains no executable capability.
+ * Every expected coordinate appears once, in source order, with FULL exact
+ * result/failure evidence. Runtime authenticates it against the trusted
+ * Catalog materializer's independently loaded durable source observations.
  */
 class NEOGRAPH_PROGRAM_API RecordedBindingSet {
 public:
     RecordedBindingSet(std::vector<CapabilityBindingReceipt>        exact_bindings,
                        std::vector<RecordedCapabilityCallReference> expected_calls,
-                       CatalogCapabilityBinding                     owned_binding,
                        std::vector<RecordedCapabilityEvidence>      evidence);
     RecordedBindingSet(RecordedBindingSet&&) noexcept;
     RecordedBindingSet& operator=(RecordedBindingSet&&) noexcept;
@@ -106,12 +100,15 @@ public:
     /** Re-check against the pinned target version immediately before start. */
     void validate_target(const ProgramVersion& target) const;
 
-    /** One-shot transfer into Catalog::resolve_version_with_binding. */
-    CatalogCapabilityBinding release_owned_binding() &&;
-
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+/** Constructed only by the Catalog's trusted captured-capability registration. */
+struct RecordedCapabilityMaterialization {
+    RecordedBindingSet evidence;
+    CatalogCapabilityBinding binding;
 };
 
 class ProgramHistoricalReplacementChain;

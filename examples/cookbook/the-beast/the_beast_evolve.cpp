@@ -29,7 +29,7 @@
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -123,22 +123,30 @@ static json extract_json(const std::string& t) {
 }
 
 // Lamarckian: the LLM does the arithmetic and wires a chain hitting TARGET.
-static std::optional<json> llm_refine(std::shared_ptr<neograph::Provider> prov, const Ind& elite) {
-    neograph::CompletionParams p;
-    p.model = "~deepseek/deepseek-v4-flash-latest";
-    p.temperature = 0.2f; p.max_tokens = 1500;
-    p.messages = {
-        {"system",
+static std::optional<json> llm_refine(std::shared_ptr<neograph::Provider> prov, const Ind& elite,
+                                     neograph::UsageAccumulator& usage) {
+    neograph::ProviderControls controls;
+    controls.temperature = 0.2; controls.max_output_tokens = 1500;
+    auto request = neograph::make_provider_request(
+        *prov, "~deepseek/deepseek-v4-flash-latest", {
+        neograph::portable_message({"system",
          "You repair a NeoGraph arithmetic harness (JSON). Output ONLY the corrected "
          "JSON object. `acc` starts at 0; each op_node applies acc<-acc<op>k in "
          "execution (edge) order. Available nodes: add2(+2) add3(+3) mul5(*5) mul2(*2) "
          "sub1(-1). Rewire `edges` into a single chain __start__->...-> so that acc "
          "becomes exactly 20. Keep the nodes, channels, and schema_version 1 unchanged; "
-         "change only edges. Example: (0+2)*5*2=20."},
-        {"user", "Current harness computes acc=" + std::to_string(elite.acc) +
-                 " (target 20):\n" + elite.core.dump()}};
+         "change only edges. Example: (0+2)*5*2=20."}),
+        neograph::portable_message({"user", "Current harness computes acc=" + std::to_string(elite.acc) +
+                 " (target 20):\n" + elite.core.dump()})},
+        {}, controls, neograph::ProviderMode::Stream);
+    request.on_event = [](const sp::Event&) {};
     std::string reply;
-    try { reply = prov->complete_stream(p, [](const std::string&){}).message.content; }
+    try {
+        sp::runtime::Result response = prov->invoke(std::move(request));
+        if (response) usage.add(neograph::outcome_usage(*response));
+        response = neograph::outcome_or_throw(std::move(response));
+        reply = neograph::outcome_text(*response);
+    }
     catch (const std::exception& e) { std::cerr << "   [refine] LLM error: " << e.what() << "\n"; return std::nullopt; }
     try { return extract_json(reply); }
     catch (const std::exception&) {
@@ -154,12 +162,10 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     std::shared_ptr<neograph::Provider> provider;
+    neograph::UsageAccumulator usage;
     const bool lamarck = !darwin_only && key && *key;
     if (lamarck)
-        provider = neograph::llm::OpenAIProvider::create_shared(
-            {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "~deepseek/deepseek-v4-flash-latest",
-             .provider_routing = {{"zdr", true}}});
+        provider = examples::make_openrouter_provider(key, "chat");
 
     ng::NodeContext ctx;
     std::cout << "======= THE BEAST (evolve · memetic · real task) =======\n"
@@ -204,7 +210,7 @@ int main(int argc, char** argv) {
         if (best.score == 0.0) { std::cout << "\nSolved — the pipeline computes " << (int)kTarget << ".\n"; break; }
 
         if (lamarck && gen % 3 == 0 && best.score < 0.0) {
-            auto imp = llm_refine(provider, best);
+            auto imp = llm_refine(provider, best, usage);
             if (!imp) { std::cout << "   [Lamarckian] LLM returned no parseable harness.\n"; }
             if (imp) {
                 Fit f = fitness(*imp, ctx);
@@ -232,5 +238,7 @@ int main(int argc, char** argv) {
                      "the loop but did not produce the champion this run.\n";
     else
         std::cout << "Pure Darwinian mutation + selection.\n";
+    std::cout << "usage: " << neograph::usage_to_json(usage.snapshot()).dump()
+              << "; monetary charge: unknown\n";
     return 0;
 }

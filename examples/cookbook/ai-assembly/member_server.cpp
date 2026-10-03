@@ -16,8 +16,7 @@
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
-#include <neograph/llm/openai_provider.h>
-#include <neograph/async/run_sync.h>
+#include "../../provider_example_support.h"
 #include <neograph/graph/node.h>
 #include <neograph/graph/loader.h>
 
@@ -53,12 +52,42 @@ std::string slurp_file(const std::string& path) {
     return ss.str();
 }
 
+// Explicit local fixture: real SDK preparation, no provider I/O, invented usage,
+// or native replay seals. Owned response state survives provider destruction.
+class MockMemberProvider final : public Provider {
+    std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
+public:
+    std::string get_name() const override { return "assembly-local-fixture"; }
+    std::string_view family() const noexcept override { return "openai.chat"; }
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        const auto& messages = examples::request_messages(request);
+        std::string bill;
+        for (const auto& message : messages)
+            if (message.role == sp::Role::User)
+                bill = project_message(message).content;
+        sp::Completion completion;
+        completion.messages.push_back(examples::message(sp::Role::Assistant,
+            "기권\nSynthetic offline vote; no model judgment was made.\nBill excerpt: " +
+            bill.substr(0, 120)));
+        completion.stop = {sp::StopKind::EndTurn, "synthetic-end"};
+        auto outcome = std::make_shared<const sp::Outcome>(std::move(completion));
+        return prepare_local(client_, std::move(request),
+            [outcome = std::move(outcome)](
+                const PreparedProviderRequest&,
+                const std::function<void(const sp::Event&)>& on_event)
+                -> asio::awaitable<sp::runtime::Result> {
+                examples::emit_local_events(std::get<sp::Completion>(*outcome), on_event);
+                co_return outcome;
+            });
+    }
+};
+
 // PersonaNode — a single LLM call that wears the persona of one
 // 국회의원. Reads `prompt` (the bill text + voting instructions from
 // the pinned OpenRouter DeepSeek route with the persona's system prompt,
 // writes the model's reply to `response` for the A2A server adapter
 // to surface as the agent's text response.
-class PersonaNode : public GraphNode {
+class PersonaNode : public GraphNode, public neograph::RuntimeInterpositionConsumer {
   public:
     PersonaNode(std::string name,
                 std::shared_ptr<Provider> provider,
@@ -75,14 +104,22 @@ class PersonaNode : public GraphNode {
         auto raw = in.state.get("prompt");
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
-        CompletionParams p;
-        p.model = "~deepseek/deepseek-v4-flash-latest";
-        p.temperature = 0.7f;
-        p.messages.push_back({"system", system_prompt_});
-        p.messages.push_back({"user", user_text});
-
-        auto reply = co_await provider_->invoke(p, nullptr);
-        std::string text = reply.message.content;
+        ProviderControls controls;
+        controls.temperature = 0.7;
+        auto request = make_provider_request(
+            *provider_, "~deepseek/deepseek-v4-flash-latest",
+            {portable_message({"system", system_prompt_}),
+             portable_message({"user", user_text})}, {}, std::move(controls));
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        request.on_event = in.ctx.on_provider_event;
+        auto reply = co_await observe_provider_result(in.ctx,
+            invoke_provider(provider_, std::move(request), {}, {},
+                provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, reply);
+        reply = outcome_or_throw(std::move(reply));
+        // A2A intentionally publishes a portable persona summary, not native history.
+        std::string text = outcome_text(*reply);
 
         // Tag with party + name so the Speaker's transcript is readable.
         std::string framed = "[" + party_ + " " + persona_name_ + "]\n" + text;
@@ -104,9 +141,9 @@ class PersonaNode : public GraphNode {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 5) {
+    if (argc < 5 || argc > 6 || (argc == 6 && std::string_view(argv[5]) != "--mock")) {
         std::cerr << "Usage: " << argv[0]
-                  << " <port> <persona_name> <party> <system_prompt_file>\n";
+                  << " <port> <persona_name> <party> <system_prompt_file> [--mock]\n";
         return 2;
     }
     int         port          = std::atoi(argv[1]);
@@ -114,8 +151,9 @@ int main(int argc, char** argv) {
     std::string party         = argv[3];
     std::string prompt_path   = argv[4];
 
-    const char* api_key = std::getenv("OPENROUTER_API_KEY");
-    if (!api_key || !*api_key) {
+    const bool mock = argc == 6;
+    const char* api_key = mock ? nullptr : std::getenv("OPENROUTER_API_KEY");
+    if (!mock && (!api_key || !*api_key)) {
         std::cerr << "OPENROUTER_API_KEY not set\n";
         return 2;
     }
@@ -128,16 +166,10 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Provider — OpenRouter DeepSeek with ZDR routing.
-    // create_shared returns shared_ptr<Provider> so the NodeFactory
-    // lambda below can capture and reuse the same provider across
-    // every node-instantiation call.
-    llm::OpenAIProvider::Config cfg;
-    cfg.api_key       = api_key;
-    cfg.base_url      = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = llm::OpenAIProvider::create_shared(cfg);
+    // The explicit offline fixture uses the same admitted typed request boundary.
+    std::shared_ptr<Provider> provider;
+    if (mock) provider = std::make_shared<MockMemberProvider>();
+    else provider = examples::make_openrouter_provider(api_key, "chat");
 
     // Wire the persona node into a one-step graph.
     NodeFactory::instance().register_type(

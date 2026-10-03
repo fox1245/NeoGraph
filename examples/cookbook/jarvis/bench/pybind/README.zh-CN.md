@@ -3,6 +3,10 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## 历史基准 — 提供方绑定迁移延期
+
+下文测量、结论和复现命令描述迁移前 Python 基准，不是已验证的当前构建。类型化 C++ `ProviderRequest`/`sp::Event`/完整不可变 `sp::Outcome` 迁移并未建立 Python 提供方绑定，该工作延期。不要将命令视为可工作的旧提供方 API、当前提供方基准或迁移后执行证据。一般 Python 图测量不能验证提供方接口。Python REPL/协议驱动不变。本次文档更新仅对照源码，未运行构建或基准。
+
 核心问题：**通过 pybind 从 Python 使用 NeoGraph（node body 也在 Python 中）是否会消除独立 C++ 的优势（启动 · RSS · 吞吐量）？**
 
 答案：**不会。** 膨胀不是来自 Python 解释器，而是来自 LangChain import tree。NeoGraph-from-Python = 精简 Python（10MB/30ms）+ 单个编译后的 .so。

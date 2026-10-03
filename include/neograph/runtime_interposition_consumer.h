@@ -22,12 +22,11 @@ public:
     }
 
 protected:
-    asio::awaitable<ChatCompletion> invoke_provider(
-        const std::shared_ptr<Provider>& provider,
-        CompletionParams params,
-        StreamCallback on_chunk = {},
-        std::vector<ChatMessage> host_instructions = {},
-        std::vector<ChatMessage> trusted_supplemental = {},
+    asio::awaitable<sp::runtime::Result> invoke_provider(
+        std::shared_ptr<Provider> provider,
+        ProviderRequest request,
+        std::vector<sp::Message> host_instructions = {},
+        std::vector<sp::Message> trusted_supplemental = {},
         std::shared_ptr<graph::ProviderCallBroker> broker = {},
         graph::ProviderCallIdentity identity = {}) const {
         // Both mechanisms claim the full dispatch boundary. Bypassing either
@@ -40,15 +39,58 @@ protected:
                 identity.node_name.empty()) {
                 throw std::invalid_argument("Provider broker requires a Core task identity");
             }
-            co_return co_await broker->invoke(std::move(identity), provider,
-                                              std::move(params), std::move(on_chunk));
+            return broker->invoke(std::move(identity), std::move(provider),
+                                  std::move(request));
         }
         if (runtime_interposition_) {
-            co_return co_await runtime_interposition_->invoke_async(
-                std::move(params), std::move(on_chunk), std::move(host_instructions),
-                std::move(trusted_supplemental));
+            return runtime_interposition_->invoke_async(
+                std::move(request), std::move(host_instructions),
+                std::move(trusted_supplemental), std::move(identity));
         }
-        co_return co_await provider->invoke(params, std::move(on_chunk));
+        if (identity.model_token_budget == 0 && !identity.managed_budget_lease) {
+            return provider->invoke_async(std::move(request));
+        }
+        return [](std::shared_ptr<Provider> provider, ProviderRequest request,
+                  graph::ProviderCallIdentity identity)
+            -> asio::awaitable<sp::runtime::Result> {
+            auto prepared = provider->prepare(std::move(request));
+            if (const auto* error = prepared.error()) {
+                co_return std::make_shared<const sp::Outcome>(sp::Failure{*error, {}});
+            }
+            ProviderBudgetClaim claim;
+            try {
+                claim = reserve_provider_dispatch(prepared,
+                    ProviderDispatchBudget{identity.usage, identity.model_token_budget,
+                        identity.budget_exhausted, identity.budget_cancel_token,
+                        identity.managed_budget_lease, identity.managed_budget_store});
+            } catch (const ProviderFailure& failure) {
+                co_return failure.outcome();
+            }
+            co_await claim.begin_managed_effect(
+                prepared, graph::managed_provider_effect_id(identity));
+            claim.mark_dispatched();
+            sp::runtime::Result outcome;
+            std::exception_ptr dispatch_error;
+            try {
+                outcome = co_await provider->dispatch_async(std::move(prepared));
+            } catch (const ProviderOutcomeError& error) {
+                outcome = error.outcome();
+                dispatch_error = std::current_exception();
+            } catch (const ProviderFailure& error) {
+                outcome = error.outcome();
+                dispatch_error = std::current_exception();
+            }
+            try {
+                co_await claim.settle_managed(outcome, dispatch_error);
+            } catch (const ProviderOutcomeError&) {
+                throw;
+            } catch (...) {
+                if (!outcome) throw;
+                throw ProviderBudgetSettlementError(outcome, std::current_exception(), dispatch_error);
+            }
+            if (dispatch_error) std::rethrow_exception(dispatch_error);
+            co_return outcome;
+        }(std::move(provider), std::move(request), std::move(identity));
     }
 
 private:

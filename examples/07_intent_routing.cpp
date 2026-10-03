@@ -11,73 +11,55 @@
 // Usage: ./example_intent_routing
 
 #include <neograph/neograph.h>
+#include "provider_example_support.h"
 
 #include <iostream>
 
-// Mock Provider: intent classification + expert responses
+// Offline classification uses the full typed request, including system turns.
 class RoutingMockProvider : public neograph::Provider {
-    int call_count_ = 0;
+    std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
 public:
-    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
-        neograph::ChatCompletion result;
-        result.message.role = "assistant";
-
-        // First call: intent classification (called by IntentClassifierNode)
-        // → if system prompt contains "Classify", return classification response
-        bool is_classifier = false;
-        for (const auto& msg : params.messages) {
-            if (msg.role == "system" && msg.content.find("Classify") != std::string::npos) {
-                is_classifier = true;
-                break;
-            }
-        }
-
-        if (is_classifier) {
-            // Determine intent from user message
-            std::string user_msg;
-            for (const auto& msg : params.messages) {
-                if (msg.role == "user") user_msg = msg.content;
-            }
-
-            if (user_msg.find("calculate") != std::string::npos ||
-                user_msg.find("plus") != std::string::npos ||
-                user_msg.find("+") != std::string::npos) {
-                result.message.content = "math";
-            } else if (user_msg.find("translate") != std::string::npos ||
-                       user_msg.find("translate") != std::string::npos) {
-                result.message.content = "translate";
-            } else {
-                result.message.content = "general";
-            }
-        } else {
-            // Expert response — inspect user message to determine which expert branch ran.
-            // (Subgraph nodes inherit parent's NodeContext, so system-prompt differentiation
-            //  is not available here; user-message inspection is the reliable signal.)
-            std::string user_msg;
-            for (const auto& msg : params.messages) {
-                if (msg.role == "user") user_msg = msg.content;
-            }
-
-            if (user_msg.find("plus") != std::string::npos ||
-                user_msg.find("+") != std::string::npos ||
-                user_msg.find("calculate") != std::string::npos) {
-                result.message.content = "I'm a math expert. 42 + 58 = 100.";
-            } else if (user_msg.find("translate") != std::string::npos) {
-                result.message.content = "I'm a translation expert. 'Hello' -> 'Bonjour'";
-            } else {
-                result.message.content = "I'm a general assistant. I can help with anything.";
-            }
-        }
-
-        return result;
+    neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
+        auto history = std::make_shared<const std::vector<sp::Message>>(
+            examples::request_messages(request));
+        return prepare_local(client_, std::move(request),
+            [history](const neograph::PreparedProviderRequest& prepared,
+                      const std::function<void(const sp::Event&)>& observer)
+                -> asio::awaitable<sp::runtime::Result> {
+                bool classifier = false;
+                std::string user;
+                for (const auto& message : *history) {
+                    std::string text;
+                    for (const auto& part : message.parts)
+                        if (const auto* value = std::get_if<sp::Text>(&part))
+                            text += value->value;
+                    if (message.role == sp::Role::System)
+                        classifier |= text.find("Classify") != std::string::npos;
+                    if (message.role == sp::Role::User) user = std::move(text);
+                }
+                const bool math = user.find("calculate") != std::string::npos ||
+                    user.find("plus") != std::string::npos ||
+                    user.find("+") != std::string::npos;
+                const bool translate = user.find("translate") != std::string::npos;
+                std::string reply;
+                if (classifier)
+                    reply = math ? "math" : translate ? "translate" : "general";
+                else if (math)
+                    reply = "I'm a math expert. 42 + 58 = 100.";
+                else if (translate)
+                    reply = "I'm a translation expert. 'Hello' -> 'Bonjour'";
+                else
+                    reply = "I'm a general assistant. I can help with anything.";
+                sp::Completion completion;
+                completion.messages.push_back(
+                    examples::message(sp::Role::Assistant, std::move(reply)));
+                completion.stop.kind = sp::StopKind::EndTurn;
+                if (prepared.mode() == neograph::ProviderMode::Stream)
+                    examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
     }
-
-    neograph::ChatCompletion complete_stream(
-        const neograph::CompletionParams& p, const neograph::StreamCallback& cb) override {
-        auto r = complete(p);
-        if (cb && !r.message.content.empty()) cb(r.message.content);
-        return r;
-    }
+    std::string_view family() const noexcept override { return "openai.chat"; }
     std::string get_name() const override { return "routing_mock"; }
 };
 
@@ -86,6 +68,7 @@ int main() {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = "fixture-routing";
 
     // Graph definition
     neograph::json definition = {

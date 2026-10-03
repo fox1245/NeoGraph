@@ -15,6 +15,12 @@ bool starts_with(const std::string& value, const std::string& prefix) {
     return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
 }
 
+void validate_public_managed_thread(const graph::Checkpoint& checkpoint) {
+    if (checkpoint.channel_values.at("provider_managed_budget").at("data").at("thread_id") !=
+        checkpoint.thread_id)
+        throw std::invalid_argument("Managed checkpoint public thread differs from its bank custody");
+}
+
 }  // namespace
 
 TenantScope::TenantScope(std::string tenant_id, std::string authorization_scope)
@@ -230,20 +236,20 @@ graph::Checkpoint ScopedCheckpointStore::private_checkpoint(const graph::Checkpo
 graph::Checkpoint ScopedCheckpointStore::public_checkpoint(graph::Checkpoint cp) const {
     const auto prefix = std::string("__neograph_tenant__") + encode_component(scope_.tenant_id()) + ":";
     auto strip = [&](std::string& id) {
-        if (!starts_with(id, prefix)) return false;
-        id.erase(0, prefix.size());
-        const auto colon = id.find(':');
-        if (colon == std::string::npos) return false;
-        const auto length = id.substr(0, colon);
-        std::size_t count = 0;
-        try { count = static_cast<std::size_t>(std::stoull(length)); } catch (...) { return false; }
-        if (colon + 1 + count != id.size()) return false;
-        id.erase(0, colon + 1);
-        return true;
+        if (!starts_with(id, prefix))
+            throw std::runtime_error("Checkpoint escaped its tenant namespace");
+        const auto encoded = id.substr(prefix.size());
+        const auto colon = encoded.find(':');
+        if (colon == std::string::npos)
+            throw std::runtime_error("Malformed tenant checkpoint identifier");
+        auto decoded = encoded.substr(colon + 1);
+        if (encode_component(decoded) != encoded)
+            throw std::runtime_error("Malformed tenant checkpoint identifier");
+        id = std::move(decoded);
     };
-    (void)strip(cp.thread_id);
-    (void)strip(cp.id);
-    if (!cp.parent_id.empty()) (void)strip(cp.parent_id);
+    strip(cp.thread_id);
+    strip(cp.id);
+    if (!cp.parent_id.empty()) strip(cp.parent_id);
     return cp;
 }
 
@@ -273,6 +279,141 @@ std::vector<graph::Checkpoint> ScopedCheckpointStore::list(const std::string& th
 
 void ScopedCheckpointStore::delete_thread(const std::string& thread_id) {
     backend_->delete_thread(private_id(thread_id));
+}
+
+bool ScopedCheckpointStore::requires_managed_budget(const std::string& thread_id) {
+    return backend_->requires_managed_budget(private_id(thread_id));
+}
+asio::awaitable<bool> ScopedCheckpointStore::requires_managed_budget_async(std::string thread_id) {
+    co_return co_await backend_->requires_managed_budget_async(private_id(thread_id));
+}
+
+graph::ManagedBudgetLeaseScope ScopedCheckpointStore::private_scope(
+    graph::ManagedBudgetLeaseScope scope) const {
+    scope.storage_thread_id = private_id(
+        scope.storage_thread_id.empty() ? scope.thread_id : scope.storage_thread_id);
+    return scope;
+}
+
+std::string ScopedCheckpointStore::private_source_commitment(
+    const graph::Checkpoint& checkpoint,
+    const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment) const {
+    if (checkpoint.id != private_id(expected_checkpoint_id))
+        throw std::runtime_error("Managed budget source escaped its tenant binding");
+    const auto public_source = public_checkpoint(checkpoint);
+    if (graph::managed_budget_checkpoint_commitment(public_source) !=
+        expected_checkpoint_commitment)
+        throw std::runtime_error("Managed budget public checkpoint commitment changed");
+    return graph::managed_budget_checkpoint_commitment(checkpoint);
+}
+
+std::shared_ptr<graph::OwnedManagedBudgetLease>
+ScopedCheckpointStore::acquire_managed_budget_lease(
+    const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment) {
+    auto mapped_scope = private_scope(scope);
+    if (expected_checkpoint_id.empty()) {
+        return backend_->acquire_managed_budget_lease(
+            mapped_scope, expected_checkpoint_id, expected_checkpoint_commitment);
+    }
+    const auto source = backend_->load_by_id(private_id(expected_checkpoint_id));
+    if (!source) throw std::runtime_error("Managed budget tenant source disappeared");
+    const auto commitment = private_source_commitment(*source,
+        expected_checkpoint_id, expected_checkpoint_commitment);
+    return backend_->acquire_managed_budget_lease(
+        mapped_scope, source->id, commitment);
+}
+
+asio::awaitable<std::shared_ptr<graph::OwnedManagedBudgetLease>>
+ScopedCheckpointStore::acquire_managed_budget_lease_async(
+    graph::ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment) {
+    auto mapped_scope = private_scope(std::move(scope));
+    if (expected_checkpoint_id.empty()) {
+        co_return co_await backend_->acquire_managed_budget_lease_async(
+            std::move(mapped_scope), std::move(expected_checkpoint_id),
+            std::move(expected_checkpoint_commitment));
+    }
+    const auto source = co_await backend_->load_by_id_async(private_id(expected_checkpoint_id));
+    if (!source) throw std::runtime_error("Managed budget tenant source disappeared");
+    auto commitment = private_source_commitment(*source,
+        expected_checkpoint_id, expected_checkpoint_commitment);
+    co_return co_await backend_->acquire_managed_budget_lease_async(
+        std::move(mapped_scope), source->id, std::move(commitment));
+}
+
+graph::ManagedBudgetEffectReceipt ScopedCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) {
+    return backend_->begin_managed_budget_effect(
+        lease, effect_id, exact_claim_amount, prepared_request_digest);
+}
+
+asio::awaitable<graph::ManagedBudgetEffectReceipt>
+ScopedCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<graph::OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest) {
+    co_return co_await backend_->begin_managed_budget_effect_async(
+        std::move(lease), std::move(effect_id), exact_claim_amount,
+        std::move(prepared_request_digest));
+}
+
+void ScopedCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+    const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+    const UsageAccumulator::AuthoritySnapshot& authority) {
+    backend_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority);
+}
+
+asio::awaitable<void> ScopedCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    co_await backend_->settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
+}
+
+void ScopedCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+    const graph::Checkpoint& checkpoint) {
+    backend_->publish_managed_budget_checkpoint(lease, private_checkpoint(checkpoint));
+}
+
+asio::awaitable<void> ScopedCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::Checkpoint checkpoint) {
+    co_await backend_->publish_managed_budget_checkpoint_async(
+        std::move(lease), private_checkpoint(checkpoint));
+}
+
+void ScopedCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) {
+    backend_->release_managed_budget_lease(lease);
+}
+
+asio::awaitable<void> ScopedCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<graph::OwnedManagedBudgetLease> lease) {
+    co_await backend_->release_managed_budget_lease_async(std::move(lease));
+}
+
+bool ScopedCheckpointStore::retains_native_checkpoint() const noexcept {
+    return backend_->retains_native_checkpoint();
+}
+
+void ScopedCheckpointStore::publish_managed_budget_fork(
+    const graph::Checkpoint& authenticated_source,
+    const graph::Checkpoint& genuine_shared_bank_fork) {
+    validate_public_managed_thread(authenticated_source);
+    validate_public_managed_thread(genuine_shared_bank_fork);
+    backend_->publish_managed_budget_fork(
+        private_checkpoint(authenticated_source), private_checkpoint(genuine_shared_bank_fork));
+}
+
+asio::awaitable<void> ScopedCheckpointStore::publish_managed_budget_fork_async(
+    graph::Checkpoint source, graph::Checkpoint forked) {
+    validate_public_managed_thread(source);
+    validate_public_managed_thread(forked);
+    co_await backend_->publish_managed_budget_fork_async(
+        private_checkpoint(source), private_checkpoint(forked));
 }
 
 void ScopedCheckpointStore::put_writes(const std::string& thread_id,

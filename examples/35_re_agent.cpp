@@ -48,7 +48,6 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     int max_steps = 80;
-    const std::string model = "~deepseek/deepseek-v4-flash-latest";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--max-steps" && i + 1 < argc) max_steps = std::atoi(argv[++i]);
@@ -70,29 +69,31 @@ int main(int argc, char** argv) {
         }
 
         // 2. OpenRouter Responses provider configured in re_agent_common.h.
-        auto provider = neograph::re_agent::make_provider(model, api_key);
+        auto provider = neograph::re_agent::make_provider(api_key);
 
         // 3. ReAct graph with ghidra-mcp tools wired in.
         auto engine = neograph::graph::create_react_graph(
             provider, std::move(bridge.tools),
-            neograph::re_agent::kSystemPrompt);
+            neograph::re_agent::kSystemPrompt, examples::openrouter_model);
 
         // 4. Kick it off.
         neograph::graph::RunConfig run_cfg;
-        run_cfg.input = {{"messages", neograph::json::array({
-            {{"role", "user"},
-             {"content", "Recover names and summaries for every user-defined function "
-                         "in the currently-open Ghidra project. Output the final JSON."}}
-        })}};
+        run_cfg.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User,
+            "Recover names and summaries for every user-defined function "
+            "in the currently-open Ghidra project. Output the final JSON.")};
+        run_cfg.on_provider_event = [](const sp::Event& event) {
+            if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+                delta && delta->payload.kind == sp::PartKind::Text &&
+                delta->payload.channel == sp::DeltaChannel::Content)
+                std::cerr << delta->payload.bytes << std::flush;
+        };
         run_cfg.max_steps = max_steps;
 
         std::cerr << "\n--- agent trace ---\n";
         auto result = engine->run_stream(run_cfg,
             [](const neograph::graph::GraphEvent& ev) {
                 using T = neograph::graph::GraphEvent::Type;
-                if (ev.type == T::LLM_TOKEN) {
-                    std::cerr << ev.data.get<std::string>() << std::flush;
-                } else if (ev.type == T::NODE_START && ev.node_name == "tools") {
+                if (ev.type == T::NODE_START && ev.node_name == "tools") {
                     std::cerr << "\n[ghidra-mcp call]\n";
                 } else if (ev.type == T::ERROR) {
                     std::cerr << "\n[ERROR " << ev.node_name << "] "
@@ -135,10 +136,7 @@ int main(int argc, char** argv) {
         }
         std::cerr << "\n--- final JSON (stdout) ---\n";
 
-        // Single helper covers both the primary path
-        // (result.output["final_response"]) and the channels.messages
-        // backward-walk fallback. Empty string → no output (caller can
-        // diff stdout against ground_truth.json either way).
+        // Display text only; result retains the full provider outcomes/history.
         const std::string final_resp =
             neograph::re_agent::extract_final_response(result);
         if (!final_resp.empty()) {

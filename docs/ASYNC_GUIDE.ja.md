@@ -1,7 +1,8 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ja source_sha256=42ecb573fd2ab6fe94a978425fd0016579262109ded26afa124e3f8649fa9ab5 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ja source_sha256=3d01320c4796b2b8fae399c9660352bcb3eaadefa460b54c1e15664cb04bd537 -->
 # NeoGraph 非同期ガイド
 
-**Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
+
+> Stage 3 (2026-04) の設計と当時の測定テスト数は歴史として保持します。provider 互換/crossover の決定は以下の typed lossless 移行に置き換わり、旧設計台帳は現在の provider API ではありません。
 
 Stage 3 / 2026-04 リリース。対象読者: 既存の NeoGraph コードを非同期 API に
 移行するユーザー、または非同期 API に対して新規コードを書くユーザー。
@@ -17,9 +18,9 @@ Stage 3 / 2026-04 リリース。対象読者: 既存の NeoGraph コードを�
 
 エンジン内のすべての同期 I/O ポイントに awaitable な対応版が追加されました:
 
-| 層 | 同期 (変更なし) | 非同期対応版 |
+| 層 | 同期 | 非同期 |
 |---|---|---|
-| Provider | `complete` / `complete_stream` | `complete_async` / `complete_stream_async` |
+| Provider | `invoke` / `dispatch` | `invoke_async` / `dispatch_async` |
 | CheckpointStore | `save` / `load_latest` / `load_by_id` / `list` / `delete_thread` / `put_writes` / `get_writes` / `clear_writes` | 各メソッドの `*_async` |
 | GraphNode | — | `run(NodeInput) -> asio::awaitable<NodeOutput>` が唯一の正規オーバーライド |
 | GraphEngine | `run` / `run_stream` / `resume` | `run_async` / `run_stream_async` / `resume_async` |
@@ -32,53 +33,18 @@ Stage 3 / 2026-04 リリース。対象読者: 既存の NeoGraph コードを�
 `run_async` 呼び出しをホストできます — このリファクタ全体の動機となった
 並行モデルです。
 
-同期インターフェースは維持されます。`engine->run(cfg)` や任意の
-`provider->complete*` エントリポイントを呼び出す既存コードは引き続き
-サポートされます。Stage 3 以前に存在した 276+ のテストケースは同期パスで
-依然としてパスします。
+旧 Stage 3 報告は既存 276+ テストが当時の sync 経路を通過したと記録しています。現移行の検証結果ではありません。
 
 ---
 
-## 2. クロスオーバーデフォルトパターン
+<a id="2-the-crossover-default-pattern"></a>
+## 2. 準備済み provider dispatch (crossover 削除)
 
-Provider と永続化抽象に残るすべての同期/非同期ペアは、各方向をブリッジする
-一対のデフォルト実装によって接続されています:
+公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
 
-```cpp
-class Provider {
-  public:
-    // Sync default: drive the async peer on a private io_context.
-    virtual ChatCompletion complete(const CompletionParams& params);
+`prepare()` は検証とエンコードを正確に一度行い、元の deadline とキャンセル状態を持つ移動専用 `PreparedProviderRequest` を生成します。永続呼び出し元は `Provider::request_digest()` を assembly に結び付け、承認された budget claim を予約し、dispatch receipt を記録してから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。gate 後の再生成はありません。重複 receipt は再送しません。カスタム実装は `get_name()`、`family()`、`prepare()` を実装し `prepare_runtime()` または `prepare_local()` を使います。local callback は `this` ではなく所有 shared 状態をキャプチャします。
 
-    // Async default: co_return the sync peer (single-threaded on
-    // the resuming coroutine).
-    virtual asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params);
-
-    // ...
-};
-```
-
-**契約: 2 つのうち少なくとも 1 つをオーバーライドすること。** どちらも
-オーバーライドしない場合、どちらのメソッドを呼び出しても 2 つのデフォルト間で
-無限再帰し、スタックオーバーフローに至ります。文書化済み。実行時ガードなし
-(すべての実装者のすべての呼び出しを遅くするため)。
-
-### どちら側をオーバーライドすべきか
-
-| コードの形状 | オーバーライド |
-|---|---|
-| 実ノンブロッキング I/O を発行 (HTTP、MCP、DB、タイマー) | **非同期対応版** — 同期ファサードを継承 |
-| 純粋な CPU 作業、または同期ライブラリで短時間ブロック | **同期対応版** — 非同期ブリッジを継承 |
-| カスタム `GraphNode` | `run(NodeInput)` をオーバーライド。書き込み、`Command`、`Send` を 1 つの `NodeOutput` で返す |
-
-### なぜ単一の統一 API ではないのか？
-
-すべての公開抽象を非同期に集約すると、既存のすべての Tool とすべての
-CheckpointStore サブクラスが非同期機構を認識することを強制されます —
-2 つの数値を加算するだけのツールのような、何の利益もないケースを含みます。
-クロスオーバーペアはこれらの抽象に対する移行コストゼロのパスであり続けます。
-`GraphNode` は v1.0 で意図的に 1 つのコルーチンオーバーライドに集約されました。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は不安定 `0.0.0`、interface revision 3 / shared ABI 3、out-of-line capability check を使用し、安定リリースの宣言ではありません。現 runtime/archive は Linux/POSIX で、Windows・macOS・WASM runtime の資格検証を意味しません。Python provider binding/wrapper は延期され、この C++ 変更では移植されません。
 
 ---
 
@@ -116,26 +82,28 @@ io.run();
 
 ### 3.2 新しい非同期プロバイダの作成
 
-`CompletionProvider` から派生し、`do_invoke()` のみを実装します。
-その final アダプタが既存のすべての `Provider` エントリポイントを動作させ続け、
-`CompletionRequest` が collect モードと stream モードを明示的にします。
+`prepare()` は検証とエンコードを正確に一度行い、元の deadline とキャンセル状態を持つ移動専用 `PreparedProviderRequest` を生成します。永続呼び出し元は `Provider::request_digest()` を assembly に結び付け、承認された budget claim を予約し、dispatch receipt を記録してから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。gate 後の再生成はありません。重複 receipt は再送しません。カスタム実装は `get_name()`、`family()`、`prepare()` を実装し `prepare_runtime()` または `prepare_local()` を使います。local callback は `this` ではなく所有 shared 状態をキャプチャします。
 
 ```cpp
-class MyProvider : public CompletionProvider {
-  public:
-    asio::awaitable<ChatCompletion>
-    do_invoke(CompletionRequest request) override {
-        auto ex = co_await asio::this_coro::executor;
-        const auto& params = request.params();
-        auto res = co_await neograph::async::async_post(
-            ex, host, port, path, body, headers, /*tls=*/true);
-        if (request.streaming() && request.on_chunk()) {
-            // Deliver parsed chunks through request.on_chunk().
-        }
-        co_return parse_response(res);
-    }
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
+#include <runtime/client.h>
 
+class MyProvider final : public neograph::Provider {
+    std::string family_;
+    std::shared_ptr<sp::runtime::Client> client_;
+public:
+    MyProvider(sp::descriptor::ValidatedDescriptor descriptor,
+               sp::runtime::Options options)
+        : family_(descriptor.family()),
+          client_(std::make_shared<sp::runtime::Client>(
+              std::move(descriptor), std::move(options))) {}
     std::string get_name() const override { return "my-provider"; }
+    std::string_view family() const noexcept override { return family_; }
+    neograph::PreparedProviderRequest
+    prepare(neograph::ProviderRequest request) override {
+        return prepare_runtime(client_, std::move(request));
+    }
 };
 ```
 
@@ -168,32 +136,37 @@ class FetchTool : public neograph::AsyncTool {
 ### 3.4 非同期プロバイダを使用するグラフノードの作成
 
 ```cpp
-class MyNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        CompletionParams params = build_params(in.state);
-        params.cancel_token = in.ctx.cancel_token;
-        auto completion = co_await provider_->complete_async(params);
+#include <neograph/graph/node.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/provider.h>
+#include <neograph/runtime_interposition_consumer.h>
 
-        neograph::json msg;
-        to_json(msg, completion.message);
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"messages", json::array({msg})});
+class ChatNode : public neograph::graph::GraphNode,
+                 public neograph::RuntimeInterpositionConsumer {
+    std::shared_ptr<neograph::Provider> provider_;
+    std::string model_;
+public:
+    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
+        : provider_(std::move(provider)), model_(std::move(model)) {}
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
+        auto request = neograph::make_provider_request(
+            *provider_, model_, in.state.get_provider_messages());
+        request.cancel_token = in.ctx.cancel_token;
+        request.options.deadline = in.ctx.deadline;
+        auto result = co_await neograph::graph::observe_provider_result(
+            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
+        neograph::graph::record_usage(in.ctx, result);
+        neograph::outcome_or_throw(result);
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::provider_messages_write(result));
         co_return out;
     }
-
-    std::string get_name() const override { return name_; }
-  private:
-    std::shared_ptr<Provider> provider_;
-    std::string name_;
+    std::string get_name() const override { return "chat"; }
 };
 ```
-
-エンジンは同期と非同期のエントリポイントからこの同じコルーチンを駆動します。
-`engine->run_async()` を使用すると、ノードは実行ごとに OS スレッドを専有することなく
-io_context オーバーラップに参加します。
-
----
 
 ## 4. 注意点と落とし穴
 
@@ -435,15 +408,14 @@ int result = neograph::async::run_sync_pool(
 
 ## 9. オーバーライド判断ガイド
 
-`GraphNode` は 1 つの正規オーバーライドを持つ。Provider と永続化
-インターフェースは互換性のため別々の同期/非同期対応を保持。
+公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
 
 ### 9.1 2 分バージョン
 
 | 作成するもの | オーバーライド | そのまま継承 |
 |---|---|---|
 | 任意のカスタム `GraphNode` | `run(NodeInput)` | 他に必要な仮想メソッドは `get_name()` のみ |
-| 新しいカスタム LLM バックエンド | `CompletionProvider` を継承、`do_invoke()` をオーバーライド | 既存の全 `Provider` エントリポイントは final アダプタ |
+| Provider | `get_name()`, `family()`, `prepare(ProviderRequest)` | `invoke(_async)`, `dispatch(_async)` |
 | カスタム `CheckpointStore`、非同期対応バックエンド | 8 つすべての `*_async` 対応版 | 同期対応版は `run_sync` 経由でブリッジ |
 | カスタム `CheckpointStore`、同期専用バックエンド | 8 つすべての同期対応版 | 非同期対応版は `run_sync` 経由でブリッジ |
 | カスタム同期 `Tool` | `Tool` を継承、`execute()` をオーバーライド | — |
@@ -464,25 +436,16 @@ int result = neograph::async::run_sync_pool(
 
 ### 9.3 `Provider`
 
-既存の `Provider` サブクラスは 4 つの同期/非同期 collect/stream 仮想メソッドを
-使い続けてよい。それらは安定した互換性 API であり、削除計画も非推奨警告もない。
-各ペアは依然として少なくとも 1 つのオーバーライドを必要とする:
+公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
 
-| オーバーライド | 動作 |
-|---|---|
-| `complete()` のみ | 同期が直接動作。非同期 `complete_async` は基底クラスのデフォルト `co_return complete()` でブリッジ。CPU 専用モックプロバイダに十分。 |
-| `complete_async()` のみ | 非同期が直接動作。同期 `complete` は `run_sync(complete_async())` でブリッジ。 |
-| `complete_stream()` のみ | 同期ストリーミングが直接動作。非同期対応版はワーカースレッドで実行し、コールバックを待機中エグゼキュータに配信。 |
-| `complete_stream_async()` のみ | ネイティブ非同期ストリーミングが直接動作。直接同期ストリーミング呼出がデフォルト collect フォールバックを避けなければならない場合は同期対応版も実装。 |
+`prepare()` は検証とエンコードを正確に一度行い、元の deadline とキャンセル状態を持つ移動専用 `PreparedProviderRequest` を生成します。永続呼び出し元は `Provider::request_digest()` を assembly に結び付け、承認された budget claim を予約し、dispatch receipt を記録してから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。gate 後の再生成はありません。重複 receipt は再送しません。カスタム実装は `get_name()`、`family()`、`prepare()` を実装し `prepare_runtime()` または `prepare_local()` を使います。local callback は `this` ではなく所有 shared 状態をキャプチャします。
 
-**新しい** バックエンドの場合、これらのペアから選択しないこと。
-`CompletionProvider` から派生し、`do_invoke(CompletionRequest)` を実装し、
-`request.streaming()` でトランスポートを選択。新しい直接呼出元は
-`invoke_request()` を `CompletionRequest::collect(...)` または
-`CompletionRequest::stream(...)` と共に使用すべき。互換性とセキュリティ修正は
-古いエントリポイントにも継続適用されるが、新機能は明示的リクエスト専用の
-可能性がある。
+任意の `ProviderControls` は呼び出し元の選択であり、強制デフォルトや黙った cap clamp ではありません。非対応 family 制御は dispatch 前に拒否します。有界呼び出しには承認された実際のモデル input/output 上限が必要で、欠落は `LimitUnknown` です。予約は保守的な支出権限であり、報告使用量・予測・請求書ではありません。不明/部分/delivery-unknown の結果は hold を維持し、実際の最終報告で精算し、超過報告も全量を計上します。retry は明示的な単一層で、既定 off、有界 window と unknown-prior hold を使います。隠れた再送はありません。
 
+
+プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、native continuation、完全な wire envelope、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。使用量は根拠・段階・品質付きの nullable `uint64_t` であり、欠落はゼロではなく不明です。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。
+
+実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
 ### 9.4 `CheckpointStore`
 
 8 つの同期メソッド、8 つの非同期対応版、1:1 対応。出荷済みストア

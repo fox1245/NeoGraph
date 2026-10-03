@@ -17,7 +17,7 @@
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../src/provider_support.h"
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/loader.h>
@@ -54,31 +54,7 @@ void on_signal(int) { g_shutdown.store(true, std::memory_order_release); }
 // ──────────────────────────────────────────────────────────────────────────
 // API 키 없을 때 쓰는 간단한 Mock Provider
 // ──────────────────────────────────────────────────────────────────────────
-class MockProvider : public Provider {
-public:
-    ChatCompletion complete(const CompletionParams& params) override {
-        // 사용자 메시지를 그대로 echo 하고 [SUMMARY] 를 붙여 돌려줌
-        std::string user_text;
-        for (auto& m : params.messages) {
-            if (m.role == "user") { user_text = m.content; break; }
-        }
-        ChatCompletion result;
-        result.message.role    = "assistant";
-        result.message.content = "[mock coder] " + user_text
-                                 + "\n[SUMMARY] mock coder reply";
-        return result;
-    }
-
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override {
-        auto result = complete(params);
-        if (on_chunk && !result.message.content.empty())
-            on_chunk(result.message.content);
-        return result;
-    }
-
-    std::string get_name() const override { return "mock"; }
-};
+using MockProvider = jarvis::providers::MockProvider;
 
 // ──────────────────────────────────────────────────────────────────────────
 // persona.txt 에서 ===<section>=== 블록을 꺼내는 함수
@@ -110,7 +86,7 @@ std::string extract_persona_section(const std::string& file_path,
 // PersonaNode — LLM 에 system prompt(코더 페르소나) 를 입히고
 //               user prompt(= "prompt" 채널 값) 를 던져 응답을 받음
 // ──────────────────────────────────────────────────────────────────────────
-class PersonaNode : public GraphNode {
+class PersonaNode : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
     PersonaNode(std::string node_name,
                 std::shared_ptr<Provider> provider,
@@ -123,16 +99,19 @@ public:
         auto raw = in.state.get("prompt");
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
-        CompletionParams p;
-        p.model       = "~deepseek/deepseek-v4-flash-latest";
-        p.temperature = 0.7f;
-        p.messages.push_back({"system", system_prompt_});
-        p.messages.push_back({"user",   user_text});
-
-        auto reply = co_await provider_->invoke(p, nullptr);
+        std::vector<sp::Message> messages;
+        messages.push_back(examples::message(sp::Role::System, system_prompt_));
+        messages.push_back(examples::message(sp::Role::User, user_text));
+        auto request = jarvis::providers::contextual_request(
+            jarvis::providers::request(*provider_, std::move(messages), 0.7), in.ctx);
+        auto reply = co_await observe_provider_result(in.ctx,
+            invoke_provider(provider_, std::move(request), {}, {},
+                provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_)));
+        record_usage(in.ctx, reply);
+        reply = neograph::outcome_or_throw(std::move(reply));
 
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"response", json(reply.message.content)});
+        out.writes.push_back(ChannelWrite{"response", json(neograph::outcome_text(*reply))});
         co_return out;
     }
 
@@ -244,15 +223,10 @@ int main(int argc, char** argv) {
     std::shared_ptr<Provider> provider;
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (api_key && *api_key) {
-        llm::OpenAIProvider::Config cfg;
-        cfg.api_key       = api_key;
-        cfg.base_url      = "https://openrouter.ai/api";
-        cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-        cfg.provider_routing = {{"zdr", true}};
-        provider = llm::OpenAIProvider::create_shared(cfg);
+        provider = jarvis::providers::live(api_key);
     } else {
         std::cerr << "[coder-specialist] OPENROUTER_API_KEY 없음 — MockProvider 로 동작\n";
-        provider = std::make_shared<MockProvider>();
+        provider = std::make_shared<MockProvider>(jarvis::providers::Fixture::Coder);
     }
 
     // 노드 타입 등록 — PersonaNode

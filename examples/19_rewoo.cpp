@@ -27,7 +27,7 @@
 // (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
+#include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <future>
 #include <iostream>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -46,63 +47,52 @@ struct Step {
     std::string id;         // e.g. "E1"
     std::string tool;       // e.g. "year_lookup"
     std::string argument;   // e.g. "When was C++17 standardized?"
-    std::string result;     // filled in after execution
+    std::string result;     // explicit text projection for evidence substitution
+    std::shared_ptr<const sp::Outcome> outcome; // complete worker output
 };
 
-// A fresh provider per worker — avoids sharing one cpp-httplib client
-// across threads. Uses the OpenRouter-compatible Responses schema.
-static std::unique_ptr<Provider> make_provider(const std::string& api_key) {
-    llm::SchemaProvider::Config cfg;
-    cfg.schema_path = "openai_responses";
-    cfg.api_key = api_key;
-    cfg.base_url_override = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    return llm::SchemaProvider::create(cfg);
-}
-
-static std::string complete_one(Provider& p,
-                                const std::string& system,
-                                const std::string& user,
-                                float temperature) {
-    CompletionParams params;
-    params.model = "~deepseek/deepseek-v4-flash-latest";
-    params.temperature = temperature;
-    params.messages.push_back({"system", system});
-    params.messages.push_back({"user", user});
-    return p.complete(params).message.content;
+static sp::runtime::Result complete_one(Provider& p,
+                                        const std::string& system,
+                                        const std::string& user,
+                                        float temperature) {
+    ProviderControls controls;
+    controls.temperature = temperature;
+    return p.invoke(make_provider_request(
+        p, "~deepseek/deepseek-v4-flash-latest",
+        {examples::message(sp::Role::System, system), examples::message(sp::Role::User, user)},
+        {}, std::move(controls)));
 }
 
 // Tools implemented as LLM calls with narrow system prompts.
-static std::string tool_year_lookup(Provider& p, const std::string& q) {
+static sp::runtime::Result tool_year_lookup(Provider& p, const std::string& q) {
     return complete_one(p,
         "You are a historical reference. Answer the question with ONLY a "
         "year (4 digits), nothing else.", q, 0.0f);
 }
-static std::string tool_country_lookup(Provider& p, const std::string& q) {
+static sp::runtime::Result tool_country_lookup(Provider& p, const std::string& q) {
     return complete_one(p,
         "You are a geographical reference. Answer with ONLY a country name, "
         "nothing else.", q, 0.0f);
 }
-static std::string tool_fact_lookup(Provider& p, const std::string& q) {
+static sp::runtime::Result tool_fact_lookup(Provider& p, const std::string& q) {
     return complete_one(p,
         "You are a factual reference. Answer in under 15 words, no "
         "preamble.", q, 0.0f);
 }
-static std::string tool_calculator(Provider& p, const std::string& q) {
+static sp::runtime::Result tool_calculator(Provider& p, const std::string& q) {
     return complete_one(p,
         "You are a calculator. Evaluate the arithmetic expression or word "
         "problem and reply with ONLY the numeric result.", q, 0.0f);
 }
 
-static std::string run_tool(Provider& p,
-                            const std::string& tool,
-                            const std::string& arg) {
+static std::optional<sp::runtime::Result> run_tool(Provider& p,
+                                                 const std::string& tool,
+                                                 const std::string& arg) {
     if (tool == "year_lookup")    return tool_year_lookup(p, arg);
     if (tool == "country_lookup") return tool_country_lookup(p, arg);
     if (tool == "fact_lookup")    return tool_fact_lookup(p, arg);
     if (tool == "calculator")     return tool_calculator(p, arg);
-    return "ERROR: unknown tool '" + tool + "'";
+    return std::nullopt; // An unknown tool is local evidence, not a provider outcome.
 }
 
 // Parse lines of the form: E1 = tool_name["argument text"]
@@ -133,8 +123,8 @@ int main() {
     }
     const std::string api_key = api_key_env;
 
-    auto planner_provider = make_provider(api_key);
-    auto solver_provider  = make_provider(api_key);
+    auto planner_provider = examples::make_openrouter_provider(api_key);
+    auto solver_provider  = examples::make_openrouter_provider(api_key);
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 19: REWOO                           ║\n"
@@ -165,8 +155,9 @@ int main() {
         "independent steps when possible. Do not output anything other than "
         "the plan lines.";
 
-    std::string plan_text = complete_one(*planner_provider, planner_sys,
-        "Question:\n" + question + "\n\nPlan:", 0.2f);
+    auto plan = examples::require_outcome(complete_one(*planner_provider, planner_sys,
+        "Question:\n" + question + "\n\nPlan:", 0.2f));
+    const std::string plan_text = examples::visible_text(*plan);
 
     std::cout << "── Plan ─────────────────────────────────────────────\n"
               << plan_text << "\n\n";
@@ -218,7 +209,7 @@ int main() {
         std::cout << "── Layer " << layer << " — " << batch.size()
                   << " parallel tool call(s) ─────────\n";
 
-        std::vector<std::future<std::string>> futures;
+        std::vector<std::future<std::optional<sp::runtime::Result>>> futures;
         futures.reserve(batch.size());
         for (size_t idx : batch) {
             std::string arg = substitute(steps[idx].argument);
@@ -228,16 +219,23 @@ int main() {
                       << "(\"" << arg << "\")\n";
             futures.push_back(std::async(std::launch::async,
                 [tool, arg, api_key_copy]() {
-                    auto p = make_provider(api_key_copy);
+                    // Each concurrent worker owns its admitted SDK provider.
+                    auto p = examples::make_openrouter_provider(api_key_copy);
                     return run_tool(*p, tool, arg);
                 }));
         }
 
         for (size_t k = 0; k < batch.size(); ++k) {
-            std::string res = futures[k].get();
-            steps[batch[k]].result = res;
+            auto res = futures[k].get();
+            auto& step = steps[batch[k]];
+            if (res) {
+                step.outcome = examples::require_outcome(std::move(*res));
+                step.result = examples::visible_text(*step.outcome);
+            } else {
+                step.result = "ERROR: unknown tool '" + step.tool + "'";
+            }
             done[batch[k]] = true;
-            std::cout << "    → " << steps[batch[k]].id << " = " << res << "\n";
+            std::cout << "    → " << step.id << " = " << step.result << "\n";
         }
         std::cout << "\n";
     }
@@ -256,12 +254,12 @@ int main() {
         "You are a Solver. Given the original question and a set of evidence "
         "collected by tools, produce the final answer. Be concise.";
 
-    std::string answer = complete_one(*solver_provider, solver_sys,
+    auto answer = examples::require_outcome(complete_one(*solver_provider, solver_sys,
         "Question:\n" + question + "\n\nEvidence:\n" + evidence.str() +
-        "\nFinal answer:", 0.2f);
+        "\nFinal answer:", 0.2f));
 
     std::cout << "── Final answer ─────────────────────────────────────\n"
-              << answer << "\n\n"
+              << examples::visible_text(*answer) << "\n\n"
               << "(" << steps.size() << " tool calls across " << layer
               << " layers, work phase took " << ms << " ms)\n\n";
     return 0;

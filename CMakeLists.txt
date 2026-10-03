@@ -269,6 +269,13 @@ endif()
 # ===========================================================================
 find_package(Threads REQUIRED)
 
+set(NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR "" CACHE PATH "Optional SchemaProvider source checkout; otherwise use its installed package")
+if(NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
+    add_subdirectory("${NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/schemaprovider")
+else()
+    find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+endif()
+
 set(DEPS_DIR ${PROJECT_SOURCE_DIR}/deps)
 
 # yyjson (C, compiled) — used by all modules for JSON parse/write
@@ -533,23 +540,6 @@ else()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
 endif()
 
-set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
-file(MAKE_DIRECTORY ${GENERATED_DIR})
-file(GLOB NEOGRAPH_SCHEMA_FILES CONFIGURE_DEPENDS
-    ${PROJECT_SOURCE_DIR}/schemas/*.json)
-
-add_custom_command(
-    OUTPUT ${GENERATED_DIR}/builtin_schemas.h
-    COMMAND Python3::Interpreter
-            ${PROJECT_SOURCE_DIR}/scripts/embed_schemas.py
-            ${PROJECT_SOURCE_DIR}/schemas
-            ${GENERATED_DIR}/builtin_schemas.h
-    DEPENDS
-        ${NEOGRAPH_SCHEMA_FILES}
-        ${PROJECT_SOURCE_DIR}/scripts/embed_schemas.py
-    COMMENT "Embedding LLM provider schemas"
-)
-add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 
 # ===========================================================================
 # neograph::core — Graph engine + foundation types
@@ -561,7 +551,6 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/cancel.cpp
     src/core/graph_invocation.cpp
     src/core/provider.cpp
-    src/core/completion_provider.cpp
     src/core/artifact_provider.cpp
     src/core/tool.cpp
     src/core/tool_execution.cpp
@@ -593,6 +582,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/tool_dispatch.cpp
     src/core/graph_loader.cpp
     src/core/graph_checkpoint.cpp
+    src/core/managed_budget_journal.cpp
     src/core/react_graph.cpp
     src/core/plan_execute_graph.cpp
     src/core/deep_research_graph.cpp
@@ -631,11 +621,10 @@ target_compile_definitions(neograph_core PRIVATE
     NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
 
 target_link_libraries(neograph_core
-    PUBLIC  yyjson Threads::Threads asio
+    PUBLIC yyjson Threads::Threads asio SchemaProvider::runtime
 )
 
-# Coroutines are exposed through public headers (provider.h ships
-# asio::awaitable<ChatCompletion>); propagate C++20 to consumers.
+# Owned provider requests/results and asio coroutines are public C++20 contracts.
 target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 # Link the smoke program to the same core target as native builds so its
@@ -914,34 +903,27 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 # ===========================================================================
-# neograph::llm — LLM provider implementations (OpenAI, Schema, Agent)
+# neograph::llm — Typed SchemaProvider, retained non-chat clients, and Agent
 # ===========================================================================
 if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm
-        src/llm/openai_provider.cpp
-        src/llm/schema_strategy_registry.cpp
-        src/llm/schema_primitive_registry.cpp
         src/llm/schema_provider.cpp
-        src/llm/schema_provider_mapping.cpp
-        src/llm/schema_provider_stream_parser.cpp
-        src/llm/rate_limited_provider.cpp
+        src/llm/images_client.cpp
+        src/llm/veo_client.cpp
+        src/llm/decisions_client.cpp
         src/llm/agent.cpp
     )
-
-    add_dependencies(neograph_llm generate_schemas)
 
     target_include_directories(neograph_llm
         PUBLIC
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
-        PRIVATE
-            ${GENERATED_DIR}
     )
 
     target_compile_definitions(neograph_llm PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_llm
         PUBLIC  neograph_core
-        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto neograph_async
+        PRIVATE neograph_async
     )
 
     add_library(neograph::llm ALIAS neograph_llm)
@@ -1368,24 +1350,8 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_openrouter_responses_sse examples/13_openrouter_responses_sse.cpp)
         target_link_libraries(example_openrouter_responses_sse PRIVATE neograph::core neograph::llm cppdotenv)
 
-        add_executable(example_openai_responses_ws examples/33_openai_responses_ws.cpp)
-        target_link_libraries(example_openai_responses_ws PRIVATE neograph::core neograph::llm cppdotenv)
-
-        # Tools-tour demo exercises a C++20 coroutine pattern that
-        # trips a GCC 13 internal compiler error (build_special_member_call
-        # at cp/call.cc:11096). GCC 14 and the other supported toolchains
-        # codegen the same source. Gate the target so
-        # Ubuntu 24.04 default toolchain users (GCC 13.3) still build
-        # the rest of the project cleanly.
-        if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-           OR CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14")
-            add_executable(example_openrouter_responses_tools_sse examples/34_openrouter_responses_tools_sse.cpp)
-            target_link_libraries(example_openrouter_responses_tools_sse PRIVATE neograph::core neograph::async cppdotenv)
-        else()
-            message(STATUS
-                "Skipping example_openrouter_responses_tools_sse: needs GCC >= 14 "
-                "(current: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
-        endif()
+        add_executable(example_openrouter_responses_tools_sse examples/34_openrouter_responses_tools_sse.cpp)
+        target_link_libraries(example_openrouter_responses_tools_sse PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_plan_executor examples/14_plan_executor.cpp)
         target_link_libraries(example_plan_executor PRIVATE neograph::core)
@@ -1851,12 +1817,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_minimal examples/51_minimal.cpp)
         target_link_libraries(example_minimal PRIVATE neograph::core)
 
-        # Example 65: provider-scoped synthetic transport/execution/artifacts.
-        add_executable(example_schema_primitive_registry
-            examples/65_schema_primitive_registry.cpp)
-        target_link_libraries(example_schema_primitive_registry PRIVATE
-            neograph::core neograph::llm)
-
         # Schema dump tool — prints NodeFactory::export_schema() as JSON.
         # The drift-proof artifact source for external tooling (the
         # visual block editor, issue #56): `./example_export_schema >
@@ -1934,6 +1894,9 @@ option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
        "Build protobuf/Cap'n Proto Program publication transport benchmark"
        OFF)
 if(NEOGRAPH_BUILD_BENCHMARKS)
+    if(NEOGRAPH_BUILD_LLM AND NEOGRAPH_BUILD_ASYNC)
+        include("${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/provider_cutover_target.cmake")
+    endif()
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
     add_executable(bench_canonical_json benchmarks/bench_canonical_json.cpp)
@@ -2434,7 +2397,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
     # hunt for PostgreSQL.
-    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)")
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)")
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()

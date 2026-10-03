@@ -43,9 +43,12 @@ public:
     static std::shared_ptr<const MaterializedProgram> pin_with_binding(
         ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id,
         CatalogCapabilityBinding binding);
+    static std::shared_ptr<const MaterializedProgram> pin_recorded(
+        ProgramCatalog& catalog, const ProgramVersion& version,
+        const RecordedBindingSet& requested, const std::vector<ProgramEvent>& source_events);
     /**
      * Read the immutable admitted version without materializing a live
-     * capability binding. Recorded replay uses this before pin_with_binding().
+     * capability binding. Recorded replay uses this before pin_recorded().
      */
     static std::optional<ProgramVersion> load_admitted_version(
         const ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id);

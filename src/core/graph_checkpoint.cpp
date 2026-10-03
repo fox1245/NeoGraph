@@ -1,5 +1,6 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/async/run_sync.h>
+#include "managed_budget_journal.h"
 
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
@@ -24,6 +25,37 @@
 #include <typeinfo>
 
 namespace neograph::graph {
+
+json checkpoint_storage_metadata(const Checkpoint& checkpoint) {
+    if (checkpoint.native_history || checkpoint.native_subgraph_writes ||
+        (checkpoint.channel_values.is_object() && checkpoint.channel_values.value("native_checkpoint_required", false)))
+        throw std::invalid_argument("In-memory native custody requires explicit archive serialization before durable storage");
+    constexpr const char* key = "_neograph_provider_checkpoint";
+    if (checkpoint.metadata.is_object() && checkpoint.metadata.contains(key))
+        throw std::invalid_argument("Checkpoint metadata uses a reserved provider custody key");
+    json state = json::object();
+    if (checkpoint.channel_values.is_object())
+        for (const auto& [name, value] : checkpoint.channel_values.items())
+            if (name != "channels" && name != "global_version") state[name] = value;
+    if (state.empty()) return checkpoint.metadata;
+    return json{{key, json{{"schema", "neograph.checkpoint-provider-state/v1"},
+        {"metadata", checkpoint.metadata}, {"state", std::move(state)}}}};
+}
+
+void restore_checkpoint_storage_envelope(Checkpoint& checkpoint) {
+    constexpr const char* key = "_neograph_provider_checkpoint";
+    if (!checkpoint.metadata.is_object() || !checkpoint.metadata.contains(key)) return;
+    const auto envelope = checkpoint.metadata.at(key);
+    if (!envelope.is_object() || envelope.value("schema", std::string{}) != "neograph.checkpoint-provider-state/v1" ||
+        !envelope.contains("metadata") || !envelope.contains("state") || !envelope.at("state").is_object())
+        throw std::invalid_argument("Invalid durable provider checkpoint envelope");
+    for (const auto& [name, value] : envelope.at("state").items()) {
+        if (name == "channels" || name == "global_version")
+            throw std::invalid_argument("Provider checkpoint envelope cannot replace state channels");
+        checkpoint.channel_values[name] = value;
+    }
+    checkpoint.metadata = envelope.at("metadata");
+}
 
 namespace {
 
@@ -214,6 +246,125 @@ public:
         }
     }
 
+    bool requires_managed_budget(const std::string& thread_id) override {
+        return core_ ? core_->requires_managed_budget(thread_id)
+                     : neograph::async::run_sync(async_->requires_managed_budget_async(thread_id));
+    }
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
+        if (async_) co_return co_await async_->requires_managed_budget_async(std::move(thread_id));
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<bool>(
+            [core = std::move(core), thread_id = std::move(thread_id)] {
+                return core->requires_managed_budget(thread_id);
+            });
+    }
+
+    std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment) override {
+        return core_ ? core_->acquire_managed_budget_lease(scope, id, commitment)
+            : neograph::async::run_sync(async_->acquire_managed_budget_lease_async(scope, id, commitment));
+    }
+    asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string id, std::string commitment) override {
+        if (async_) co_return co_await async_->acquire_managed_budget_lease_async(
+            std::move(scope), std::move(id), std::move(commitment));
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<std::shared_ptr<OwnedManagedBudgetLease>>(
+            [core = std::move(core), scope = std::move(scope), id = std::move(id),
+             commitment = std::move(commitment)] {
+                return core->acquire_managed_budget_lease(scope, id, commitment);
+            });
+    }
+    ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
+        std::uint64_t amount, const std::string& digest) override {
+        return core_ ? core_->begin_managed_budget_effect(lease, id, amount, digest)
+            : neograph::async::run_sync(async_->begin_managed_budget_effect_async(lease, id, amount, digest));
+    }
+    asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id,
+        std::uint64_t amount, std::string digest) override {
+        if (async_) co_return co_await async_->begin_managed_budget_effect_async(
+            std::move(lease), std::move(id), amount, std::move(digest));
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<ManagedBudgetEffectReceipt>(
+            [core = std::move(core), lease = std::move(lease), id = std::move(id),
+             amount, digest = std::move(digest)] {
+                return core->begin_managed_budget_effect(lease, id, amount, digest);
+            });
+    }
+    void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override {
+        if (core_) core_->settle_managed_budget_effect(lease, effect, std::move(outcome), authority);
+        else neograph::async::run_sync(async_->settle_managed_budget_effect_async(
+            lease, effect, std::move(outcome), authority));
+    }
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result outcome, UsageAccumulator::AuthoritySnapshot authority) override {
+        if (async_) {
+            co_await async_->settle_managed_budget_effect_async(
+                std::move(lease), std::move(effect), std::move(outcome), std::move(authority));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), lease = std::move(lease),
+            effect = std::move(effect), outcome = std::move(outcome), authority = std::move(authority)] {
+                core->settle_managed_budget_effect(lease, effect, outcome, authority);
+            });
+    }
+    void publish_managed_budget_checkpoint(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const Checkpoint& checkpoint) override {
+        if (core_) core_->publish_managed_budget_checkpoint(lease, checkpoint);
+        else neograph::async::run_sync(async_->publish_managed_budget_checkpoint_async(lease, checkpoint));
+    }
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) override {
+        if (async_) {
+            co_await async_->publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), lease = std::move(lease),
+            checkpoint = std::move(checkpoint)] {
+                core->publish_managed_budget_checkpoint(lease, checkpoint);
+            });
+    }
+    void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease) override {
+        if (core_) core_->release_managed_budget_lease(lease);
+        else neograph::async::run_sync(async_->release_managed_budget_lease_async(lease));
+    }
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease) override {
+        if (async_) {
+            co_await async_->release_managed_budget_lease_async(std::move(lease));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), lease = std::move(lease)] {
+            core->release_managed_budget_lease(lease);
+        });
+    }
+    bool retains_native_checkpoint() const noexcept override {
+        return core_ ? core_->retains_native_checkpoint() : async_->retains_native_checkpoint();
+    }
+    void publish_managed_budget_fork(const Checkpoint& source, const Checkpoint& forked) override {
+        if (core_) core_->publish_managed_budget_fork(source, forked);
+        else neograph::async::run_sync(async_->publish_managed_budget_fork_async(source, forked));
+    }
+    asio::awaitable<void> publish_managed_budget_fork_async(Checkpoint source, Checkpoint forked) override {
+        if (async_) {
+            co_await async_->publish_managed_budget_fork_async(std::move(source), std::move(forked));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), source = std::move(source),
+                                         forked = std::move(forked)] {
+            core->publish_managed_budget_fork(source, forked);
+        });
+    }
+
     void put_writes(const std::string& thread_id,
                     const std::string& parent_checkpoint_id,
                     const PendingWrite& write) override {
@@ -335,6 +486,139 @@ asio::awaitable<void> CheckpointStore::clear_writes_async(
         });
 }
 
+[[noreturn]] static bool unsupported_managed_budget_obligations() {
+    throw std::logic_error("Checkpoint backend does not support managed-bank custody obligations");
+}
+
+bool CheckpointStoreCore::requires_managed_budget(const std::string&) {
+    return unsupported_managed_budget_obligations();
+}
+asio::awaitable<bool> AsyncCheckpointStore::requires_managed_budget_async(std::string) {
+    co_return unsupported_managed_budget_obligations();
+}
+bool CheckpointStore::requires_managed_budget(const std::string&) {
+    return unsupported_managed_budget_obligations();
+}
+asio::awaitable<bool> CheckpointStore::requires_managed_budget_async(std::string thread_id) {
+    co_return co_await run_blocking_checkpoint<bool>(
+        [this, thread_id = std::move(thread_id)] { return requires_managed_budget(thread_id); });
+}
+
+template <typename T>
+[[noreturn]] static T unsupported_managed_budget_journal() {
+    throw std::logic_error("Checkpoint backend does not support owned managed-bank journals");
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> CheckpointStoreCore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope&, const std::string&, const std::string&) {
+    return unsupported_managed_budget_journal<std::shared_ptr<OwnedManagedBudgetLease>>();
+}
+ManagedBudgetEffectReceipt CheckpointStoreCore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>&, const std::string&, std::uint64_t, const std::string&) {
+    return unsupported_managed_budget_journal<ManagedBudgetEffectReceipt>();
+}
+void CheckpointStoreCore::settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>&,
+    const ManagedBudgetEffectReceipt&, sp::runtime::Result, const UsageAccumulator::AuthoritySnapshot&) {
+    unsupported_managed_budget_journal<void>();
+}
+void CheckpointStoreCore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>&, const Checkpoint&) {
+    unsupported_managed_budget_journal<void>();
+}
+void CheckpointStoreCore::release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>&) {
+    unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> AsyncCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope, std::string, std::string) {
+    co_return unsupported_managed_budget_journal<std::shared_ptr<OwnedManagedBudgetLease>>();
+}
+asio::awaitable<ManagedBudgetEffectReceipt> AsyncCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease>, std::string, std::uint64_t, std::string) {
+    co_return unsupported_managed_budget_journal<ManagedBudgetEffectReceipt>();
+}
+asio::awaitable<void> AsyncCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease>, ManagedBudgetEffectReceipt, sp::runtime::Result,
+    UsageAccumulator::AuthoritySnapshot) {
+    co_return unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<void> AsyncCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease>, Checkpoint) {
+    co_return unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<void> AsyncCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease>) {
+    co_return unsupported_managed_budget_journal<void>();
+}
+std::shared_ptr<OwnedManagedBudgetLease> CheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope&, const std::string&, const std::string&) {
+    return unsupported_managed_budget_journal<std::shared_ptr<OwnedManagedBudgetLease>>();
+}
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> CheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string id, std::string commitment) {
+    co_return co_await run_blocking_checkpoint<std::shared_ptr<OwnedManagedBudgetLease>>(
+        [this, scope = std::move(scope), id = std::move(id), commitment = std::move(commitment)] {
+            return acquire_managed_budget_lease(scope, id, commitment);
+        });
+}
+ManagedBudgetEffectReceipt CheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>&, const std::string&, std::uint64_t, const std::string&) {
+    return unsupported_managed_budget_journal<ManagedBudgetEffectReceipt>();
+}
+asio::awaitable<ManagedBudgetEffectReceipt> CheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id, std::uint64_t amount, std::string digest) {
+    co_return co_await run_blocking_checkpoint<ManagedBudgetEffectReceipt>(
+        [this, lease = std::move(lease), id = std::move(id), amount, digest = std::move(digest)] {
+            return begin_managed_budget_effect(lease, id, amount, digest);
+        });
+}
+void CheckpointStore::settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>&,
+    const ManagedBudgetEffectReceipt&, sp::runtime::Result, const UsageAccumulator::AuthoritySnapshot&) {
+    unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<void> CheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    co_await run_blocking_checkpoint([this, lease = std::move(lease), effect = std::move(effect),
+        outcome = std::move(outcome), authority = std::move(authority)] {
+            settle_managed_budget_effect(lease, effect, outcome, authority);
+        });
+}
+void CheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>&, const Checkpoint&) {
+    unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<void> CheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
+    co_await run_blocking_checkpoint([this, lease = std::move(lease), checkpoint = std::move(checkpoint)] {
+        publish_managed_budget_checkpoint(lease, checkpoint);
+    });
+}
+void CheckpointStore::release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>&) {
+    unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<void> CheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    co_await run_blocking_checkpoint([this, lease = std::move(lease)] {
+        release_managed_budget_lease(lease);
+    });
+}
+
+void CheckpointStoreCore::publish_managed_budget_fork(const Checkpoint&, const Checkpoint&) {
+    throw std::logic_error("Checkpoint backend does not support original C++ shared-bank forks");
+}
+asio::awaitable<void> AsyncCheckpointStore::publish_managed_budget_fork_async(Checkpoint, Checkpoint) {
+    throw std::logic_error("Checkpoint backend does not support original C++ shared-bank forks");
+    co_return;
+}
+void CheckpointStore::publish_managed_budget_fork(const Checkpoint&, const Checkpoint&) {
+    throw std::logic_error("Checkpoint backend does not support original C++ shared-bank forks");
+}
+asio::awaitable<void> CheckpointStore::publish_managed_budget_fork_async(Checkpoint source, Checkpoint forked) {
+    co_await run_blocking_checkpoint([this, source = std::move(source), forked = std::move(forked)] {
+        publish_managed_budget_fork(source, forked);
+    });
+}
+
 // =========================================================================
 // CheckpointPhase <-> string
 // =========================================================================
@@ -438,12 +722,7 @@ Checkpoint InMemoryCheckpointStore::split_blobs_locked(Checkpoint cp) {
         shell_channels[name] = entry;
     }
 
-    json new_cv = json::object();
-    new_cv["channels"] = shell_channels;
-    if (cp.channel_values.contains("global_version")) {
-        new_cv["global_version"] = cp.channel_values["global_version"];
-    }
-    cp.channel_values = new_cv;
+    cp.channel_values["channels"] = std::move(shell_channels);
     return cp;
 }
 
@@ -477,17 +756,23 @@ Checkpoint InMemoryCheckpointStore::join_blobs_locked(Checkpoint cp) const {
         full_channels[name] = entry;
     }
 
-    json new_cv = json::object();
-    new_cv["channels"] = full_channels;
-    if (cp.channel_values.contains("global_version")) {
-        new_cv["global_version"] = cp.channel_values["global_version"];
-    }
-    cp.channel_values = new_cv;
+    cp.channel_values["channels"] = std::move(full_channels);
     return cp;
 }
 
 void InMemoryCheckpointStore::save(const Checkpoint& cp) {
     std::lock_guard lock(mutex_);
+    // Ordinary new rows never advance the trusted current branch. Replacing
+    // that exact ID with edited content or custody permanently invalidates it.
+    if (const auto previous = by_id_.find(cp.id); previous != by_id_.end()) {
+        if (const auto branch = managed_budget_branch_heads_.find(previous->second.thread_id);
+            branch != managed_budget_branch_heads_.end() && branch->second.checkpoint_id == cp.id &&
+            (branch->second.commitment != managed_budget_checkpoint_commitment(cp) ||
+             branch->second.native_history != cp.native_history))
+            branch->second.valid = false;
+    }
+    if (detail::ManagedBudgetJournalAccess::checkpoint_requires_obligation(cp))
+        managed_budget_obligations_.insert(cp.thread_id);
     Checkpoint shell = split_blobs_locked(cp);
     by_id_[shell.id] = shell;
     by_thread_[shell.thread_id].push_back(std::move(shell));
@@ -530,6 +815,8 @@ std::vector<Checkpoint> InMemoryCheckpointStore::list(
 
 void InMemoryCheckpointStore::delete_thread(const std::string& thread_id) {
     std::lock_guard lock(mutex_);
+    if (const auto branch = managed_budget_branch_heads_.find(thread_id);
+        branch != managed_budget_branch_heads_.end()) branch->second.valid = false;
     auto it = by_thread_.find(thread_id);
     if (it != by_thread_.end()) {
         for (const auto& cp : it->second) {
@@ -621,6 +908,234 @@ asio::awaitable<void> InMemoryCheckpointStore::clear_writes_async(
         co_return;
     }
     clear_writes(thread_id, parent_checkpoint_id);
+}
+
+bool InMemoryCheckpointStore::requires_managed_budget(const std::string& thread_id) {
+    std::lock_guard lock(mutex_);
+    return managed_budget_obligations_.contains(thread_id);
+}
+asio::awaitable<bool> InMemoryCheckpointStore::requires_managed_budget_async(std::string thread_id) {
+    if (!is_exact_in_memory_store(*this))
+        co_return co_await CheckpointStore::requires_managed_budget_async(std::move(thread_id));
+    co_return requires_managed_budget(thread_id);
+}
+
+const InMemoryCheckpointStore::ManagedBudgetBranchHead&
+InMemoryCheckpointStore::authenticate_managed_budget_branch_locked(
+    const Checkpoint& source, const std::string& commitment) const {
+    const auto branch = managed_budget_branch_heads_.find(source.thread_id);
+    const auto stored = by_id_.find(source.id);
+    if (branch == managed_budget_branch_heads_.end() || !branch->second.valid ||
+        branch->second.checkpoint_id != source.id || branch->second.commitment != commitment ||
+        branch->second.native_history != source.native_history || stored == by_id_.end() ||
+        stored->second.thread_id != source.thread_id || stored->second.native_history != source.native_history ||
+        managed_budget_checkpoint_commitment(source) != commitment ||
+        managed_budget_checkpoint_commitment(join_blobs_locked(stored->second)) != commitment)
+        throw std::invalid_argument("Managed-bank source is not the actual trusted current branch head");
+    return branch->second;
+}
+
+void InMemoryCheckpointStore::validate_managed_budget_execution_locked(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const json& head) const {
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
+    const auto& execution_key = lease->execution_storage_thread_id();
+    const auto id = head.at("head_checkpoint_id").get<std::string_view>();
+    if (id.empty()) {
+        if (execution_key != key || lease->execution_thread_id() != lease->scope().thread_id)
+            throw std::invalid_argument("Managed-bank unpublished root cannot acquire branch execution authority");
+        return;
+    }
+    const auto branch = managed_budget_branch_heads_.find(execution_key);
+    if (branch == managed_budget_branch_heads_.end() ||
+        branch->second.financial_storage_thread_id != key ||
+        branch->second.execution_thread_id != lease->execution_thread_id() ||
+        branch->second.checkpoint_id != id ||
+        branch->second.commitment != head.at("head_commitment").get<std::string_view>())
+        throw std::invalid_argument("Managed-bank receipt does not select the current trusted execution branch");
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> InMemoryCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment) {
+    std::lock_guard lock(mutex_);
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(scope);
+    std::string execution_key = key;
+    std::string execution_thread = scope.thread_id;
+    if (!id.empty()) {
+        const auto source = by_id_.find(id);
+        if (source == by_id_.end())
+            throw std::invalid_argument("Managed-bank source checkpoint is missing");
+        auto complete_source = join_blobs_locked(source->second);
+        const auto& branch = authenticate_managed_budget_branch_locked(complete_source, commitment);
+        if (branch.financial_storage_thread_id != key)
+            throw std::invalid_argument("Managed-bank branch changed its original financial namespace");
+        execution_key = complete_source.thread_id;
+        execution_thread = branch.execution_thread_id;
+    }
+    const auto found = managed_budget_journals_.find(key);
+    json candidate = found == managed_budget_journals_.end() ? json() : found->second;
+    if (!id.empty()) detail::ManagedBudgetJournalAccess::select_branch_head(candidate, id, commitment);
+    auto lease = detail::ManagedBudgetJournalAccess::acquire_branch(candidate,
+        managed_budget_obligations_.contains(key), scope, id, commitment, execution_thread, execution_key);
+    managed_budget_obligations_.insert(key);
+    managed_budget_journals_[key] = std::move(candidate);
+    detail::ManagedBudgetJournalAccess::refresh(lease, managed_budget_journals_.at(key));
+    detail::ManagedBudgetJournalAccess::bind_cpp_native_retention(lease, managed_budget_journals_.at(key));
+    return lease;
+}
+ManagedBudgetEffectReceipt InMemoryCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
+    std::uint64_t amount, const std::string& digest) {
+    if (!lease) throw std::invalid_argument("Managed-bank effect requires an owned lease");
+    std::lock_guard lock(mutex_);
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
+    const auto head = managed_budget_journals_.find(key);
+    if (head == managed_budget_journals_.end()) throw std::invalid_argument("Managed-bank journal is missing");
+    validate_managed_budget_execution_locked(lease, head->second);
+    detail::ManagedBudgetJournalAccess::bind_cpp_native_retention(lease, head->second);
+    auto candidate = head->second;
+    const auto effect_key = std::make_tuple(key, lease->bank_generation(), id);
+    const auto found = managed_budget_effects_.find(effect_key);
+    json effect = found == managed_budget_effects_.end() ? json() : found->second;
+    auto receipt = detail::ManagedBudgetJournalAccess::begin(candidate, effect, lease, id, amount, digest);
+    managed_budget_effects_[effect_key] = std::move(effect);
+    head->second = std::move(candidate);
+    detail::ManagedBudgetJournalAccess::refresh(lease, head->second);
+    return receipt;
+}
+void InMemoryCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& receipt,
+    sp::runtime::Result outcome, const UsageAccumulator::AuthoritySnapshot& authority) {
+    if (!lease || !receipt.active()) throw std::invalid_argument("Managed-bank settlement requires owned custody");
+    std::lock_guard lock(mutex_);
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
+    const auto head = managed_budget_journals_.find(key);
+    const auto effect_key = std::make_tuple(key, lease->bank_generation(), receipt.effect_id());
+    const auto found = managed_budget_effects_.find(effect_key);
+    if (head == managed_budget_journals_.end() || found == managed_budget_effects_.end())
+        throw std::invalid_argument("Managed-bank settlement lacks its original journal effect");
+    validate_managed_budget_execution_locked(lease, head->second);
+    auto candidate = head->second;
+    auto effect = found->second;
+    detail::ManagedBudgetJournalAccess::settle(candidate, effect, lease, receipt, outcome, authority);
+    // Real immutable C++ outcome retains native seals when no archive exists.
+    // Financial JSON is not a public native replay import.
+    managed_budget_results_[effect_key] = std::move(outcome);
+    found->second = std::move(effect);
+    head->second = std::move(candidate);
+    detail::ManagedBudgetJournalAccess::refresh(lease, head->second);
+}
+void InMemoryCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    if (!lease) throw std::invalid_argument("Managed-bank checkpoint requires an owned lease");
+    std::lock_guard lock(mutex_);
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
+    const auto head = managed_budget_journals_.find(key);
+    if (head == managed_budget_journals_.end()) throw std::invalid_argument("Managed-bank journal is missing");
+    if (by_id_.contains(checkpoint.id)) throw std::invalid_argument("Managed-bank checkpoint ID has already been used");
+    const auto execution_key = lease->execution_storage_thread_id();
+    const auto branch = managed_budget_branch_heads_.find(execution_key);
+    if (!lease->head_checkpoint_id().empty()) {
+        const auto source = by_id_.find(lease->head_checkpoint_id());
+        if (source == by_id_.end())
+            throw std::invalid_argument("Managed-bank publication source was removed");
+        const auto& current = authenticate_managed_budget_branch_locked(
+            join_blobs_locked(source->second), lease->head_commitment());
+        if (current.financial_storage_thread_id != key ||
+            current.execution_thread_id != lease->execution_thread_id() ||
+            source->second.thread_id != execution_key)
+            throw std::invalid_argument("Managed-bank publication changed its trusted execution branch");
+    } else if (branch != managed_budget_branch_heads_.end() ||
+               by_thread_.contains(execution_key) || execution_key != key) {
+        throw std::invalid_argument("Managed-bank first publication target is not a fresh original branch");
+    }
+    auto candidate = head->second;
+    detail::ManagedBudgetJournalAccess::publish(candidate, lease, checkpoint);
+    auto shell = split_blobs_locked(checkpoint);
+    if (managed_budget_checkpoint_commitment(join_blobs_locked(shell)) !=
+        managed_budget_checkpoint_commitment(checkpoint))
+        throw std::invalid_argument("Managed-bank checkpoint cannot preserve its complete source state");
+    ManagedBudgetBranchHead next_branch{key, lease->execution_thread_id(), checkpoint.id,
+        candidate.at("head_commitment").get<std::string>(), checkpoint.native_history, true};
+    const bool existing_branch = branch != managed_budget_branch_heads_.end();
+    bool created_history = false;
+    bool inserted_checkpoint = false;
+    bool inserted_branch = false;
+    try {
+        auto [history, created] = by_thread_.try_emplace(execution_key);
+        created_history = created;
+        by_id_.emplace(checkpoint.id, shell);
+        inserted_checkpoint = true;
+        if (!existing_branch) {
+            managed_budget_branch_heads_.emplace(execution_key, std::move(next_branch));
+            inserted_branch = true;
+        }
+        history->second.push_back(std::move(shell));
+    } catch (...) {
+        if (inserted_branch) managed_budget_branch_heads_.erase(execution_key);
+        if (inserted_checkpoint) by_id_.erase(checkpoint.id);
+        if (created_history) by_thread_.erase(execution_key);
+        throw;
+    }
+    if (existing_branch) branch->second = std::move(next_branch);
+    head->second = std::move(candidate);
+    detail::ManagedBudgetJournalAccess::refresh(lease, head->second);
+}
+
+void InMemoryCheckpointStore::publish_managed_budget_fork(
+    const Checkpoint& source, const Checkpoint& forked) {
+    std::lock_guard lock(mutex_);
+    const auto commitment = managed_budget_checkpoint_commitment(source);
+    const auto& source_branch = authenticate_managed_budget_branch_locked(source, commitment);
+    const auto head = managed_budget_journals_.find(source_branch.financial_storage_thread_id);
+    if (head == managed_budget_journals_.end())
+        throw std::invalid_argument("Managed-bank fork source has no original financial journal");
+    auto candidate = head->second;
+    detail::ManagedBudgetJournalAccess::select_branch_head(candidate, source.id, commitment);
+    const auto execution_thread =
+        detail::ManagedBudgetJournalAccess::validate_shared_bank_fork(candidate, source, forked);
+    const auto pending_target = pending_.lower_bound({forked.thread_id, {}});
+    if (by_id_.contains(forked.id) || by_thread_.contains(forked.thread_id) ||
+        managed_budget_obligations_.contains(forked.thread_id) ||
+        managed_budget_journals_.contains(forked.thread_id) ||
+        managed_budget_branch_heads_.contains(forked.thread_id) ||
+        (pending_target != pending_.end() && pending_target->first.first == forked.thread_id))
+        throw std::invalid_argument("Managed-bank fork target namespace or checkpoint ID is not fresh");
+
+    // Keep this one structural checkpoint inline until its first real branch
+    // publication, so a failed fork cannot leave partial target channel blobs.
+    auto shell = forked;
+    const auto fork_commitment = managed_budget_checkpoint_commitment(forked);
+    ManagedBudgetBranchHead branch{source_branch.financial_storage_thread_id, execution_thread,
+        forked.id, fork_commitment, forked.native_history, true};
+    // All real authority records commit under this store lock. If allocation
+    // fails, no target head/alias/obligation is left authoritative.
+    try {
+        by_id_.emplace(shell.id, shell);
+        by_thread_.emplace(forked.thread_id, std::vector<Checkpoint>{std::move(shell)});
+        managed_budget_branch_heads_.emplace(forked.thread_id, std::move(branch));
+        managed_budget_obligations_.insert(forked.thread_id);
+    } catch (...) {
+        by_id_.erase(forked.id);
+        by_thread_.erase(forked.thread_id);
+        managed_budget_branch_heads_.erase(forked.thread_id);
+        managed_budget_obligations_.erase(forked.thread_id);
+        throw;
+    }
+    // Structural fork grants no currency: the original financial generation,
+    // actor/revision/frontier and source branch head are deliberately unchanged.
+}
+void InMemoryCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    if (!lease) throw std::invalid_argument("Managed-bank release requires an owned lease");
+    std::lock_guard lock(mutex_);
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
+    const auto head = managed_budget_journals_.find(key);
+    if (head == managed_budget_journals_.end()) throw std::invalid_argument("Managed-bank journal is missing");
+    validate_managed_budget_execution_locked(lease, head->second);
+    auto candidate = head->second;
+    detail::ManagedBudgetJournalAccess::release(candidate, lease);
+    head->second = std::move(candidate);
+    detail::ManagedBudgetJournalAccess::refresh(lease, head->second);
 }
 
 size_t InMemoryCheckpointStore::size() const {

@@ -12,6 +12,7 @@
 #include "canonical_json.h"
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <limits>
 #include <set>
@@ -465,6 +466,14 @@ void validate(const CapsuleData& data) {
         throw std::invalid_argument(
             "Graph migration capsule requires a completed super-step checkpoint");
     }
+    // Capsules serialize JSON and rebind the target graph/thread; they do not
+    // own an authenticated archive or the original shared usage bank.
+    if (checkpoint.native_history ||
+        checkpoint.channel_values.value("native_checkpoint_required", false) ||
+        checkpoint.channel_values.contains("provider_managed_budget")) {
+        throw std::invalid_argument(
+            "Graph migration capsule cannot transfer native or managed-bank custody");
+    }
     // Root super-step checkpoints carry no node-local/subgraph journal. An
     // opaque metadata payload cannot be reconciled by the identity projector:
     // accepting it would silently drop or misinterpret pending local state.
@@ -893,9 +902,32 @@ std::string ProgramExecutionLease::serialize_canonical() const {
 
 bool does_program_execution_lease_bind(
     const ProgramExecutionLease& lease,
-    const ProgramTransitionPublication& publication) noexcept {
+    const ProgramTransitionPublication& publication,
+    const ProgramExecutionLease* expected_lease) noexcept {
     try {
         const auto& run = publication.run_record;
+        if (expected_lease && lease.id() == expected_lease->id()) {
+            // Captured JS appends retain the already-owned absolute lease.
+            // Command checkpoints have their own threads; they do not mint a
+            // new root execution identity or renew the original deadline.
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            const auto checkpoint = run.exact_checkpoint();
+            return run.recorded_binding_set_fingerprint().has_value() &&
+                !publication.commands.empty() &&
+                run.continuation().state == ContinuationState::Running &&
+                lease.owner_scope() == run.owner_scope() &&
+                lease.run_id() == run.run_id() &&
+                lease.attempt() == run.continuation().attempt &&
+                lease.program_version_id() == run.program_version_id() &&
+                lease.bundle_id() == run.bundle_id() &&
+                run.updated_at_ms() >= lease.acquired_at_ms() &&
+                run.updated_at_ms() < lease.expires_at_ms() &&
+                now < lease.expires_at_ms() &&
+                (!checkpoint ||
+                 (checkpoint->core_name == lease.core_name() &&
+                  checkpoint->core_generation_id == lease.core_generation_id()));
+        }
         if (lease.owner_scope() != run.owner_scope() ||
             lease.run_id() != run.run_id() || lease.attempt() != run.continuation().attempt ||
             lease.program_version_id() != run.program_version_id() ||

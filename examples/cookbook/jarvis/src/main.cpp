@@ -13,7 +13,7 @@
 //      __shutdown__ 채널 true 또는 SIGINT/SIGTERM 이면 루프 종료
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_support.h"
 #include <neograph/graph/store.h>
 #include <cppdotenv/dotenv.hpp>
 
@@ -66,53 +66,7 @@ void install_signal_handlers() {
 //   - 그래프가 direct + skip_synthesis=true 경로로 흘러서 TTS 직행.
 // ─────────────────────────────────────────────────────────────────────────────
 
-class MockProvider : public neograph::Provider {
-public:
-    // invoke() — v0.4 단일 진입점
-    asio::awaitable<neograph::ChatCompletion>
-    invoke(const neograph::CompletionParams& params,
-           neograph::StreamCallback on_chunk) override
-    {
-        neograph::ChatCompletion result;
-        result.message.role = "assistant";
-
-        // 시스템 프롬프트에 "IMPORTANT: respond with a single JSON" 문자열이 있으면
-        // 라우터 호출로 판단 → mock 라우팅 JSON 반환
-        bool is_router_call = false;
-        for (const auto& msg : params.messages) {
-            if (msg.role == "system" &&
-                msg.content.find("IMPORTANT: respond with a single JSON") != std::string::npos) {
-                is_router_call = true;
-                break;
-            }
-        }
-
-        if (is_router_call) {
-            // 사용자 텍스트를 꺼내서 마지막 user 메시지 기준으로 echo 응답
-            // direct + skip_synthesis=true → tool_results → synth_skip → final_text
-            result.message.content =
-                R"({"mode":"direct","tool_calls":[],"delegate_to":null,"skip_synthesis":true,"reasoning_short":"mock router"})";
-        } else {
-            // 일반 LLM 호출(response_synth 등) — 사용자 발화를 그대로 echo
-            std::string user_text;
-            for (const auto& msg : params.messages) {
-                if (msg.role == "user") user_text = msg.content;
-            }
-            result.message.content = "[mock] " + user_text;
-        }
-
-        // 스트리밍 콜백이 있으면 전체 내용을 한 번에 전달
-        if (on_chunk && !result.message.content.empty()) {
-            on_chunk(result.message.content);
-        }
-
-        co_return result;
-    }
-
-    // 동기 버전 — Provider 기본 구현이 invoke 를 써서 처리하므로 여기서는 사용 안 됨
-    // (neograph::Provider 가 complete() 기본 구현 제공)
-    std::string get_name() const override { return "jarvis_mock"; }
-};
+using MockProvider = jarvis::providers::MockProvider;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // load_prompt_section() — persona.txt 의 ===<section>=== 섹션 추출.
@@ -579,7 +533,8 @@ void register_custom_node_types(
     factory.register_type("llm_call",
         [synth_provider](const std::string& name, const neograph::json& cfg, const NodeContext&)
         {
-            class JarvisSynthNode : public neograph::graph::GraphNode {
+            class JarvisSynthNode : public neograph::graph::GraphNode,
+                                    public neograph::RuntimeInterpositionConsumer {
             public:
                 JarvisSynthNode(std::string n, neograph::json c,
                                 std::shared_ptr<neograph::Provider> p)
@@ -651,16 +606,14 @@ void register_custom_node_types(
                     // ── messages 배열 조립: system → 이력(user/assistant 교대) → 현재 턴 ──
                     // All live Jarvis calls use the pinned OpenRouter model;
                     // mock mode is selected before this node is invoked.
-                    neograph::CompletionParams p;
-                    p.model       = "~deepseek/deepseek-v4-flash-latest";
-                    p.temperature = 0.4f;
-                    p.max_tokens  = 220;
-                    p.messages.push_back({"system", sys});
+                    // Persistent memory is an explicit speech projection, not native replay.
+                    std::vector<sp::Message> messages;
+                    messages.push_back(examples::message(sp::Role::System, sys));
                     for (const auto& turn : history) {
                         if (!turn.user.empty())
-                            p.messages.push_back({"user", turn.user});
+                            messages.push_back(examples::message(sp::Role::User, turn.user));
                         if (!turn.assistant.empty())
-                            p.messages.push_back({"assistant", turn.assistant});
+                            messages.push_back(examples::message(sp::Role::Assistant, turn.assistant));
                     }
 
                     std::string usr = user_text;
@@ -668,21 +621,33 @@ void register_custom_node_types(
                         usr += "\n\n[Tool result JSON — use the key fact]: " + tool_summary;
                     if (!delegated.empty())
                         usr += "\n\n[Specialist reply — speak it as your own]: " + delegated;
-                    p.messages.push_back({"user", usr});
+                    messages.push_back(examples::message(sp::Role::User, usr));
 
                     // ── 스트리밍 합성 — 첫 토큰 도착 시 [jarvis:ttft] 마커를
                     //    stdout 에 한 번 찍는다. 드라이버가 이 시각으로 TTFT
                     //    (사용자가 답을 "듣기 시작"하는 지점)를 잰다. 요즘 LLM
                     //    서비스는 전부 스트리밍이라 벤치도 여기 맞춘다.
                     bool ttft_emitted = false;
-                    auto on_tok = [&ttft_emitted](const std::string& chunk) {
-                        if (!ttft_emitted && !chunk.empty()) {
+                    auto on_tok = [&ttft_emitted](const sp::Event& event) {
+                        const auto* delta = std::get_if<sp::PartDelta>(&event);
+                        if (!ttft_emitted && delta && delta->payload.kind == sp::PartKind::Text &&
+                            delta->payload.channel == sp::DeltaChannel::Content &&
+                            !delta->payload.bytes.empty()) {
                             ttft_emitted = true;
                             std::cout << "[jarvis:ttft]" << std::endl;
                         }
                     };
-                    auto reply = co_await provider_->invoke(p, on_tok);
-                    std::string final_text = reply.message.content;
+                    auto request = jarvis::providers::request(*provider_, messages, 0.4, 220,
+                                                             neograph::ProviderMode::Stream);
+                    request.on_event = on_tok;
+                    request = jarvis::providers::contextual_request(std::move(request), in.ctx);
+                    auto reply = co_await neograph::graph::observe_provider_result(in.ctx,
+                        invoke_provider(provider_, std::move(request), {}, {},
+                            neograph::graph::provider_call_broker(in.ctx),
+                            neograph::graph::make_provider_call_identity(in.ctx, name_, 0)));
+                    neograph::graph::record_usage(in.ctx, reply);
+                    reply = neograph::outcome_or_throw(std::move(reply));
+                    std::string final_text = neograph::outcome_text(*reply);
 
                     // ── 복창 가드 — 과거 답변과 trim 후 verbatim 일치하면 1회 재생성.
                     //    커밋 전 마지막 방어선: 복창이 Store 에 들어가면 다음 턴의
@@ -708,14 +673,22 @@ void register_custom_node_types(
                     if (verbatim) {
                         std::cerr << "[synth] 복창 감지 — 과거 답변과 verbatim 일치, "
                                      "1회 재생성\n";
-                        p.messages.push_back({"system",
+                        const auto& generated = neograph::outcome_messages(*reply);
+                        messages.insert(messages.end(), generated.begin(), generated.end());
+                        messages.push_back(examples::message(sp::Role::User,
                             "Your draft repeated one of your earlier replies "
                             "word-for-word. Compose a fresh answer to the user's "
-                            "CURRENT message, in their language."});
-                        auto retry = co_await provider_->invoke(p, nullptr);
-                        if (!trim(retry.message.content).empty()) {
-                            final_text = retry.message.content;
-                        }
+                            "CURRENT message, in their language."));
+                        auto retry_request = jarvis::providers::contextual_request(
+                            jarvis::providers::request(*provider_, std::move(messages), 0.4, 220), in.ctx);
+                        auto retry = co_await neograph::graph::observe_provider_result(in.ctx,
+                            invoke_provider(provider_, std::move(retry_request), {}, {},
+                                neograph::graph::provider_call_broker(in.ctx),
+                                neograph::graph::make_provider_call_identity(in.ctx, name_, 1)));
+                        neograph::graph::record_usage(in.ctx, retry);
+                        retry = neograph::outcome_or_throw(std::move(retry));
+                        const auto retry_text = neograph::outcome_text(*retry);
+                        if (!trim(retry_text).empty()) final_text = retry_text;
                     }
 
                     std::string out_ch = cfg_.value("output_channel",
@@ -831,14 +804,10 @@ int main(int argc, char** argv) {
         const char* base_url_env = std::getenv("OPENROUTER_BASE_URL");
         if (api_key_env && std::string(api_key_env).size() > 0) {
             std::cerr << "[jarvis] OpenRouter Provider 사용 (OPENROUTER_API_KEY 감지됨)\n";
-            neograph::llm::OpenAIProvider::Config pcfg;
-            pcfg.api_key = api_key_env;
-            pcfg.base_url = (base_url_env && *base_url_env)
+            const std::string base_url = (base_url_env && *base_url_env)
                 ? base_url_env : "https://openrouter.ai/api";
-            pcfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-            pcfg.provider_routing = {{"zdr", true}};
-            router_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
-            synth_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
+            router_provider = jarvis::providers::live(api_key_env, base_url);
+            synth_provider = jarvis::providers::live(api_key_env, base_url);
         } else {
             std::cerr << "[jarvis] Mock Provider 사용 (OPENROUTER_API_KEY 없음)\n";
             router_provider = std::make_shared<MockProvider>();

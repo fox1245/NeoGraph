@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "provider": "gemini",
+  "model_profile": "nano_banana_2_lite",
+  "model": "gemini-3.1-flash-lite-image",
+  "endpoint": {
+    "host": "generativelanguage.googleapis.com",
+    "port": "443",
+    "path": "/v1beta/models/gemini-3.1-flash-lite-image:generateContent"
+  },
+  "limits": {
+    "timeout_ms": 60000,
+    "max_prompt_bytes": 8000,
+    "max_response_header_bytes": 65536,
+    "max_response_body_bytes": 16777216,
+    "max_response_chunk_bytes": 1048576,
+    "max_artifact_bytes": 8388608,
+    "max_outputs": 16
+  },
+  "defaults": {
+    "aspect_ratio": "1:1",
+    "image_size": "1K",
+    "thinking": "minimal",
+    "max_output_tokens": 2048
+  }
+}

@@ -7,8 +7,11 @@
 #include <neograph/api.h>
 #include <neograph/json.h>
 #include <neograph/program/pending.h>
+#include <neograph/types.h>
+#include <core/native_archive.h>
 
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <string>
@@ -80,8 +83,16 @@ struct ProgramFailure {
     std::string   core_node;
     std::uint32_t attempts = 0;
     json          witness;
+    /// Genuine immutable transport outcome and original live failure cause.
+    /// The witness carries full durable evidence; exception_ptr is never stored.
+    sp::runtime::Result provider_outcome;
+    std::exception_ptr provider_cause;
 
-    bool operator==(const ProgramFailure&) const = default;
+    bool operator==(const ProgramFailure& other) const {
+        return code == other.code && message == other.message &&
+            operation_id == other.operation_id && core_node == other.core_node &&
+            attempts == other.attempts && witness == other.witness;
+    }
 };
 
 struct ProgramInterrupt {
@@ -106,6 +117,9 @@ struct ProgramResultData {
     std::optional<ProgramInterrupt>       interrupt;
     std::optional<ProgramFailure>         failure;
     std::vector<std::string>              execution_trace;
+    /// Actual bank custody, authenticated by the enclosing owner-scoped run journal.
+    /// Reported usage is separate from charged credit and UnknownHold reservations.
+    std::optional<UsageAccumulator::AuthoritySnapshot> provider_budget_authority;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramResult {
@@ -119,6 +133,8 @@ public:
      */
     ProgramResult();
     static ProgramResult create(ProgramResultData data);
+    /// Stored native provider failures remain data-only until the owner Runtime
+    /// restores their configured archive; failure() rejects an unresolved seal.
     static ProgramResult parse(std::string_view stored_bytes);
     std::string          serialize_canonical() const;
     const std::string&   id() const noexcept;
@@ -133,14 +149,21 @@ public:
     RunBudget                             remaining_budget() const noexcept;
     std::optional<CoreCheckpointIdentity> checkpoint() const;
     std::optional<ProgramInterrupt>       interrupt() const;
+    /// Returns genuine owned provider evidence when present, never a native projection.
     std::optional<ProgramFailure>         failure() const;
     std::vector<std::string>              execution_trace() const;
+    const std::optional<UsageAccumulator::AuthoritySnapshot>& provider_budget_authority() const noexcept;
 
 private:
     using ConstructionData = ProgramResultData;
 
     struct Impl;
-    explicit ProgramResult(ConstructionData data);
+    explicit ProgramResult(ConstructionData data, bool persistable = true);
+    ProgramResult restore_provider_failure(
+        std::string_view owner_scope, const std::shared_ptr<sp::NativeArchive>& archive) const;
+    static ProgramResult create_for_runtime(
+        ConstructionData data, std::string_view owner_scope,
+        const std::shared_ptr<sp::NativeArchive>& archive);
     std::shared_ptr<const Impl> impl_;
 
     friend class detail::RunControl;

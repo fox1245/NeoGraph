@@ -20,7 +20,7 @@
 // Equivalent to the HTTP example 03 but with transport=stdio.
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
 #include <neograph/mcp/client.h>
 #include <neograph/graph/react_graph.h>
 
@@ -71,32 +71,29 @@ int main(int argc, char** argv) {
     }
 
     // --- LLM provider ---
-    neograph::llm::OpenAIProvider::Config config;
-    config.api_key       = api_key;
-    config.base_url      = "https://openrouter.ai/api";
-    config.default_model = "~deepseek/deepseek-v4-flash-latest";
-    config.provider_routing = {{"zdr", true}};
     std::shared_ptr<neograph::Provider> provider =
-        neograph::llm::OpenAIProvider::create(config);
+        examples::make_openrouter_provider(api_key);
 
     // --- Wire the stdio tools into a ReAct graph ---
     auto engine = neograph::graph::create_react_graph(
         provider, std::move(tools),
         "You are an assistant that uses local tools to answer questions. "
-        "Always call the tools when information is needed.");
+        "Always call the tools when information is needed.", examples::openrouter_model);
 
     neograph::graph::RunConfig run_config;
-    run_config.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", question}}
-    })}};
+    run_config.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
+    run_config.on_provider_event = [](const sp::Event& event) {
+        if (const auto* delta = std::get_if<sp::PartDelta>(&event);
+            delta && delta->payload.kind == sp::PartKind::Text &&
+            delta->payload.channel == sp::DeltaChannel::Content)
+            std::cout << delta->payload.bytes << std::flush;
+    };
 
     std::cout << "\nUser: " << question << "\n\nAssistant: \n";
 
     auto result = engine->run_stream(run_config,
         [](const neograph::graph::GraphEvent& event) {
-            if (event.type == neograph::graph::GraphEvent::Type::LLM_TOKEN) {
-                std::cout << event.data.get<std::string>() << std::flush;
-            } else if (event.type == neograph::graph::GraphEvent::Type::NODE_START &&
+            if (event.type == neograph::graph::GraphEvent::Type::NODE_START &&
                        event.node_name == "tools") {
                 std::cout << "\n[tool call via stdio...]\n";
             }

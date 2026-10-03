@@ -13,14 +13,12 @@
  *     span events. Closing the session ends the root span.
  *
  *   - `OpenInferenceProvider(inner, tracer)` — wraps any `Provider`.
- *     Each `complete*` call opens an LLM-kind child span tagged with
- *     `llm.model_name`, `llm.invocation_parameters`,
- *     `llm.input_messages.{i}.message.{role,content}`,
- *     `llm.output_messages.0.message.{role,content}`, and
- *     `llm.token_count.{prompt,completion,total}`. The streaming
- *     overloads (`complete_stream` / `complete_stream_async`) also
- *     accumulate streamed tokens into the LLM span's `output.value`
- *     and emit one `llm.token` event per chunk.
+ *     Each prepared dispatch opens one LLM-kind child span tagged with
+ *     the admitted model, declared scalar controls, and public role/text
+ *     message projections. Known token counts, including zero, are recorded;
+ *     missing counts remain absent. Native replay blocks, reasoning, and raw
+ *     wire envelopes are never exported through tracing. The full immutable
+ *     outcome and typed stream events pass through unchanged.
  *
  * Phoenix / Arize / Langfuse render the resulting trace as a chat
  * chain with token counts and per-message bubbles — the same UX the
@@ -144,14 +142,13 @@ NEOGRAPH_API OpenInferenceTracerSession openinference_tracer(
 /**
  * @brief Provider wrapper that emits OpenInference LLM spans.
  *
- * Pass-through to the inner Provider for all four virtual paths
- * (complete / complete_async / complete_stream / complete_stream_async).
- * Each call opens an `llm.complete` child span, attaches the
- * OpenInference LLM-kind attribute set, runs the inner call, captures
- * the response + usage onto the span, and ends it. Streaming overloads
- * additionally append each token to `output.value` and emit a
- * `llm.token` span event per chunk so Phoenix's timeline view shows
- * stream cadence.
+ * Preparation delegates once to the inner provider. The exact move-only
+ * prepared handle is observed at dispatch, without re-encoding or changing
+ * its mode, deadline, cancellation, or typed callback. Each dispatched
+ * operation opens one `llm.complete` span and records public text and known
+ * usage only. An abandoned preparation opens no span. Original full outcomes
+ * and typed callbacks, plus provider name and family identity, pass through
+ * unchanged; tracing projections never become provider history.
  *
  * Tracing failures are caught and swallowed — observability must
  * never break the LLM call.
@@ -179,24 +176,8 @@ public:
                           std::string span_name = "llm.complete");
     ~OpenInferenceProvider() override;
 
-    ChatCompletion complete(const CompletionParams& params) override;
-
-    asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override;
-
-    ChatCompletion complete_stream(const CompletionParams& params,
-                                   const StreamCallback& on_chunk) override;
-
-    asio::awaitable<ChatCompletion>
-    complete_stream_async(const CompletionParams& params,
-                          const StreamCallback& on_chunk) override;
-
-    /// Callback-selected compatibility override. Engine
-    /// `provider->invoke(...)` calls land here and route through the
-    /// stable complete* tracing methods above so each request emits
-    /// exactly one span.
-    asio::awaitable<ChatCompletion>
-    invoke(const CompletionParams& params, StreamCallback on_chunk) override;
+    PreparedProviderRequest prepare(ProviderRequest request) override;
+    std::string_view family() const noexcept override;
 
     std::string get_name() const override;
 

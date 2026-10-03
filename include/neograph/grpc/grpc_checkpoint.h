@@ -34,16 +34,20 @@ namespace neograph::grpc {
 //       "checkpoint-host:50071");
 //   auto engine = GraphEngine::compile(def, ctx, store);
 //
-// Every checkpoint then save/loads over gRPC. Only the 5 sync core
-// virtuals are overridden; the async peers inherit the base facade
-// (run_sync over the sync impl), and pending-writes stay the no-op
-// default — same surface NexaGraph shipped.
+// Every checkpoint then save/loads over gRPC. The sync checkpoint
+// operations, managed-budget denial query, and owned journal operations are
+// overridden; async peers inherit the base facade (run_sync over the sync
+// impl), and pending-writes stay the legacy no-op default.
 class NEOGRAPH_API GrpcCheckpointStore : public neograph::graph::CheckpointStore {
 public:
     /// target e.g. "localhost:50071" / "cp-host:50071". Insecure
     /// channel (wire your own TLS via the stub ctor in a wrapper if
     /// needed — same posture as GraphService::run_server).
     explicit GrpcCheckpointStore(const std::string& target);
+    /// Settlement requires actual shared trusted archive custody reachable
+    /// from both endpoints. Portable outcome JSON cannot authorize a refund.
+    GrpcCheckpointStore(const std::string& target,
+                        std::shared_ptr<sp::NativeArchive> native_archive);
     ~GrpcCheckpointStore() override;
 
     void save(const neograph::graph::Checkpoint& cp) override;
@@ -54,6 +58,25 @@ public:
     std::vector<neograph::graph::Checkpoint>
         list(const std::string& thread_id, int limit = 100) override;
     void delete_thread(const std::string& thread_id) override;
+    bool requires_managed_budget(const std::string& thread_id) override;
+    std::shared_ptr<neograph::graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const neograph::graph::ManagedBudgetLeaseScope& scope,
+        const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override;
+    neograph::graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const std::string& effect_id, std::uint64_t exact_claim_amount,
+        const std::string& prepared_request_digest) override;
+    void settle_managed_budget_effect(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const neograph::graph::ManagedBudgetEffectReceipt& effect,
+        sp::runtime::Result genuine_outcome,
+        const neograph::UsageAccumulator::AuthoritySnapshot& authority) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const neograph::graph::Checkpoint& checkpoint) override;
+    void release_managed_budget_lease(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease) override;
 
 private:
     struct Impl;
@@ -69,6 +92,12 @@ private:
 NEOGRAPH_API void run_checkpoint_server(
     const std::string& address,
     std::shared_ptr<neograph::graph::CheckpointStore> backend);
+/// This overload resolves settlement references using real trusted native
+/// custody shared with clients. Missing/unverifiable custody fails closed.
+NEOGRAPH_API void run_checkpoint_server(
+    const std::string& address,
+    std::shared_ptr<neograph::graph::CheckpointStore> backend,
+    std::shared_ptr<sp::NativeArchive> native_archive);
 
 // ── Serialization (exposed for tests / payload-size measurement) ─────
 //

@@ -1,6 +1,20 @@
 <!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=zh-CN source_sha256=4d18b0fee54089948ca59063eb6177567e1b5db09a87123125e808bee6889add -->
 # NeoGraph + OpenRouter（固定 DeepSeek）
 
+## 历史 Python recipe — binding 迁移延期
+
+本页保存迁移前 Python provider API 和测量记录。以下代码**不兼容当前类型化 C++
+契约，也不是当前可运行的说明**。Python provider binding、subclass trampoline 与
+BYO/OpenRouter adapter 尚未移植或执行验证；不得从 C++ 迁移推断 Python 兼容性。
+当前 C++ 拥有类型化 `ProviderRequest`，只 prepare 一次，并保留完整不可变
+`sp::Outcome`、native history 和 nullable usage。以下 `complete(params)`/
+`ChatCompletion` 仅是历史 API。缺失 usage 不等于 zero；最后一次调用的 usage 不能
+代表整个 tool loop。SDK retry 不得在 durable receipt 后隐藏重新发送。
+密钥、prompt 和 native payload 必须保持私密。
+
+## 迁移前说明与观察记录
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 在OpenRouter固定的`~deepseek/deepseek-v4-flash-latest`模型上运行NeoGraph图。本手册展示两个等效的提供商表面，两者使用相同的API密钥、模型和显式的零数据保留（ZDR）提供商偏好：

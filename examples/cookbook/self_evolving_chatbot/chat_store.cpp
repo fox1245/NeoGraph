@@ -1,6 +1,13 @@
 #include "chat_store.h"
 
 #include <stdexcept>
+#include <cerrno>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+#include <openssl/sha.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #if defined(CHAT_SQLITE)
 #include <neograph/graph/sqlite_checkpoint.h>
 #include <neograph/program/sqlite_store.h>
@@ -20,6 +27,7 @@ namespace evolving_chat {
 using namespace neograph::program;
 struct ChatStore::Impl {
     std::mutex mutex;
+    std::string archive_root;
 #if defined(CHAT_SQLITE)
     sqlite3* sqlite = nullptr;
 #endif
@@ -36,6 +44,8 @@ struct ChatStore::Impl {
     }
 };
 ChatStore::ChatStore(const Options& o) : impl_(std::make_unique<Impl>()) {
+    impl_->archive_root = o.native_archive_directory.empty()
+        ? o.database + ".native" : o.native_archive_directory;
     const char* ddl =
         "CREATE TABLE IF NOT EXISTS neograph_chat_sessions ("
         "owner TEXT PRIMARY KEY, revision BIGINT NOT NULL, body TEXT NOT NULL)";
@@ -143,5 +153,39 @@ void ChatStore::save(const std::string& owner, json& value) {
 #else
     throw std::runtime_error("No chat storage backend");
 #endif
+}
+std::shared_ptr<sp::NativeArchive> ChatStore::native_archive(
+    const std::string& owner, const sp::descriptor::ValidatedDescriptor& descriptor,
+    bool allow_provision) {
+    std::lock_guard lock(impl_->mutex);
+    auto private_directory = [](const std::filesystem::path& path) {
+        if (::mkdir(path.c_str(), 0700) != 0 && errno != EEXIST)
+            throw std::runtime_error("Cannot provision private native archive parent");
+        struct stat state{};
+        if (::lstat(path.c_str(), &state) != 0 || !S_ISDIR(state.st_mode) ||
+            state.st_uid != ::geteuid() || (state.st_mode & 0777) != 0700)
+            throw std::runtime_error("Native archive parent must be owned private 0700 directory");
+    };
+    private_directory(impl_->archive_root);
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(owner.data()), owner.size(), hash);
+    std::ostringstream identity;
+    identity << std::hex << std::setfill('0');
+    for (auto byte : hash) identity << std::setw(2) << static_cast<unsigned>(byte);
+    const auto parent = std::filesystem::path(impl_->archive_root) / identity.str();
+    private_directory(parent);
+    const auto directory = parent / "records", key = parent / "key";
+    const bool has_directory = std::filesystem::exists(directory);
+    const bool has_key = std::filesystem::exists(key);
+    if (has_directory != has_key)
+        throw std::runtime_error("Incomplete native custody; never recreate a missing key/store");
+    if (!has_directory && !allow_provision)
+        throw std::runtime_error("Existing model ledger requires its original native custody");
+    auto result = has_directory
+        ? sp::NativeArchive::open(directory.string(), key.string(), owner, descriptor)
+        : sp::NativeArchive::provision(directory.string(), key.string(), owner, descriptor);
+    if (auto* archive = std::get_if<std::shared_ptr<sp::NativeArchive>>(&result))
+        return std::move(*archive);
+    throw std::runtime_error("Native custody cannot be admitted for this owner/provider");
 }
 }  // namespace evolving_chat

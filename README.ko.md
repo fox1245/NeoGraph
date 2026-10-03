@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=b55194bbadc8c3c1d7ad7d1de6c96629aaeb960f4cc4b5c5f66d33ac710ec351 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=73d8153a6b0ecc5957982362ae8429663ac2730be7c65242cb1c4b1031fc170c -->
 <p align="center">
 <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -54,10 +54,12 @@ proposal → reserve → compile → semantic validate → admit → publish →
 
 ### C++ Core
 
+SchemaProvider는 `NEOGRAPH_BUILD_LLM=OFF`여도 필수 외부 C++ 의존성이다. Core도 소유 typed provider 계약을 공개한다. SDK runtime 패키지를 설치하고 설치 prefix를 `SCHEMAPROVIDER_PREFIX`로 지정한다. 아래 configure는 `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`를 사용한다. 또는 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`로 checkout을 명시한다. 추측한 sibling checkout이나 구 bundled interpreter를 자동 선택하지 않는다. 현재 SDK runtime/archive는 Linux/POSIX이며 의존성 없음·OpenSSL 불필요·native Windows/macOS·WASM runtime을 약속하지 않는다.
+
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
 cmake --build build --parallel
 ./build/example_core_quickstart
 ```
@@ -68,6 +70,7 @@ cmake --build build --parallel
 
 ```bash
 cmake -S . -B build-program \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
@@ -89,6 +92,7 @@ GCC 또는 Clang에서 로컬 호스트 전용 성능 빌드를 수행하려면:
 
 ```bash
 cmake -S . -B build-performance -G Ninja \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
   -DNEOGRAPH_BUILD_BENCHMARKS=ON \
@@ -144,9 +148,39 @@ NeoGraph는 중요한 동작을 모델 재량 밖으로 이동시킵니다:
 - 지속적인 런타임 개발자 지침 및 승인된 토폴로지 전환.
 
 NeoGraph는 구성, 승인(admission), 디스패치 및 증거 경계들을 보장합니다. LLM이 모든 토큰에 주의를 기울였다고 주장하지 않습니다.
+## Typed C++ provider 호출
+
+`SchemaProvider`는 승인된 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택적 `SchemaProvider::Defaults`를 받는다. descriptor는 closed/versioned 데이터 admission이지 요청/응답 interpreter나 임의 primitive registry가 아니다. credential은 공개 descriptor가 아니라 runtime options에 둔다. Defaults는 typed OpenRouter routing과 Responses 보관(`responses_store`)만 포함하고 후자는 Responses에만 유효하다. Hosted OpenRouter routing·retention·JSON 형식은 선언된 typed 제어다. Images, Veo, Decisions는 별도 NeoGraph typed client와 별도 승인을 쓰며 SDK chat grant를 물려받지 않는다.
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
+
+sp::runtime::Result first_call(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model) {
+    neograph::llm::SchemaProvider provider(
+        std::move(descriptor), std::move(options), {});
+    std::vector<sp::Message> history{
+        {.role = sp::Role::User, .parts = {sp::Text{"hi"}}}};
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history));
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));
+}
+```
+
+공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, native continuation, 전체 wire envelope, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
+
+`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. 현재 포맷은 [`provider-message-v2`](schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](schemas/runtime-history-record-v2.schema.json)이다. 실제 C++ 메모리 checkpoint sidecar는 archive 없이 native seal을 유지한다. 영속 native 기록과 bank 참조에는 실제 `sp::NativeArchive`가 필요하다. closed v2 / `spna2`는 독립 키를 쓰는 인증된 owner-private 보호 custody이며 암호화나 vendor-issuer 인증이 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. managed 복구/fork는 charged/reserved/report/dedup canonical bank를 공유하며 예산을 갱신하지 않는다. 일반 bounded 영속 fork는 외부 host-shared bank/journal이 필요하며 복사한 snapshot은 독립 지출 권한을 주지 않는다.
+
+
+실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 불안정 `0.0.0`, interface revision 3 / shared ABI 3이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 현재 runtime/archive는 Linux/POSIX이며 Windows·macOS·WASM runtime 검증을 뜻하지 않는다. Python provider binding/wrapper는 유예되었고 이 C++ 변경으로 포팅되지 않는다.
 
 ## Python
 
+> 아래 Python 자료는 기존 binding을 설명한다. provider binding/wrapper는 명시적으로 유예되었고 typed lossless C++ 전환으로 포팅·실행되지 않았다. 과거 wheel 설치는 새 C++ provider API를 제공하지 않는다.
 Python 패키지는 동일한 C++ 엔진을 사용하며 이제 Program, Hook, 엄격한 컨텍스트, 런타임 정책 및 SQLite 지속성 표면을 포함합니다:
 
 ```bash
@@ -195,10 +229,11 @@ Python은 추가로 다음을 노출합니다:
 
 ## 빌드 구성
 
-Core 전용 사용자는 Program 또는 QuickJS 비용을 지불하지 않습니다:
+Core 전용 빌드는 Program/QuickJS를 제외하지만 SchemaProvider runtime은 제외하지 않는다:
 
 ```bash
 cmake -S . -B build-core \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DNEOGRAPH_BUILD_PROGRAM=OFF \
   -DNEOGRAPH_BUILD_LLM=OFF \
   -DNEOGRAPH_BUILD_MCP=OFF
@@ -208,6 +243,7 @@ cmake -S . -B build-core \
 
 | 옵션 | 용도 |
 |---|---|
+| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | 명시적 SDK source checkout. 미지정 시 설치된 runtime 패키지가 필수. |
 | `NEOGRAPH_BUILD_PROGRAM` | 내구성 있는 Program 값, 카탈로그, 런타임, 계보 및 마이그레이션 |
 | `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program 작성 및 생성기 명령 |
 | `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 최적화 구성에서 비이식적인 호스트 전용 명령어 튜닝을 선택적으로 활성화 |
@@ -220,9 +256,17 @@ cmake -S . -B build-core \
 
 배포 환경에 맞는 좁은 CMake 대상을 사용하십시오: `neograph::core`, `neograph::llm`, `neograph::program`, `neograph::mcp`, `neograph::a2a`, 또는 기타 활성화된 구성 요소.
 
+SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
+
+```cmake
+find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(NeoGraph CONFIG REQUIRED)
+target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
+```
+
 ## 검증
 
-저장소는 결정적 C++ 및 Python 스위트, Program 재생(replay)/마이그레이션 프로브, DSL 기능 픽스처, 문서/i18n 검사, 새니타이저, 그리고 선택적 라이브 모델 평가를 실행합니다. 벤치마크 주장은 [benchmarks](benchmarks/README.md)와 날짜가 표시된 [performance report](docs/performance-deep-dive.md)에 속하며, 시대를 초월한 API 보장으로서가 아닙니다.
+`scripts/test_find_package.sh`는 installed-consumer 검사 절차이며 파일 존재만으로 현재 통과를 주장하지 않는다. 현재 SDK ABI3 전체 재빌드/CTest는 26/26 통과했고 shared 설치 소비자는 실제 local HTTP 두 turn typed 요청, tool/native/refusal/known-zero 결과와 mismatch 거부를 실행했다. 이는 NeoGraph·Python·Windows·macOS·WASM·유료 live-provider 호환 검증이 아니다. NeoGraph 통합 검증은 별도로 보고한다.
 
 ## 문서
 

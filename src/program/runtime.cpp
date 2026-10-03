@@ -2,6 +2,7 @@
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/schema.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/provider.h>
 
 #include "canonical_json.h"
 #include "catalog_access.h"
@@ -1600,7 +1601,8 @@ enum class TerminalPublicationResult : std::uint8_t {
 };
 
 TerminalPublicationResult publish_terminal_record(const detail::RunControl& control,
-                                                  const ProgramResult&      result) {
+                                                  const ProgramResult&      result,
+                                                  std::exception_ptr&       cause) {
     std::lock_guard lock(child_relation_publication_mutex(*control.transitions, control.owner_scope,
                                                           control.logical_run_id));
     for (int retry = 0; retry < 3; ++retry) {
@@ -1608,10 +1610,12 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
         try {
             previous = control.transitions->load(control.owner_scope, control.run_id);
         } catch (const std::exception& error) {
+            cause = std::current_exception();
             std::cerr << "terminal load exception run=" << control.run_id
                       << " error=" << error.what() << '\n';
             return TerminalPublicationResult::JournalFailure;
         } catch (...) {
+            cause = std::current_exception();
             std::cerr << "terminal load unknown exception run=" << control.run_id << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
@@ -1624,10 +1628,12 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
         try {
             previous_journal = control.transitions->latest(control.owner_scope, control.run_id);
         } catch (const std::exception& error) {
+            cause = std::current_exception();
             std::cerr << "terminal latest exception run=" << control.run_id
                       << " error=" << error.what() << '\n';
             return TerminalPublicationResult::JournalFailure;
         } catch (...) {
+            cause = std::current_exception();
             std::cerr << "terminal latest unknown exception run=" << control.run_id << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
@@ -1723,10 +1729,12 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
                 return TerminalPublicationResult::Published;
             }
         } catch (const std::exception& error) {
+            cause = std::current_exception();
             std::cerr << "terminal publication exception run=" << control.run_id
                       << " error=" << error.what() << '\n';
             return TerminalPublicationResult::JournalFailure;
         } catch (...) {
+            cause = std::current_exception();
             std::cerr << "terminal publication unknown exception run=" << control.run_id << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
@@ -1834,7 +1842,8 @@ RunControl::RunControl(std::string                                owner,
 }
 
 RunControl::RunControl(ProgramRunRecord                        record,
-                       std::shared_ptr<ProgramTransitionStore> transition_store)
+                       std::shared_ptr<ProgramTransitionStore> transition_store,
+                       std::shared_ptr<sp::NativeArchive> archive)
     : owner_scope(record.owner_scope()),
       run_id(record.run_id()),
       logical_run_id(record.logical_run_id()),
@@ -1864,7 +1873,10 @@ RunControl::RunControl(ProgramRunRecord                        record,
       latest_checkpoint_(record.exact_checkpoint()),
       next_sequence_(record.event_sequence() + 1),
       terminal_decided_(result_.has_value()),
-      completion_claimed_(result_.has_value()) {}
+      completion_claimed_(result_.has_value()) {
+    native_history_archive = std::move(archive);
+    if (result_) result_ = result_->restore_provider_failure(owner_scope, native_history_archive);
+}
 void RunControl::set_completion_callback(CompletionCallback callback) noexcept {
     std::shared_ptr<RunControl> next;
     {
@@ -2501,11 +2513,12 @@ void RunControl::emit(std::string_view    event_operation_id,
 }
 
 ProgramResult RunControl::make_result(RunOutcome outcome) const {
-    return ProgramResult(ProgramResult::ConstructionData{
+    return ProgramResult::create_for_runtime(ProgramResult::ConstructionData{
         outcome.status, run_id, program_version_id, bundle_id, operation_id, attempt,
         std::move(outcome.output), outcome.usage, outcome.remaining_budget,
         std::move(outcome.checkpoint), std::move(outcome.interrupt), std::move(outcome.failure),
-        std::move(outcome.execution_trace)});
+        std::move(outcome.execution_trace), std::move(outcome.provider_budget_authority)},
+        owner_scope, native_history_archive);
 }
 
 void ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) {
@@ -2559,7 +2572,7 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             // logical cleanups belong to the successor; no terminal hook or
             // checkpoint is published for the superseded execution.
             outcome.status = ProgramTerminalStatus::Cancelled;
-            outcome.failure.reset();
+            if (!outcome.failure || !outcome.failure->provider_outcome) outcome.failure.reset();
             auto                     result = make_result(outcome);
             std::vector<AsyncWaiter> waiters;
             {
@@ -2619,8 +2632,17 @@ void RunControl::complete(RunOutcome outcome) noexcept {
                                 outcome.status != ProgramTerminalStatus::Cancelled);
         } catch (const std::exception& error) {
             outcome.status = ProgramTerminalStatus::Failed;
+            auto provider_outcome = outcome.failure
+                ? std::move(outcome.failure->provider_outcome) : sp::runtime::Result{};
+            auto provider_cause = outcome.failure
+                ? std::move(outcome.failure->provider_cause) : std::exception_ptr{};
+            json causal_witness = json::object();
+            if (outcome.failure && outcome.failure->witness.is_object() &&
+                outcome.failure->witness.contains("provider_error"))
+                causal_witness["provider_error"] = std::move(outcome.failure->witness["provider_error"]);
             outcome.failure = ProgramFailure{"P_HOOK_BLOCKED", error.what(), "root", "", 0,
-                                             json::object()};
+                                             std::move(causal_witness), std::move(provider_outcome),
+                                             std::move(provider_cause)};
             auto failed_terminal = terminal_events.back();
             failed_terminal.id.clear();
             failed_terminal.payload = ProgramTerminalEvent{outcome.status};
@@ -2643,7 +2665,8 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             outcome.status != ProgramTerminalStatus::AmbiguousEffect)
             cancel_children(CancellationCause::ParentTerminal);
         auto       result       = make_result(outcome);
-        const auto publication  = publish_terminal_record(*this, result);
+        std::exception_ptr publication_cause;
+        const auto publication = publish_terminal_record(*this, result, publication_cause);
         const bool is_published = publication == TerminalPublicationResult::Published;
         if (!is_published) {
             const auto first_unpublished_sequence = terminal_events.front().sequence;
@@ -2654,18 +2677,46 @@ void RunControl::complete(RunOutcome outcome) noexcept {
                 }
             }
 
-            RunOutcome failed;
-            failed.status             = ProgramTerminalStatus::Failed;
-            failed.remaining_budget   = outcome.remaining_budget;
+            RunOutcome failed = std::move(outcome);
+            failed.status = ProgramTerminalStatus::Failed;
             const bool journal_failed = publication == TerminalPublicationResult::JournalFailure;
-            failed.failure            = ProgramFailure{
-                journal_failed ? "P_JOURNAL_CONFLICT" : "P_TRANSITION_CONFLICT",
-                journal_failed ? "Program journal finalization failed"
-                               : "Atomic Program terminal transition publication failed",
-                "root",
-                "",
-                0,
-                json::object()};
+            auto primary_failure = result.failure();
+            if (primary_failure && primary_failure->provider_outcome) {
+                failed.failure = std::move(primary_failure);
+                failed.failure->witness["terminal_publication_failure"] =
+                    journal_failed ? "journal" : "transition";
+            } else {
+                failed.failure = ProgramFailure{
+                    journal_failed ? "P_JOURNAL_CONFLICT" : "P_TRANSITION_CONFLICT",
+                    journal_failed ? "Program journal finalization failed"
+                                   : "Atomic Program terminal transition publication failed",
+                    "root", "", 0, json::object()};
+            }
+            if (publication_cause) {
+                try {
+                    std::rethrow_exception(publication_cause);
+                } catch (const std::exception& error) {
+                    failed.failure->witness["terminal_publication_cause"] =
+                        json{{"message", error.what()}};
+                } catch (...) {
+                    failed.failure->witness["terminal_publication_cause"] =
+                        json{{"kind", "non_standard_exception"}};
+                }
+                if (failed.failure->provider_outcome) {
+                    try {
+                        std::rethrow_exception(publication_cause);
+                    } catch (...) {
+                        try {
+                            std::throw_with_nested(ProviderOutcomeError(
+                                "Program terminal publication failed",
+                                failed.failure->provider_outcome,
+                                failed.failure->provider_cause));
+                        } catch (...) {
+                            failed.failure->provider_cause = std::current_exception();
+                        }
+                    }
+                }
+            }
             result = make_result(std::move(failed));
         } else {
             if (outcome.checkpoint) {
@@ -2953,20 +3004,27 @@ asio::awaitable<void> RunControl::hold_latest_handoff_if_requested(std::uint64_t
     if (checkpoint_handler) checkpoint_handler(ordinal);
     reach_latest_handoff_if_requested();
 
-    const auto executor = co_await asio::this_coro::executor;
-    auto       timer    = std::make_shared<asio::steady_timer>(executor);
+    auto control = shared_from_this();
+    auto timer = std::make_shared<asio::steady_timer>(waiter_strand);
     timer->expires_at((asio::steady_timer::time_point::max)());
-    {
-        std::lock_guard lock(mutex_);
-        if (handoff_request_id_ == 0 || !held_handoff_ || result_ || terminal_decided_ ||
-            cancellation_cause_ != CancellationCause::None) {
-            co_return;
-        }
-        handoff_release_waiter_ = timer;
-    }
-
-    asio::error_code error;
-    co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    // Register and initiate the wait on the same strand used by release.
+    // A pool executor alone permits expiry mutation to race async_wait.
+    co_await asio::co_spawn(
+        waiter_strand,
+        [control, timer]() -> asio::awaitable<void> {
+            {
+                std::lock_guard lock(control->mutex_);
+                if (control->handoff_request_id_ == 0 || !control->held_handoff_ ||
+                    control->result_ || control->terminal_decided_ ||
+                    control->cancellation_cause_ != CancellationCause::None) {
+                    co_return;
+                }
+                control->handoff_release_waiter_ = timer;
+            }
+            asio::error_code error;
+            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+        },
+        asio::use_awaitable);
     co_return;
 }
 
@@ -3575,6 +3633,12 @@ ProgramRunRecord RunControl::snapshot() const {
     if (!record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
+    if (const auto terminal = record->terminal_result()) {
+        if (const auto retained = try_result(); retained && retained->id() == terminal->id())
+            return record->with_hydrated_terminal(*retained);
+        return record->with_hydrated_terminal(
+            terminal->restore_provider_failure(owner_scope, native_history_archive));
+    }
     return *record;
 }
 
@@ -3757,8 +3821,14 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                                                         {},
                                                         std::nullopt,
                                                         {std::move(entry)}};
-        const auto published = compare_publish_with_lineage(
-            *transitions, owner_scope, previous->journal_head(), std::move(publication));
+        publication = attach_run_lineage(*transitions, std::move(publication));
+        const auto owned_lease = execution_lease();
+        const auto published = owned_lease
+            ? transitions->compare_publish_execution(
+                  owner_scope, previous->journal_head(), std::move(publication),
+                  owned_lease, owned_lease)
+            : transitions->compare_publish(
+                  owner_scope, previous->journal_head(), std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
             if (terminal_result && command.kind() == JavaScriptCommandKind::Checkpoint) {
@@ -4429,10 +4499,13 @@ struct ProgramRuntime::Impl {
 
     ControlRegistration register_control(const std::shared_ptr<detail::RunControl>& control,
                                           bool process_unique = false) {
-        control->set_hook_runtime(config.hook_runtime);
-        control->set_core_tool_grant_resolver(config.core_tool_grant_resolver);
-        control->set_core_provider_call_resolver(
-            config.core_provider_call_resolver, config.require_core_provider_call_broker);
+        control->native_history_archive = config.native_history_archive;
+        if (!control->recorded_replay) {
+            control->set_hook_runtime(config.hook_runtime);
+            control->set_core_tool_grant_resolver(config.core_tool_grant_resolver);
+            control->set_core_provider_call_resolver(
+                config.core_provider_call_resolver, config.require_core_provider_call_broker);
+        }
         if (control->logical_run_id != control->run_id) {
             const auto run = control->snapshot();
             if (!run.children().empty()) {
@@ -4450,8 +4523,8 @@ struct ProgramRuntime::Impl {
                 control->inherited_children = initial->run_record.children();
             }
         }
-        configure_child_launcher(control);
-        if (config.checkpoint_handler) {
+        if (!control->recorded_replay) configure_child_launcher(control);
+        if (config.checkpoint_handler && !control->recorded_replay) {
             control->checkpoint_handler = [weak = std::weak_ptr<detail::RunControl>(control),
                                            handler =
                                                config.checkpoint_handler](std::uint64_t ordinal) {
@@ -5418,92 +5491,180 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     return ProgramHandle(std::move(control));
 }
 
-ProgramHandle ProgramRuntime::start_recorded(RunInvocation                     invocation,
-                                             RecordedBindingSet                recorded,
-                                             std::shared_ptr<ProgramEventSink> events) {
+ProgramHandle ProgramRuntime::replay_recorded(
+    std::string_view source_run_id, RunInvocation invocation,
+    RecordedBindingSet recorded, std::shared_ptr<ProgramEventSink> events) {
     invocation.validate();
-    if (!invocation.parent_run_id.empty()) {
-        throw std::invalid_argument(
-            "Top-level RunInvocation must not carry parent_run_id; use start_child");
-    }
-
-    const auto owner_scope = invocation.owner_scope;
-    const auto resolved    = detail::CatalogRuntimeAccess::load_admitted_version(
-        *impl_->config.catalog, owner_scope, invocation.program_version_id);
-    if (!resolved) {
-        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
-    }
-    return start_recorded(owner_scope, *resolved,
-                          runtime_projection(std::move(invocation), std::move(events)),
-                          std::move(recorded));
-}
-
-ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
-                                             const ProgramVersion& version,
-                                             ProgramInvocation     invocation,
-                                             RecordedBindingSet    recorded) {
-    if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
-    if (version.ownership_scope() != owner_scope) {
-        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
-    }
-    recorded.validate_target(version);
-    const auto recorded_fingerprint = recorded.fingerprint();
-    auto       pinned               = detail::CatalogRuntimeAccess::pin_with_binding(
-        *impl_->config.catalog, owner_scope, version.id(),
-        std::move(recorded).release_owned_binding());
-    if (pinned->version.id() != version.id()) {
-        throw_runtime_diagnostic("P_REPLAY_BINDING",
-                                 "Recorded capability binding was not accepted");
-    }
-    validate_invocation(*pinned, invocation);
-    const auto run_id =
-        invocation.requested_run_id.empty() ? generate_run_id() : invocation.requested_run_id;
-    const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
-    const auto core_thread_id = core_thread_identity(run_id, pinned->root->compiled_plan_identity);
-    const auto binding_fingerprint = capability_binding_receipt_root(
-        pinned->version.core_materialization_receipt().capability_bindings);
-    ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
-                                         canonical.correlation_id, canonical.parent_run_id,
-                                         invocation.child_depth};
-    auto                       control = std::make_shared<detail::RunControl>(
-        std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
-        std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
-        impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
-         impl_->config.transitions);
-    control->set_hook_runtime(impl_->config.hook_runtime);
-    control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
-    control->set_core_provider_call_resolver(
-        impl_->config.core_provider_call_resolver,
-        impl_->config.require_core_provider_call_broker);
-    const auto started =
-        control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
-    const auto published = compare_publish_with_lineage(
-        *control->transitions, owner_scope, "",
-        initial_publication(*control, started, std::nullopt, std::nullopt, recorded_fingerprint));
-    if (published != ProgramTransitionPublishResult::Published) {
-        throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
-    }
-    impl_->register_control(control);
-    if (!admit_started(control, started, invocation.budget)) {
+    if (source_run_id.empty() || !invocation.parent_run_id.empty())
+        throw_runtime_diagnostic("P_REPLAY_SOURCE", "Recorded replay requires a top-level source");
+    const auto owner = invocation.owner_scope;
+    const auto source = impl_->config.transitions->load(owner, source_run_id);
+    if (!source || !source->terminal_result())
+        throw_runtime_diagnostic("P_REPLAY_SOURCE", "Recorded replay source is not terminal");
+    const auto terminal = *source->terminal_result();
+    if (terminal.status() == ProgramTerminalStatus::Interrupted ||
+        terminal.status() == ProgramTerminalStatus::AmbiguousEffect)
+        throw_runtime_diagnostic("P_REPLAY_SOURCE",
+            "Recorded replay cannot allocate custody from an unresolved source");
+    const auto& authority = terminal.provider_budget_authority();
+    if (!authority)
+        throw_runtime_diagnostic("P_REPLAY_CUSTODY", "Source lacks authenticated provider bank custody");
+    if (source->owner_scope() != owner || source->program_version_id() != invocation.program_version_id ||
+        source->invocation().input != invocation.input || source->invocation().budget != invocation.budget ||
+        source->child_depth() != 0 || !source->invocation().parent_run_id.empty())
+        throw_runtime_diagnostic("P_REPLAY_PERMISSION", "Replay differs from its original source permissions");
+    const auto version = detail::CatalogRuntimeAccess::load_admitted_version(
+        *impl_->config.catalog, owner, source->program_version_id());
+    if (!version)
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Recorded source version was not found");
+    recorded.validate_target(*version);
+    const auto fingerprint = recorded.fingerprint();
+    const auto source_events = impl_->config.transitions->load_events(owner, source_run_id);
+    auto pinned = detail::CatalogRuntimeAccess::pin_recorded(
+        *impl_->config.catalog, *version, recorded, source_events);
+    if (version->execution_guarantee() == ExecutionGuarantee::Unmanaged &&
+        !pinned->bundle.control_source())
+        throw_runtime_diagnostic("P_REPLAY_GUARANTEE",
+            "Unmanaged native execution cannot be admitted as recorded replay");
+    auto projection = runtime_projection(invocation, events);
+    // Validate immutable permissions, not the already-spent resource remainder.
+    validate_invocation(*pinned, projection);
+    const auto binding = capability_binding_receipt_root(
+        version->core_materialization_receipt().capability_bindings);
+    if (binding != source->binding_fingerprint() || pinned->bundle.id() != source->bundle_id())
+        throw_runtime_diagnostic("P_REPLAY_BINDING", "Source execution identity differs from its pinned version");
+    const auto run_id = invocation.run_id;
+    if (const auto existing = impl_->config.transitions->load(owner, run_id)) {
+        const auto lineage = impl_->config.transitions->load_run_lineage(owner, run_id);
+        const auto initial = lineage
+            ? impl_->config.transitions->load_generation_initial_publication(
+                owner, lineage->lineage_id(), 1) : std::nullopt;
+        if (existing->invocation() != invocation ||
+            existing->recorded_binding_set_fingerprint() != std::optional<std::string>(fingerprint) ||
+            !initial || !initial->recorded_replay_source ||
+            initial->recorded_replay_source->run_id != source_run_id ||
+            initial->recorded_replay_source->run_record_id != source->id())
+            throw_runtime_diagnostic("P_RUN_CONFLICT", "Recorded replay retry differs from its durable receipt");
+        if (auto active = impl_->find_control(owner, run_id)) return ProgramHandle(std::move(active));
+        if (auto active = impl_->find_process_control(owner, run_id))
+            return ProgramHandle(std::move(active));
+        if (existing->terminal_result())
+            return ProgramHandle(std::make_shared<detail::RunControl>(
+                *existing, impl_->config.transitions, impl_->config.native_history_archive));
+        const auto lease = impl_->config.transitions->load_execution_lease(owner, run_id);
+        if (!lease || now_ms() < lease->expires_at_ms())
+            throw_runtime_diagnostic("P_REPLAY_LEASE_HELD", "Recorded replay dispatch custody is still held");
+        ProgramPersistedInvocation persisted{
+            invocation.input, existing->remaining_budget(), invocation.correlation_id, "", 0};
+        auto control = std::make_shared<detail::RunControl>(
+            owner, run_id, existing->continuation().attempt, std::move(pinned), binding,
+            std::move(persisted), invocation, lease->core_thread_id(), existing->event_sequence(),
+            events, impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+            impl_->config.state_store, impl_->config.transitions, lease);
+        control->recorded_replay = std::make_shared<detail::RecordedRunReplay>();
+        control->recorded_replay->source_run_id = std::string(source_run_id);
+        detail::RunOutcome failed;
+        failed.status = ProgramTerminalStatus::Failed;
+        failed.remaining_budget = existing->remaining_budget();
+        // Lost replay execution has uncertain CPU/Core consumption. Fence it;
+        // neither the transferred resources nor provider holds are refunded.
+        failed.remaining_budget.wall_time_ms = 0;
+        failed.remaining_budget.max_core_steps = 0;
+        failed.usage.model_tokens = terminal.usage().model_tokens;
+        failed.provider_budget_authority = authority;
+        failed.failure = ProgramFailure{"P_REPLAY_EXECUTION_LOST",
+            "Recorded replay execution was lost after its durable allocation",
+            "root", "", 0, json::object()};
+        impl_->register_control(control);
+        control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
+    const auto active_source = load_active_run_lineage(*impl_->config.transitions, *source);
+    if (!active_source || active_source->lineage.committed_descendant_budget() != RunBudget{} ||
+        active_source->lineage.inflight_reservation() != RunBudget{})
+        throw_runtime_diagnostic("P_REPLAY_CUSTODY", "Source does not have transferable exact replay custody");
+    const auto available = active_source->lineage.remaining_budget();
+    if (available.wall_time_ms == 0 ||
+        (!pinned->bundle.control_source() && available.max_core_steps == 0))
+        throw_runtime_diagnostic("P_REPLAY_BUDGET", "Source has no remaining replay work authority");
+    auto replay = std::make_shared<detail::RecordedRunReplay>();
+    replay->source_run_id = std::string(source_run_id);
+    replay->provider_authority = *authority;
+    for (const auto& event : source_events) {
+        if (event.kind == ProgramEventKind::OperationStarted)
+            replay->operations[event.operation_id].push_back(std::get<ProgramOperationEvent>(event.payload));
+    }
+    if (!pinned->bundle.control_source() && replay->operations.empty())
+        throw_runtime_diagnostic("P_REPLAY_COORDINATES", "Source lacks exact captured operation coordinates");
+    auto commands = impl_->config.transitions->load_javascript_commands(owner, source_run_id);
+    for (const auto& command : commands) {
+        if (!command.pending()) continue;
+        const auto completion = std::find_if(commands.begin(), commands.end(), [&](const auto& candidate) {
+            return candidate.command_ordinal() == command.command_ordinal() && candidate.completed();
+        });
+        if (completion == commands.end())
+            throw_runtime_diagnostic("P_REPLAY_EVIDENCE_REQUIRED", "Source command lacks a captured terminal outcome");
+    }
+    replay->commands = std::move(commands);
+    const auto contexts = impl_->config.transitions->load_context_publications(owner, source_run_id);
+    const auto thread_id = core_thread_identity(run_id, pinned->root->compiled_plan_identity);
+    ProgramPersistedInvocation persisted{
+        invocation.input, available, invocation.correlation_id, "", 0};
+    auto control = std::make_shared<detail::RunControl>(
+        owner, run_id, 1, std::move(pinned), binding, std::move(persisted), invocation,
+        thread_id, 0, events, impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+        impl_->config.state_store, impl_->config.transitions);
+    control->recorded_replay = std::move(replay);
+    const auto started = control->stage_event(
+        ProgramEventKind::Started, ProgramStartedEvent{available});
+    auto publication = initial_publication(
+        *control, started, std::nullopt, std::nullopt, fingerprint);
+    if (!contexts.empty())
+        publication.context_publication = transfer_context_to_run(contexts.back(), run_id);
+    publication = attach_run_lineage(*impl_->config.transitions, std::move(publication));
+    publication.recorded_replay_source = ProgramRecordedReplaySource{
+        source->run_id(), source->id(), source->journal_head(), active_source->lineage.id()};
+    publication.recorded_replay_source_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        active_source->lineage.owner_scope(), active_source->lineage.lineage_id(),
+        active_source->lineage.root_run_id(), active_source->lineage.active_generation(),
+        active_source->lineage.active_generation_id(), active_source->lineage.active_run_record_id(),
+        active_source->lineage.active_journal_head(), debit_budget(available, available),
+        active_source->lineage.inflight_reservation(), active_source->lineage.id(),
+        active_source->lineage.created_at_ms(),
+        std::max(active_source->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),
+        active_source->lineage.committed_descendant_budget()});
+    const auto acquired = publication.run_record.updated_at_ms();
+    if (available.wall_time_ms > static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max() - acquired))
+        throw_runtime_diagnostic("P_REPLAY_BUDGET", "Replay lease lifetime cannot be represented");
+    const auto lease = ProgramExecutionLease(ProgramExecutionLeaseData{
+        owner, run_id, 1, control->program_version_id, control->bundle_id,
+        control->materialized->root->core_name, control->materialized->root->compiled_plan_identity,
+        control->core_thread_id, graph::Checkpoint::generate_id(), acquired,
+        acquired + static_cast<std::int64_t>(available.wall_time_ms)});
+    const auto published = impl_->config.transitions->compare_publish_execution(
+        owner, "", std::move(publication), std::nullopt, lease);
+    if (published != ProgramTransitionPublishResult::Published)
+        throw_runtime_diagnostic("P_REPLAY_ALLOCATION_CONFLICT", "Source replay allocation lost its exact CAS");
+    control->set_execution_lease(lease);
+    impl_->register_control(control);
     try {
         control->deliver_event(started);
     } catch (const std::exception& error) {
         detail::RunOutcome failed;
-        failed.status                                  = ProgramTerminalStatus::Failed;
-        failed.remaining_budget                        = invocation.budget;
-        failed.usage.program_operations                = 1;
-        failed.remaining_budget.max_program_operations = 0;
-        failed.failure =
-            ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        failed.status = ProgramTerminalStatus::Failed;
+        failed.remaining_budget = available;
+        failed.usage.model_tokens = terminal.usage().model_tokens;
+        failed.provider_budget_authority = authority;
+        failed.failure = ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt,
+    spawn_run_attempt(impl_->pool, control, invocation.input, std::nullopt,
                       impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
+
 
 ProgramHandle ProgramRuntime::fork(ExactProgramCheckpointReference   source,
                                    RunInvocation                     invocation,
@@ -7117,7 +7278,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (!existing_control) {
         auto process_control = impl_->find_process_control(owner_scope, run_id);
         if (process_control &&
-            (successor_generation || process_control->has_active_handoff_request() ||
+            (successor_generation || process_control->recorded_replay ||
+             process_control->has_active_handoff_request() ||
              process_control->has_active_graph_migration_request())) {
             existing_control = std::move(process_control);
         }
@@ -7126,6 +7288,9 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         auto control = std::move(existing_control);
         return ProgramHandle(std::move(control));
     }
+    if (record->recorded_binding_set_fingerprint() && !record->terminal_result())
+        throw_runtime_diagnostic("P_REPLAY_EVIDENCE_REQUIRED",
+            "Recorded replay recovery requires its exact owned evidence binding");
 
     if (graph_migration_receipt) {
         std::optional<MigrationPlan> stored_plan;
@@ -7602,7 +7767,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (requires_result && !record->terminal_result()) {
         throw_runtime_diagnostic("P_RUN_INVALID", "Stored terminal Program run is incomplete");
     }
-    auto control = std::make_shared<detail::RunControl>(*record, impl_->config.transitions);
+    auto control = std::make_shared<detail::RunControl>(
+        *record, impl_->config.transitions, impl_->config.native_history_archive);
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
     control->set_core_provider_call_resolver(
@@ -8337,7 +8503,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         if (!reconciled)
             throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Reconciled Program run was not found");
         auto control = std::make_shared<detail::RunControl>(
-            *reconciled, impl_->config.transitions);
+            *reconciled, impl_->config.transitions, impl_->config.native_history_archive);
         if (!reconciled->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(control, owner_scope,
                                                   reconciled->invocation().parent_run_id, run_id);

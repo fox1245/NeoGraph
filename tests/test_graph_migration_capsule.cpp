@@ -1,5 +1,7 @@
 #include <neograph/program/program.h>
 #include <neograph/graph/engine.h>
+#include <neograph/graph/state.h>
+#include "fixtures/typed_provider.h"
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
 #endif
@@ -47,7 +49,9 @@ private:
 GraphSafePoint capture_safe_point(
     const std::shared_ptr<CheckpointStore>& store,
     std::string thread_id,
-    GraphGenerationIdentity generation_identity) {
+    GraphGenerationIdentity generation_identity,
+    std::shared_ptr<sp::NativeArchive> archive = {},
+    std::uint64_t model_token_budget = 0) {
     NodeFactory::instance().register_type(
         "graph_migration_capsule_node",
         [](const std::string& name, const json&, const NodeContext&) {
@@ -63,12 +67,14 @@ GraphSafePoint capture_safe_point(
     auto compiled = GraphCompiler::compile(graph, NodeContext{});
     EngineConfig engine_config;
     engine_config.checkpoint_store = store;
+    engine_config.native_history_archive = std::move(archive);
     auto engine = GraphEngine::link(
         std::move(compiled), std::move(engine_config), {}, generation_identity);
     auto request = std::make_shared<GraphSafePointRequest>(generation_identity);
     if (!request->request()) throw std::runtime_error("failed to arm safe point");
     RunConfig config;
     config.thread_id = std::move(thread_id);
+    config.model_token_budget = model_token_budget;
     RunResources resources;
     resources.checkpoint_store = store;
     asio::io_context io;
@@ -82,6 +88,21 @@ GraphSafePoint capture_safe_point(
     }
     return *request->safe_point();
 }
+
+struct TempMigrationArchive {
+    std::filesystem::path root = std::filesystem::temp_directory_path() /
+        ("neograph-migration-archive-" + Checkpoint::generate_id());
+    TempMigrationArchive() {
+        if (!std::filesystem::create_directory(root))
+            throw std::runtime_error("cannot reserve migration archive fixture directory");
+        std::filesystem::permissions(root, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
+    }
+    ~TempMigrationArchive() {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+};
 
 struct SourceGeneration {
     ProgramRunGeneration generation;
@@ -428,6 +449,73 @@ TEST(GraphMigrationCapsule, CanonicalRoundTripBindsSourceAndCheckpoint) {
     EXPECT_EQ(parsed.checkpoint().next_nodes, std::vector<std::string>{"__end__"});
     EXPECT_EQ(parsed.checkpoint().channel_values["channels"]["value"]["value"],
               "captured");
+}
+
+
+TEST(GraphMigrationCapsule, ArchiveConfigurationDoesNotGrantPlainGraphCustody) {
+    TempMigrationArchive files;
+    const auto descriptor = neograph::test::descriptor();
+    auto provisioned = sp::NativeArchive::provision(
+        (files.root / "archive").string(), (files.root / "key").string(),
+        "capsule-owner", descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(provisioned));
+    auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(provisioned));
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    const auto version = program_version();
+    const auto source = source_generation(version);
+    const GraphGenerationIdentity identity{"graph_migration_capsule", digest('5')};
+    const auto safe_point = capture_safe_point(store,
+        program_root_core_thread_id(source.generation.run_id(), identity.core_generation_id),
+        identity, archive);
+    EXPECT_FALSE(safe_point.checkpoint().native_history);
+    const auto capsule = GraphMigrationCapsule::seal(
+        source.generation, source.lineage, version, safe_point);
+    const auto restored = GraphMigrationCapsule::parse(capsule.serialize_canonical());
+    GraphState state;
+    state.init_channel("value", ReducerType::OVERWRITE,
+        [](const json&, const json& value) { return json(value); });
+    state.set_native_history_archive(archive);
+    auto bank = std::make_shared<UsageAccumulator>();
+    state.configure_budget_bank(bank, 0, true, "capsule-owner",
+        restored.checkpoint().thread_id, "plain-graph");
+    state.restore_checkpoint(restored.checkpoint().channel_values, {});
+    const auto durable = state.serialize();
+    state.write("value", "changed");
+    state.restore(durable);
+    EXPECT_EQ(state.get("value"), restored.checkpoint().channel_values.at("channels").at("value").at("value"));
+    EXPECT_EQ(state.budget_bank(), bank);
+    EXPECT_FALSE(state.checkpoint_snapshot().second);
+}
+
+TEST(GraphMigrationCapsule, BoundedCustodyCannotBeLiftedTamperedOrMigrated) {
+    GraphState original;
+    original.init_channel("value", ReducerType::OVERWRITE,
+        [](const json&, const json& value) { return json(value); }, "held");
+    auto bank = std::make_shared<UsageAccumulator>();
+    ASSERT_TRUE(bank->try_reserve(3, 10));
+    original.configure_budget_bank(bank, 10, true, "capsule-owner", "bank-thread", "bank-graph");
+    const auto snapshot = original.checkpoint_snapshot();
+    ASSERT_TRUE(snapshot.second);
+    GraphState lifted;
+    lifted.configure_budget_bank(std::make_shared<UsageAccumulator>(), 11, true,
+        "capsule-owner", "bank-thread", "bank-graph");
+    EXPECT_THROW(lifted.restore_checkpoint(snapshot.first, {}, snapshot.second), std::invalid_argument);
+    auto edited = snapshot.first;
+    edited["provider_managed_budget"]["data"]["reserved"] = 0u;
+    GraphState tampered;
+    EXPECT_THROW(tampered.restore_checkpoint(edited, {}, snapshot.second), std::invalid_argument);
+    EXPECT_THROW(tampered.restore_checkpoint(snapshot.first, {}), std::invalid_argument);
+    EXPECT_EQ(bank->authority_snapshot().reserved, 3u);
+
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    const auto version = program_version();
+    const auto source = source_generation(version);
+    const GraphGenerationIdentity identity{"graph_migration_capsule", digest('5')};
+    const auto safe_point = capture_safe_point(store,
+        program_root_core_thread_id(source.generation.run_id(), identity.core_generation_id),
+        identity, {}, 10);
+    EXPECT_THROW(GraphMigrationCapsule::seal(
+        source.generation, source.lineage, version, safe_point), std::invalid_argument);
 }
 
 TEST(GraphMigrationCapsule, RejectsTamperedFrontierAndPhase) {

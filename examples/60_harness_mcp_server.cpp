@@ -1,4 +1,5 @@
-#include <neograph/llm/openai_provider.h>
+#include "provider_example_support.h"
+#include <sp/config_defaults.h>
 #include <neograph/mcp/adoption.h>
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_host_agent.h>
@@ -67,15 +68,61 @@ bool secure_equal(const TokenDigest& expected, std::string_view candidate) {
 }
 #endif
 
-class SmokeReviewProvider final : public neograph::Provider {
-public:
-    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        neograph::ChatCompletion completion;
-        completion.message.role    = "assistant";
-        completion.message.content = R"({"status":"ok","findings":[]})";
-        return completion;
-    }
+// Private offline fixture contract: this callback performs no model inference.
+// These caps are not facts about any hosted/public model.
+constexpr std::uint64_t kSmokeInputTokens = 4096;
+constexpr std::uint64_t kSmokeOutputTokens = 256;
+constexpr const char* kSmokeModel = "harness-smoke";
 
+std::shared_ptr<sp::runtime::Client> smoke_client() {
+    auto source = neograph::json::parse(sp::config_defaults::descriptor_policy_json);
+    neograph::json defaults;
+    for (const auto& family : source.at("families")) {
+        if (family.at("family") == "openai.chat") {
+            defaults = family.at("defaults");
+            break;
+        }
+    }
+    source.at("models").push_back({
+        {"family", "openai.chat"}, {"model", kSmokeModel},
+        {"defaults", std::move(defaults)}, {"input_limit", kSmokeInputTokens},
+        {"output_limit", kSmokeOutputTokens}});
+    auto admitted = sp::descriptor::load_policy(
+        source.dump(), sp::config_defaults::codec_defaults_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
+        throw std::invalid_argument(error->pointer + ": " + error->message);
+    return std::make_shared<sp::runtime::Client>(examples::admitted_descriptor(
+        "http://127.0.0.1:18080", "openai.chat", "/v1/chat/completions",
+        "neograph-harness-smoke",
+        std::get<sp::descriptor::PolicySnapshot>(std::move(admitted))));
+}
+
+class SmokeReviewProvider final : public neograph::Provider {
+    std::shared_ptr<sp::runtime::Client> client_ = smoke_client();
+public:
+    std::string_view family() const noexcept override { return "openai.chat"; }
+    neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
+        return prepare_local(client_, std::move(request),
+            [](const neograph::PreparedProviderRequest&,
+               const std::function<void(const sp::Event&)>& observer)
+                -> asio::awaitable<sp::runtime::Result> {
+                sp::Completion completion;
+                completion.messages.push_back(examples::message(
+                    sp::Role::Assistant, R"({"status":"ok","findings":[]})"));
+                completion.stop.kind = sp::StopKind::EndTurn;
+                // Exact local accounting: constructing this synthetic review
+                // uses no model tokens, including either cache-price band.
+                completion.usage.input_total = sp::Count{0, sp::Evidence::Derived};
+                completion.usage.output_total = sp::Count{0, sp::Evidence::Derived};
+                completion.usage.total = sp::Count{0, sp::Evidence::Derived};
+                completion.usage.input_uncached = sp::Count{0, sp::Evidence::Derived};
+                completion.usage.cache_read = sp::Count{0, sp::Evidence::Derived};
+                completion.usage.cache_write = sp::Count{0, sp::Evidence::Derived};
+                completion.usage.stage = sp::UsageStage::Final;
+                examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
+    }
     std::string get_name() const override { return "harness-smoke-review"; }
 };
 
@@ -200,17 +247,13 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    neograph::llm::OpenAIProvider::Config provider_config;
-    provider_config.api_key          = api_key;
-    provider_config.base_url         = "https://openrouter.ai/api";
-    provider_config.default_model    = "~deepseek/deepseek-v4-flash-latest";
-    provider_config.provider_routing = {{"zdr", true}};
+    const std::string provider_base_url = "https://openrouter.ai";
+    const std::string provider_model = smoke_mode ? kSmokeModel : examples::openrouter_model;
     std::shared_ptr<neograph::Provider> provider;
     if (smoke_mode && !host_mode) {
-        provider                      = std::make_shared<SmokeReviewProvider>();
-        provider_config.default_model = "harness-smoke";
+        provider = std::make_shared<SmokeReviewProvider>();
     } else if (!host_mode) {
-        provider = neograph::llm::OpenAIProvider::create_shared(provider_config);
+        provider = examples::make_openrouter_provider(api_key, "chat");
     }
     constexpr const char* kProviderBindingIdentity =
         "sha256:7df70a8b692b53148480c9eb019db87cac5c2c7e1c53a351ff628651ab219c14";
@@ -239,8 +282,8 @@ int main(int argc, char** argv) {
     host_config.provider_host_configuration = host_mode ?
         neograph::json{{"executor", executor}, {"model", host_model.empty() ? "host default" : host_model},
                        {"mode", "local-read-only-cli"}} :
-        neograph::json{{"base_url", provider_config.base_url},
-                       {"model", provider_config.default_model}, {"provider", provider->get_name()}};
+        neograph::json{{"base_url", provider_base_url},
+                       {"model", provider_model}, {"provider", provider->get_name()}};
     host_config.snapshots.owner_scope = "neograph-harness-example";
     const neograph::program::ExecutableIdentity provider_identity{
         neograph::program::ExecutableKind::Provider, "harness.provider", "1.0.0",
@@ -261,12 +304,16 @@ int main(int argc, char** argv) {
     host_config.checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
     host_config.state_store = std::make_shared<neograph::graph::InMemoryStore>();
     harness_config.translation_defaults.provider = provider_identity;
+    if (smoke_mode && !host_mode) {
+        harness_config.translation_defaults.input_token_ceiling_per_round = kSmokeInputTokens;
+        harness_config.translation_defaults.max_output_tokens = kSmokeOutputTokens;
+    }
     if (host_mode) {
         host_config.worker_executor = neograph::mcp::make_host_agent_executor(agent_config);
     } else {
         neograph::mcp::HarnessProviderExecutorConfig executor_config;
         executor_config.provider = provider;
-        executor_config.model = provider_config.default_model;
+        executor_config.model = provider_model;
         if (adopted_mcp) {
             adopted_mcp->configure_harness(host_config, executor_config);
             harness_config.translation_defaults.read_only_effects =

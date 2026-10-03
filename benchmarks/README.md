@@ -341,3 +341,74 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
 
 Numbers will vary on your hardware, but the ratios should be stable to
 within ~20%.
+
+## Typed provider cutover: actual GraphEngine before/after
+
+This is a separate **local TLS HTTP/SSE** measurement, not the checkpoint-free Python framework benchmark above and not model inference. The current static Release/GCC13.3/Linux x64 run qualified **16 configurations × 3 fresh processes = 48 records** through production `GraphEngine.llm_call/tool_dispatch`. It covers three common H1 workloads, all five families' buffered/SSE native continuations, and three actual H2 cases. No compiler ran during measurement; no paid API was called.
+
+[Original nine records](provider-cutover-legacy-results.json) come from unmodified `7b47ad43`; [current raw records](provider-cutover-current-results.json) and [scalar comparison](provider-cutover-summary.json) retain effective controls, distributions, RSS/threads, actual peer counters and owned outcomes.
+
+| Common graph workload | Before p50 ms | After p50 ms | Before graph runs/s | After graph runs/s | Before peak RSS MiB | After peak RSS MiB |
+|---|---:|---:|---:|---:|---:|---:|
+| H1 buffered text | 0.707 | 1.320 | 1,375.58 | 733.65 | 12.617 | 15.465 |
+| H1 buffered tool loop | 29.337 | 30.510 | 800.30 | 702.64 | 17.832 | 20.219 |
+| H1 SSE tool loop | 600.540 | 37.593 | 51.43 | 615.38 | 14.414 | 20.367 |
+
+Values are medians of three repetitions, **per graph run**, not per HTTP request. Text uses concurrency1/no peer delay; tool loops use concurrency32/5ms delay per request, two generation requests per graph run. Every cohort warms up10 and measures100 runs; tool/native cohorts also request eight cancellations per repetition.
+
+Across current cohorts: **0 measured failures**, **336 actual cancellations / 0 cancellation failures**, **3,300 exact synthetic native replays**, **5,280 retained graph results revalidated after Provider destruction**, zero invalid peer requests and zero excess retry dispatches. Cancellation is classified from the actual owned SDK `Cancelled` outcome, not exception wording.
+
+Tradeoff: full owned raw/native/nullable results and authority gates add text latency/memory; buffered tool p50 increases slightly. SSE no longer incurs the legacy buffered path's latency. Legacy native/nullable authority and several worker knobs were unsupported, so these are same-workload measurements—not semantic/resource equivalence or promised model speedups. Current p95/p99, first semantic event, cancellation settle time and extended-family rows are in the JSON summary.
+
+```sh
+cmake -S . -B build-provider-bench -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=OFF \
+  -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE_DIR" \
+  -DSP_BUILD_TESTS=OFF -DSP_BUILD_BENCHMARKS=OFF
+cmake --build build-provider-bench --target neograph_provider_cutover_benchmark
+for config in benchmarks/provider_cutover_h1_*.json benchmarks/provider_cutover_extended_*.json; do
+  build-provider-bench/neograph_provider_cutover_benchmark --config "$config" || exit "$?"
+done
+```
+
+Run from the NeoGraph root with Node.js/OpenSSL CLI and the SDK's normal dependencies. The peer uses an ephemeral private CA; no system trust or dependency library is replaced. Original raw evidence is preserved, not recalculated from the current implementation.
+
+
+## Final verification cohort: fresh typed provider GraphEngine measurements
+
+The final Release GraphEngine/local TLS HTTP/SSE cohort completed **16 configurations × 3 fresh process repetitions = 48 records, zero failures, 38.29seconds**. All actual protocol checks and owned-outcome checks passed. No compiler ran and no paid model call occurred during measurement. This is a fresh final-worktree cohort, not a replacement for the historical table above. [Final scalar summary](provider-cutover-final-summary.json) and [final raw owned synthetic objects](provider-cutover-final-results.json) are separate from the unchanged [legacy9-record cohort](provider-cutover-legacy-results.json), [earlier current48-record cohort](provider-cutover-current-results.json) and [earlier comparison](provider-cutover-summary.json). The approximately60MB raw file contains actual synthetic outcome objects, not provider secrets.
+
+Values below are the summary's medians of three independent process repetitions, **per graph run**, not per model token or HTTP request. Every configuration validated its negotiated protocol and retained owned graph outcomes after provider destruction. Resource/control and native/nullable authority differences remain: **semantic/resource equivalence is false**; these are local measured tradeoffs, not model speedups or a vendor qualification.
+
+### Final16-configuration measurements
+
+| Family | HTTP | Workload | p50 ms | p95 ms | p99 ms | Graph runs/s | Peak RSS MiB | Peak threads |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `openai.chat` | H1 | text buffered | 1.296943 | 1.349401 | 1.397812 | 769.975584 | 15.898438 | 3 |
+| `openai.chat` | H1 | tool buffered | 30.672507 | 100.492667 | 112.663949 | 678.507993 | 20.585938 | 19 |
+| `openai.chat` | H1 | tool SSE | 35.800113 | 105.431034 | 117.559931 | 627.047345 | 21.042969 | 19 |
+| `openai.chat` | H1 | native buffered | 32.546693 | 102.680190 | 115.244483 | 683.637830 | 20.925781 | 19 |
+| `openai.chat` | H1 | native SSE | 38.135188 | 115.463732 | 126.668501 | 615.357297 | 21.902344 | 19 |
+| `anthropic.messages` | H1 | native buffered | 30.612805 | 103.979300 | 123.110448 | 678.785191 | 20.324219 | 19 |
+| `anthropic.messages` | H1 | native SSE | 44.021986 | 71.548005 | 93.941146 | 604.744184 | 22.125000 | 19 |
+| `openai.responses` | H1 | native buffered | 35.070430 | 100.615954 | 114.597387 | 647.751880 | 22.179688 | 19 |
+| `openai.responses` | H1 | native SSE | 46.670934 | 77.636952 | 89.664406 | 571.458359 | 25.511719 | 19 |
+| `google.generate` | H1 | native buffered | 31.449930 | 99.319459 | 112.385528 | 698.783682 | 21.726562 | 19 |
+| `google.generate` | H1 | native SSE | 37.774704 | 105.703383 | 120.826886 | 627.040287 | 22.500000 | 19 |
+| `google.interactions` | H1 | native buffered | 32.588486 | 101.365734 | 109.841457 | 690.967042 | 21.664062 | 19 |
+| `google.interactions` | H1 | native SSE | 46.786625 | 76.036675 | 92.590316 | 573.469300 | 23.058594 | 19 |
+| `openai.chat` | H2 | text buffered | 1.311873 | 2.443117 | 2.604176 | 701.785481 | 16.148438 | 3 |
+| `openai.chat` | H2 | tool SSE | 40.349311 | 54.813608 | 59.912728 | 714.064349 | 20.386719 | 19 |
+| `google.interactions` | H2 | native SSE | 44.561127 | 56.692743 | 64.665852 | 663.966743 | 22.750000 | 19 |
+
+### Three shared H1 workloads: unchanged legacy versus final cohort
+
+| H1 graph workload | Before p50 ms | Final p50 ms | Before graph runs/s | Final graph runs/s |
+|---|---:|---:|---:|---:|
+| text buffered | 0.706631 | 1.296943 | 1375.578826 | 769.975584 |
+| tool buffered | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
+| tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
+
+Before values remain the original7b47ad43 cohort. Text latency rose and throughput fell; buffered-tool changes are modest; SSE removes the old buffered-path delay. No historical value is recalculated or overwritten. Extended-family/protocol, first-semantic, cancellation, native replay and retained-outcome facts remain in the final summary/raw records; benchmark evidence does not strengthen the paid native-consumption or cryptographic-validation claims.

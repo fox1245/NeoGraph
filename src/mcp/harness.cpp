@@ -331,6 +331,13 @@ json project(const program::ProgramEvent& v) {
         case program::ProgramEventKind::Core:
             r["type"] = "core.event";
             break;
+        case program::ProgramEventKind::OperationStarted: {
+            const auto& operation = std::get<program::ProgramOperationEvent>(v.payload);
+            r["type"] = "program.operation.started";
+            r["operation_kind"] = operation.operation_kind;
+            r["input_digest"] = operation.input_digest;
+            break;
+        }
         case program::ProgramEventKind::CheckpointPublished:
             r["type"] = "checkpoint.published";
             r["checkpoint"] =
@@ -1032,6 +1039,28 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             invocation_template.budget =
                 bounded_budget(invocation_template.budget, source_lineage->remaining_budget());
         }
+        if (replay_source) {
+            const auto source_handle = retained_handle(replay_source);
+            if (mode == "recorded_replay" && !source_handle.try_result())
+                return {{"started", false}, {"status", "source_not_terminal"}};
+            const auto source_transitions = transitions(x->record);
+            const auto source_lineage = source_transitions->load_run_lineage(
+                resources.owner_scope, source_handle.run_id());
+            if (!source_lineage)
+                return {{"started", false}, {"status", "lineage_unavailable"}};
+            // Recorded replay authenticates original immutable permissions
+            // separately and atomically transfers only the retained remainder.
+            if (mode == "recorded_replay") {
+                const auto source_record =
+                    source_transitions->load(resources.owner_scope, source_handle.run_id());
+                if (!source_record) return {{"started", false}, {"status", "not_found"}};
+                invocation_template.input = source_record->invocation().input;
+                invocation_template.budget = source_record->invocation().budget;
+            } else {
+                invocation_template.budget =
+                    bounded_budget(invocation_template.budget, source_lineage->remaining_budget());
+            }
+        }
         auto id = run_id(resources.snapshots.policy.fingerprint());
         auto invocation =
             bind_harness_invocation(std::move(invocation_template), resources.owner_scope,
@@ -1070,7 +1099,8 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 auto recorded = resources.make_recorded_binding(x->record.version(), x->bindings,
                                                                 source_handle.events_after(0));
                 handle.emplace(
-                    runtime->start_recorded(std::move(invocation), std::move(recorded), events));
+                    runtime->replay_recorded(source_handle.run_id(), std::move(invocation),
+                                             std::move(recorded), events));
             } else {
                 handle.emplace(runtime->start(std::move(invocation), events));
             }
@@ -1278,6 +1308,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                                                 {"operation_id", record.continuation().operation_id},
                                                 {"attempt", record.continuation().attempt},
                                                 {"remaining_budget", budget_json(record.remaining_budget())}};
+        if (const auto lineage = transitions(artifact(x->artifact_id)->record)->load_run_lineage(
+                resources.owner_scope, record.run_id()))
+            r["remaining_budget"] = budget_json(lineage->remaining_budget());
         r["artifact_id"]      = x->artifact_id;
         r["revision_digest"]  = record.program_version_id();
         r["protocol_version"] = MCP_PROTOCOL_VERSION;

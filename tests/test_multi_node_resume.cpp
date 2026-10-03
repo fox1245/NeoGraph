@@ -153,7 +153,8 @@ TEST(MultiNodeResume, ResumeReEntersAllReadyNodes) {
     auto cp = store->load_latest("resume-001");
     ASSERT_TRUE(cp.has_value());
 
-    // Phase 2: resume with NO interrupt — both siblings must fire.
+    // Phase 2: exact resume under the same graph continues past the saved gate.
+    graph["interrupt_before"] = json::array({"b"});
     auto engine2 = GraphEngine::compile(graph, NodeContext{}, store);
     auto result = engine2->resume("resume-001");
 

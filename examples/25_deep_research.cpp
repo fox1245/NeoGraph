@@ -20,8 +20,7 @@
 //   CRAWL4AI_API_TOKEN        — optional for legacy servers; required by the current secure Docker server
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
-#include <neograph/llm/rate_limited_provider.h>
+#include "provider_example_support.h"
 #include <neograph/graph/deep_research_graph.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -279,16 +278,8 @@ int main(int argc, char** argv) {
 
     const std::string model = "~deepseek/deepseek-v4-flash-latest";
 
-    auto raw_openrouter = llm::SchemaProvider::create({
-        .schema_path      = "openai_responses",
-        .api_key          = api_key,
-        .default_model    = model,
-        .timeout_seconds  = 120,
-        .base_url_override = "https://openrouter.ai/api",
-        .provider_routing = {{"zdr", true}}
-    });
     std::shared_ptr<Provider> provider =
-        llm::RateLimitedProvider::create(std::move(raw_openrouter));
+        examples::make_openrouter_provider(api_key);
 
     auto crawl = std::make_shared<Crawl4AIClient>(crawl4ai_url, crawl4ai_token);
 

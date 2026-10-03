@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 #include <neograph/json.h>
 #include <neograph/types.h>
+#include <core/native_archive.h>
 
 #include <cstdint>
 #include <memory>
@@ -61,7 +62,7 @@ struct RuntimeHistoryRecordData {
     std::uint64_t               sequence = 0;
     std::string                 message_id;
     RuntimeTrustClass           trust = RuntimeTrustClass::UntrustedInput;
-    ChatMessage                 message;
+    sp::Message                 message;
     std::optional<json>         source_payload;
     std::optional<std::string>  source_media_type;
     std::optional<std::string>  predecessor_id;
@@ -70,21 +71,28 @@ struct RuntimeHistoryRecordData {
 /** One immutable, content-addressed line in the authoritative RAW history feed. */
 class NEOGRAPH_API RuntimeHistoryRecord final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     static RuntimeHistoryRecord create(RuntimeHistoryRecordData data);
-    static RuntimeHistoryRecord parse(std::string_view stored_bytes);
+    static RuntimeHistoryRecord parse(
+        std::string_view stored_bytes,
+        const std::shared_ptr<sp::NativeArchive>& archive = {},
+        std::string_view owner_id = {});
 
     const std::string& feed_id() const noexcept;
     std::uint64_t sequence() const noexcept;
     const std::string& message_id() const noexcept;
     RuntimeTrustClass trust() const noexcept;
-    const ChatMessage& message() const noexcept;
+    const sp::Message& message() const noexcept;
     std::optional<json> source_payload() const;
     const std::optional<std::string>& source_media_type() const noexcept;
     const std::optional<std::string>& predecessor_id() const noexcept;
     const std::string& id() const noexcept;
     std::string serialize_canonical() const;
+    /** Persist authentic seals under the host's owner-scoped archive. */
+    std::string serialize_canonical(
+        const std::shared_ptr<sp::NativeArchive>& archive,
+        std::string_view owner_id) const;
 
 private:
     struct Impl;

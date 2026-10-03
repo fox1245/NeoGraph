@@ -73,6 +73,9 @@ public:
         std::uint64_t from_sequence,
         std::uint64_t through_sequence) const = 0;
     virtual std::string hydrate_history(const ContextHistoryRange& range) const = 0;
+    /** Hydrate full typed records; native seals require trusted storage custody. */
+    virtual std::vector<RuntimeHistoryRecord> hydrate_records(
+        const ContextHistoryRange& range) const;
 
     virtual ContextArtifactPutResult put_artifact(
         std::string_view owner_id,
@@ -118,6 +121,8 @@ public:
         std::uint64_t from_sequence,
         std::uint64_t through_sequence) const override;
     std::string hydrate_history(const ContextHistoryRange& range) const override;
+    std::vector<RuntimeHistoryRecord> hydrate_records(
+        const ContextHistoryRange& range) const override;
     ContextArtifactPutResult put_artifact(
         std::string_view owner_id,
         const ContextArtifact& artifact) override;

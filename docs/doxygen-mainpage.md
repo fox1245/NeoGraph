@@ -17,8 +17,8 @@ what you're looking for.
 | What NeoGraph is, why, benchmarks | [README](https://github.com/fox1245/NeoGraph#readme) |
 | Mental model — channels, nodes, edges, Send, Command | [Core Concepts](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
 | Symptom-first fixes for common issues | [Troubleshooting](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
-| 39 runnable C++ programs | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
-| 23 runnable Python programs | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
+| C++ examples (verification reported separately) | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
+| Python examples (provider port deferred) | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
 | Async / coroutine internals | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
 
 ## Top-level header
@@ -36,7 +36,7 @@ Sub-namespaces:
 
 - `neograph`           — foundation types (`Provider`, `Tool`, `ChatMessage`)
 - `neograph::graph`    — engine, nodes, state, checkpointing
-- `neograph::llm`      — provider implementations (OpenAI, schema-driven, agent helper)
+- `neograph::llm` — `SchemaProvider`, `Agent`; typed SDK runtime
 - `neograph::mcp`      — Model Context Protocol client
 - `neograph::async`    — coroutine + io_context infrastructure
 - `neograph::util`     — concurrency primitives
@@ -44,39 +44,31 @@ Sub-namespaces:
 ## A first program
 
 ```cpp
-#include <neograph/neograph.h>
-#include <neograph/llm/mock_provider.h>
+#include <neograph/llm/schema_provider.h>
+#include <neograph/types.h>
 
-using namespace neograph;
-using namespace neograph::graph;
-
-int main() {
-    json definition = {
-        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
-        {"channels", {{"messages", {{"reducer", "append"}}}}},
-        {"nodes",    {{"echo",     {{"type", "llm_call"}}}}},
-        {"edges",    json::array({
-            {{"from", "__start__"}, {"to", "echo"}},
-            {{"from", "echo"},      {"to", "__end__"}}})}
-    };
-
-    NodeContext ctx;
-    ctx.provider = std::make_shared<llm::MockProvider>();
-    auto engine = GraphEngine::build_strict(
-        definition, EngineConfig{.node_context = std::move(ctx)});
-
-    RunConfig cfg;
-    cfg.thread_id = "demo";
-    cfg.input["messages"] = json::array({{{"role","user"},{"content","hi"}}});
-    auto result = engine->run(cfg);
-    return 0;
+sp::runtime::Result first_call(
+    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
+    std::string model) {
+    neograph::llm::SchemaProvider provider(
+        std::move(descriptor), std::move(options), {});
+    std::vector<sp::Message> history{
+        {.role = sp::Role::User, .parts = {sp::Text{"hi"}}}};
+    auto request = neograph::make_provider_request(
+        provider, std::move(model), std::move(history));
+    auto prepared = provider.prepare(std::move(request));
+    return provider.dispatch(std::move(prepared));
 }
 ```
 
-For real LLM use, swap `MockProvider` for `llm::OpenAIProvider` or
-`llm::SchemaProvider`. The full `Provider` interface is at
-`neograph::Provider`.
+`SchemaProvider` accepts an admitted `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options` and optional `SchemaProvider::Defaults`. Descriptor loading is closed/versioned data admission, not a request/response interpreter or arbitrary primitive registry. Credentials belong in runtime options, not public descriptor files. Defaults contain only typed OpenRouter routing and Responses retention (`responses_store`); the latter is valid only for Responses. Hosted OpenRouter routing, retention and JSON formats remain declared typed controls. Images, Veo and Decisions use separate NeoGraph typed clients and separate authorization; they do not inherit an SDK chat grant.
 
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
+
+
+If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
 ## Reference index
 
 The class list, file list, and namespace list in the sidebar are

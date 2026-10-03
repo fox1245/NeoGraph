@@ -4,6 +4,7 @@
 
 #include "channel_write_codec.h"
 #include "run_context_runtime.h"
+#include "managed_budget_journal.h"
 
 #include <chrono>
 #include <limits>
@@ -11,6 +12,16 @@
 #include <unordered_set>
 
 namespace neograph::graph {
+
+json detail::managed_budget_scope_metadata(const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    if (!lease) throw std::invalid_argument("Managed budget scope requires an owned lease");
+    const auto& scope = lease->scope();
+    return {{"schema", "neograph.graph-managed-bank-scope/v1"},
+        {"owner_scope", scope.owner_scope}, {"thread_id", scope.thread_id},
+        {"graph_identity", scope.graph_identity}, {"original_ceiling", scope.original_ceiling},
+        {"original_deadline_ticks", scope.original_deadline_ticks ? json(*scope.original_deadline_ticks) : json()},
+        {"deadline_clock_identity", scope.deadline_clock_identity}, {"bank_generation", lease->bank_generation()}};
+}
 
 namespace {
 
@@ -20,16 +31,17 @@ namespace {
 // NodeResult and the on-store PendingWrite record; moved here because
 // only the coordinator drives both directions now.
 
-inline json serialize_command(const std::optional<Command>& cmd) {
+inline json serialize_command(const std::optional<Command>& cmd, const std::shared_ptr<sp::NativeArchive>& archive,
+                              bool native_custody = false) {
     if (!cmd) return json();
     return {{"goto_node", cmd->goto_node},
-            {"updates", detail::serialize_channel_writes(cmd->updates)}};
+            {"updates", detail::serialize_channel_writes(cmd->updates, archive, native_custody)}};
 }
-inline std::optional<Command> deserialize_command(const json& j) {
+inline std::optional<Command> deserialize_command(const json& j, const std::shared_ptr<sp::NativeArchive>& archive) {
     if (j.is_null() || !j.is_object()) return std::nullopt;
     Command c;
     c.goto_node = j.value("goto_node", std::string{});
-    c.updates   = detail::deserialize_channel_writes(j.value("updates", json::array()));
+    c.updates = detail::deserialize_channel_writes(j.value("updates", json::array()), archive);
     return c;
 }
 
@@ -57,13 +69,14 @@ inline PendingWrite make_pending_write(const std::string& task_id,
                                        const std::string& task_path,
                                        const std::string& node_name,
                                        const NodeResult&  nr,
-                                       int                step) {
+                                       int step, const std::shared_ptr<sp::NativeArchive>& archive, bool native_custody) {
     PendingWrite pw;
     pw.task_id   = task_id;
     pw.task_path = task_path;
     pw.node_name = node_name;
-    pw.writes    = detail::serialize_channel_writes(nr.writes);
-    pw.command   = serialize_command(nr.command);
+    pw.writes = detail::serialize_channel_writes(nr.writes, archive, native_custody);
+    pw.command = serialize_command(nr.command, archive, native_custody);
+    if (native_custody) pw.native_result = std::make_shared<const NodeResult>(nr);
     pw.sends     = serialize_sends(nr.sends);
     pw.step      = step;
     pw.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -72,10 +85,18 @@ inline PendingWrite make_pending_write(const std::string& task_id,
     return pw;
 }
 
-inline NodeResult pending_to_node_result(const PendingWrite& pw) {
+inline NodeResult pending_to_node_result(const PendingWrite& pw, const std::shared_ptr<sp::NativeArchive>& archive) {
+    if (pw.native_result) {
+        const auto& original = *pw.native_result;
+        if (pw.writes != detail::serialize_channel_writes(original.writes, {}, true) ||
+            pw.command != serialize_command(original.command, {}, true) ||
+            pw.sends != serialize_sends(original.sends))
+            throw std::invalid_argument("Pending write projection differs from original typed custody");
+        return original;
+    }
     NodeResult nr;
-    nr.writes  = detail::deserialize_channel_writes(pw.writes);
-    nr.command = deserialize_command(pw.command);
+    nr.writes = detail::deserialize_channel_writes(pw.writes, archive);
+    nr.command = deserialize_command(pw.command, archive);
     nr.sends   = deserialize_sends(pw.sends);
     return nr;
 }
@@ -131,7 +152,8 @@ bool is_external_resume_boundary(const Checkpoint& checkpoint,
 }
 
 std::unordered_map<std::string, NodeResult> load_resume_writes(
-    CheckpointStore& store, const std::string& thread_id, const Checkpoint& checkpoint) {
+    CheckpointStore& store, const std::string& thread_id, const Checkpoint& checkpoint,
+    const std::shared_ptr<sp::NativeArchive>& archive) {
     std::unordered_map<std::string, NodeResult> results;
     Checkpoint current = checkpoint;
     const bool node_interrupt_resume =
@@ -151,7 +173,7 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
         }
         for (const auto& pw : store.get_writes(thread_id, current.id)) {
             if (node_interrupt_resume && pw.step != checkpoint.step) continue;
-            results.emplace(pw.task_id, pending_to_node_result(pw));
+            results.emplace(pw.task_id, pending_to_node_result(pw, archive));
         }
         if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
@@ -174,7 +196,8 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
 }
 
 asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_async(
-    std::shared_ptr<CheckpointStore> store, std::string thread_id, Checkpoint checkpoint) {
+    std::shared_ptr<CheckpointStore> store, std::string thread_id, Checkpoint checkpoint,
+    std::shared_ptr<sp::NativeArchive> archive) {
     std::unordered_map<std::string, NodeResult> results;
     std::unordered_set<std::string> visited;
     const bool node_interrupt_resume =
@@ -195,7 +218,7 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
         auto writes = co_await store->get_writes_async(thread_id, current.id);
         for (const auto& pw : writes) {
             if (node_interrupt_resume && pw.step != selected_step) continue;
-            results.emplace(pw.task_id, pending_to_node_result(pw));
+            results.emplace(pw.task_id, pending_to_node_result(pw, archive));
         }
         if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
@@ -226,9 +249,36 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
 CheckpointCoordinator::CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
                                               std::string                      thread_id,
                                               std::shared_ptr<::neograph::HookRuntime> hook_runtime,
-                                              CheckpointHookContext hook_context)
+                                              CheckpointHookContext hook_context,
+                                              std::shared_ptr<sp::NativeArchive> native_archive,
+                                              std::shared_ptr<detail::SubgraphWriteJournal> native_journal)
     : store_(std::move(store)), thread_id_(std::move(thread_id)),
-      hook_runtime_(std::move(hook_runtime)), hook_context_(std::move(hook_context)) {}
+      hook_runtime_(std::move(hook_runtime)), hook_context_(std::move(hook_context)),
+      native_archive_(std::move(native_archive)), native_journal_(std::move(native_journal)),
+      native_memory_(store_ && store_->retains_native_checkpoint()) {}
+
+void CheckpointCoordinator::set_managed_budget_lease(std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    managed_budget_lease_ = std::move(lease);
+}
+
+void CheckpointCoordinator::capture_state(Checkpoint& checkpoint, const GraphState& state) const {
+    const bool native_custody = managed_budget_lease_
+        ? detail::ManagedBudgetJournalAccess::retains_native_checkpoint(managed_budget_lease_)
+        : native_memory_;
+    if (native_custody) {
+        auto snapshot = state.checkpoint_snapshot();
+        checkpoint.channel_values = std::move(snapshot.first);
+        checkpoint.native_history = std::move(snapshot.second);
+        if (native_journal_)
+            checkpoint.native_subgraph_writes = std::make_shared<const std::vector<ChannelWrite>>(native_journal_->writes);
+    } else checkpoint.channel_values = state.serialize();
+    if (managed_budget_lease_) {
+        if (checkpoint.metadata.is_null()) checkpoint.metadata = json::object();
+        if (!checkpoint.metadata.is_object() || checkpoint.metadata.contains("_neograph_managed_budget_scope"))
+            throw std::invalid_argument("Checkpoint metadata conflicts with original managed budget scope");
+        checkpoint.metadata["_neograph_managed_budget_scope"] = detail::managed_budget_scope_metadata(managed_budget_lease_);
+    }
+}
 
 asio::awaitable<void> CheckpointCoordinator::publish_checkpoint_async(
     const Checkpoint& checkpoint) const {
@@ -268,8 +318,8 @@ std::string CheckpointCoordinator::save_super_step(const GraphState&            
     Checkpoint cp;
     cp.id              = Checkpoint::generate_id();
     cp.thread_id       = thread_id_;
-    cp.channel_values  = state.serialize();
     cp.metadata        = with_ephemeral_guard(json(), state);
+    capture_state(cp, state);
     cp.parent_id       = parent_id;
     cp.current_node    = current_node;
     cp.next_nodes      = next_nodes;
@@ -278,7 +328,8 @@ std::string CheckpointCoordinator::save_super_step(const GraphState&            
     cp.step            = step;
     cp.timestamp       = now_ms();
 
-    store_->save(cp);
+    if (managed_budget_lease_) store_->publish_managed_budget_checkpoint(managed_budget_lease_, cp);
+    else store_->save(cp);
     return cp.id;
 }
 
@@ -292,6 +343,7 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
+    ctx.native_history = cp_opt->native_history;
     ctx.metadata       = cp_opt->metadata;
     ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
     ctx.next_nodes     = cp_opt->next_nodes;
@@ -308,8 +360,9 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
 
     // Rehydrate in-flight super-step writes so the engine can replay
     // completed tasks instead of re-executing them.
-    ctx.replay_results = load_resume_writes(*store_, thread_id_, *cp_opt);
+    ctx.replay_results = load_resume_writes(*store_, thread_id_, *cp_opt, native_archive_);
 
+    ctx.managed_budget_source = std::make_shared<const Checkpoint>(std::move(*cp_opt));
     return ctx;
 }
 
@@ -329,7 +382,8 @@ void CheckpointCoordinator::record_pending_write(const std::string& parent_cp_id
     // the source of a single dead row per thread observed in PG.
     if (parent_cp_id.empty()) return;
     store_->put_writes(thread_id_, parent_cp_id,
-                       make_pending_write(task_id, task_path, node_name, nr, step));
+                       make_pending_write(task_id, task_path, node_name, nr, step, native_archive_,
+                           managed_budget_lease_ ? detail::ManagedBudgetJournalAccess::retains_native_checkpoint(managed_budget_lease_) : native_memory_));
 }
 
 void CheckpointCoordinator::clear_pending_writes(const std::string& parent_cp_id) const {
@@ -371,18 +425,20 @@ asio::awaitable<std::string> CheckpointCoordinator::save_super_step_async(
     Checkpoint cp;
     cp.id              = Checkpoint::generate_id();
     cp.thread_id       = thread_id_;
-    cp.channel_values  = state.serialize();
+    cp.metadata = with_ephemeral_guard(metadata, state);
+    capture_state(cp, state);
     cp.parent_id       = parent_id;
     cp.current_node    = current_node;
     cp.next_nodes      = next_nodes;
     cp.interrupt_phase = phase;
     cp.barrier_state   = barrier_state;
-    cp.metadata        = with_ephemeral_guard(metadata, state);
     cp.step            = step;
     cp.timestamp       = now_ms();
 
     auto      id = cp.id;
-    co_await  store_->save_async(cp);
+    if (managed_budget_lease_)
+        co_await store_->publish_managed_budget_checkpoint_async(managed_budget_lease_, cp);
+    else co_await store_->save_async(cp);
     if (hook_runtime_) co_await publish_checkpoint_async(cp);
     co_return id;
 }
@@ -403,17 +459,19 @@ asio::awaitable<Checkpoint> CheckpointCoordinator::commit_super_step_async(
     Checkpoint checkpoint;
     checkpoint.id              = Checkpoint::generate_id();
     checkpoint.thread_id       = thread_id_;
-    checkpoint.channel_values  = state.serialize();
+    checkpoint.metadata = with_ephemeral_guard(metadata, state);
+    capture_state(checkpoint, state);
     checkpoint.parent_id       = parent_id;
     checkpoint.current_node    = current_node;
     checkpoint.next_nodes      = next_nodes;
     checkpoint.interrupt_phase = CheckpointPhase::Completed;
     checkpoint.barrier_state   = barrier_state;
-    checkpoint.metadata        = with_ephemeral_guard(metadata, state);
     checkpoint.step            = step;
     checkpoint.timestamp       = now_ms();
 
-    co_await store_->save_async(checkpoint);
+    if (managed_budget_lease_)
+        co_await store_->publish_managed_budget_checkpoint_async(managed_budget_lease_, checkpoint);
+    else co_await store_->save_async(checkpoint);
     if (hook_runtime_) co_await publish_checkpoint_async(checkpoint);
     co_await clear_pending_writes_async(parent_id);
     co_return checkpoint;
@@ -428,7 +486,8 @@ asio::awaitable<void> CheckpointCoordinator::record_pending_write_async(
     int                step) const {
     if (!enabled() || parent_cp_id.empty()) co_return;
     co_await store_->put_writes_async(thread_id_, parent_cp_id,
-                                      make_pending_write(task_id, task_path, node_name, nr, step));
+                                      make_pending_write(task_id, task_path, node_name, nr, step, native_archive_,
+                                          managed_budget_lease_ ? detail::ManagedBudgetJournalAccess::retains_native_checkpoint(managed_budget_lease_) : native_memory_));
 }
 
 asio::awaitable<void> CheckpointCoordinator::clear_pending_writes_async(
@@ -447,6 +506,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
+    ctx.native_history = cp_opt->native_history;
     ctx.metadata       = cp_opt->metadata;
     ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
     ctx.next_nodes     = cp_opt->next_nodes;
@@ -455,8 +515,9 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     // Same phase-aware step offset as load_for_resume.
     ctx.start_step = resume_start_step(*cp_opt);
 
-    ctx.replay_results = co_await load_resume_writes_async(store_, thread_id_, *cp_opt);
+    ctx.replay_results = co_await load_resume_writes_async(store_, thread_id_, *cp_opt, native_archive_);
 
+    ctx.managed_budget_source = std::make_shared<const Checkpoint>(std::move(*cp_opt));
     co_return ctx;
 }
 
@@ -480,6 +541,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
     ctx.have_cp        = true;
     ctx.checkpoint_id  = cp_opt->id;
     ctx.channel_values = cp_opt->channel_values;
+    ctx.native_history = cp_opt->native_history;
     ctx.metadata       = cp_opt->metadata;
     ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
     ctx.next_nodes     = cp_opt->next_nodes;
@@ -487,8 +549,9 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
 
     ctx.start_step = resume_start_step(*cp_opt);
 
-    ctx.replay_results = co_await load_resume_writes_async(store_, thread_id_, *cp_opt);
+    ctx.replay_results = co_await load_resume_writes_async(store_, thread_id_, *cp_opt, native_archive_);
 
+    ctx.managed_budget_source = std::make_shared<const Checkpoint>(std::move(*cp_opt));
     co_return ctx;
 }
 

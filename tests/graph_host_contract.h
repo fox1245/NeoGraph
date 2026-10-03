@@ -5,6 +5,7 @@
 #include <neograph/graph/store.h>
 #include <neograph/tool_dispatch.h>
 #include <gtest/gtest.h>
+#include "fixtures/typed_provider.h"
 
 #include <algorithm>
 #include <atomic>
@@ -79,28 +80,24 @@ public:
 private:
     std::shared_ptr<Probe> probe_;
 };
-class DependencyProvider final : public Provider {
+class DependencyProvider final : public test::LocalProvider {
 public:
-    explicit DependencyProvider(std::shared_ptr<Probe> probe) : probe_(std::move(probe)) {}
-    asio::awaitable<ChatCompletion> complete_async(const CompletionParams& params) override {
-        probe_->record("dependency-start");
-        const auto until = std::chrono::steady_clock::now() + 1200ms;
-        while (std::chrono::steady_clock::now() < until) {
-            if (params.cancel_token && params.cancel_token->is_cancelled()) {
-                probe_->record("dependency-cancelled");
-                throw CancelledException();
+    explicit DependencyProvider(std::shared_ptr<Probe> probe)
+        : LocalProvider([probe = std::move(probe)](
+              ProviderRequest request, const PreparedProviderRequest&,
+              const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            probe->record("dependency-start");
+            const auto until = std::chrono::steady_clock::now() + 1200ms;
+            while (std::chrono::steady_clock::now() < until) {
+                if (request.cancel_token && request.cancel_token->is_cancelled()) {
+                    probe->record("dependency-cancelled");
+                    throw CancelledException();
+                }
+                std::this_thread::sleep_for(1ms);
             }
-            std::this_thread::sleep_for(1ms);
-        }
-        probe_->record("dependency-complete");
-        co_return ChatCompletion{};
-    }
-    ChatCompletion complete(const CompletionParams&) override {
-        throw std::logic_error("provider fixture requires the async path");
-    }
-    std::string get_name() const override { return "contract-provider"; }
-private:
-    std::shared_ptr<Probe> probe_;
+            probe->record("dependency-complete");
+            co_return test::success("");
+        }, "contract-provider") {}
 };
 
 class DependencyTool final : public Tool, public ContextualAsyncTool {
@@ -166,10 +163,9 @@ public:
             }
         }
         if (prompt == "provider") {
-            CompletionParams params;
-            params.model = "contract-local";
-            params.cancel_token = input.ctx.cancel_token;
-            (void)co_await provider_->complete_async(params);
+            auto request = test::request("contract-local");
+            request.cancel_token = input.ctx.cancel_token;
+            (void)co_await provider_->invoke_async(std::move(request));
         }
         if (prompt == "error") throw std::runtime_error("contract node failure");
         if (prompt == "interrupt") throw NodeInterrupt("contract approval required");

@@ -1,201 +1,101 @@
-// neograph::history — conversation compaction + tool-pair sanitation.
-// See include/neograph/history.h. Ported from NexaGraph's CAF
-// compress_history actor; the actor is gone, the core is one coroutine.
-
 #include <neograph/history.h>
 #include <neograph/runtime_interposition_controller.h>
-
+#include <algorithm>
+#include <limits>
+#include <set>
 #include <sstream>
-#include <unordered_set>
+#include <stdexcept>
 
 namespace neograph::history {
 
-int estimate_tokens(const std::vector<ChatMessage>& messages) {
-    // ~3 chars/token (conservative for mixed KO/EN). Count content and
-    // tool-call argument blobs — both are real prompt tokens.
+int estimate_tokens(const std::vector<sp::Message>& messages) {
     std::size_t chars = 0;
-    for (const auto& m : messages) {
-        chars += m.content.size();
-        for (const auto& tc : m.tool_calls)
-            chars += tc.name.size() + tc.arguments.size();
+    const auto maximum = static_cast<std::size_t>(std::numeric_limits<int>::max()) * 3;
+    for (const auto& message : messages) {
+        const auto size = message_projection_json(message).dump().size();
+        if (size >= maximum - chars) return std::numeric_limits<int>::max();
+        chars += size;
     }
-    return static_cast<int>(chars / 3);
+    return static_cast<int>((chars + 2) / 3);
 }
 
-void sanitize_tool_calls(std::vector<ChatMessage>& messages) {
-    // Pass 1 — drop orphaned tool responses: a role=="tool" message is
-    // valid only if some *preceding* assistant message announced its
-    // tool_call_id.
-    std::unordered_set<std::string> announced;
-    std::vector<ChatMessage> pass1;
-    pass1.reserve(messages.size());
-    for (auto& m : messages) {
-        if (m.role == "assistant") {
-            for (const auto& tc : m.tool_calls)
-                if (!tc.id.empty()) announced.insert(tc.id);
-            pass1.push_back(std::move(m));
-        } else if (m.role == "tool") {
-            if (!m.tool_call_id.empty() &&
-                announced.count(m.tool_call_id))
-                pass1.push_back(std::move(m));
-            // else: orphaned response — drop.
-        } else {
-            pass1.push_back(std::move(m));
+void sanitize_tool_calls(std::vector<sp::Message>& messages) {
+    std::set<std::string> announced, pending;
+    for (const auto& message : messages) {
+        for (const auto& part : message.parts) {
+            if (const auto* call = std::get_if<sp::ToolCall>(&part);
+                call && call->kind == sp::ToolCallKind::ClientExecuted) {
+                if (call->id.empty() || !announced.insert(call->id).second)
+                    throw std::invalid_argument("Client tool call has missing or duplicate identity");
+                pending.insert(call->id);
+            } else if (const auto* result = std::get_if<sp::ToolResult>(&part)) {
+                if (!pending.erase(result->tool_use_id))
+                    throw std::invalid_argument("Tool result has no pending client call");
+            }
         }
     }
-
-    // Pass 2 — drop unanswered calls: an assistant tool_call is valid
-    // only if a surviving tool message responds to it. If that empties
-    // tool_calls and content is also empty, drop the assistant turn.
-    std::unordered_set<std::string> answered;
-    for (const auto& m : pass1)
-        if (m.role == "tool" && !m.tool_call_id.empty())
-            answered.insert(m.tool_call_id);
-
-    std::vector<ChatMessage> out;
-    out.reserve(pass1.size());
-    for (auto& m : pass1) {
-        if (m.role == "assistant" && !m.tool_calls.empty()) {
-            std::vector<ToolCall> kept;
-            for (auto& tc : m.tool_calls)
-                if (answered.count(tc.id)) kept.push_back(std::move(tc));
-            m.tool_calls = std::move(kept);
-            if (m.tool_calls.empty() && m.content.empty())
-                continue; // nothing left in this turn
-        }
-        out.push_back(std::move(m));
-    }
-    messages = std::move(out);
+    if (!pending.empty()) throw std::invalid_argument("Client tool call has no result");
 }
 
-asio::awaitable<CompactedHistory> compact_history(
-    std::vector<ChatMessage> messages,
-    Provider& provider,
-    std::string model,
-    int max_tokens,
-    int recent_keep) {
-
-    CompactedHistory result;
-
-    if (estimate_tokens(messages) <= max_tokens) {
-        result.recent = std::move(messages);
-        co_return result;
-    }
-
-    const std::size_t n = messages.size();
-    const std::size_t recent_start =
-        n > static_cast<std::size_t>(recent_keep)
-            ? n - static_cast<std::size_t>(recent_keep)
-            : 0;
-
-    // A leading system message is steering, not history — keep it.
-    std::size_t compress_start = 0;
-    if (!messages.empty() && messages[0].role == "system") {
-        compress_start = 1;
-        result.recent.push_back(messages[0]);
-    }
-
-    std::ostringstream conv;
-    for (std::size_t i = compress_start; i < recent_start; ++i)
-        conv << messages[i].role << ": " << messages[i].content << '\n';
-
-    const std::string conversation = conv.str();
-    if (conversation.empty()) {
-        // Nothing between system and the recent window — can't compact.
-        result.recent = std::move(messages);
-        co_return result;
-    }
-
-    CompletionParams params;
-    params.model = std::move(model);
-    params.temperature = 0.2f;
-    params.max_tokens = 500;
-    {
-        ChatMessage sys;
-        sys.role = "system";
-        sys.content =
-            "Summarize the following conversation concisely in 3-5 "
-            "sentences. Preserve key facts, user preferences, and "
-            "important context. Respond in the same language as the "
-            "conversation.";
-        ChatMessage usr;
-        usr.role = "user";
-        usr.content = conversation;
-        params.messages = {std::move(sys), std::move(usr)};
-    }
-
-    ChatCompletion completion = co_await provider.invoke(params, nullptr);
-    const std::string& summary = completion.message.content;
-
-    if (!summary.empty()) {
-        result.summary = summary;
-        result.compacted = true;
-        ChatMessage sm;
-        sm.role = "system";
-        sm.content = "Previous conversation summary:\n" + summary;
-        result.recent.push_back(std::move(sm));
-    }
-    // else: degraded fallback — old span is simply dropped. A shorter
-    // valid history beats throwing mid-conversation.
-
-    for (std::size_t i = recent_start; i < n; ++i)
-        result.recent.push_back(std::move(messages[i]));
-
-    // A recent_keep cut can land between an assistant tool_call and its
-    // tool response; repair so the compacted list can't 400 the API.
-    sanitize_tool_calls(result.recent);
-    co_return result;
+asio::awaitable<CompactedHistory> compact_history(std::vector<sp::Message> messages,
+    Provider& provider, std::string model, int max_tokens, int recent_keep) {
+    co_return co_await compact_history(std::move(messages), provider, {}, std::move(model),
+                                      max_tokens, recent_keep);
 }
 
-asio::awaitable<CompactedHistory> compact_history(
-    std::vector<ChatMessage> messages, Provider& provider,
-    std::shared_ptr<::neograph::RuntimeInterpositionController> controller,
+asio::awaitable<CompactedHistory> compact_history(std::vector<sp::Message> messages,
+    Provider& provider, std::shared_ptr<RuntimeInterpositionController> controller,
     std::string model, int max_tokens, int recent_keep) {
-    if (!controller) {
-        co_return co_await compact_history(std::move(messages), provider, std::move(model),
-                                           max_tokens, recent_keep);
-    }
-
+    if (max_tokens < 0 || recent_keep < 0)
+        throw std::invalid_argument("History compaction limits must be nonnegative");
     CompactedHistory result;
     if (estimate_tokens(messages) <= max_tokens) {
         result.recent = std::move(messages);
         co_return result;
     }
-
-    const std::size_t n = messages.size();
-    const std::size_t recent_start = n > static_cast<std::size_t>(recent_keep)
-        ? n - static_cast<std::size_t>(recent_keep) : 0;
-    std::size_t compress_start = 0;
-    if (!messages.empty() && messages[0].role == "system") {
-        compress_start = 1;
-        result.recent.push_back(messages[0]);
-    }
-    std::ostringstream conv;
-    for (std::size_t i = compress_start; i < recent_start; ++i)
-        conv << messages[i].role << ": " << messages[i].content << '\n';
-    const auto conversation = conv.str();
-    if (conversation.empty()) {
+    const std::size_t first = !messages.empty() && messages.front().role == sp::Role::System ? 1 : 0;
+    const auto keep = static_cast<std::size_t>(recent_keep);
+    const auto candidate_end = messages.size() > keep ? messages.size() - keep : 0;
+    std::size_t end = first;
+    // Summarization is not an authority downgrade: stop at the first native or
+    // structured message, leaving that whole suffix exactly as returned.
+    while (end < candidate_end && !messages[end].native && !messages[end].wire_output &&
+           std::all_of(messages[end].parts.begin(), messages[end].parts.end(), [](const sp::Part& part) {
+               return std::holds_alternative<sp::Text>(part);
+           })) ++end;
+    if (end == first) {
         result.recent = std::move(messages);
         co_return result;
     }
-
-    CompletionParams params;
-    params.model = std::move(model);
-    params.temperature = 0.2f;
-    params.max_tokens = 500;
-    ChatMessage sys{"system", "Summarize the following conversation concisely in 3-5 sentences. Preserve key facts, user preferences, and important context. Respond in the same language as the conversation."};
-    ChatMessage usr{"user", conversation};
-    // GCC 13 ICEs when this overloaded call's awaitable remains a temporary.
-    auto invocation = controller->invoke_async(
-        std::move(params), {}, {std::move(sys)}, {std::move(usr)});
-    auto completion = co_await std::move(invocation);
-    if (!completion.message.content.empty()) {
-        result.summary = completion.message.content;
-        result.compacted = true;
-        result.recent.push_back({"system", "Previous conversation summary:\n" + result.summary});
+    std::ostringstream rendered;
+    for (std::size_t index = first; index < end; ++index) {
+        const auto projection = project_message(messages[index]);
+        rendered << projection.role << ": " << projection.content << '\n';
     }
-    for (std::size_t i = recent_start; i < n; ++i) result.recent.push_back(std::move(messages[i]));
-    sanitize_tool_calls(result.recent);
+    auto system = portable_message(ChatMessage{"system",
+        "Summarize the following conversation concisely in 3-5 sentences. Preserve key facts, user preferences, and important context. Respond in the same language as the conversation."});
+    auto user = portable_message(ChatMessage{"user", rendered.str()});
+    ProviderControls controls;
+    controls.temperature = 0.2;
+    controls.max_output_tokens = 500;
+    auto request = make_provider_request(provider, std::move(model), {system, user}, {}, controls);
+    if (controller) {
+        auto operation = controller->invoke_async(std::move(request), {system}, {user});
+        result.summary_outcome = co_await std::move(operation);
+    } else {
+        result.summary_outcome = co_await provider.invoke_async(std::move(request));
+    }
+    outcome_or_throw(result.summary_outcome);
+    result.summary = outcome_text(*result.summary_outcome);
+    if (result.summary.empty()) {
+        result.recent = std::move(messages);
+        co_return result;
+    }
+    result.compacted = true;
+    if (first) result.recent.push_back(std::move(messages.front()));
+    result.recent.push_back(portable_message(ChatMessage{"system", "Previous conversation summary:\n" + result.summary}));
+    result.recent.insert(result.recent.end(), std::make_move_iterator(messages.begin() + end),
+                         std::make_move_iterator(messages.end()));
     co_return result;
 }
 

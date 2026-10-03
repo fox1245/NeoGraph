@@ -1,8 +1,8 @@
 // SqliteCheckpointStore — see include/neograph/graph/sqlite_checkpoint.h
 //
-// Schema is the same shape as PostgresCheckpointStore (three tables:
+// Payload schema is the same shape as PostgresCheckpointStore (three tables:
 // neograph_checkpoints, neograph_checkpoint_blobs, neograph_checkpoint_writes)
-// with type substitutions for SQLite:
+// with independent monotonic budget obligations and migration markers, and:
 //
 //   JSONB   → TEXT       (stored as JSON text; queryable via json1 if needed)
 //   BIGINT  → INTEGER    (SQLite's INTEGER is variable-width up to 64-bit)
@@ -17,6 +17,7 @@
 // method so the cleanup boilerplate is bounded.
 
 #include <neograph/graph/sqlite_checkpoint.h>
+#include "managed_budget_journal.h"
 
 #include <sqlite3.h>
 
@@ -131,6 +132,78 @@ json parse_text(const std::string& s) {
     return json::parse(s);
 }
 
+bool has_managed_budget_obligation(sqlite3* db, const std::string& thread_id) {
+    Stmt query(db,
+        "SELECT 1 FROM neograph_checkpoint_managed_budget_obligations WHERE thread_id = ?");
+    query.bind_text(1, thread_id);
+    const int status = query.step();
+    if (status == SQLITE_ROW) return true;
+    if (status == SQLITE_DONE) return false;
+    throw_sqlite_error(db, "managed budget obligation query failed");
+}
+
+void record_managed_budget_obligation(sqlite3* db, const std::string& thread_id) {
+    Stmt insert(db,
+        "INSERT INTO neograph_checkpoint_managed_budget_obligations "
+        "(thread_id) VALUES (?) ON CONFLICT (thread_id) DO NOTHING");
+    insert.bind_text(1, thread_id);
+    if (insert.step() != SQLITE_DONE)
+        throw_sqlite_error(db, "managed budget obligation insert failed");
+}
+
+json load_managed_budget_head(sqlite3* db, const std::string& thread_id) {
+    Stmt query(db,
+        "SELECT head_json FROM neograph_checkpoint_managed_budget_heads WHERE thread_id = ?");
+    query.bind_text(1, thread_id);
+    const int status = query.step();
+    if (status == SQLITE_DONE) return nullptr;
+    if (status != SQLITE_ROW) throw_sqlite_error(db, "managed budget head query failed");
+    return json::parse(query.column_text(0));
+}
+
+void save_managed_budget_head(sqlite3* db, const std::string& thread_id, const json& head) {
+    Stmt insert(db,
+        "INSERT INTO neograph_checkpoint_managed_budget_heads (thread_id, head_json) "
+        "VALUES (?, ?) ON CONFLICT (thread_id) DO UPDATE SET head_json = excluded.head_json");
+    insert.bind_text(1, thread_id);
+    insert.bind_text(2, head.dump());
+    if (insert.step() != SQLITE_DONE) throw_sqlite_error(db, "managed budget head write failed");
+}
+
+json load_managed_budget_effect(sqlite3* db, const std::string& thread_id,
+                                const std::string& generation, const std::string& effect_id) {
+    Stmt query(db,
+        "SELECT effect_json FROM neograph_checkpoint_managed_budget_effects "
+        "WHERE thread_id = ? AND bank_generation = ? AND effect_id = ?");
+    query.bind_text(1, thread_id);
+    query.bind_text(2, generation);
+    query.bind_text(3, effect_id);
+    const int status = query.step();
+    if (status == SQLITE_DONE) return nullptr;
+    if (status != SQLITE_ROW) throw_sqlite_error(db, "managed budget effect query failed");
+    return json::parse(query.column_text(0));
+}
+
+void save_managed_budget_effect(sqlite3* db, const std::string& thread_id,
+                                const std::string& generation, const std::string& effect_id,
+                                const json& effect) {
+    Stmt insert(db,
+        "INSERT INTO neograph_checkpoint_managed_budget_effects "
+        "(thread_id, bank_generation, effect_id, effect_json) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (thread_id, bank_generation, effect_id) "
+        "DO UPDATE SET effect_json = excluded.effect_json");
+    insert.bind_text(1, thread_id);
+    insert.bind_text(2, generation);
+    insert.bind_text(3, effect_id);
+    insert.bind_text(4, effect.dump());
+    if (insert.step() != SQLITE_DONE) throw_sqlite_error(db, "managed budget effect write failed");
+}
+
+std::string managed_budget_lease_key(const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    if (!lease) throw std::invalid_argument("SqliteCheckpointStore: missing managed budget lease");
+    return detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
+}
+
 // next_nodes ↔ JSON array (vector<string>).
 json next_nodes_to_json(const std::vector<std::string>& v) {
     json arr = json::array();
@@ -175,10 +248,10 @@ json extract_channel_versions(const json& channel_values) {
     json out = json::object();
     if (!channel_values.is_object()) return out;
     if (!channel_values.contains("channels")) return out;
-    json chs = channel_values["channels"];
+    const auto& chs = channel_values.at("channels");
     if (!chs.is_object()) return out;
-    for (auto [name, ch] : chs.items()) {
-        if (ch.is_object() && ch.contains("version")) {
+    for (const auto& [name, ch] : chs.items()) {
+        if (checkpoint_channel_blob_eligible(ch)) {
             out[name] = ch["version"];
         }
     }
@@ -226,6 +299,7 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoints (
     step               INTEGER NOT NULL DEFAULT 0,
     timestamp_ms       INTEGER NOT NULL DEFAULT 0,
     schema_version     INTEGER NOT NULL DEFAULT 2,
+    checkpoint_shape   TEXT,
     PRIMARY KEY (thread_id, checkpoint_id)
 );
 
@@ -254,6 +328,27 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_writes (
     timestamp_ms         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, parent_checkpoint_id, seq)
 );
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_obligations (
+    thread_id TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_heads (
+    thread_id TEXT PRIMARY KEY,
+    head_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_effects (
+    thread_id       TEXT NOT NULL,
+    bank_generation TEXT NOT NULL,
+    effect_id       TEXT NOT NULL,
+    effect_json     TEXT NOT NULL,
+    PRIMARY KEY (thread_id, bank_generation, effect_id)
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_schema_migrations (
+    migration_id TEXT PRIMARY KEY
+);
 )SQL";
 
 constexpr const char* kDropDDL = R"SQL(
@@ -265,7 +360,7 @@ DROP TABLE IF EXISTS neograph_checkpoints;
 constexpr const char* kSelectCols =
     "thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
     "interrupt_phase, barrier_state, channel_versions, global_version, "
-    "metadata, step, timestamp_ms, schema_version";
+    "metadata, step, timestamp_ms, schema_version, checkpoint_shape";
 
 } // namespace
 
@@ -303,13 +398,9 @@ SqliteCheckpointStore::SqliteCheckpointStore(
         // app code), but enabling them now would future-proof the schema.
         exec_ddl("PRAGMA journal_mode=WAL;");
         exec_ddl("PRAGMA foreign_keys=ON;");
-        // synchronous=NORMAL is the WAL-recommended default — fsyncs on
-        // checkpoint, not every commit. ~10× faster than FULL with no
-        // durability loss for crashes; only OS crashes can lose the last
-        // few transactions in WAL. For a CheckpointStore that's a good
-        // trade because the engine is the source of truth in RAM until
-        // commit anyway.
-        exec_ddl("PRAGMA synchronous=NORMAL;");
+        // A committed write-ahead claim must survive a host crash before IO:
+        // NORMAL can lose the latest WAL transactions and reissue currency.
+        exec_ddl("PRAGMA synchronous=FULL;");
         ensure_schema();
     } catch (...) {
         sqlite3_close(db_);
@@ -335,7 +426,51 @@ void SqliteCheckpointStore::exec_ddl(const char* sql) {
 }
 
 void SqliteCheckpointStore::ensure_schema() {
+    WriteTransaction transaction(db_);
     exec_ddl(kSchemaDDL);
+    // Older databases lack the lossless structural residue. This inspects only
+    // table metadata, never checkpoint history, and preserves legacy payloads.
+    bool has_checkpoint_shape = false;
+    {
+        Stmt columns(db_, "PRAGMA table_info(neograph_checkpoints)");
+        int column_status;
+        while ((column_status = columns.step()) == SQLITE_ROW) {
+            if (columns.column_text(1) == "checkpoint_shape") has_checkpoint_shape = true;
+        }
+        if (column_status != SQLITE_DONE) throw_sqlite_error(db_, "checkpoint schema lookup failed");
+    }
+    if (!has_checkpoint_shape)
+        exec_ddl("ALTER TABLE neograph_checkpoints ADD COLUMN checkpoint_shape TEXT;");
+    Stmt migration(db_,
+        "SELECT 1 FROM neograph_checkpoint_schema_migrations "
+        "WHERE migration_id = 'managed_budget_finite_scope_v2'");
+    const int status = migration.step();
+    if (status != SQLITE_ROW && status != SQLITE_DONE)
+        throw_sqlite_error(db_, "managed budget migration lookup failed");
+    if (status == SQLITE_DONE) {
+        // Backfill once using the saver classifier, not reported unbounded
+        // usage. Existing flags and journal obligations are never removed.
+        Stmt retained(db_, "SELECT thread_id, metadata FROM neograph_checkpoints");
+        int retained_status;
+        while ((retained_status = retained.step()) == SQLITE_ROW) {
+            bool obligation = true;
+            try {
+                Checkpoint checkpoint;
+                checkpoint.metadata = json::parse(retained.column_text(1));
+                restore_checkpoint_storage_envelope(checkpoint);
+                obligation = detail::ManagedBudgetJournalAccess::checkpoint_requires_obligation(checkpoint);
+            } catch (const std::exception&) {
+                // Malformed retained custody is denial-only evidence.
+            }
+            if (obligation) record_managed_budget_obligation(db_, retained.column_text(0));
+        }
+        if (retained_status != SQLITE_DONE)
+            throw_sqlite_error(db_, "retained managed budget migration failed");
+        exec_ddl(
+            "INSERT INTO neograph_checkpoint_schema_migrations (migration_id) "
+            "VALUES ('managed_budget_finite_scope_v2') ON CONFLICT (migration_id) DO NOTHING");
+    }
+    transaction.commit();
 }
 
 void SqliteCheckpointStore::drop_schema() {
@@ -350,22 +485,32 @@ void SqliteCheckpointStore::drop_schema() {
 
 void SqliteCheckpointStore::save(const Checkpoint& cp) {
     std::lock_guard lock(db_mutex_);
-
     WriteTransaction transaction(db_);
     if (write_guard_) write_guard_(db_, cp.thread_id);
+    save_locked(cp);
+    transaction.commit();
+}
+
+void SqliteCheckpointStore::save_locked(const Checkpoint& cp) {
+    const auto metadata = checkpoint_storage_metadata(cp);
+    const auto shape = checkpoint_storage_shape(cp);
+    // Custody denial only: this is not proof that any bank is authentic.
+    // Record in the payload transaction, independently of metadata/overwrites.
+    if (detail::ManagedBudgetJournalAccess::checkpoint_requires_obligation(cp)) {
+        record_managed_budget_obligation(db_, cp.thread_id);
+    }
     // 1. Blob upserts.
     if (cp.channel_values.is_object() &&
         cp.channel_values.contains("channels")) {
-        json chs = cp.channel_values["channels"];
+        const auto& chs = cp.channel_values.at("channels");
         if (chs.is_object()) {
             Stmt blob_ins(db_,
                 "INSERT INTO neograph_checkpoint_blobs "
                 "(thread_id, channel, version, blob_data) "
                 "VALUES (?, ?, ?, ?) "
                 "ON CONFLICT (thread_id, channel, version) DO NOTHING");
-            for (auto [name, ch] : chs.items()) {
-                if (!ch.is_object() || !ch.contains("version")) continue;
-                if (!ch.contains("value")) continue;
+            for (const auto& [name, ch] : chs.items()) {
+                if (!checkpoint_channel_blob_eligible(ch)) continue;
                 int64_t ver = ch["version"].get<int64_t>();
                 std::string val_text = to_text(ch["value"]);
 
@@ -384,18 +529,16 @@ void SqliteCheckpointStore::save(const Checkpoint& cp) {
 
     // 2. Checkpoint row (upsert on PK).
     json channel_versions = extract_channel_versions(cp.channel_values);
-    int64_t global_version = 0;
-    if (cp.channel_values.is_object() &&
-        cp.channel_values.contains("global_version")) {
-        global_version = cp.channel_values["global_version"].get<int64_t>();
-    }
+    // This legacy SQL index field is not the original JSON scalar; the shared
+    // shape retains its exact presence/type/value, including null or overflow.
+    constexpr int64_t global_version = 0;
 
     Stmt cp_ins(db_,
         "INSERT INTO neograph_checkpoints "
         "(thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
         " interrupt_phase, barrier_state, channel_versions, global_version, "
-        " metadata, step, timestamp_ms, schema_version) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " metadata, step, timestamp_ms, schema_version, checkpoint_shape) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET "
         "  parent_id        = excluded.parent_id, "
         "  current_node     = excluded.current_node, "
@@ -407,7 +550,8 @@ void SqliteCheckpointStore::save(const Checkpoint& cp) {
         "  metadata         = excluded.metadata, "
         "  step             = excluded.step, "
         "  timestamp_ms     = excluded.timestamp_ms, "
-        "  schema_version   = excluded.schema_version");
+        "  schema_version   = excluded.schema_version, "
+        "  checkpoint_shape = excluded.checkpoint_shape");
     cp_ins.bind_text (1,  cp.thread_id);
     cp_ins.bind_text (2,  cp.id);
     cp_ins.bind_text (3,  cp.parent_id);
@@ -417,15 +561,14 @@ void SqliteCheckpointStore::save(const Checkpoint& cp) {
     cp_ins.bind_text (7,  to_text(barrier_state_to_json(cp.barrier_state)));
     cp_ins.bind_text (8,  to_text(channel_versions));
     cp_ins.bind_int64(9,  global_version);
-    cp_ins.bind_text (10, to_text(cp.metadata));
+    cp_ins.bind_text (10, to_text(metadata));
     cp_ins.bind_int64(11, cp.step);
     cp_ins.bind_int64(12, cp.timestamp);
     cp_ins.bind_int  (13, cp.schema_version);
+    cp_ins.bind_text (14, shape.dump());
     if (cp_ins.step() != SQLITE_DONE) {
         throw_sqlite_error(db_, "checkpoint insert failed");
     }
-
-    transaction.commit();
 }
 
 // ── load helpers ──────────────────────────────────────────────────────
@@ -436,6 +579,7 @@ struct LoadedShell {
     Checkpoint cp;
     json channel_versions;
     int64_t global_version = 0;
+    json checkpoint_shape;
 };
 
 LoadedShell stmt_to_loaded(Stmt& q) {
@@ -453,6 +597,7 @@ LoadedShell stmt_to_loaded(Stmt& q) {
     ls.cp.step             = q.column_int64(10);
     ls.cp.timestamp        = q.column_int64(11);
     ls.cp.schema_version   = q.column_int  (12);
+    if (!q.column_is_null(13)) ls.checkpoint_shape = json::parse(q.column_text(13));
     return ls;
 }
 
@@ -471,8 +616,11 @@ std::map<std::string, json> fetch_blobs(sqlite3* db,
         q.bind_text(1, thread_id);
         q.bind_text(2, name);
         q.bind_int64(3, ver.get<int64_t>());
-        if (q.step() == SQLITE_ROW) {
+        const int status = q.step();
+        if (status == SQLITE_ROW) {
             out.emplace(name, parse_text(q.column_text(0)));
+        } else if (status != SQLITE_DONE) {
+            throw_sqlite_error(db, "checkpoint blob lookup failed");
         }
     }
     return out;
@@ -480,8 +628,13 @@ std::map<std::string, json> fetch_blobs(sqlite3* db,
 
 Checkpoint finish_load(sqlite3* db, LoadedShell ls) {
     auto blobs = fetch_blobs(db, ls.cp.thread_id, ls.channel_versions);
-    ls.cp.channel_values = materialize_channel_values(
-        ls.channel_versions, blobs, static_cast<uint64_t>(ls.global_version));
+    if (ls.checkpoint_shape.is_null()) {
+        ls.cp.channel_values = materialize_channel_values(
+            ls.channel_versions, blobs, static_cast<uint64_t>(ls.global_version));
+    } else {
+        restore_checkpoint_storage_shape(ls.cp, ls.checkpoint_shape, blobs);
+    }
+    restore_checkpoint_storage_envelope(ls.cp);
     return ls.cp;
 }
 
@@ -544,12 +697,177 @@ void SqliteCheckpointStore::delete_thread(const std::string& thread_id) {
     transaction.commit();
 }
 
+bool SqliteCheckpointStore::requires_managed_budget(const std::string& thread_id) {
+    std::lock_guard lock(db_mutex_);
+    return has_managed_budget_obligation(db_, thread_id);
+}
+
+asio::awaitable<bool> SqliteCheckpointStore::requires_managed_budget_async(
+    std::string thread_id) {
+    co_return co_await CheckpointStore::requires_managed_budget_async(std::move(thread_id));
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> SqliteCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment) {
+    const auto key = detail::ManagedBudgetJournalAccess::storage_key(scope);
+    std::lock_guard lock(db_mutex_);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, key);
+    auto head = load_managed_budget_head(db_, key);
+    const bool prior_obligation = has_managed_budget_obligation(db_, key);
+    if (!head.is_null() && !expected_checkpoint_id.empty()) {
+        const std::string sql = std::string("SELECT ") + kSelectCols +
+            " FROM neograph_checkpoints WHERE thread_id = ? AND checkpoint_id = ?";
+        Stmt source(db_, sql.c_str());
+        source.bind_text(1, key);
+        source.bind_text(2, expected_checkpoint_id);
+        const int status = source.step();
+        if (status == SQLITE_DONE)
+            throw std::runtime_error("SqliteCheckpointStore: managed budget source checkpoint is missing");
+        if (status != SQLITE_ROW) throw_sqlite_error(db_, "managed budget source lookup failed");
+        const auto checkpoint = finish_load(db_, stmt_to_loaded(source));
+        if (managed_budget_checkpoint_commitment(checkpoint) != expected_checkpoint_commitment)
+            throw std::runtime_error("SqliteCheckpointStore: managed budget source commitment mismatch");
+    }
+    auto lease = detail::ManagedBudgetJournalAccess::acquire(
+        head, prior_obligation, scope, expected_checkpoint_id, expected_checkpoint_commitment);
+    if (!lease)
+        throw std::logic_error("SqliteCheckpointStore: journal did not issue a managed budget lease");
+    record_managed_budget_obligation(db_, key);
+    save_managed_budget_head(db_, key, head);
+    transaction.commit();
+    detail::ManagedBudgetJournalAccess::refresh(lease, head);
+    return lease;
+}
+
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
+SqliteCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment) {
+    co_return co_await CheckpointStore::acquire_managed_budget_lease_async(
+        std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment));
+}
+
+ManagedBudgetEffectReceipt SqliteCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) {
+    const auto key = managed_budget_lease_key(lease);
+    std::lock_guard lock(db_mutex_);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, key);
+    auto head = load_managed_budget_head(db_, key);
+    auto effect = load_managed_budget_effect(db_, key, lease->bank_generation(), effect_id);
+    auto receipt = detail::ManagedBudgetJournalAccess::begin(
+        head, effect, lease, effect_id, exact_claim_amount, prepared_request_digest);
+    save_managed_budget_effect(db_, key, lease->bank_generation(), effect_id, effect);
+    save_managed_budget_head(db_, key, head);
+    transaction.commit();
+    detail::ManagedBudgetJournalAccess::refresh(lease, head);
+    return receipt;
+}
+
+asio::awaitable<ManagedBudgetEffectReceipt> SqliteCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest) {
+    co_return co_await CheckpointStore::begin_managed_budget_effect_async(
+        std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest));
+}
+
+void SqliteCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& effect,
+    sp::runtime::Result genuine_outcome, const UsageAccumulator::AuthoritySnapshot& authority) {
+    const auto key = managed_budget_lease_key(lease);
+    if (!effect.active())
+        throw std::invalid_argument("SqliteCheckpointStore: missing managed budget effect receipt");
+    std::lock_guard lock(db_mutex_);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, key);
+    auto head = load_managed_budget_head(db_, key);
+    auto stored_effect = load_managed_budget_effect(db_, key, lease->bank_generation(), effect.effect_id());
+    detail::ManagedBudgetJournalAccess::settle(
+        head, stored_effect, lease, effect, std::move(genuine_outcome), authority);
+    save_managed_budget_effect(db_, key, lease->bank_generation(), effect.effect_id(), stored_effect);
+    save_managed_budget_head(db_, key, head);
+    transaction.commit();
+    detail::ManagedBudgetJournalAccess::refresh(lease, head);
+}
+
+asio::awaitable<void> SqliteCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    co_await CheckpointStore::settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
+}
+
+void SqliteCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    const auto key = managed_budget_lease_key(lease);
+    if (checkpoint.thread_id != key)
+        throw std::invalid_argument("SqliteCheckpointStore: managed checkpoint storage scope mismatch");
+    std::lock_guard lock(db_mutex_);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, key);
+    {
+        Stmt existing(db_,
+            "SELECT 1 FROM neograph_checkpoints WHERE thread_id = ? AND checkpoint_id = ?");
+        existing.bind_text(1, key);
+        existing.bind_text(2, checkpoint.id);
+        const int status = existing.step();
+        if (status == SQLITE_ROW)
+            throw std::runtime_error("SqliteCheckpointStore: managed checkpoint ID was already published");
+        if (status != SQLITE_DONE) throw_sqlite_error(db_, "managed checkpoint identity lookup failed");
+    }
+    auto head = load_managed_budget_head(db_, key);
+    detail::ManagedBudgetJournalAccess::publish(head, lease, checkpoint);
+    save_locked(checkpoint);
+    {
+        const std::string sql = std::string("SELECT ") + kSelectCols +
+            " FROM neograph_checkpoints WHERE thread_id = ? AND checkpoint_id = ?";
+        Stmt stored(db_, sql.c_str());
+        stored.bind_text(1, key);
+        stored.bind_text(2, checkpoint.id);
+        if (stored.step() != SQLITE_ROW) throw_sqlite_error(db_, "published checkpoint lookup failed");
+        const auto persisted = finish_load(db_, stmt_to_loaded(stored));
+        if (managed_budget_checkpoint_commitment(persisted) != managed_budget_checkpoint_commitment(checkpoint))
+            throw std::runtime_error("SqliteCheckpointStore: published checkpoint cannot be reconstructed exactly");
+    }
+    save_managed_budget_head(db_, key, head);
+    transaction.commit();
+    detail::ManagedBudgetJournalAccess::refresh(lease, head);
+}
+
+asio::awaitable<void> SqliteCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
+    co_await CheckpointStore::publish_managed_budget_checkpoint_async(
+        std::move(lease), std::move(checkpoint));
+}
+
+void SqliteCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    const auto key = managed_budget_lease_key(lease);
+    std::lock_guard lock(db_mutex_);
+    WriteTransaction transaction(db_);
+    if (write_guard_) write_guard_(db_, key);
+    auto head = load_managed_budget_head(db_, key);
+    detail::ManagedBudgetJournalAccess::release(head, lease);
+    save_managed_budget_head(db_, key, head);
+    transaction.commit();
+    detail::ManagedBudgetJournalAccess::refresh(lease, head);
+}
+
+asio::awaitable<void> SqliteCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    co_await CheckpointStore::release_managed_budget_lease_async(std::move(lease));
+}
+
 // ── Pending writes ────────────────────────────────────────────────────
 
 void SqliteCheckpointStore::put_writes(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id,
     const PendingWrite& write) {
+    if (write.native_result) throw std::invalid_argument("Native pending writes require explicit archive serialization");
     std::lock_guard lock(db_mutex_);
     // Acquire the writer before reading seq. A deferred read transaction cannot
     // upgrade its WAL snapshot after a different connection commits, even with

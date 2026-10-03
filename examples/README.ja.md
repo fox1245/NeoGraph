@@ -1,6 +1,32 @@
 <!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
 # C++ API の例
 
+
+## 型付き C++ 移行状況
+
+現在の C++ recipe は五つの型付き SDK family の所有された `ProviderRequest`、
+順序付き `sp::Event`、不変 `std::shared_ptr<const sp::Outcome>`
+（`Completion`/`Failure`）を使用します。`ChatMessage`/`ChatTool` は portable 投影であり、
+native replay 権限ではありません。prepare は一度だけ行い、durable 呼出元は
+`Provider::request_digest(prepared)` に claim/receipt を結び付け、同じ handle を dispatch します。
+出力 JSON から history を再構築したり、failure を最終テキストに縮約しないでください。
+
+canonical persistence は `provider-message-v2`/`runtime-history-record-v2` を使用し、
+portable 要約は native record を置換しません。optional control は呼出元が選び、暗黙に clamp しません。
+bounded call には真正 model fact が必要で、欠落は `LimitUnknown` です。
+reservation/charged/held は nullable provider usage と別で、budget 更新、価格、forecast、invoice ではありません。
+
+header-only `examples/provider_example_support.h` は実際の SDK runtime を使用します。
+LLM ビルドには `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)` の `SchemaProvider::runtime` または
+明示的な `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` が必要です。
+インストール include root は `include/SchemaProvider`。interface/capability 検査を行い、
+SDK package は unstable `0.0.0`（interface 3）です。
+
+この文書はソース移行状況であり recipe の実行検証ではありません。過去の測定は新移行の
+qualification ではありません。live 実行には鍵、ネットワーク、モデルアクセスと費用が必要です。
+鍵、prompt、artifact は非公開に保ち、機密 envelope/native inspection 出力を公開 log に送らないでください。
+native archive は認証された owner-private custody であり、暗号化や vendor issuer 認証ではありません。
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 NeoGraph エンジンの表面をカバーする 56 個の実行可能な C++ プログラム。
@@ -91,9 +117,8 @@ OPENROUTER_API_KEY=sk-or-...
 |---|------|-------|---------------|
 | 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct ループ: `llm_call` ↔ `tool_dispatch` (`has_tool_calls` 条件付き)。計算ツール。 |
 | 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | OpenRouter 互換 embedding + メモリ内コサイン検索を備えた RAG。 |
-| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | `SchemaProvider::complete_stream()` を直接呼び出す単一リクエストの OpenRouter Responses SSE スモークテスト。 |
-| 33 | [`33_openai_responses_ws.cpp`](33_openai_responses_ws.cpp) | OpenAI | `use_websocket=true` を使用する OpenAI `/v1/responses` WebSocket の直接スモークテスト。 |
-| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | OpenRouter Responses の組み込みツール wire shape を紹介する raw HTTP/SSE サンプル。 |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | 型付き Responses SSE リクエスト、順序付き `sp::Event` 観測と所有された `sp::Outcome`。 |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | 全七 hosted-tool セクションを型付き SSE で実行し、完全な Outcome と順序付き wire 観測を保持します。 |
 | 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | デバッグ支援: 1 つのツール呼び出しリクエストの生の `/api/v1/responses` JSON envelope をダンプします。 |
 | 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | 固定 DeepSeek モデルで reasoning effort のレイテンシー / reasoning token のトレードオフを確認します。 |
 
@@ -133,7 +158,7 @@ OPENROUTER_API_KEY=sk-or-...
 | # |ファイル |セットアップ |それが示すもの |
 |---|------|-------|---------------|
 | 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) |オフライン | 3 つのエージェントは、`engine->run_async()` を介して 1 つの `io_context` スレッドでインターリーブ実行されます (3×50 ミリ秒ではなく、ほぼ 50 ミリ秒)。ステージ 4 非同期エンドツーエンド。 |
-| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | 外側の `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` で ReAct ループを駆動し、`SchemaProvider("openai_responses")` 経由のトークンを stdout へストリーミングします。 |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | 型付き provider イベントによる非同期 ReAct。text delta は表示用投影であり native history ではありません。 |
 | 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) |オフライン |バックプレッシャー付きの固定ワーカー プール (`neograph::util::RequestQueue`) — 実行中の作業は制限されており、負荷がかかっても無制限に増加することはありません。 |
 | 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) |オフライン |協調キャンセル — 子ごとに `CancelToken::fork()`、親 `cancel()` が飛行中のすべての子にカスケードされます。 |
 | 47 | [`47_node_cache.cpp`](47_node_cache.cpp) |オフライン |ノード + 入力をキーとしたノードごとの結果キャッシュ — 実行全体で同一の入力に対する再計算をスキップします。 |
@@ -176,7 +201,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 | # |ファイル |セットアップ |それが示すもの |
 |---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) |ローカルサーバー (llama.cpp / vLLM) | `OpenAIProvider` を `http://localhost:8090` に向けます。 2 つのプロセスの分割により、モデルの重みがエージェントのアドレス空間から外されます。 |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | llama.cpp / vLLM | `http://localhost:8090` の型付き Chat クライアント。モデル重みはエージェントプロセスの外部に置きます。 |
 
 ### ショーケース
 
@@ -197,9 +222,7 @@ OPENROUTER_API_KEY=sk-or-...
    正確な `run(NodeInput)` ボディ — `ChannelWrite`、`Send`、または
    `Command` から `NodeOutput`。ここでファンアウトを送信し、
    コマンド ルーティングはライブでオーバーライドされます。
-3. **Schema-driven response shapes** (13、15、16、17、33):
-   1 つの JSON スキーマがワイヤー形状を記述し、サンプルは
-   OpenRouter 互換 SSE または OpenAI のネイティブ WebSocket transport を使用します。
+3. **型付き provider リクエストと Outcome** (13, 15, 16, 17): SDK admission、順序付きイベント、不変 Outcome を使用します。descriptor interpreter や WebSocket adapter はありません。
 
 グラフ定義はJSON形式(`std::map<std::string, json>`)
 どちらの方法でも — [Python examples](../bindings/python/examples/) の例 14 と 15
@@ -210,7 +233,6 @@ OPENROUTER_API_KEY=sk-or-...
 |プロバイダー |例 |
 |---|---|
 | `OPENROUTER_API_KEY` | 01、03、12、13、15、16、17、18、19、20、22、23、24、25、28、29、30、34、35、40 |
-| `OPENAI_API_KEY` | 33 |
 | ローカルサーバー (キーなし) | 31 |
 | **なし** | 02、04、05、06、07、08、09、10、14、21、27、36、37、38、39、41、42、43、44、46、47、48、49、50、51、52、53、54、55、 56、57 |
 
@@ -228,3 +250,20 @@ OPENROUTER_API_KEY=sk-or-...
 `example_<short_name>` (例: `example_react_agent`、
 `example_custom_graph`）。正確な名前は各 `.cpp` の上部にあります
 `Usage:` の下にコメントします。
+
+## Responses inspection 契約 (13 / 29 / 30 / 34)
+
+13 は型付き Responses streaming request で、イベントは文字列 callback ではありません。
+29 は成功/失敗の完全な Outcome、`wire_envelope`、順序付き全 `wire_output` item と型付き part、
+function argument、citation、reasoning、opaque hosted output、artifact を保持します。
+raw inspection 出力は機密であり、安全な telemetry/export 形式ではありません。
+30 は `none`、`low`、`medium`、`high` を sweep し完全な Outcome を保持します。
+reasoning/input/output/total/provider-reported-total と extra count は nullable 64-bit evidence で、
+stage/quality/conflict を含みます。欠落は zero ではなく、visible text や予約量は usage ではありません。
+34 の七セクションは function(calculator)、web search、image generation、file search、
+tool search、`shell.environment` の skills、shell(`container_auto`) です。
+`OPENROUTER_VECTOR_STORE_ID` は file search 条件、`OPENROUTER_SKILL_ID` は既定
+`openai-spreadsheets` skill を置換します。この inspection demo は function tool を宣言するだけでローカル実行しません。
+順序付き型付き/raw event と完全な terminal を保持します。hosted tool は route によって未対応または追加費用となり、
+型付き admission は live 互換性保証ではありません。WebSocket/primitive 実行例は残しません。
+Images/Veo/Decisions は別の型付き NeoGraph client で、chat spending grant を継承しません。

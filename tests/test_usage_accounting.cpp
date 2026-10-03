@@ -1,28 +1,10 @@
-// Token usage comes out of a run (issue #88).
-//
-// ChatCompletion::Usage existed and SchemaProvider parsed it, but nothing
-// downstream kept it: LLMCallNode never read completion.usage and RunResult had
-// no field for it. Call a Provider directly and you could see token counts; run
-// a graph and they were gone. For anything cost-sensitive — budgets, per-tenant
-// billing, rate-limit planning — that is a hard blocker.
-//
-// The accumulator rides on RunContext, which already flows into every node and
-// down into subgraphs via RunConfig, exactly like cancel_token. Two consequences
-// worth testing rather than assuming:
-//
-//   * Usage is recorded where the completion is *received* (the node), not where
-//     it is produced (the provider). RateLimitedProvider wraps another provider
-//     and delegates to it, so counting in the provider layer would count the
-//     same completion twice. Counting on receipt cannot.
-//
-//   * A subgraph runs on its own engine with its own RunConfig. If the
-//     accumulator does not ride that config down, a graph that delegates its LLM
-//     work to a subgraph reports zero tokens — the most misleading possible
-//     answer, since it looks like a free run.
+// Provider reports retain nullable uint64 counters; budget commitments are a
+// separate conservative ledger carried through graph and subgraph execution.
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/llm/agent.h>
+#include "fixtures/typed_provider.h"
 
 #include <memory>
 #include <atomic>
@@ -38,30 +20,18 @@ using namespace neograph::graph;
 
 namespace {
 
-// Reports a fixed usage on every completion.
-class UsageProvider : public Provider {
+class UsageProvider : public neograph::test::LocalProvider {
 public:
-    UsageProvider(int prompt, int completion)
-        : prompt_(prompt), completion_(completion) {}
-
-    ChatCompletion complete(const CompletionParams&) override {
-        ChatCompletion c;
-        c.message = ChatMessage{"assistant", "ok"};
-        c.usage.prompt_tokens     = prompt_;
-        c.usage.completion_tokens = completion_;
-        c.usage.total_tokens      = prompt_ + completion_;
-        return c;
-    }
-    ChatCompletion complete_stream(const CompletionParams& p,
-                                   const StreamCallback&) override {
-        return complete(p);
-    }
-    std::string get_name() const override { return "usage-stub"; }
-
-private:
-    int prompt_;
-    int completion_;
+    UsageProvider(std::uint64_t input, std::uint64_t output)
+        : LocalProvider([input, output](ProviderRequest, const PreparedProviderRequest&,
+                                        const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+              co_return neograph::test::success("ok", neograph::test::usage(input, output, input + output));
+          }, "usage-fixture") {}
 };
+
+std::optional<std::uint64_t> reported(const std::optional<sp::Count>& count) {
+    return count ? std::optional(count->value) : std::nullopt;
+}
 
 json llm_graph(int llm_nodes) {
     json nodes  = json::object();
@@ -87,10 +57,12 @@ RunResult run_graph(const json& def, std::shared_ptr<Provider> provider,
                     const std::string& thread) {
     NodeContext ctx;
     ctx.provider = std::move(provider);
+    ctx.model = "test-model";
     auto engine = GraphEngine::compile(def, ctx);
 
     RunConfig cfg;
     cfg.thread_id = thread;
+    cfg.input = {{"messages", json::array({{{"role", "user"}, {"content", "account this turn"}}})}};
     return engine->run(cfg);
 }
 
@@ -101,9 +73,9 @@ TEST(UsageAccounting, SingleLLMNodeReportsUsage) {
     auto result = run_graph(llm_graph(1),
                             std::make_shared<UsageProvider>(10, 5), "single");
 
-    EXPECT_EQ(result.usage.prompt_tokens, 10);
-    EXPECT_EQ(result.usage.completion_tokens, 5);
-    EXPECT_EQ(result.usage.total_tokens, 15);
+    EXPECT_EQ(reported(result.usage.input_total), 10U);
+    EXPECT_EQ(reported(result.usage.output_total), 5U);
+    EXPECT_EQ(reported(result.usage.total), 15U);
 }
 
 // Two LLM nodes: the run total is the sum, not the last node's.
@@ -111,13 +83,13 @@ TEST(UsageAccounting, MultipleLLMNodesSum) {
     auto result = run_graph(llm_graph(2),
                             std::make_shared<UsageProvider>(10, 5), "double");
 
-    EXPECT_EQ(result.usage.total_tokens, 30);
-    EXPECT_EQ(result.usage.prompt_tokens, 20);
-    EXPECT_EQ(result.usage.completion_tokens, 10);
+    EXPECT_EQ(reported(result.usage.total), 30U);
+    EXPECT_EQ(reported(result.usage.input_total), 20U);
+    EXPECT_EQ(reported(result.usage.output_total), 10U);
 }
 
-// A graph with no LLM node reports zero, not an error and not garbage.
-TEST(UsageAccounting, NoLLMNodeYieldsZero) {
+// No provider report is unknown, not a fabricated known zero.
+TEST(UsageAccounting, NoLLMNodeReportsUnknownUsage) {
     json def = {
         {"name", "no_llm"},
         {"channels", {{"x", {{"reducer", "overwrite"}}}}},
@@ -134,7 +106,7 @@ TEST(UsageAccounting, NoLLMNodeYieldsZero) {
     cfg.thread_id = "empty";
     auto result = engine->run(cfg);
 
-    EXPECT_EQ(result.usage.total_tokens, 0);
+    EXPECT_FALSE(result.usage.total);
 }
 
 // A subgraph runs on its own engine with its own RunConfig. Its tokens are still
@@ -159,7 +131,7 @@ TEST(UsageAccounting, SubgraphUsageRollsUpIntoTheParent) {
 
     auto result = run_graph(outer, std::make_shared<UsageProvider>(10, 5), "sub");
 
-    EXPECT_EQ(result.usage.total_tokens, 15)
+    EXPECT_EQ(reported(result.usage.total), 15U)
         << "the subgraph's tokens did not reach the parent run";
 }
 
@@ -228,49 +200,68 @@ TEST(UsageAccounting, SubgraphPropagatesProgramBudgetContext) {
     EXPECT_TRUE(saw_same_budget->load(std::memory_order_relaxed));
 }
 
-TEST(UsageAccounting, WideTotalSurvivesPublicIntCounterOverflow) {
-    UsageAccumulator usage;
-    ChatCompletion::Usage first;
-    first.total_tokens = std::numeric_limits<int>::max();
-    usage.add(first);
-    ChatCompletion::Usage second;
-    second.total_tokens = 1;
-    usage.add(second);
-
-    EXPECT_EQ(usage.total_tokens_wide(),
-              static_cast<long long>(std::numeric_limits<int>::max()) + 1);
+TEST(UsageAccounting, WideReportedTotalsRemainLossless) {
+    UsageAccumulator accumulator;
+    const auto input = std::uint64_t{1} << 40;
+    accumulator.add(neograph::test::usage(input, 1, input + 1));
+    accumulator.add(neograph::test::usage(input, 2, input + 2));
+    EXPECT_EQ(reported(accumulator.snapshot().total), 2 * input + 3);
+    EXPECT_EQ(accumulator.total_tokens_wide(), static_cast<long long>(2 * input + 3));
 }
 
-TEST(UsageAccounting, InvalidUsageCannotReduceCommittedBudget) {
-    UsageAccumulator usage;
-    usage.add(ChatCompletion::Usage{-7, -3, -1});
-    EXPECT_EQ(usage.total_tokens_wide(), 0);
-
-    // A provider total smaller than its components must not under-report.
-    usage.add(ChatCompletion::Usage{4, 6, 1});
-    EXPECT_EQ(usage.total_tokens_wide(), 10);
-    ASSERT_TRUE(usage.try_reserve(2, 12));
-
-    // Releasing more than the outstanding reservation is a no-op past zero;
-    // it must not create negative committed usage that bypasses the ceiling.
-    usage.release_reservation(100);
-    EXPECT_FALSE(usage.try_reserve(1, 10));
-
-    ASSERT_TRUE(usage.try_reserve(2, 12));
-    usage.settle_reservation(2, ChatCompletion::Usage{-1, -1, -1});
-    EXPECT_FALSE(usage.try_reserve(1, 10));
+TEST(UsageAccounting, UnknownAndInconsistentUsageCannotRenewBudget) {
+    UsageAccumulator accumulator;
+    ASSERT_TRUE(accumulator.try_reserve(10, 10));
+    accumulator.settle_reservation(10, {});
+    EXPECT_EQ(accumulator.total_tokens_wide(), 10);
+    EXPECT_FALSE(accumulator.snapshot().total);
+    EXPECT_FALSE(accumulator.try_reserve(1, 10));
+    auto inconsistent = neograph::test::usage(4, 6, 1);
+    inconsistent.quality = sp::UsageQuality::Inconsistent;
+    accumulator.settle_reservation(10, inconsistent);
+    EXPECT_EQ(accumulator.total_tokens_wide(), 10);
+    EXPECT_EQ(accumulator.snapshot().quality, sp::UsageQuality::Inconsistent);
+    EXPECT_FALSE(accumulator.try_reserve(1, 10));
 }
-TEST(UsageAccounting, SettlingOneReservationPreservesSiblingReservation) {
-    UsageAccumulator usage;
-    ASSERT_TRUE(usage.try_reserve(4, 10));
-    ASSERT_TRUE(usage.try_reserve(3, 10));
 
-    usage.settle_reservation(4, ChatCompletion::Usage{0, 8, 8});
+TEST(UsageAccounting, KnownZeroSettlementReleasesOnlyItsReservation) {
+    UsageAccumulator accumulator;
+    ASSERT_TRUE(accumulator.try_reserve(4, 10));
+    ASSERT_TRUE(accumulator.try_reserve(3, 10));
+    accumulator.settle_reservation(4, neograph::test::usage(0, 0, 0));
+    EXPECT_EQ(reported(accumulator.snapshot().total), 0U);
+    EXPECT_EQ(accumulator.total_tokens_wide(), 3);
+    EXPECT_FALSE(accumulator.try_reserve(8, 10));
+    EXPECT_TRUE(accumulator.try_reserve(7, 10));
+}
 
-    // Actual usage (8) plus the still-in-flight sibling (3) is 11.
-    EXPECT_FALSE(usage.try_reserve(1, 11));
-    ASSERT_TRUE(usage.try_reserve(1, 12));
-    usage.release_reservation(100);
+TEST(UsageAccounting, MixedKnownAndUnknownReportsNeverFabricateTotals) {
+    UsageAccumulator accumulator;
+    accumulator.add(neograph::test::usage(0, 0, 0));
+    ASSERT_TRUE(accumulator.try_reserve(5, 5));
+    auto partial = neograph::test::usage(std::nullopt, 2, std::nullopt, sp::UsageStage::Partial);
+    partial.output_total->evidence = sp::Evidence::Derived;
+    accumulator.settle_reservation(5, partial);
+    const auto reports = accumulator.snapshot();
+    EXPECT_FALSE(reports.input_total);
+    EXPECT_FALSE(reports.total);
+    ASSERT_TRUE(reports.output_total);
+    EXPECT_EQ(reports.output_total->value, 2U);
+    EXPECT_EQ(reports.output_total->evidence, sp::Evidence::Derived);
+    EXPECT_EQ(reports.stage, sp::UsageStage::Partial);
+    EXPECT_EQ(accumulator.total_tokens_wide(), 5);
+    EXPECT_FALSE(accumulator.try_reserve(1, 5));
+}
+
+TEST(UsageAccounting, OverspendingSettlementKeepsFullChargeAndSiblingAuthority) {
+    UsageAccumulator accumulator;
+    ASSERT_TRUE(accumulator.try_reserve(4, 10));
+    ASSERT_TRUE(accumulator.try_reserve(3, 10));
+    accumulator.settle_reservation(4, neograph::test::usage(0, 8, 8));
+    EXPECT_EQ(reported(accumulator.snapshot().total), 8U);
+    EXPECT_EQ(accumulator.total_tokens_wide(), 11);
+    EXPECT_FALSE(accumulator.try_reserve(1, 11));
+    EXPECT_TRUE(accumulator.try_reserve(1, 12));
 }
 
 TEST(UsageAccounting, ConcurrentReservationsRespectTheAdmittedCeiling) {
@@ -287,30 +278,17 @@ TEST(UsageAccounting, ConcurrentReservationsRespectTheAdmittedCeiling) {
             ready.arrive_and_wait();
             if (usage.try_reserve(20, ceiling)) {
                 accepted.fetch_add(1, std::memory_order_relaxed);
-                usage.settle_reservation(20, ChatCompletion::Usage{0, 20, 20});
+                usage.settle_reservation(20, neograph::test::usage(0, 20, 20));
             }
         });
     }
     ready.arrive_and_wait();
     for (auto& thread : threads) thread.join();
 
-    EXPECT_LE(accepted.load(std::memory_order_relaxed), ceiling / 20);
-    EXPECT_EQ(usage.total_tokens_wide(),
-              static_cast<long long>(accepted.load(std::memory_order_relaxed)) * 20);
-    EXPECT_LE(usage.total_tokens_wide(), ceiling);
+    EXPECT_EQ(accepted.load(std::memory_order_relaxed), ceiling / 20);
+    EXPECT_EQ(usage.total_tokens_wide(), ceiling);
 }
 
-TEST(UsageAccounting, PublicSnapshotClampsWideTotals) {
-    UsageAccumulator usage;
-    ChatCompletion::Usage maxed;
-    maxed.total_tokens = std::numeric_limits<int>::max();
-    usage.add(maxed);
-    usage.add(maxed);
-
-    EXPECT_EQ(usage.total_tokens_wide(),
-              2LL * static_cast<long long>(std::numeric_limits<int>::max()));
-    EXPECT_EQ(usage.snapshot().total_tokens, std::numeric_limits<int>::max());
-}
 
 // The other way to drive an LLM. Agent is not a graph run and has no
 // RunContext, so it keeps its own total — and it has to, or token accounting
@@ -318,45 +296,32 @@ TEST(UsageAccounting, PublicSnapshotClampsWideTotals) {
 // split #87 was about.
 TEST(UsageAccounting, AgentAccumulatesAcrossCalls) {
     neograph::llm::Agent agent(std::make_shared<UsageProvider>(10, 5),
-                               std::vector<std::unique_ptr<Tool>>{});
+                               std::vector<std::unique_ptr<Tool>>{}, "", "test-model");
 
-    EXPECT_EQ(agent.usage().total_tokens, 0) << "nothing called yet";
+    EXPECT_FALSE(agent.usage().total) << "nothing reported yet";
 
-    std::vector<ChatMessage> messages{{"user", "hi"}};
+    std::vector<sp::Message> messages{neograph::test::message("hi", sp::Role::User)};
     agent.run(messages);
-    EXPECT_EQ(agent.usage().total_tokens, 15);
+    EXPECT_EQ(reported(agent.usage().total), 15U);
 
     // Cumulative over the agent's lifetime, not reset per run: an agent loop
     // makes several calls and the number people want is what the conversation
     // cost, not what the last turn cost.
-    std::vector<ChatMessage> more{{"user", "again"}};
+    std::vector<sp::Message> more{neograph::test::message("again", sp::Role::User)};
     agent.run(more);
-    EXPECT_EQ(agent.usage().total_tokens, 30);
+    EXPECT_EQ(reported(agent.usage().total), 30U);
 }
 
-// A provider that reports prompt/completion but leaves total at zero — several
-// real APIs do. The accumulator normalizes rather than under-reporting.
-TEST(UsageAccounting, TotalIsDerivedWhenTheProviderOmitsIt) {
-    class PartialUsageProvider : public Provider {
-    public:
-        ChatCompletion complete(const CompletionParams&) override {
-            ChatCompletion c;
-            c.message = ChatMessage{"assistant", "ok"};
-            c.usage.prompt_tokens     = 7;
-            c.usage.completion_tokens = 3;
-            c.usage.total_tokens      = 0;   // provider did not fill it in
-            return c;
-        }
-        ChatCompletion complete_stream(const CompletionParams& p,
-                                       const StreamCallback&) override {
-            return complete(p);
-        }
-        std::string get_name() const override { return "partial"; }
-    };
-
-    auto result = run_graph(llm_graph(1), std::make_shared<PartialUsageProvider>(),
-                            "partial");
-    EXPECT_EQ(result.usage.total_tokens, 10) << "total should fall back to prompt + completion";
+TEST(UsageAccounting, MissingTotalRemainsUnknownWithKnownComponents) {
+    auto provider = std::make_shared<neograph::test::LocalProvider>(
+        [](ProviderRequest, const PreparedProviderRequest&,
+           const neograph::test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            co_return neograph::test::success("ok", neograph::test::usage(7, 3, std::nullopt));
+        });
+    auto result = run_graph(llm_graph(1), provider, "partial");
+    EXPECT_EQ(reported(result.usage.input_total), 7U);
+    EXPECT_EQ(reported(result.usage.output_total), 3U);
+    EXPECT_FALSE(result.usage.total);
 }
 
 // ── Streaming counts too ──
@@ -368,13 +333,15 @@ TEST(UsageAccounting, TotalIsDerivedWhenTheProviderOmitsIt) {
 TEST(UsageAccounting, StreamingRunsCountToo) {
     NodeContext ctx;
     ctx.provider = std::make_shared<UsageProvider>(10, 5);
+    ctx.model = "test-model";
     auto engine = GraphEngine::compile(llm_graph(1), ctx);
 
     RunConfig cfg;
     cfg.thread_id = "stream";
+    cfg.input = {{"messages", json::array({{{"role", "user"}, {"content", "account this stream"}}})}};
     auto result = engine->run_stream(cfg, [](const GraphEvent&) {});
 
-    EXPECT_EQ(result.usage.total_tokens, 15);
+    EXPECT_EQ(reported(result.usage.total), 15U);
 }
 
 // ── The contract around a failed run, and its sharp edge ──
@@ -387,9 +354,7 @@ public:
         : provider_(std::move(p)), fail_(fail) {}
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        CompletionParams params;
-        params.messages = {{"user", "hi"}};
-        auto completion = co_await provider_->invoke(params, nullptr);
+        auto completion = co_await provider_->invoke_async(neograph::test::request());
         record_usage(in.ctx, completion);              // the tokens are spent
 
         if (fail_->load()) throw std::runtime_error("crash after paying");
@@ -445,7 +410,7 @@ TEST(UsageAccounting, ACrashedAttemptIsInvisibleToRunResult) {
     fail = false;
     auto result = engine->run(cfg);                   // 15 more
 
-    EXPECT_EQ(result.usage.total_tokens, 15)
+    EXPECT_EQ(reported(result.usage.total), 15U)
         << "RunResult reports this run, not the whole bill — see the next test";
 }
 
@@ -474,6 +439,59 @@ TEST(UsageAccounting, ACallerSuppliedAccumulatorSeesTheCrashedAttempt) {
     fail = false;
     auto result = engine->run(cfg);
 
-    EXPECT_EQ(budget->snapshot().total_tokens, 30) << "the crashed attempt's tokens went missing";
-    EXPECT_EQ(result.usage.total_tokens, 30)       << "RunResult snapshots the accumulator it was given";
+    EXPECT_EQ(reported(budget->snapshot().total), 30U) << "the crashed attempt's tokens went missing";
+    EXPECT_EQ(reported(result.usage.total), 30U) << "RunResult snapshots the accumulator it was given";
+}
+
+TEST(UsageAccounting, ObservationSealRetainsReportsAndUnknownHoldBeforeEveryRejectedMutation) {
+    UsageAccumulator live;
+    live.add(neograph::test::usage(2, 3, 5));
+    ASSERT_TRUE(live.try_reserve(11, 20));
+    ASSERT_TRUE(live.remember_provider_effect("owner:source:effect-1"));
+    UsageAccumulator replay;
+    replay.restore_authority(live.authority_snapshot());
+    replay.seal_observation();
+
+    const auto zero = neograph::test::usage(0, 0, 0);
+    EXPECT_THROW(replay.remember_provider_effect("owner:replay:fresh-effect"), std::logic_error);
+    EXPECT_THROW(replay.observe(zero), std::logic_error);
+    EXPECT_THROW(replay.add(zero), std::logic_error);
+    EXPECT_THROW(replay.try_reserve(1, 20), std::logic_error);
+    EXPECT_THROW(replay.release_reservation(11), std::logic_error);
+    EXPECT_THROW(replay.settle_reservation(11, zero), std::logic_error);
+    EXPECT_THROW(replay.restore_charge(1), std::logic_error);
+    EXPECT_THROW(replay.restore_reservation(1), std::logic_error);
+    EXPECT_THROW(replay.restore_authority({}), std::logic_error);
+
+    const auto authority = replay.authority_snapshot();
+    EXPECT_EQ(authority.charged, 5U);
+    EXPECT_EQ(authority.reserved, 11U);
+    EXPECT_EQ(authority.provider_effects,
+              std::vector<std::string>({"owner:source:effect-1"}));
+    EXPECT_TRUE(authority.has_report);
+    EXPECT_EQ(reported(replay.snapshot().input_total), 2U);
+    EXPECT_EQ(reported(replay.snapshot().output_total), 3U);
+    EXPECT_EQ(reported(replay.snapshot().total), 5U);
+    EXPECT_EQ(replay.total_tokens_wide(), 16U);
+
+    // The observation seal belongs to the hydrated replay bank, not its live source.
+    EXPECT_TRUE(live.try_reserve(4, 20));
+    EXPECT_EQ(live.total_tokens_wide(), 20U);
+    EXPECT_EQ(replay.total_tokens_wide(), 16U);
+}
+
+TEST(UsageAccounting, ObservationSealRejectsRestorationAndZeroClaimsOnAPristineBank) {
+    UsageAccumulator replay;
+    replay.seal_observation();
+    UsageAccumulator::AuthoritySnapshot forged;
+    forged.reserved = 8;
+    forged.provider_effects = {"owner:forged"};
+    EXPECT_THROW(replay.restore_authority(std::move(forged)), std::logic_error);
+    EXPECT_THROW(replay.try_reserve(0, 0), std::logic_error);
+    const auto authority = replay.authority_snapshot();
+    EXPECT_EQ(authority.charged, 0U);
+    EXPECT_EQ(authority.reserved, 0U);
+    EXPECT_TRUE(authority.provider_effects.empty());
+    EXPECT_FALSE(authority.has_report);
+    EXPECT_FALSE(replay.snapshot().total);
 }

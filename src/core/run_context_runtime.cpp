@@ -1,6 +1,7 @@
 #include "run_context_runtime.h"
 
 #include "channel_write_codec.h"
+#include "managed_budget_journal.h"
 
 #include <mutex>
 #include <unordered_map>
@@ -67,7 +68,10 @@ json checkpoint_metadata_for(const RunContext& context) {
     if (runtime->subgraph_write_journal) {
         metadata[kMetadataNamespace][kJournalVersion] = 1;
         metadata[kMetadataNamespace][kJournal] =
-            serialize_channel_writes(runtime->subgraph_write_journal->writes);
+            serialize_channel_writes(runtime->subgraph_write_journal->writes, context.native_history_archive,
+                context.managed_budget_lease
+                    ? ManagedBudgetJournalAccess::retains_native_checkpoint(context.managed_budget_lease)
+                    : runtime->checkpoint_store->retains_native_checkpoint());
         if (!runtime->subgraph_write_journal->parent_call_id.empty())
             metadata[kMetadataNamespace]["subgraph_parent_call_id"] =
                 runtime->subgraph_write_journal->parent_call_id;
@@ -77,7 +81,8 @@ json checkpoint_metadata_for(const RunContext& context) {
 
 void restore_subgraph_write_journal(
     const Checkpoint& checkpoint,
-    const std::shared_ptr<SubgraphWriteJournal>& journal) {
+    const std::shared_ptr<SubgraphWriteJournal>& journal,
+    const std::shared_ptr<sp::NativeArchive>& archive) {
     if (!journal) return;
 
     const bool has_journal = checkpoint.metadata.is_object()
@@ -91,8 +96,15 @@ void restore_subgraph_write_journal(
             "restart the parent invocation with NeoGraph checkpoint schema v4 or newer");
     }
 
+    if (checkpoint.native_subgraph_writes) {
+        if (checkpoint.metadata[kMetadataNamespace][kJournal] !=
+            serialize_channel_writes(*checkpoint.native_subgraph_writes, {}, true))
+            throw std::invalid_argument("Subgraph journal projection differs from original typed custody");
+        journal->writes = *checkpoint.native_subgraph_writes;
+        return;
+    }
     journal->writes = deserialize_channel_writes(
-        checkpoint.metadata[kMetadataNamespace][kJournal]);
+        checkpoint.metadata[kMetadataNamespace][kJournal], archive);
 }
 
 ScopedRunContextRuntime::ScopedRunContextRuntime(

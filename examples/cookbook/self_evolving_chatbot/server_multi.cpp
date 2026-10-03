@@ -20,7 +20,7 @@
 //   ./build/cookbook_self_evolving_chatbot_multi
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include "../../provider_example_support.h"
 #include <cppdotenv/dotenv.hpp>
 
 #include <cctype>
@@ -133,10 +133,14 @@ make_topology_registry() {
 
 class CompileCache {
     std::shared_mutex mu_;
-    std::unordered_map<size_t, std::shared_ptr<GraphEngine>> cache_;
+    using Key = std::pair<std::shared_ptr<Provider>, std::string>;
+    std::map<Key, std::shared_ptr<GraphEngine>> cache_;
 public:
-    std::shared_ptr<GraphEngine> get_or_compile(const json& def, const NodeContext& ctx) {
-        size_t key = std::hash<std::string>{}(def.dump());
+    std::shared_ptr<GraphEngine> get_or_compile(
+        const std::string& customer_id, const json& def, const NodeContext& ctx) {
+        // No topology-only reuse across tenant instructions or provider origins.
+        Key key{ctx.provider, json::array({customer_id, def, ctx.model,
+            ctx.instructions, ctx.extra_config, ctx.provider_name}).dump()};
         {
             std::shared_lock lk(mu_);
             if (auto it = cache_.find(key); it != cache_.end()) return it->second;
@@ -144,8 +148,7 @@ public:
         auto raw = GraphEngine::build(def, EngineConfig{.node_context = ctx});
         std::shared_ptr<GraphEngine> engine(raw.release());
         std::unique_lock lk(mu_);
-        cache_.emplace(key, engine);
-        return engine;
+        return cache_.emplace(std::move(key), engine).first->second;
     }
     std::size_t size() { std::shared_lock lk(mu_); return cache_.size(); }
 };
@@ -155,7 +158,8 @@ public:
 static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
     const std::vector<json>& history,
-    const std::string& current_topology)
+    const std::string& current_topology,
+    UsageAccumulator& usage)
 {
     std::string hist_str;
     for (const auto& m : history) {
@@ -165,9 +169,9 @@ static std::string llm_judge_topology(
         hist_str += "- " + role + ": " + content + "\n";
     }
 
-    neograph::CompletionParams p;
-    p.model = "~deepseek/deepseek-v4-flash-latest";
-    p.messages.push_back({
+    // Judge summaries are portable observations, not native continuation.
+    std::vector<sp::Message> messages;
+    messages.push_back(portable_message({
         "system",
         "You are a chatbot harness optimizer. Given a conversation history "
         "and the current topology, decide which topology fits the user best.\n"
@@ -178,16 +182,19 @@ static std::string llm_judge_topology(
         "- fanout: 3 parallel LLM perspectives merged. Good when user wants "
         "multiple angles / comparisons / comprehensive views.\n"
         "Respond with EXACTLY one word: simple OR reflexive OR fanout."
-    });
-    p.messages.push_back({
+    }));
+    messages.push_back(portable_message({
         "user",
         "Current topology: " + current_topology +
         "\n\nConversation so far:\n" + hist_str +
         "\nBest topology for THIS user (one word):"
-    });
+    }));
 
-    auto result = provider->complete(p);
-    std::string raw = result.message.content;
+    auto result = provider->invoke(make_provider_request(
+        *provider, "~deepseek/deepseek-v4-flash-latest", std::move(messages)));
+    usage.add(outcome_usage(*result));
+    result = outcome_or_throw(std::move(result));
+    std::string raw = outcome_text(*result);
     std::string word;
     for (char c : raw) {
         if (std::isalpha(static_cast<unsigned char>(c)))
@@ -278,7 +285,8 @@ struct CustomerState {
     std::string topology_name;
     json        topology_def;
     std::string system_prompt;
-    std::vector<json> history;
+    std::vector<sp::Message> native_history; // Exact answering history, tenant-private.
+    std::vector<json> history;              // Portable final-text observations for the judge.
     std::vector<std::pair<int, std::string>> evolution_log;
     int main_llm_calls = 0;
     int judge_llm_calls = 0;
@@ -306,12 +314,7 @@ int main() {
         return 1;
     }
 
-    neograph::llm::OpenAIProvider::Config cfg;
-    cfg.api_key = api_key;
-    cfg.base_url = "https://openrouter.ai/api";
-    cfg.default_model = "~deepseek/deepseek-v4-flash-latest";
-    cfg.provider_routing = {{"zdr", true}};
-    auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
+    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat");
 
     NodeFactory::instance().register_type("merge",
         [](const std::string& name, const json&, const NodeContext&) {
@@ -320,6 +323,7 @@ int main() {
 
     auto topo_registry = make_topology_registry();
     CompileCache cache;
+    auto reported_usage = std::make_shared<UsageAccumulator>();
 
     // 5 customer 초기화 — 모두 simple topology 로 시작.
     auto patterns = make_patterns();
@@ -355,18 +359,18 @@ int main() {
             ctx.provider = provider;
             ctx.model = "~deepseek/deepseek-v4-flash-latest";
             ctx.instructions = cust.system_prompt;
-            auto engine = cache.get_or_compile(cust.topology_def, ctx);
+            auto engine = cache.get_or_compile(cust.id, cust.topology_def, ctx);
 
-            std::vector<json> input_msgs = cust.history;
-            input_msgs.push_back({{"role", "user"}, {"content", umsg}});
+            auto answering_history = cust.native_history;
+            answering_history.push_back(portable_message({"user", umsg}));
 
             RunConfig rcfg;
+            rcfg.usage = reported_usage;
             rcfg.thread_id = cust.id + "__main";
-            rcfg.input = {{"messages", json::array()}};
-            for (const auto& m : input_msgs)
-                rcfg.input["messages"].push_back(m);
+            rcfg.provider_messages = std::move(answering_history);
 
             auto result = engine->run(rcfg);
+            cust.native_history = std::move(result.native_messages);
             auto out_msgs = result.output["channels"]["messages"]["value"];
             std::string final_reply;
             if (out_msgs.is_array()) {
@@ -381,7 +385,7 @@ int main() {
             cust.main_llm_calls += (cust.topology_name == "simple") ? 1 : 3;
 
             std::string suggested = llm_judge_topology(
-                provider, cust.history, cust.topology_name);
+                provider, cust.history, cust.topology_name, *reported_usage);
             cust.judge_llm_calls += 1;
 
             std::string evolve_marker = "";
@@ -420,6 +424,8 @@ int main() {
     std::cout << "Total main LLM:      " << total_main << "\n";
     std::cout << "Total judge LLM:     " << total_judge << "\n";
     std::cout << "Total LLM calls:     " << (total_main + total_judge) << "\n";
+    std::cout << "Reported usage:      " << usage_to_json(reported_usage->snapshot()).dump() << "\n";
+    std::cout << "Monetary charge:     unknown (not inferred from call counts)\n";
     std::cout << "Wall time:           " << total_s << " s\n";
     std::cout << "Peak RSS:            " << peak_rss_kb() << " KB ("
               << peak_rss_kb() / 1024.0 << " MB)\n";

@@ -17,7 +17,7 @@
  *
  * ## Schema
  *
- * Three tables, all auto-created on first use via `ensure_schema()`:
+ * Checkpoint tables, all auto-created on first use via `ensure_schema()`:
  *
  *   - `neograph_checkpoints` — cp metadata + per-channel version map.
  *     Channel VALUES are NOT stored here (just versions).
@@ -28,7 +28,15 @@
  *     distinct writes, not in steps × channels.
  *   - `neograph_checkpoint_writes` — pending intra-super-step writes,
  *     keyed `(thread_id, parent_checkpoint_id, task_id, seq)`.
+ *   - `neograph_checkpoint_managed_budget_obligations` — monotonic
+ *     thread-level denial obligations, independent of checkpoint lifetime.
+ *   - `neograph_checkpoint_managed_budget_migrations` — persistent markers
+ *     for once-only backfill from retained provider metadata envelopes.
  *
+ *   - `neograph_checkpoint_managed_budget_heads` — one indexed current
+ *     currency head per storage thread, independent of checkpoint lifetime.
+ *   - `neograph_checkpoint_managed_budget_effects` — immutable-generation
+ *     write-ahead effects, separately indexed by thread/generation/effect ID.
  * ## Concurrency — connection pool
  *
  * The store owns a **fixed-size pool** of libpq connections sized by
@@ -198,8 +206,38 @@ public:
     asio::awaitable<void> clear_writes_async(const std::string& thread_id,
                                              const std::string& parent_checkpoint_id) override;
 
-    /// Drop all `neograph_*` tables. Test-only utility — destroys data.
-    /// Useful in test fixtures that want a clean slate per test case.
+    /// Indexed denial obligation; does not authenticate or authorize a bank.
+    bool requires_managed_budget(const std::string& thread_id) override;
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override;
+
+    std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override;
+    asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+        std::string expected_checkpoint_commitment) override;
+    ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override;
+    asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest) override;
+    void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override;
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) override;
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) override;
+    void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease) override;
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease) override;
+
+    /// Drop checkpoint data tables, retaining obligations, migration markers,
+    /// currency heads and write-ahead effects. No bank is reset by this utility.
     void drop_schema();
 
     /// Test helper: count rows in `neograph_checkpoint_blobs`. Lets

@@ -2,6 +2,14 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## Typed provider migration — evidence boundary
+
+The migrated C++ author/repair paths build typed `ProviderRequest` and `sp::Message` histories and consume full immutable `sp::Outcome` results, including every returned native message/part. Text extraction is only for parsing the candidate JSON/Python; it is not used to replace native conversation history. Compiler/parse/initialization feedback is appended after those messages. Semantic repair is bounded by each program's attempt limit (live author: three; Forge server generation: two); it is not transport retry or unlimited evolution.
+
+Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`: no eligible endpoint means failure, not disclosure to another provider. ZDR and historical US endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated native Python server execution has its own local trust boundary; it is not deferred Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
+
+All retained console transcripts, benchmark/fuzz results and live execution claims below are historical evidence, not execution of the typed migration. Coherence gates establish their stated structural/effect-contract properties, not provider transport/privacy correctness or model semantic truth. This documentation update is source alignment only: no build, tests, benchmark or live execution was performed. Python provider bindings remain deferred; protocol clients are unchanged.
+
 > A self-evolving agent that writes its own harness as strict Core JSON, evolves
 > it under the Core compiler, and rewinds its execution through the checkpointer.
 > **Generated. Evolved. Rewound. The Beast remains.**

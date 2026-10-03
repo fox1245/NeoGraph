@@ -1,7 +1,9 @@
 #include "program_chat.h"
 
-#include <neograph/llm/openai_provider.h>
+#include <neograph/provider_outcome_codec.h>
+#include "../../provider_example_support.h"
 #include <neograph/neograph.h>
+#include <sp/config_defaults.h>
 
 #include "chat_store.h"
 #include <openssl/sha.h>
@@ -9,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -21,7 +24,7 @@ namespace evolving_chat {
 using namespace neograph::program;
 using namespace neograph::graph;
 namespace {
-constexpr const char* build_id = "evolving-chat/v5";
+constexpr const char* build_id = "evolving-chat/v6";
 const RunBudget       root_budget{86400000, 2000000, 0, 4, 1200, 10000, 40, 3, 16};
 const RunBudget       assistant_budget{82800000, 1000000, 0, 2, 800, 8000, 30, 2, 12};
 const RunBudget       reviewer_budget{180000, 16000, 0, 1, 4, 12, 0, 0, 0};
@@ -126,7 +129,7 @@ private:
 };
 RegistrySnapshot make_registry(Step::Work work) {
     RegistrySnapshotBuilder b;
-    ExecutableManifest node{{ExecutableKind::Node, "chat.step", "1.4.0", digest("chat.step/v5")},
+    ExecutableManifest node{{ExecutableKind::Node, "chat.step", "1.5.0", digest("chat.step/v6")},
                             EffectMode::Brokered,
                             "evolving-chat:host",
                             {"chat:model"},
@@ -184,6 +187,99 @@ PolicySnapshot make_policy(const AdmissionProfile& profile, const std::string& o
     return std::move(b).build();
 }
 
+class MockProvider final : public neograph::Provider {
+public:
+    MockProvider(sp::descriptor::ValidatedDescriptor descriptor, std::string tenant)
+        : client_(std::make_shared<sp::runtime::Client>(std::move(descriptor))),
+          tenant_(std::make_shared<const std::string>(std::move(tenant))) {}
+    std::string get_name() const override { return "program-chat-mock"; }
+    std::string_view family() const noexcept override { return "openai.chat"; }
+    neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
+        const auto& messages = examples::request_messages(request);
+        const auto payload = json::parse(std::get<sp::Text>(messages.back().parts.at(0)).value);
+        auto tenant = tenant_;
+        return prepare_local(client_, std::move(request),
+            [payload, tenant](const auto&, const auto& observer) -> asio::awaitable<sp::runtime::Result> {
+                const auto role = payload.at("phase").get<std::string>();
+                const auto message = payload.at("task").at("message").get<std::string>();
+                std::string text;
+                if (role == "evolve") {
+                    const bool review = message.find("review") != std::string::npos ||
+                        message.find("검토") != std::string::npos ||
+                        message.find("비교") != std::string::npos;
+                    text = json{{"plan", review ? "review" : "direct"},
+                        {"reason", review ? "The request asks for a review step." :
+                                           "A direct response is sufficient."},
+                        {"confidence", 0.9}}.dump();
+                } else if (role == "critique")
+                    text = "Check assumptions and answer the requested comparison explicitly.";
+                else
+                    text = "[demo / " + *tenant + " / " + role + "] " + message;
+                sp::Completion completion;
+                completion.messages.push_back(examples::message(sp::Role::Assistant, std::move(text)));
+                completion.stop = {sp::StopKind::EndTurn, "stop"};
+                examples::emit_local_events(completion, observer);
+                co_return std::make_shared<const sp::Outcome>(std::move(completion));
+            });
+    }
+private:
+    std::shared_ptr<sp::runtime::Client> client_;
+    std::shared_ptr<const std::string> tenant_;
+};
+
+std::string archive_binding(const std::string& owner, const std::string& call,
+                            const std::string& request_hash, const char* kind) {
+    return json::array({owner, call, request_hash, kind}).dump();
+}
+std::optional<std::uint64_t> final_charge(const sp::Completion& completion) {
+    if (completion.attempt.prior_usage_unknown ||
+        completion.attempt.transport_internal_resends != 0)
+        return {};
+    return neograph::UsageAccumulator::conservative_final_charge(completion.usage);
+}
+void fold_report(json aggregate, const std::optional<sp::Count>& value) {
+    if (aggregate.is_null()) return;
+    if (!value || value->value > std::numeric_limits<std::uint64_t>::max() -
+                                  aggregate.get<std::uint64_t>()) {
+        aggregate = nullptr;
+        return;
+    }
+    aggregate = aggregate.get<std::uint64_t>() + value->value;
+}
+
+sp::descriptor::PolicySnapshot load_host_policy(const Options& options) {
+    const bool loopback = options.allow_loopback && options.base_url.starts_with("http://");
+    if (options.descriptor_policy_file.empty() && !loopback)
+        return sp::descriptor::builtin_policy();
+    std::string source;
+    if (options.descriptor_policy_file.empty()) {
+        source = sp::config_defaults::descriptor_policy_json;
+    } else {
+        std::ifstream file(options.descriptor_policy_file, std::ios::binary);
+        if (!file) throw std::runtime_error("Host descriptor policy file is unreadable");
+        constexpr std::size_t maximum_bytes = 1024 * 1024;
+        source.resize(maximum_bytes + 1);
+        file.read(source.data(), static_cast<std::streamsize>(source.size()));
+        source.resize(static_cast<std::size_t>(file.gcount()));
+        if (file.bad() || source.size() > maximum_bytes)
+            throw std::runtime_error("Host descriptor policy file is unreadable or exceeds 1 MiB");
+    }
+    if (loopback && options.descriptor_policy_file.empty()) {
+        const auto authority_end = options.base_url.find('/', options.base_url.find("://") + 3);
+        const auto origin = options.base_url.substr(0, authority_end);
+        auto policy_json = json::parse(source);
+        for (auto family : policy_json.at("families"))
+            if (family.at("family") == "openai.chat")
+                family["openrouter_origins"].push_back(origin);
+        source = policy_json.dump();
+    }
+    auto admitted = sp::descriptor::load_policy(source, sp::config_defaults::codec_defaults_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
+        throw std::invalid_argument("Host descriptor policy rejected at " +
+            error->pointer + ": " + error->message);
+    return std::get<sp::descriptor::PolicySnapshot>(std::move(admitted));
+}
+
 struct Tenant {
     Options                             options;
     std::string                         owner;
@@ -197,6 +293,7 @@ struct Tenant {
     std::shared_ptr<ProgramCompiler>    compiler;
     std::shared_ptr<ProgramCatalog>     catalog;
     std::shared_ptr<neograph::Provider> provider;
+    std::shared_ptr<sp::NativeArchive> native_archive;
     std::unique_ptr<ProgramRuntime>     runtime;
     std::mutex                          queue_mutex;
     std::condition_variable             queue_cv;
@@ -209,7 +306,8 @@ struct Tenant {
     std::optional<Point>         ready;
     bool                         stopping = false;
 
-    Tenant(Options o, std::string name, std::shared_ptr<ChatStore> backend)
+    Tenant(Options o, std::string name, std::shared_ptr<ChatStore> backend,
+           sp::descriptor::PolicySnapshot descriptor_policy)
         : options(std::move(o)),
           owner("chat:" + options.session + ":" + name),
           store(std::move(backend)),
@@ -221,9 +319,11 @@ struct Tenant {
           compiler(std::make_shared<ProgramCompiler>(registry, ProgramCompilerConfig{build_id})),
           catalog(std::make_shared<ProgramCatalog>(CatalogConfig{
               store->programs, registry, std::make_shared<EngineGenerationCache>(), build_id})) {
+        const auto descriptor_policy_digest = digest(std::string(descriptor_policy->identity()));
         data = store->load(owner);
         if (data.is_null()) {
-            data = {{"tenant", name},
+            data = {{"schema", "neograph.program-chat/v6"},
+                    {"tenant", name},
                     {"revision", 0},
                     {"messages", json::array()},
                     {"requests", json::object()},
@@ -238,6 +338,7 @@ struct Tenant {
                      {{"mode", options.mock ? "mock" : "openrouter"},
                       {"model", options.model},
                       {"base_url", options.base_url},
+                      {"descriptor_policy_sha256", descriptor_policy_digest},
                       {"skill_sha256", digest(options.authoring_guidance)},
                       {"max_output_tokens", options.max_output_tokens},
                       {"provider_timeout_seconds", options.provider_timeout_seconds},
@@ -252,12 +353,16 @@ struct Tenant {
                       {"tokens", 0},
                       {"prompt_tokens", 0},
                       {"completion_tokens", 0},
+                      {"reported_total_tokens", 0},
                       {"uncertain_calls", 0}}}};
             store->save(owner, data);
         }
+        if (data.value("schema", "") != "neograph.program-chat/v6")
+            throw std::runtime_error("Incompatible legacy chat artifacts; select a new --session");
         const json settings{{"mode", options.mock ? "mock" : "openrouter"},
                             {"model", options.model},
                             {"base_url", options.base_url},
+                            {"descriptor_policy_sha256", descriptor_policy_digest},
                             {"skill_sha256", digest(options.authoring_guidance)},
                             {"max_output_tokens", options.max_output_tokens},
                             {"provider_timeout_seconds", options.provider_timeout_seconds},
@@ -269,7 +374,8 @@ struct Tenant {
         bool uncertain = false;
         for (const auto& [id, call] : data["calls"].items()) {
             if (call.at("status") != "pending") continue;
-            data["calls"][id]["status"]      = "uncertain";
+            data["calls"][id]["status"]      = "UnknownHold";
+            data["calls"][id]["settlement"]  = "UnknownHold";
             data["usage"]["uncertain_calls"] = data["usage"]["uncertain_calls"].get<unsigned>() + 1;
             uncertain                        = true;
         }
@@ -277,17 +383,27 @@ struct Tenant {
             data["status"] = "attention_required";
             save();
         }
-        if (!options.mock) {
-            if (options.api_key.empty() || options.model.empty())
-                throw std::runtime_error("Set OPENROUTER_API_KEY and OPENROUTER_MODEL for --live");
-            neograph::llm::OpenAIProvider::Config config;
-            config.api_key                 = options.api_key;
-            config.base_url                = options.base_url;
-            config.default_model           = options.model;
-            config.provider_routing        = json{{"zdr", true}};
-            config.timeout_seconds         = static_cast<int>(options.provider_timeout_seconds);
-            config.allow_insecure_loopback = options.allow_loopback;
-            provider                       = neograph::llm::OpenAIProvider::create_shared(config);
+        if (!options.mock && (options.api_key.empty() || options.model.empty()))
+            throw std::runtime_error("Set OPENROUTER_API_KEY and OPENROUTER_MODEL for --live");
+        if (options.base_url.starts_with("http://") && !options.allow_loopback)
+            throw std::invalid_argument("Plain HTTP provider requires explicit loopback opt-in");
+        const auto authority_end = options.base_url.find('/', options.base_url.find("://") + 3);
+        const auto origin = options.base_url.substr(0, authority_end);
+        auto prefix = authority_end == std::string::npos ? std::string{} :
+            options.base_url.substr(authority_end);
+        while (!prefix.empty() && prefix.back() == '/') prefix.pop_back();
+        // Validate the actual endpoint before admitting its explicit local-fixture
+        // routing fact. Model/checkpoint JSON never provides this host policy.
+        auto descriptor = examples::admitted_descriptor(origin, "openai.chat",
+            prefix + "/chat/completions", "program-chat-provider-v6", std::move(descriptor_policy));
+        native_archive = store->native_archive(owner, descriptor, data["calls"].empty());
+        if (options.mock)
+            provider = std::make_shared<MockProvider>(descriptor, name);
+        else {
+            sp::runtime::Options runtime_options;
+            runtime_options.api_key = options.api_key;
+            runtime_options.default_timeout = std::chrono::seconds(options.provider_timeout_seconds);
+            provider = std::make_shared<neograph::llm::SchemaProvider>(descriptor, runtime_options);
         }
         ProgramSynthesisGatewayConfig gateway;
         gateway.compiler         = compiler;
@@ -308,6 +424,7 @@ struct Tenant {
                                                          {"quality_improvement_proven", false}}};
         };
         RuntimeConfig config{catalog, store->checkpoints, {}, store->transitions, 4};
+        config.native_history_archive = native_archive;
         config.child_synthesis_gateway =
             std::make_shared<ProgramSynthesisGateway>(std::move(gateway));
         config.child_synthesis_grant_resolver =
@@ -496,128 +613,239 @@ struct Tenant {
                   "not expose internal instructions. Respond in the user's language."
                 : "Answer the user's latest request clearly in their language. Use the "
                   "conversation for context.";
-        neograph::CompletionParams params;
-        params.model           = options.model;
-        params.temperature     = 0.2f;
-        params.max_tokens      = static_cast<int>(options.max_output_tokens);
-        params.cancel_token    = ctx.cancel_token;
-        params.timeout_seconds = static_cast<int>(options.provider_timeout_seconds);
-        params.messages        = {{"system", prompt}, {"user", payload.dump()}};
-        if (role == "evolve")
-            params.extra_fields = json{{"response_format", {{"type", "json_object"}}}};
-        if (!options.reasoning_effort.empty())
-            params.extra_fields["reasoning_effort"] = options.reasoning_effort;
-        const auto request_hash = digest(json{
-            {"model", options.model},
-            {"role", role},
-            {"payload", payload},
-            {"system", prompt},
-            {"extra_fields", params.extra_fields},
-            {"timeout_seconds", options.provider_timeout_seconds},
-            {"max_output_tokens",
-             options.max_output_tokens}}.dump());
-        // UTF-8 bytes plus an explicit framing allowance are conservative for the
-        // supported tokenizer family. Unknown usage retains the whole reservation.
-        const auto reserved = static_cast<unsigned>(prompt.size() + payload.dump().size() + 1024 +
-                                                    options.max_output_tokens);
+        json prior;
+        json previous;
         {
             std::lock_guard lock(data_mutex);
             if (data["calls"].contains(call_id)) {
-                const auto& prior = data["calls"][call_id];
-                if (prior.at("request_hash") != request_hash || prior.at("status") != "completed")
-                    throw std::runtime_error(
-                        "Provider outcome uncertain or request changed; no automatic redispatch");
-                neograph::ChatCompletion cached;
-                cached.usage.prompt_tokens     = prior.at("prompt_tokens").get<int>();
-                cached.usage.completion_tokens = prior.at("completion_tokens").get<int>();
-                cached.usage.total_tokens      = prior.at("charged_tokens").get<int>();
-                record_usage(ctx, cached);
-                return prior.at("output");
-            }
-            auto usage = data["usage"];
-            if (usage.at("calls").get<unsigned>() >= data["limits"]["calls"].get<unsigned>() ||
-                reserved > data["limits"]["tokens"].get<unsigned>() -
-                               std::min(data["limits"]["tokens"].get<unsigned>(),
-                                        usage.at("tokens").get<unsigned>()))
-                throw std::runtime_error("Session model budget exhausted");
-            usage["calls"]         = usage["calls"].get<unsigned>() + 1;
-            usage["tokens"]        = usage["tokens"].get<unsigned>() + reserved;
-            data["calls"][call_id] = {{"status", "pending"},
-                                      {"request_hash", request_hash},
-                                      {"reserved_tokens", reserved}};
-            save();  // Debit BEFORE an external effect. Never retry a pending call.
-        }
-        neograph::ChatCompletion completion;
-        json                     output;
-        try {
-            if (options.mock) {
-                if (role == "evolve") {
-                    const auto message = task.at("message").get<std::string>();
-                    const bool review  = message.find("review") != std::string::npos ||
-                                        message.find("검토") != std::string::npos ||
-                                        message.find("비교") != std::string::npos;
-                    output = {{"plan", review ? "review" : "direct"},
-                              {"reason", review ? "The request asks for a review step."
-                                                : "A direct response is sufficient."},
-                              {"confidence", 0.9}};
-                } else if (role == "critique")
-                    output = "Check assumptions and answer the requested comparison explicitly.";
-                else
-                    output = "[demo / " + data.at("tenant").get<std::string>() + " / " + role +
-                             "] " + task.at("message").get<std::string>();
-                completion.message = {
-                    "assistant", output.is_string() ? output.get<std::string>() : output.dump()};
-                completion.usage = {80, 40, 120};
+                prior = data["calls"].at(call_id);
+                if (prior.at("status") != "completed")
+                    throw std::runtime_error("Provider outcome UnknownHold; no automatic redispatch");
             } else {
-                completion = provider->complete(params);
-                if (completion.message.content.size() > 16384)
-                    throw std::runtime_error("Provider response too large");
-                if (completion.message.content.empty() && role != "evolve")
-                    throw std::runtime_error("Provider returned no answer");
-                if (role == "evolve") {
-                    try {
-                        output = json::parse(completion.message.content);
-                    } catch (const json::parse_error&) {
-                        output = {{"invalid", true},
-                                  {"reason", "Model proposal was not JSON"},
-                                  {"stop_reason", completion.stop_reason}};
+                unsigned latest = 0;
+                for (const auto& [id, call] : data["calls"].items()) {
+                    const auto turn = call.at("turn").get<unsigned>();
+                    if (call.at("role") == role && turn < task.at("turn").get<unsigned>() &&
+                        turn > latest) {
+                        if (call.at("status") != "completed")
+                            throw std::runtime_error("Role history UnknownHold; no redispatch");
+                        latest = turn;
+                        previous = call;
                     }
-                } else
-                    output = completion.message.content;
+                }
             }
-            const auto& u     = completion.usage;
-            const auto  total = std::max<std::int64_t>(
-                u.total_tokens, static_cast<std::int64_t>(u.prompt_tokens) + u.completion_tokens);
-            if (u.prompt_tokens < 0 || u.completion_tokens < 0 || u.total_tokens < 0 ||
-                total > std::numeric_limits<int>::max())
-                throw std::runtime_error("Provider returned invalid usage; reservation retained");
-            const auto     actual         = static_cast<unsigned>(total);
-            const unsigned charged        = actual ? actual : reserved;
-            completion.usage.total_tokens = static_cast<int>(charged);
+        }
+        std::vector<sp::Message> messages;
+        auto restore = [&](const json& call, const char* kind, const char* field) {
+            auto result = native_archive->load(call.at(field).get<std::string>(),
+                archive_binding(owner, call.at("call_id").get<std::string>(),
+                    call.at("request_hash").get<std::string>(), kind));
+            if (auto* history = std::get_if<std::vector<sp::Message>>(&result))
+                return std::move(*history);
+            throw std::runtime_error("Role native history cannot be authenticated");
+        };
+        if (!prior.is_null()) {
+            messages = restore(prior, "input", "request_history_ref");
+            if (messages.empty() || messages.back().role != sp::Role::User ||
+                messages.back().parts.size() != 1 ||
+                !std::holds_alternative<sp::Text>(messages.back().parts.front()) ||
+                std::get<sp::Text>(messages.back().parts.front()).value != payload.dump())
+                throw std::runtime_error("Replay payload differs from authenticated request");
+        } else {
+            if (!previous.is_null())
+                messages = restore(previous, "continuation", "continuation_ref");
+            else
+                messages.push_back(examples::message(sp::Role::System, prompt));
+            messages.push_back(examples::message(sp::Role::User, payload.dump()));
+        }
+        neograph::ProviderControls controls;
+        controls.temperature = 0.2;
+        controls.max_output_tokens = options.max_output_tokens;
+        if (!options.reasoning_effort.empty()) controls.reasoning_effort = options.reasoning_effort;
+        auto request = neograph::make_provider_request(*provider,
+            options.model.empty() ? "program-chat-mock" : options.model, messages, {}, controls);
+        auto& chat_request = std::get<sp::chat::Request>(request.payload);
+        sp::OpenRouterRouting routing;
+        routing.zdr = true;
+        chat_request.provider = std::move(routing);
+        if (role == "evolve") chat_request.response_format = sp::ResponseFormat{};
+        request.cancel_token = ctx.cancel_token;
+        request.on_event = ctx.on_provider_event;
+        request.options.deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(options.provider_timeout_seconds);
+        if (ctx.deadline && *ctx.deadline < *request.options.deadline)
+            request.options.deadline = ctx.deadline;
+        // The durable role ledger admits one external attempt. Unknown delivery
+        // remains a hold, never an SDK-managed retry hidden behind that receipt.
+        sp::runtime::RetryPolicy retry;
+        retry.enabled = false;
+        retry.max_attempts = 1;
+        request.options.retry = retry;
+        auto prepared = provider->prepare(std::move(request));
+        if (!prepared.valid())
+            throw std::runtime_error("Provider rejected preparation before budget reservation");
+        const auto request_hash = neograph::Provider::request_digest(prepared);
+        const auto bound = neograph::Provider::conservative_token_upper_bound(prepared);
+        if (!bound)
+            throw std::runtime_error("Provider model limits are unknown; cannot reserve a bounded call");
+        const auto reserved = *bound;
+        const auto outcome_binding = archive_binding(owner, call_id, request_hash, "outcome");
+        auto account = [&](const sp::Outcome& outcome, bool known_delivery) {
+            if (!ctx.usage) return;
+            const auto ceiling = ctx.model_token_budget ? ctx.model_token_budget :
+                std::numeric_limits<std::uint64_t>::max();
+            if (!ctx.usage->try_reserve(reserved, ceiling))
+                throw std::runtime_error("Program model budget exhausted");
+            if (known_delivery)
+                ctx.usage->settle_reservation(reserved, neograph::outcome_usage(outcome));
+            else
+                ctx.usage->observe(neograph::outcome_usage(outcome));
+        };
+        if (!prior.is_null()) {
+            if (prior.at("request_hash") != request_hash ||
+                prior.at("reserved_tokens").get<std::uint64_t>() != reserved)
+                throw std::runtime_error("Replay prepared request digest changed; no redispatch");
+            const auto cached = neograph::provider_codec::decode_outcome(
+                prior.at("outcome"), native_archive, outcome_binding);
+            if (!std::holds_alternative<sp::Completion>(*cached))
+                throw std::runtime_error("Stored call is not a completed provider outcome");
+            if (ctx.provider_outcomes) ctx.provider_outcomes->add(cached);
+            const auto charge = final_charge(std::get<sp::Completion>(*cached));
+            if (prior.at("charged_tokens") != charge.value_or(reserved) ||
+                prior.at("settlement") != (charge ? "Settled" : "UnknownHold"))
+                throw std::runtime_error("Replay settlement differs from immutable report");
+            account(*cached, charge.has_value());
+            if (charge && *charge > reserved && ctx.budget_exhausted)
+                ctx.budget_exhausted->store(true);
+            const auto text = neograph::outcome_text(*cached);
+            json output = text;
+            if (role == "evolve") {
+                try { output = json::parse(text); }
+                catch (const json::parse_error&) {
+                    output = {{"invalid", true}, {"reason", "Model proposal was not JSON"},
+                        {"stop_reason", std::get<sp::Completion>(*cached).stop.raw}};
+                }
+            }
+            if (output != prior.at("output"))
+                throw std::runtime_error("Replay output differs from immutable native outcome");
+            return output;
+        }
+        auto save_history = [&](const std::vector<sp::Message>& history, const char* kind) {
+            auto result = native_archive->save(history,
+                archive_binding(owner, call_id, request_hash, kind));
+            if (auto* reference = std::get_if<std::string>(&result)) return std::move(*reference);
+            throw std::runtime_error("Cannot persist trusted role native history");
+        };
+        const auto input_reference = save_history(messages, "input");
+        {
+            std::lock_guard lock(data_mutex);
+            auto usage = data["usage"];
+            const auto consumed = usage.at("tokens").get<std::uint64_t>();
+            const auto limit = data["limits"]["tokens"].get<std::uint64_t>();
+            if (usage.at("calls").get<unsigned>() >= data["limits"]["calls"].get<unsigned>() ||
+                consumed > limit || reserved > limit - consumed)
+                throw std::runtime_error("Session model budget exhausted");
+            if (ctx.usage && !ctx.usage->try_reserve(reserved,
+                    ctx.model_token_budget ? ctx.model_token_budget :
+                        std::numeric_limits<std::uint64_t>::max()))
+                throw std::runtime_error("Program model budget exhausted");
+            usage["calls"] = usage["calls"].get<unsigned>() + 1;
+            usage["tokens"] = consumed + reserved;
+            data["calls"][call_id] = {{"schema", "neograph.program-chat-call/v6"},
+                {"status", "pending"}, {"settlement", "pending"}, {"call_id", call_id},
+                {"turn", task.at("turn")}, {"role", role}, {"request_hash", request_hash},
+                {"request_history_ref", input_reference}, {"reserved_tokens", reserved},
+                {"charged_tokens", reserved}};
+            try {
+                save();  // Exact preparation and durable debit precede the external effect.
+            } catch (...) {
+                if (ctx.usage) ctx.usage->release_reservation(reserved);
+                throw;
+            }
+        }
+        bool reported = false;
+        sp::runtime::Result outcome;
+        std::exception_ptr observer_failure;
+        try {
+            try {
+                outcome = provider->dispatch(std::move(prepared));
+            } catch (const neograph::ProviderObserverError& error) {
+                outcome = error.outcome();
+                observer_failure = std::current_exception();
+            }
+            if (!outcome) throw std::runtime_error("Provider returned no owned outcome");
+            if (ctx.provider_outcomes) ctx.provider_outcomes->add(outcome);
+            const auto encoded = neograph::provider_codec::encode_outcome(
+                *outcome, native_archive, outcome_binding);
             {
                 std::lock_guard lock(data_mutex);
-                auto            usage = data["usage"];
-                usage["tokens"]       = usage["tokens"].get<unsigned>() - reserved + charged;
-                usage["prompt_tokens"] =
-                    usage["prompt_tokens"].get<unsigned>() + std::max(0, u.prompt_tokens);
-                usage["completion_tokens"] =
-                    usage["completion_tokens"].get<unsigned>() + std::max(0, u.completion_tokens);
-                data["calls"][call_id] = {{"status", "completed"},
-                                          {"output", output},
-                                          {"request_hash", request_hash},
-                                          {"reserved_tokens", reserved},
-                                          {"charged_tokens", charged},
-                                          {"prompt_tokens", std::max(0, u.prompt_tokens)},
-                                          {"completion_tokens", std::max(0, u.completion_tokens)},
-                                          {"usage_known", actual != 0}};
+                data["calls"][call_id]["outcome"] = encoded;
+                fold_report(data["usage"]["prompt_tokens"], neograph::outcome_usage(*outcome).input_total);
+                fold_report(data["usage"]["completion_tokens"], neograph::outcome_usage(*outcome).output_total);
+                fold_report(data["usage"]["reported_total_tokens"],
+                    neograph::outcome_usage(*outcome).provider_reported_total);
                 save();
             }
-            record_usage(ctx, completion);
+            const auto* completion = std::get_if<sp::Completion>(outcome.get());
+            if (!completion) {
+                if (ctx.usage) ctx.usage->observe(neograph::outcome_usage(*outcome));
+                reported = true;
+                if (observer_failure) std::rethrow_exception(observer_failure);
+                throw std::runtime_error("Provider failed; full partial outcome retained");
+            }
+            const auto text = neograph::outcome_text(*outcome);
+            if (text.size() > 16384 || (text.empty() && role != "evolve")) {
+                if (ctx.usage) ctx.usage->observe(completion->usage);
+                reported = true;
+                throw std::runtime_error("Provider answer violates bounded output contract");
+            }
+            json output = text;
+            if (role == "evolve") {
+                try { output = json::parse(text); }
+                catch (const json::parse_error&) {
+                    output = {{"invalid", true}, {"reason", "Model proposal was not JSON"},
+                        {"stop_reason", completion->stop.raw}};
+                }
+            }
+            messages.insert(messages.end(), completion->messages.begin(), completion->messages.end());
+            const auto continuation_reference = save_history(messages, "continuation");
+            const auto charge = final_charge(*completion);
+            {
+                std::lock_guard lock(data_mutex);
+                auto call = data["calls"][call_id];
+                call["status"] = "completed";
+                call["settlement"] = charge ? "Settled" : "UnknownHold";
+                call["charged_tokens"] = charge.value_or(reserved);
+                call["output"] = output;
+                call["continuation_ref"] = continuation_reference;
+                const auto other_charges = data["usage"]["tokens"].get<std::uint64_t>() - reserved;
+                const auto debit = charge.value_or(reserved);
+                data["usage"]["tokens"] = debit > std::numeric_limits<std::uint64_t>::max() - other_charges
+                    ? std::numeric_limits<std::uint64_t>::max() : other_charges + debit;
+                if (!charge)
+                    data["usage"]["uncertain_calls"] =
+                        data["usage"]["uncertain_calls"].get<unsigned>() + 1;
+                save();
+            }
+            if (ctx.usage) {
+                if (charge) ctx.usage->settle_reservation(reserved, completion->usage);
+                else ctx.usage->observe(completion->usage);
+            }
+            if (charge && *charge > reserved && ctx.budget_exhausted)
+                ctx.budget_exhausted->store(true);
+            reported = true;
+            if (observer_failure) std::rethrow_exception(observer_failure);
             return output;
         } catch (...) {
             std::lock_guard lock(data_mutex);
-            data["calls"][call_id]["status"] = "uncertain";
-            data["usage"]["uncertain_calls"] = data["usage"]["uncertain_calls"].get<unsigned>() + 1;
+            auto call = data["calls"][call_id];
+            if (call.at("settlement") == "pending") {
+                call["status"] = "UnknownHold";
+                call["settlement"] = "UnknownHold";
+                data["usage"]["uncertain_calls"] = data["usage"]["uncertain_calls"].get<unsigned>() + 1;
+            }
+            if (!reported && ctx.usage && outcome)
+                ctx.usage->observe(neograph::outcome_usage(*outcome));
             save();
             throw;
         }
@@ -880,8 +1108,8 @@ struct Chat::Impl {
     explicit Impl(Options o) : store(std::make_shared<ChatStore>(o)) {
         if (o.session.empty() || o.session.size() > 64)
             throw std::invalid_argument("session must be 1..64 bytes");
-        if (!o.max_output_tokens || o.max_output_tokens > 8192)
-            throw std::invalid_argument("max-output-tokens must be 1..8192");
+        if (!o.max_output_tokens)
+            throw std::invalid_argument("max-output-tokens must be positive");
         if (!o.provider_timeout_seconds || o.provider_timeout_seconds > 120)
             throw std::invalid_argument("provider-timeout-seconds must be 1..120");
         if (!o.reasoning_effort.empty() && o.reasoning_effort != "none" &&
@@ -894,8 +1122,9 @@ struct Chat::Impl {
                 read_guidance(CHAT_SKILL_PATH) + "\n\n" + read_guidance(CHAT_SKILL_MODE_PATH);
         if (o.authoring_guidance.size() > 32768)
             throw std::invalid_argument("Authoring guidance exceeds 32 KiB");
+        const auto descriptor_policy = load_host_policy(o);
         for (const auto& name : {"alice", "bob"})
-            tenants.emplace(name, std::make_unique<Tenant>(o, name, store));
+            tenants.emplace(name, std::make_unique<Tenant>(o, name, store, descriptor_policy));
     }
     Tenant& get(const std::string& name) const {
         auto it = tenants.find(name);

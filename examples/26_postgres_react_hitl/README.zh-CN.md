@@ -8,7 +8,7 @@
 1. **`PostgresCheckpointStore`** — 在真实 PostgreSQL 中实现持久化检查点，并带有 channel-blob 去重。
 2. **基于 NodeInterrupt 的 HITL** — 深度研究图在生成报告后暂停，让人类进行审核，然后恢复执行，要么批准（→ 结束），要么提供反馈（→ 进入另一轮研究）。
 
-该演示故意采用**流程不连续**设计：二进制文件在生成报告后退出，因此当您`resume`时，您是一个全新进程，必须从PG重新加载所有内容。这正是其要点——证明检查点确实跨过了进程边界。
+此演示跨越进程边界。新的`resume`进程必须恢复PG状态及所有者私有native历史；仅PG不足以恢复typed native续接。
 
 ## 场景
 
@@ -92,6 +92,8 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 
 ### 一次真实运行中的参考数字
 
+这些是切换前运行的历史数字。上方输出也是历史/示意记录，不是当前typed provider迁移的执行验证。
+
 在上述多模态 RAG 演示上完成一轮 运行-恢复-恢复 的循环（2 轮监督者 × 每轮 2 个研究者，固定使用通过 OpenRouter 访问的 DeepSeek），产生的 PG 数字如下：
 
 | 指标                      | 值      | 备注 |
@@ -116,12 +118,19 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. 运行演示（参见上方“场景”）。第一个`docker compose run`会触发`agent`镜像构建（在预热机器上约需1分钟）。
+3. 使用BuildKit和Docker Compose >= 2.17，将`SCHEMAPROVIDER_SOURCE`设为实际SchemaProvider源码路径（默认`../../../SchemaProvider`，相对此目录）。Dockerfile先从named additional context安装`SchemaProvider::runtime`。
+4. 固定`.env`中的`NEOGRAPH_NATIVE_ARCHIVE_OWNER`，仅初始化一次：
+   ```
+   docker compose run --rm agent init-archive
+   ```
+5. 运行演示。需要有效OpenRouter/Crawl4AI凭据、网络及provider余额；研究/反馈轮次产生模型费用。不承诺固定成本或当前运行成功。
+
+一起保留`pgdata`、`native-history`和`native-keys`。历史和密钥使用独立私有卷父目录。恢复要求相同owner、兼容provider descriptor、原始密钥和archive记录；不要为恢复旧线程重新生成密钥。这是经过认证的所有者私有主机保管，**不是加密或provider issuer证明**。也要保护PG、备份、提示、反馈、报告和`.env`。不要将raw native记录或archive/密钥内容输出到公共日志。CLI会打印查询、反馈和报告，请使用私有终端/日志。
 
 完成后：
 ```
-docker compose down       # stop services, keep PG volume
-docker compose down -v    # drop the PG volume too
+docker compose down       # 保留PG、native-history、native-keys
+docker compose down -v    # 删除三个卷；旧native恢复能力丢失
 ```
 
 ## 直接运行二进制文件（agent不使用docker-compose）
@@ -129,9 +138,15 @@ docker compose down -v    # drop the PG volume too
 您也可以在宿主机上构建二进制文件，并将其指向docker-compose管理的Postgres + Crawl4AI：
 
 ```
-cmake -B build -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_BUILD_POSTGRES=ON -DNEOGRAPH_BUILD_TESTS=OFF \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
+# 私密保管工作目录的.env并保持archive路径稳定
+mkdir -m 700 .native-keys
+./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
 ./build/example_postgres_react_hitl resume <thread_id> "feedback"
 ./build/example_postgres_react_hitl status <thread_id>
@@ -179,7 +194,8 @@ SELECT blob_data::text FROM neograph_checkpoint_blobs
 - HITL门控构建在Deep Research图内部，位于`DeepResearchConfig::enable_human_review`标志之后（默认关闭，因此示例25不受影响）。启用后，一个`HumanReviewNode`位于`final_report`和`__end__`之间。
 - 该节点在首次执行时抛出`NodeInterrupt`。引擎捕获该异常，在阶段`NodeInterrupt`保存检查点，然后重新抛出给调用方。恢复时，引擎以用户回复写入`messages`通道的方式重新进入同一节点。
 - 该节点区分“批准”（→ Command(__end__)）与反馈（→ Command(supervisor)，反馈追加到 `supervisor_messages` 并重置迭代计数器）。两条路径均干净地结束运行，因此 PG 始终具有一致的最近检查点。
-- 该场景的所有三个步骤（首次运行、带反馈的恢复、带批准的恢复）均跨越进程边界，引擎状态在每次调用之间完全驻留于 PG 中。
+- PG保存portable图状态；native恢复还需要受保护的archive及原始密钥。
+- C++使用typed `ProviderRequest`/事件和完整不可变`sp::Outcome`。报告文本是projection，不是native replay权限。本指南记录源码迁移，不是新的构建/测试/live验证。
 
 ## 为什么没有前端？
 

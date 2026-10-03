@@ -1,6 +1,20 @@
 <!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ja source_sha256=4d18b0fee54089948ca59063eb6177567e1b5db09a87123125e808bee6889add -->
 # NeoGraph + OpenRouter（ピン留めされた DeepSeek）
 
+## 過去の Python recipe — binding 移行は延期
+
+このページは移行前 Python provider API と測定の記録です。以下のコードは
+**現在の型付き C++ 契約と互換性がなく、現在の実行手順ではありません**。
+Python provider binding、subclass trampoline、BYO/OpenRouter adapter は未移植・未検証です。
+C++ 移行から Python 互換性を推論しないでください。現在の C++ は型付き
+`ProviderRequest` を所有し、一度 prepare し、完全な不変 `sp::Outcome`、native history、
+nullable usage を保持します。以下の `complete(params)`/`ChatCompletion` は過去の API です。
+欠落 usage は zero ではなく、最終呼出 usage は tool loop 全体の使用量ではありません。
+durable receipt の背後で SDK retry による隠れた再送を作らず、鍵、prompt、native payload は非公開に保ちます。
+
+## 移行前の手順と観測記録
+
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 OpenRouter のピン留めされた `~deepseek/deepseek-v4-flash-latest` モデルに対して NeoGraph グラフを実行します。このクックブックは、同じ API キー、モデル、および明示的なゼロデータ保持（ZDR）プロバイダー設定を持つ、等価な2つのプロバイダーサーフェスを示します:

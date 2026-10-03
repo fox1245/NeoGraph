@@ -3,6 +3,14 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+## 型付きプロバイダー移行 — ソースの状態
+
+C++ルーター・合成器・専門家フィクスチャは型付き `ProviderRequest`、`sp::Message`、`sp::Event` と完全な不変 `sp::Outcome` (`sp::runtime::Result`) を使用し、旧文字列応答APIではない。`src/provider_support.h` のJarvis/coder/researcher mockは固定ルーターJSON、ユーザーテキストecho、明示的な架空の研究応答を返す。キーやネットワーク提供者は不要だが、本物の研究・推論ではない。以下の既存設定/プロファイルのパスを、この文書変更で作成・修正することはない。
+
+ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
+
+`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL/ベンチのプロトコルドライバーは不変で、型付きPythonプロバイダーバインディングは延期。以下の時間・実行主張はすべて過去の記録で、移行したC++の実行証拠ではない。今回はソースとの整合のみで、ビルド・ベンチ・音声/ライブ実行はしていない。
+
 NeoGraph(C++モックビルド)とLangGraph(Pythonツイン `langgraph_twin.py`)の同一のトポロジー(mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)を反映し、同一制約の`--cpus=2 --memory=2g`コンテナ内で計測します。
 
 ```bash
@@ -63,7 +71,7 @@ E2Eの「分散が差分を覆い尽くす」問題をプロキシ境界計測�
 
 ## ストリーミングTTFTラウンド（2026-07-05）
 
-現代のLLMサービスはすべてストリーミングを行うため、ベンチマークの一致を取る：両方のsynth呼び出しをストリーミングに変更し（C++ `invoke(p, on_chunk)`、LangGraph `SYNTH_LLM.stream()`）、ドライバは`[jarvis:ttft]`マーカーで**ターン送信 → 最初のsynthトークン**までの時間を計測する。nginxは`proxy_buffering off`でSSEを通過させるため、`$upstream_header_time`が実際の最初のバイトとなる。ラウンド分割の推測を排除するため、ラウンドごとにログを分ける（mv + `nginx -s reopen`）。
+現代のLLMサービスはすべてストリーミングを行うため、ベンチマークの一致を取る：両方のsynth呼び出しをストリーミングに変更し（C++ `ProviderMode::Stream` / `sp::Event`、LangGraph `SYNTH_LLM.stream()`）、ドライバは`[jarvis:ttft]`マーカーで**ターン送信 → 最初のsynthトークン**までの時間を計測する。nginxは`proxy_buffering off`でSSEを通過させるため、`$upstream_header_time`が実際の最初のバイトとなる。ラウンド分割の推測を排除するため、ラウンドごとにログを分ける（mv + `nginx -s reopen`）。
 
 |  | 知覚 TTFT p50 | 完了時間 p50 | ターン毎の上流送信平均 (Avg/turn upstream) |
 |---|---|---|---|

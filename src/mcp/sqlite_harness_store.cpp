@@ -1596,7 +1596,7 @@ public:
                 return program::ProgramTransitionPublishResult::Conflict;
             }
             if (next_lease &&
-                !program::does_program_execution_lease_bind(*next_lease, publication)) {
+                !program::does_program_execution_lease_bind(*next_lease, publication, expected_lease)) {
                 impl_->exec("ROLLBACK;");
                 return program::ProgramTransitionPublishResult::Conflict;
             }
@@ -1928,6 +1928,42 @@ public:
                 impl_->exec("ROLLBACK;");
                 return program::ProgramTransitionPublishResult::Conflict;
             }
+            if (publication.recorded_replay_source) {
+                const auto& receipt = *publication.recorded_replay_source;
+                Statement source_lineage_query(
+                    impl_->db,
+                    "SELECT head_id, record_json FROM neograph_harness_program_lineage_heads "
+                    "WHERE owner_scope=? AND lineage_id=?");
+                source_lineage_query.bind_text(1, std::string(owner_scope));
+                source_lineage_query.bind_text(
+                    2, publication.recorded_replay_source_lineage->lineage_id());
+                if (exists || source_lineage_query.step() != SQLITE_ROW) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                const auto lineage = program::ProgramRunLineage::parse(source_lineage_query.text(1));
+                Statement source_run_query(
+                    impl_->db, "SELECT record_json FROM neograph_harness_runs "
+                               "WHERE run_id=? AND owner_scope=?");
+                source_run_query.bind_text(1, program_storage_run_id(owner_scope, receipt.run_id));
+                source_run_query.bind_text(2, std::string(owner_scope));
+                if (source_run_query.step() != SQLITE_ROW) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+                const auto source = HarnessProgramRunRecord::parse(
+                    json::parse(source_run_query.text(0))).run_record();
+                const auto contexts = load_context_publications_locked(owner_scope, receipt.run_id, 0);
+                if (lineage.id() != source_lineage_query.text(0) ||
+                    has_blocking_hook_obligation(load_hook_outbox_entries_locked(
+                        owner_scope, receipt.run_id)) ||
+                    !program::is_valid_program_runtime_context_clone(
+                        contexts, publication.run_record, publication.context_publication) ||
+                    !program::is_valid_program_recorded_replay_allocation(publication, lineage, source)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            }
 
             const auto new_terminal = publication.run_record.terminal_result();
             const bool publishes_terminal_event =
@@ -2244,6 +2280,28 @@ public:
                     4, publication.fork_source_lineage->serialize_canonical());
                 if (insert_source_history.step() != SQLITE_DONE)
                     throw_sqlite_error(impl_->db, "Program fork source history insert failed");
+            }
+            if (publication.recorded_replay_source_lineage) {
+                const auto& debit = *publication.recorded_replay_source_lineage;
+                Statement update_source_lineage(
+                    impl_->db, "UPDATE neograph_harness_program_lineage_heads "
+                               "SET head_id=?, record_json=? WHERE owner_scope=? AND lineage_id=? AND head_id=?");
+                update_source_lineage.bind_text(1, debit.id());
+                update_source_lineage.bind_text(2, debit.serialize_canonical());
+                update_source_lineage.bind_text(3, std::string(owner_scope));
+                update_source_lineage.bind_text(4, debit.lineage_id());
+                update_source_lineage.bind_text(5, publication.recorded_replay_source->lineage_head_id);
+                if (update_source_lineage.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1)
+                    throw_sqlite_error(impl_->db, "Recorded replay source lineage CAS failed");
+                Statement insert_source_history(
+                    impl_->db, "INSERT INTO neograph_harness_program_lineage_history "
+                               "(owner_scope, lineage_id, head_id, record_json) VALUES(?, ?, ?, ?)");
+                insert_source_history.bind_text(1, std::string(owner_scope));
+                insert_source_history.bind_text(2, debit.lineage_id());
+                insert_source_history.bind_text(3, debit.id());
+                insert_source_history.bind_text(4, debit.serialize_canonical());
+                if (insert_source_history.step() != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Recorded replay source lineage history insert failed");
             }
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
 
