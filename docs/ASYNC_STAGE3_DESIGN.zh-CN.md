@@ -1,9 +1,13 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=zh-CN source_sha256=8fdd608254fb2607289f13a59d7badf7ae1c4fdc843589df101c684e1ba1b88b -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=zh-CN source_sha256=d6d1575f38204de726d4313f8b7a1314ed2fe236484934f7f5be1fb0b4bcf7aa -->
 # 第三阶段 — 基于 asio 的完整异步重构设计
 
-> **历史设计记录。** 本文记录 2026-04-19 提出的第三阶段重构方案，
-> 并非当前 API 文档。当前行为请参阅 [API narrative tour](reference-en.md)
-> 和已安装的头文件。
+> **已归档、已被取代的设计提案。** 本文记录 2026-04-19 的第三阶段提案，
+> 不是当前 API 指南，也不能证明所有计划 gate 已完成。这里的
+> `Provider::complete` / `complete_async` 对和 `OpenAIProvider` 已在类型化
+> provider 迁移中删除。当前 provider 拥有类型化请求，只 prepare 一次，再
+> dispatch 已准备的调用。请参阅 [API narrative tour](reference-zh-CN.md)、
+> [迁移指南](migration-v0.4-to-v1.0.zh-CN.md)和已安装的头文件。
+> SDK 的 `Client::complete` 是另一项仍受支持的 API。
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

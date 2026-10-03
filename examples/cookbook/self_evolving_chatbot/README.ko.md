@@ -1,3 +1,4 @@
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=1590cb19892c57cdbad4cd7660cf8df5dd72727141e908e4202ad63c59f8f5db -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -49,7 +50,10 @@ prepared digest/reservation을 요구하며 archive에서 원본 불변 Outcome/
 복원하고 settlement/output을 검증합니다. DB, archive/key, session, provider/model/settings,
 build identity를 유지하세요. 설정 변경은 새 session이 필요합니다. SDK retry는 off (`max_attempts=1`)입니다.
 restart/교체는 budget을 갱신하지 않습니다. model JSON은 제안이지 native authority가 아닙니다.
-이 내용은 소스 계약이며 새 recipe 실행이나 live pass를 주장하지 않습니다.
+현재 범위 한정 실행 증거: 실제 ProgramChat PostgreSQL blackbox에서 6개 scenario가
+18.989초에 pass했으며 실제 browser에서 Alice/Bob 격리와 generation-2 교체를 관찰했습니다.
+이 model-free 증거는 vendor 추론 qualification이나 별도 `multi_tenant_chatbot` server/load
+recipe, 모든 storage 변형 또는 유예된 Python 제공자 binding의 실행 증거가 아닙니다.
 
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

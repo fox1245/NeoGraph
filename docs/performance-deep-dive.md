@@ -2,6 +2,15 @@
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
 
+> **Historical measurements, not current cutover qualification.** This page
+> preserves pre-cutover performance/economics claims and reproduction commands.
+> Its `OpenAIProvider::Config` example and single-dependency/frozen-ABI/wheel
+> assumptions are not current integration guidance: the typed C++ provider
+> requires external SchemaProvider runtime, whose `0.0.0` interface/shared ABI 3
+> remains unstable; Python provider wrappers are deferred. See the
+> [current migration guide](migration-v0.4-to-v1.0.md) and
+> [current benchmark evidence](../benchmarks/README.md).
+
 > Detailed measurements behind the **Performance** and **Lightweight**
 > axes. README has the headline numbers; this is the full evidence.
 

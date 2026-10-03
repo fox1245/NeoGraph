@@ -1,9 +1,13 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ja source_sha256=8fdd608254fb2607289f13a59d7badf7ae1c4fdc843589df101c684e1ba1b88b -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ja source_sha256=d6d1575f38204de726d4313f8b7a1314ed2fe236484934f7f5be1fb0b4bcf7aa -->
 # Stage 3 — asio ベース完全非同期リファクタ設計
 
-> **履歴上の設計記録。** この文書は 2026-04-19 時点で提案された Stage 3
-> リファクタリングを記録したものです。現在の API ドキュメントではないため、
-> 現在の動作は [API narrative tour](reference-en.md) とインストール済みヘッダーを参照してください。
+> **アーカイブ済み・後継に置き換えられた設計提案。** 2026-04-19 の Stage 3
+> 提案の記録であり、現在の API 指針や予定した全 gate の完了証拠ではありません。
+> ここでの `Provider::complete` / `complete_async` の組と `OpenAIProvider` は
+> 型付き provider 移行で削除されました。現在の provider は型付きリクエストを所有し、
+> 一度 prepare して準備済みの呼び出しを dispatch します。[API narrative tour](reference-ja.md)、
+> [移行ガイド](migration-v0.4-to-v1.0.ja.md)とインストール済みヘッダーを参照してください。
+> SDK の `Client::complete` は別の、引き続きサポートされる API です。
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

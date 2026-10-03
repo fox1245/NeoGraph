@@ -2,6 +2,11 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+**Current scoped runtime evidence.** Four actual local A2A member servers and
+the C++ Speaker completed an offline session after the typed-provider cutover.
+Synthetic abstentions are fixture output, not model judgment or vendor inference.
+This does not qualify live provider calls or the deferred Python Speaker binding.
+
 A toy demo built **as a fresh NeoGraph user** — every API choice was
 made by reading the public docs (README, examples on github, Doxygen)
 without ever opening NeoGraph's source. The point is two-fold:

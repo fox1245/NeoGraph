@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=14c932ce835be59435fe30b831344894d899490a1478a3bd34f442e9113414da -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=1590cb19892c57cdbad4cd7660cf8df5dd72727141e908e4202ad63c59f8f5db -->
 # 自己進化型チャットボット
 
 ## 現在の型付き Program chat 契約
@@ -48,7 +48,11 @@ restart では pending は `UnknownHold` となり自動再送しません。com
  digest/reservation を要求し、archive から元の不変 Outcome/native role history を復元して settlement/output を検証します。
 DB、archive/key、session、provider/model/settings、build identity を保持し、変更には新 session が必要です。
 SDK retry は off（`max_attempts=1`）。restart/置換は budget を更新しません。
-model JSON は提案であって native authority ではありません。これはソース契約であり、新 recipe 実行/live pass の主張ではありません。
+model JSON は提案であって native authority ではありません。
+現在の範囲限定実行証拠：実際の ProgramChat PostgreSQL blackbox で6 scenario が
+18.989秒で pass し、実際の browser で Alice/Bob 隔離と generation-2 置換を観察しました。
+この model-free 証拠は vendor 推論 qualification や別の `multi_tenant_chatbot` server/load
+recipe、全 storage 変種、延期された Python provider binding の実行証拠ではありません。
 
 ## 旧 Core デモの歴史的手順と測定
 

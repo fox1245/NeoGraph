@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=9a8d8defc5b23d66cb6abe96f28e5a3dd82b273a8833a472cf355d9f5b836b35 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=8733a2df59553c82a3ada848609ea369b440fcd97dce2c2bc5a5c745eff05a28 -->
 # JARVIS オーケストレーションベンチマーク — NeoGraph vs LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,7 @@ C++ルーター・合成器・専門家フィクスチャは型付き `ProviderR
 
 ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
 
-`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL/ベンチのプロトコルドライバーは不変で、型付きPythonプロバイダーバインディングは延期。以下の時間・実行主張はすべて過去の記録で、移行したC++の実行証拠ではない。今回はソースとの整合のみで、ビルド・ベンチ・音声/ライブ実行はしていない。
+`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL/ベンチのプロトコルドライバーは不変で、型付きPythonプロバイダーバインディングは延期。現在の[Jarvis CLI実行証拠](../README.ja.md)は挨拶、永続化した合成メモリturn、正常なEOF終了のみで、このベンチroundの証拠ではない。以下のベンチ時間・実行主張は過去の記録。CLI実行はマイク・ASR・TTS・pybindベンチやvendor推論を検証しない。
 
 NeoGraph(C++モックビルド)とLangGraph(Pythonツイン `langgraph_twin.py`)の同一のトポロジー(mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)を反映し、同一制約の`--cpus=2 --memory=2g`コンテナ内で計測します。
 

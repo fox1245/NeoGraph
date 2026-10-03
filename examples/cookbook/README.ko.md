@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=2b960566263f063bf11a97a63b315005e7ab13700b5839294441f20eb52f6256 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=01f0466eb43755a45f571b1f6bcdd22e270983bc426fb68d843fdc881e63aa3e -->
 # NeoGraph 쿡북
 
 
@@ -22,8 +22,12 @@ LLM 빌드는 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`�
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
 수행하며 SDK package는 unstable `0.0.0` (interface 3)입니다.
 
-이 문서는 소스 전환 상태이며 recipe 실행 검증이 아닙니다. 아래 과거 측정은
-새 전환의 qualification이 아닙니다. live 실행에는 키/네트워크/모델 접근과 비용이 필요합니다.
+현재 model-free 실행에서는 Assembly 로컬 A2A member 서버 4개와 C++ speaker,
+JARVIS CLI synthetic turn·메모리 영속화, Beast strict Core 컴파일·진화·checkpoint 롤백,
+ProgramChat 브라우저 tenant 격리·generation 교체 및 PostgreSQL black-box 6개 시나리오를 확인했습니다.
+아래 목록은 이 실행 범위와 미검증 surface를 구분합니다. vendor inference, 음성, 보류된 Python binding,
+모든 Beast live 변형이나 전용 multitenant server/load의 통과를 주장하지 않습니다.
+아래 과거 측정은 새 전환의 qualification이 아닙니다. live 실행에는 키/네트워크/모델 접근과 비용이 필요합니다.
 키, prompt, artifact를 비공개로 유지하세요. envelope/native inspection 출력은 민감하므로
 공개 log에 내보내지 마세요. native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
 
@@ -46,14 +50,14 @@ LLM 빌드는 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`�
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | 타입 C++ 소스 전환; 실행 검증 주장 없음 |
+| [`ai-assembly/`](ai-assembly/) | 타입 C++ 전환; 실제 로컬 A2A member 서버 4개와 C++ speaker를 offline 실행 검증; synthetic abstention은 모델 판단이 아님 |
 | [`byo-openai/`](byo-openai/) | 과거 공급자 recipe; Python binding 전환 보류 |
-| [`jarvis/`](jarvis/) | 타입 C++ 소스 전환; 실행 검증 주장 없음 |
+| [`jarvis/`](jarvis/) | 타입 C++ 전환; CLI synthetic turn·메모리 영속화·정상 EOF 검증; 음성/Python surface는 미검증 |
 | [`minimal-mcp/`](minimal-mcp/) | protocol-only client/server; 의도적으로 변경 없음 |
-| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 타입 C++ 소스 전환; 실행 검증 주장 없음 |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 타입 C++ 전환; 전용 server 실행 및 live 1,000/32 load는 미검증 |
 | [`openrouter-provider/`](openrouter-provider/) | 과거 공급자 recipe; Python binding 전환 보류 |
-| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 타입 C++ 소스 전환; 실행 검증 주장 없음 |
-| [`the-beast/`](the-beast/) | 타입 C++ 소스 전환; 실행 검증 주장 없음 |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 타입 C++ 전환; vendor inference 없이 ProgramChat 브라우저 tenant 격리·generation 교체 및 PostgreSQL black-box 6개 시나리오 검증 |
+| [`the-beast/`](the-beast/) | 타입 C++ 전환; 실제 strict Core 컴파일·진화·checkpoint 롤백 검증; 모든 live 변형의 통과 주장이 아님 |
 | [`topology-retrieval/`](topology-retrieval/) | protocol-only client/server; 의도적으로 변경 없음 |
 
 Python MCP server, Jarvis CLI/REPL driver, retrieval HTTP client는 protocol client이며 provider binding 구현이 아닙니다. Assembly Python speaker와 Jarvis pybind benchmark는 보류된 binding에 의존합니다. live multitenant 1,000/32는 smoke가 아닙니다.

@@ -542,10 +542,9 @@ struct CurlH2Pool::Impl {
                 r.status  = static_cast<int>(p->status);
                 r.headers = std::move(p->resp_headers);
                 r.body    = std::move(p->resp_body);
-                // RateLimitedProvider + the SchemaProvider 429 path read
-                // `retry_after` and `location` directly off HttpResponse
-                // (not via get_header) — populate those here so behaviour
-                // matches the HTTP/1.1 free-function path.
+                // Populate the direct `retry_after` and `location`
+                // fields as well as headers so HttpResponse callers
+                // observe the same metadata as the HTTP/1.1 path.
                 for (const auto& [k, v] : r.headers) {
                     std::string lk; lk.reserve(k.size());
                     for (char c : k) lk.push_back(static_cast<char>(std::tolower(

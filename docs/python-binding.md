@@ -2,6 +2,13 @@
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
+> **Provider binding cutover boundary.** The Python provider bindings/wrappers
+> described below are pre-cutover material and explicitly deferred. They were
+> not ported or executed against the owned typed C++ prepare/dispatch/Outcome
+> contract. Historical wheel feature lists and generic Python graph examples
+> do not qualify that provider surface; upgrading a wheel supplies no compatible
+> legacy bridge. Use the [current C++ provider guide](reference-en.md).
+
 `neograph-engine` is the pybind11 surface of the same C++ runtime. The wheel enables Core, LLM, Program/QuickJS, MCP and SQLite runtime durability; optional source builds expose only the components they compile.
 
 ```bash
@@ -266,7 +273,7 @@ Use `get_state_history`, `update_state`, and `fork` for inspection and time-trav
 
 `run_async`, `run_stream_async`, and `resume_async` return `asyncio.Future` objects. Cancelling the Future propagates through `CancelToken` into in-flight native I/O. Streaming callbacks are marshalled back to the caller's asyncio loop thread.
 
-Python-defined providers implement synchronous `complete`/`complete_stream`; async-native provider implementations remain C++ extensions.
+Historically, Python-defined providers implemented synchronous `complete`/`complete_stream`. Those methods do not implement the current typed C++ provider contract; the Python provider cutover remains deferred.
 
 ## Protocols and observability
 

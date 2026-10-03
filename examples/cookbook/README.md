@@ -25,7 +25,13 @@ explicit `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` configuration.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
 checks are enforced; the SDK package remains unstable `0.0.0` (interface 3).
 
-This documentation records source migration, not execution of these recipes.
+Current model-free execution covered the four local Assembly A2A member servers
+and C++ speaker, JARVIS CLI synthetic turns with persisted memory, Beast strict
+Core compilation/evolution/checkpoint rollback, and ProgramChat browser tenant
+isolation/generation replacement plus six PostgreSQL black-box scenarios.
+The inventory below separates these scoped runs from unexercised surfaces.
+They do not qualify vendor inference, voice, deferred Python bindings, every
+Beast live variant, or the dedicated multitenant server/load scenario.
 Historical timings below are not new-cutover qualification. Live runs incur
 provider charges and require explicit keys/network/model access. Keep keys,
 prompts and artifacts private; envelope/native inspection demos print sensitive
@@ -53,14 +59,14 @@ finding the rough edges of the public API.
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | Typed C++ source migration; execution not claimed |
+| [`ai-assembly/`](ai-assembly/) | Typed C++ migration; four actual local A2A member servers and C++ speaker exercised offline; synthetic abstentions are not model judgment |
 | [`byo-openai/`](byo-openai/) | Historical provider recipes; Python binding migration deferred |
-| [`jarvis/`](jarvis/) | Typed C++ source migration; execution not claimed |
+| [`jarvis/`](jarvis/) | Typed C++ migration; CLI synthetic turn, persisted memory and graceful EOF exercised; voice/Python surfaces not qualified |
 | [`minimal-mcp/`](minimal-mcp/) | Protocol-only client/server; intentionally unchanged |
-| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | Typed C++ source migration; execution not claimed |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | Typed C++ migration; dedicated server execution and live 1,000/32 load not qualified |
 | [`openrouter-provider/`](openrouter-provider/) | Historical provider recipes; Python binding migration deferred |
-| [`self_evolving_chatbot/`](self_evolving_chatbot/) | Typed C++ source migration; execution not claimed |
-| [`the-beast/`](the-beast/) | Typed C++ source migration; execution not claimed |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | Typed C++ migration; ProgramChat browser tenant isolation/generation replacement and six PostgreSQL black-box scenarios exercised without vendor inference |
+| [`the-beast/`](the-beast/) | Typed C++ migration; actual strict Core compilation/evolution/checkpoint rollback exercised; not a pass claim for all live variants |
 | [`topology-retrieval/`](topology-retrieval/) | Protocol-only client/server; intentionally unchanged |
 
 Python MCP servers, Jarvis CLI/REPL drivers and retrieval HTTP clients remain protocol clients; they do not implement provider bindings. Assembly Python speaker and Jarvis pybind benchmark depend on deferred bindings. Live multitenant 1,000/32 is not a smoke run.

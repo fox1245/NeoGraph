@@ -1,7 +1,13 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=61dd8227b6a8807710fb014cacdf14a64257a18b35778a30981f34bd1eefb35f -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=795b6b8719fdb52b9f1ef31d04e0dc196ad3e6ea9eaead3da50ab44804b9c113 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
+
+> **Provider binding 移行境界。** 以下の Python provider binding/wrapper は移行前
+> 資料で、明示的に延期されています。所有する型付き C++ prepare/dispatch/Outcome
+> 契約へ port・実行していません。過去の wheel 機能一覧や一般 Python graph 例は
+> provider 表面を検証せず、wheel upgrade は legacy 互換 bridge を提供しません。
+> [現在の C++ provider guide](reference-ja.md)を参照してください。
 
 `neograph-engine`は、同じC++ランタイムのpybind11サーフェスです。ホイールによりCore、LLM、Program/QuickJS、MCP、SQLiteランタイムの永続性が有効になります。オプションのソースビルドでは、コンパイルされたコンポーネントのみが公開されます。
 
@@ -264,7 +270,7 @@ if result.interrupted:
 
 `run_async`、`run_stream_async`、`resume_async`は`asyncio.Future`オブジェクトを返します。Futureのキャンセルは`CancelToken`を通じて実行中のネイティブI/Oに伝播します。ストリーミングコールバックは呼び出し元のasyncioループスレッドにマーシャリングされて戻されます。
 
-Python定義のプロバイダは同期`complete`/`complete_stream`を実装します。非同期ネイティブのプロバイダ実装はC++拡張のままです。
+過去の Python 定義 provider は同期 `complete`/`complete_stream` を実装していました。これらは現在の型付き C++ provider 契約を実装せず、Python provider 移行は延期されたままです。
 
 ## プロトコルと可観測性
 

@@ -15,9 +15,9 @@
  * suspends on an asio handler that the worker posts back to via
  * `asio::post(caller_executor, ...)` once the request completes.
  *
- * Provider-style ownership: SchemaProvider / OpenAIProvider hold
- * one `CurlH2Pool` for their lifetime — successive completions reuse
- * the same connection cache. The pool itself is thread-safe; multiple
+ * Caller-owned reusable pool: keeping one `CurlH2Pool` alive across
+ * successive HTTP requests reuses the same connection cache.
+ * The pool itself is thread-safe; multiple
  * caller coroutines on different executors can call `async_post`
  * concurrently and the worker will multiplex them onto the same
  * underlying TCP when the host matches.

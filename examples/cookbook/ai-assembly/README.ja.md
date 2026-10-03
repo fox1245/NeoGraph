@@ -1,7 +1,12 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=4922ec93b98cf57b8a7fc967e471974122e6b7608a53fc5f1b826cb01f3fd9b8 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=e1c5c9d708af4408691ca586bfbccaab38566f6f8c1f22894dc3d61bff8b68c2 -->
 # AI国民議会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+**現在の範囲限定実行証拠。** 型付き provider 移行後、実際のローカル A2A
+メンバーサーバー4台と C++ 議長でオフラインセッションを完了しました。
+合成棄権は fixture 出力であり、モデル判断や vendor 推論ではありません。
+live provider 呼び出しや延期された Python 議長 binding の検証ではありません。
 
 **NeoGraphの新規ユーザーとして**構築されたおもちゃのデモ — すべてのAPI選択は、NeoGraphのソースを開くことなく公開ドキュメント（README、githubの例、Doxygen）を読むことで行われました。目的は2つあります：A2Aが実際のマルチペルソナシナリオで機能することを証明すること、そして、まったく新しいC++開発者が途中で直面する摩擦を浮き彫りにすることです。
 

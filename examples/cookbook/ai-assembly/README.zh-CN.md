@@ -1,7 +1,12 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=4922ec93b98cf57b8a7fc967e471974122e6b7608a53fc5f1b826cb01f3fd9b8 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=e1c5c9d708af4408691ca586bfbccaab38566f6f8c1f22894dc3d61bff8b68c2 -->
 # AI国民议会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+**当前限定范围的运行证据。** 类型化 provider 迁移后，四个真实本地 A2A
+成员服务器和 C++ 议长完成了离线会话。合成弃权是 fixture 输出，不是
+模型判断或 vendor 推理。这不验证 live provider 调用或延期的 Python
+议长 binding。
 
 一个作为**全新NeoGraph用户**构建的玩具演示——所有API选择都是通过阅读公开文档（README、GitHub上的示例、Doxygen）做出的，从未打开过NeoGraph的源代码。目的有两点：证明A2A能用于真实的多角色场景，并揭示全新C++开发者在过程中遇到的摩擦。
 

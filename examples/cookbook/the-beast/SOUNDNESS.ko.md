@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=b9f9924f38084a242500a0f3af09153dba35415c1f1e158a2d18a158745273af -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=81678ff6d72ad46af392428e631c78ddeae6d31983dbfad94991ded32d3d0406 -->
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
 
 ## 타입 제공자 전환 — 증거의 경계
@@ -7,7 +7,7 @@
 
 비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 네이티브 Python 서버 실행은 별도의 로컬 신뢰 경계이며 유예된 Python 제공자 바인딩과 다르다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
 
-아래 콘솔·벤치·fuzz·라이브 실행 결과는 모두 과거 증거이며 타입 전환 실행 결과가 아니다. 일관성 게이트는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. 소스 대조 문서화만 했으며 빌드·테스트·벤치·라이브 실행은 하지 않았다. Python 제공자 바인딩은 유예되었고 프로토콜 클라이언트는 그대로다.
+현재 범위 한정 실행 증거는 실제 오프라인 strict Core 컴파일·진화·checkpoint rollback에 한정된다. 모든 live/apex/forge/script 변형이나 vendor 추론을 검증하지 않는다. 아래 콘솔·벤치·fuzz·live 실행 기록은 과거 증거이며 새로운 타입 전환 측정이 아니다. 일관성 gate는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. Python 제공자 binding은 유예되었고 protocol client는 그대로다.
 
 # Coherence Gate의 건전성 — 공식 동반자
 

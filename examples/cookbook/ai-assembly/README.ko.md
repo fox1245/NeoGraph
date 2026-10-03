@@ -1,7 +1,12 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=4922ec93b98cf57b8a7fc967e471974122e6b7608a53fc5f1b826cb01f3fd9b8 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=e1c5c9d708af4408691ca586bfbccaab38566f6f8c1f22894dc3d61bff8b68c2 -->
 # AI 국회
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+**현재 범위 한정 실행 증거.** 타입 제공자 전환 후 실제 로컬 A2A 멤버 서버
+네 개와 C++ 의장이 오프라인 세션을 완료했습니다. 합성 기권은 fixture 출력이며
+모델 판단이나 vendor 추론이 아닙니다. live 제공자 호출이나 유예된 Python
+의장 binding을 검증하지 않습니다.
 
 신규 NeoGraph 사용자로서 만든 장난감 데모입니다. 모든 API 선택은 NeoGraph의 소스를 열어보지 않고 공개 문서(README, GitHub의 예제, Doxygen)를 읽는 방식으로 이루어졌습니다. 그 목적은 두 가지입니다. A2A가 실제 다중 페르소나 시나리오에서 작동함을 입증하고, 새로운 C++ 개발자가 그 과정에서 겪는 마찰을 드러내는 것입니다.
 

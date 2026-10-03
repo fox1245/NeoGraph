@@ -1,7 +1,15 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=6420c556d0eca29b919ff60a7327ec851d1dab1488dddf29e215d7e427849a8a -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=9fdb1ea2f06b3f4efd6ff30e9e3526d0e16a5270bffe251408b209d8ad3c37df -->
 # パフォーマンスの詳細
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
+
+> **過去の測定であり、現在の移行 qualification ではありません。** 移行前の
+> 性能/経済性主張と再現コマンドを保存しています。`OpenAIProvider::Config` 例、
+> 単一依存/frozen ABI/wheel の前提は現在の統合指針ではありません。型付き C++
+> provider は外部 SchemaProvider runtime を要求し、`0.0.0` interface/shared ABI 3
+> は不安定です。Python provider wrapper は延期されています。
+> [現在の移行ガイド](migration-v0.4-to-v1.0.ja.md)と
+> [現在の benchmark 証拠](../benchmarks/README.ja.md)を参照してください。
 
 > **パフォーマンス**と**軽量**を裏付ける詳細な測定
 > 軸。 README には見出し番号が記載されています。これが完全な証拠です。

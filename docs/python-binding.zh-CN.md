@@ -1,7 +1,12 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=61dd8227b6a8807710fb014cacdf14a64257a18b35778a30981f34bd1eefb35f -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=795b6b8719fdb52b9f1ef31d04e0dc196ad3e6ea9eaead3da50ab44804b9c113 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
+
+> **Provider binding 迁移边界。** 下文 Python provider binding/wrapper 为迁移前
+> 资料，已明确延期，未移植或执行拥有所有权的类型化 C++ prepare/dispatch/Outcome
+> 契约。历史 wheel 功能列表及一般 Python graph 示例不验证 provider 表面；
+> wheel upgrade 不提供 legacy 兼容 bridge。参阅[当前 C++ provider 指南](reference-zh-CN.md)。
 
 `neograph-engine` 是同一 C++ 运行时的 pybind11 接口。该 wheel 支持 Core、LLM、Program/QuickJS、MCP 和 SQLite 运行时持久化；可选源码构建仅暴露其编译的组件。
 
@@ -263,7 +268,7 @@ if result.interrupted:
 
 `run_async`、`run_stream_async` 和 `resume_async` 返回 `asyncio.Future` 对象。取消 Future 会通过 `CancelToken` 传播到进行中的原生 I/O。流式回调会被编组回调用方的 asyncio 事件循环线程。
 
-Python 定义的提供程序实现同步的 `complete`/`complete_stream`；异步原生的提供程序实现仍然是 C++ 扩展。
+历史上 Python 定义的 provider 实现同步 `complete`/`complete_stream`。这些方法不实现当前类型化 C++ provider 契约；Python provider 迁移仍然延期。
 
 ## 协议与可观测性
 

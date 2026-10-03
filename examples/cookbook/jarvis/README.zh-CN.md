@@ -1,15 +1,15 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=e52a150fd89075b66a0022d867def85dca59b234e1fc2e664a953c21f6625b10 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=8ac92757f70745afa264fbc5ef7d0980d480ae9dca5cd364dd7f427a0ce215f2 -->
 # JARVIS — 语音驱动的元编排器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-## 类型化提供方迁移 — 源码状态
+## 类型化提供方迁移 — 限定范围的运行状态
 
 C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp::Message`、`sp::Event` 及完整不可变 `sp::Outcome` (`sp::runtime::Result`)，不是旧字符串响应 API。`src/provider_support.h` 的 Jarvis/coder/researcher mock 提供固定路由 JSON、用户文本 echo 和明确的模拟研究回复。不需要密钥或网络提供方，但不是真实研究或推理。本次文档更新不会创建或修复下文既有配置/配置档路径。
 
 本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
 
-`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL/基准协议驱动不变；类型化 Python 提供方绑定延期。下文所有耗时及执行主张均为历史记录，不能证明迁移后 C++ 已执行。本次仅对齐源码，未运行构建、基准或语音/实时调用。
+`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL/基准协议驱动不变；类型化 Python 提供方绑定延期。当前运行证据仅涵盖实际 CLI 问候、已持久化的合成记忆 turn 和正常 EOF 退出，不验证麦克风捕获、ASR、TTS、pybind 基准或 vendor 推理。下文耗时及语音/live 执行主张仍为历史记录，不是当前迁移的 qualification。
 
 > 本地/mock 无需云端提供方；可选语音需要本地资源和设备。
 > 麦克风是Tony，NeoGraph是JARVIS，工具/专家是JARVIS的下属。

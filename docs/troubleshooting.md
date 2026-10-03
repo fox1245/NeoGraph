@@ -382,22 +382,18 @@ def cb(event):
 
 ### My `StreamMode.TOKENS` callback never fires
 
-The provider must support streaming. Currently:
+For current C++ providers, choose `ProviderMode::Stream` explicitly; the
+presence of an observer does not select streaming. Prepare the owned typed
+request once, dispatch the same prepared handle and observe ordered `sp::Event`
+views. Copy only data needed after the callback. A text/token consumer must
+select nonempty content-text deltas rather than treating usage, reasoning or
+other event kinds as tokens. Collect mode retains a complete immutable Outcome,
+not an incremental-token guarantee.
 
-| Provider | Streaming? |
-|---|---|
-| `OpenAIProvider` | ✓ HTTP/SSE |
-| `SchemaProvider("openai_responses")` | ✓ SSE |
-| `SchemaProvider("openai_responses", use_websocket=True)` | ✓ WS |
-| `SchemaProvider("claude")` | ✓ SSE |
-| Custom Python `Provider` subclass | depends on your `complete_stream` impl |
-
-For a custom Python `Provider`, override `complete_stream`; Python subclasses
-do not expose an async virtual override. For a new C++ backend, derive from
-`CompletionProvider` and handle `request.streaming()` in `do_invoke()`. Existing
-C++ `Provider` subclasses may continue to override `complete_stream()` or
-`complete_stream_async()`. Without a streaming implementation, the default emits
-the collected response as one chunk rather than incremental tokens.
+`Provider::complete_stream`, `CompletionProvider` and Responses WebSocket
+compatibility paths were removed. Python provider bindings/wrappers are
+deferred; a wheel upgrade does not establish support for the new typed contract.
+See the [current provider guide](reference-en.md).
 
 ---
 
@@ -663,17 +659,23 @@ set -a; . ./.env; set +a            # marks every assignment as exported
 The cookbook's `scripts/run_session.sh` shows the full pattern with
 fallback to a sibling `.env`.
 
-### Multi-persona / multi-process A2A: where to share an OpenAI provider
+### Multi-persona / multi-process A2A: sharing a typed provider
 
-Use `OpenAIProvider::create_shared(cfg)` (returns `shared_ptr<Provider>`)
-instead of `create(cfg)` (returns `unique_ptr`). The shared form is
-captureable into a `NodeFactory` lambda and reusable across every
-graph node and A2A request — `create()`'s `unique_ptr` would force
-you to manually `release()` and rewrap.
+The current [Assembly recipe](../examples/cookbook/ai-assembly/README.md) uses
+`examples::make_openrouter_provider` and retains a shared typed provider within
+each member process. Capture the owning handle in its `NodeFactory`; do not
+manually `release()` a unique pointer. Separate processes still own separate
+instances. `OpenAIProvider::create_shared` was removed; it is not a current API.
+The documented offline session does not qualify live model calls.
 
 ---
 
 ## C++ consumers — `httplib.h` macro consistency (load-bearing, issue #16)
+
+> **Historical pre-cutover diagnosis (issue #16).** The stack below names the
+> removed `SchemaProvider::complete_stream` API. It records the old integration,
+> not a current typed-provider transport path. Macro consistency still matters
+> for consumers that instantiate the same header-only httplib types across TUs.
 
 If you build a C++ application that **links against NeoGraph** AND
 also `#include <httplib.h>` in your own translation units (e.g. to

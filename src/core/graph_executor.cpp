@@ -329,13 +329,9 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // a NodeInterrupt checkpoint, matching the sync path.
             throw;
         } catch (const CancelledException&) {
-            // v0.3.2: cancel is also a control-flow signal — never
-            // retry. Without this short-circuit a fan-out worker
-            // whose Provider::complete throws CancelledException on
-            // socket abort would re-enter the retry loop, fresh
-            // run_sync would race emit-vs-bind on the already-set
-            // cancel flag, the second HTTP call would slip through,
-            // and the cost leak would persist for max_retries × ~3 s.
+            // Cancellation is a control-flow signal, not a retryable
+            // node error. Re-entering the node would start fresh work
+            // after the run has already been cancelled.
             throw;
         } catch (const ProviderOutcomeError&) {
             // The provider effect has already drained. Retrying a host

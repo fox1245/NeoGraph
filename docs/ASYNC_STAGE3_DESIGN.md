@@ -1,8 +1,12 @@
 # Stage 3 — asio-based Full Async Refactor Design
 
-> **Historical design record.** This document captures the proposed Stage 3
-> refactor from 2026-04-19. It is not current API documentation; use the
-> [API narrative tour](reference-en.md) and installed headers for current behavior.
+> **Archived, superseded design proposal.** This document captures the proposed
+> Stage 3 refactor from 2026-04-19, not current API guidance or proof that every
+> planned gate was completed. Its `Provider::complete` / `complete_async` pair
+> and `OpenAIProvider` were removed in the typed-provider cutover. Current
+> providers own typed requests, prepare once and dispatch the prepared call;
+> use the [API narrative tour](reference-en.md), [migration guide](migration-v0.4-to-v1.0.md)
+> and installed headers. The SDK's `Client::complete` is a distinct, supported API.
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

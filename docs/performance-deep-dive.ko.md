@@ -1,5 +1,13 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=6420c556d0eca29b919ff60a7327ec851d1dab1488dddf29e215d7e427849a8a -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=9fdb1ea2f06b3f4efd6ff30e9e3526d0e16a5270bffe251408b209d8ad3c37df -->
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
+
+> **과거 측정이며 현재 전환 qualification이 아님.** 이 페이지는 전환 이전
+> 성능/경제성 주장과 재현 명령을 보존합니다. `OpenAIProvider::Config` 예제와
+> 단일 의존성/frozen ABI/wheel 전제는 현재 통합 지침이 아닙니다. 타입 C++ 제공자는
+> 외부 SchemaProvider runtime이 필요하고 `0.0.0` interface/shared ABI 3은
+> 불안정하며 Python 제공자 wrapper는 유예되었습니다.
+> [현재 이전 가이드](migration-v0.4-to-v1.0.ko.md)와
+> [현재 benchmark 증거](../benchmarks/README.ko.md)를 참고하세요.
 
 # 성능 심층 분석
 

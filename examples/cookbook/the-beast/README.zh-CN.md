@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=c70c7b805d11a43a76fb1402e0b7ab7160eea9d0b9137fc779776b717d66c453 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=1d5e31e1d0219b65d56905d841f93fdf68f603c0f885b052fb7b45dd069ff8e2 -->
 # The Beast — 生成 · 演化 · 回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,7 @@
 
 保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的原生 Python 服务器执行具有独立本地信任边界，不是延期的 Python 提供方绑定。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
 
-下文所有控制台、基准、fuzz 和实时执行结果均为历史证据，不是类型化迁移的执行结果。一致性门控仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。本次仅对齐源码，未执行构建、测试、基准或实时调用。Python 提供方绑定延期；协议客户端不变。
+当前限定范围的运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是新的类型化迁移测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 延期；protocol client 不变。
 
 > 一个自我进化的智能体，它将自己的harness编写为严格的Core JSON，在Core编译器下进化它，并通过检查点器回退其执行。**生成。进化。回退。野兽仍在。**
 

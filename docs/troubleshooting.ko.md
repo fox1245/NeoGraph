@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=ac341ae5a04c54a36f6e1d4e165be17f5cf789b924e015626c3a01c9c3a447b9 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=842219593169eb693deb640f149b381e316f95d59e1380ec45858f8a4d1f1994 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -285,17 +285,16 @@ def cb(event):
 
 ### 내 `StreamMode.TOKENS` 콜백이 절대 실행되지 않습니다
 
-공급자는 스트리밍을 지원해야 합니다. 현재:
+현재 C++ 제공자는 `ProviderMode::Stream`을 명시적으로 선택합니다. observer 유무는
+streaming을 선택하지 않습니다. 소유 타입 요청을 한 번 prepare하고 같은 handle을
+dispatch하며 순서 있는 `sp::Event` view를 관찰합니다. callback 이후 필요한 데이터만
+복사하세요. 텍스트/token consumer는 비어 있지 않은 content-text delta를 선택하고
+usage·reasoning·다른 event를 token으로 취급하지 않아야 합니다. Collect는 전체 불변
+Outcome을 보존하며 incremental token을 보장하지 않습니다.
 
-| 공급자 | 스트리밍? |
-|---|---|
-| `OpenAIProvider` | ✓ HTTP/SSE |
-| `SchemaProvider("openai_responses")` | ✓ SSE |
-| `SchemaProvider("openai_responses", use_websocket=True)` | ✓ WS |
-| `SchemaProvider("claude")` | ✓ SSE |
-| 사용자 정의 Python `Provider` 하위 클래스 | 사용자의 `complete_stream` 구현에 따라 달라집니다 |
-
-사용자 정의 Python `Provider`의 경우, `complete_stream`를 재정의하세요. Python 하위 클래스는 async 가상 재정의를 노출하지 않습니다. 새 C++ 백엔드의 경우, `CompletionProvider`에서 파생하고 `request.streaming()`을(를) `do_invoke()`에서 처리하세요. 기존 C++ `Provider` 하위 클래스는 계속해서 `complete_stream()` 또는 `complete_stream_async()`를 재정의하실 수 있습니다. 스트리밍 구현이 없는 경우, 기본값은 수집된 응답을 토큰 단위가 아닌 하나의 덩어리로 출력합니다.
+`Provider::complete_stream`, `CompletionProvider`, Responses WebSocket 호환 경로는
+제거되었습니다. Python 제공자 binding/wrapper는 유예되었고 wheel upgrade는 새 타입
+계약 지원 증거가 아닙니다. [현재 제공자 가이드](reference-ko.md)를 참고하세요.
 
 ---
 
@@ -471,13 +470,23 @@ set -a; . ./.env; set +a            # marks every assignment as exported
 
 쿡북의 `scripts/run_session.sh`는 형제 `.env`로의 폴백이 있는 전체 패턴을 보여줍니다.
 
-### 멀티 페르소나 / 멀티 프로세스 A2A: OpenAI 제공자를 공유할 위치
+### 다중 페르소나 / 다중 프로세스 A2A: 타입 제공자 공유
 
-`OpenAIProvider::create_shared(cfg)`(`shared_ptr<Provider>` 반환)를 사용하고, `create(cfg)`(`unique_ptr` 반환)는 사용하지 마십시오. 공유 형태는 `NodeFactory` 람다에 캡처할 수 있고 모든 그래프 노드와 A2A 요청에서 재사용할 수 있습니다. 반면 `create()`의 `unique_ptr`를 사용하면 직접 `release()`한 뒤 다시 래핑해야 합니다.
+현재 [Assembly recipe](../examples/cookbook/ai-assembly/README.ko.md)는
+`examples::make_openrouter_provider`로 각 멤버 process 내부의 shared 타입 제공자를
+유지합니다. 소유 handle을 `NodeFactory`에 capture하고 unique pointer를 수동
+`release()`하지 마세요. 서로 다른 process는 별도 instance를 소유합니다.
+`OpenAIProvider::create_shared`는 제거된 API입니다. 기록된 오프라인 세션은 live 모델
+호출을 검증하지 않습니다.
 
 ---
 
 ## C++ 소비자 — `httplib.h` 매크로 일관성(필수적인, 이슈 #16)
+
+> **전환 이전 역사적 진단(issue #16).** 아래 stack은 제거된
+> `SchemaProvider::complete_stream` API를 포함합니다. 과거 통합 기록이지 현재
+> 타입 제공자 transport 경로가 아닙니다. 여러 TU에서 같은 header-only httplib
+> type을 사용하는 consumer에게 macro 일관성은 여전히 중요합니다.
 
 C++ 애플리케이션을 빌드할 때 **NeoGraph에 링크**하고 동시에 자체 번역 단위에서 `#include <httplib.h>`도 사용하는 경우(예: 자체 `httplib::Server` SSE 엔드포인트를 실행하기 위해), `<httplib.h>`를 포함하는 모든 TU는 include **이전에** `#define CPPHTTPLIB_OPENSSL_SUPPORT`를 반드시 수행해야 합니다. 단 하나의 TU에서 매크로가 누락되면 `getaddrinfo` 내부에서 `SchemaProvider::complete_stream`가 LLM 엔드포인트에 처음 도달할 때 자동으로 SEGV가 발생합니다.
 

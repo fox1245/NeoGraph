@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=2b960566263f063bf11a97a63b315005e7ab13700b5839294441f20eb52f6256 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=01f0466eb43755a45f571b1f6bcdd22e270983bc426fb68d843fdc881e63aa3e -->
 # NeoGraph Cookbooks
 
 
@@ -22,9 +22,13 @@ LLM 构建需要 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime
 安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
 SDK package 仍为 unstable `0.0.0`（interface 3）。
 
-本文记录源代码迁移，不代表这些 recipe 已执行验证。历史测量不是新迁移的 qualification。
-live 运行需要密钥、网络和模型访问并产生费用。密钥、prompt、artifact 必须保持私密；
-envelope/native inspection 输出含敏感内容，不得进入公开 log。
+当前 model-free 执行已覆盖 Assembly 四个真实本地 A2A member 服务器与 C++ speaker、
+JARVIS CLI synthetic turn 和记忆持久化、Beast strict Core 编译·演化·checkpoint 回滚、
+ProgramChat 浏览器 tenant 隔离·generation 替换及 PostgreSQL black-box 六个场景。
+下表区分这些实际执行范围与未验证 surface。不声称 vendor inference、语音、延期 Python binding、
+全部 Beast live 变体或专用 multitenant server/load 已通过。
+历史测量不是新迁移的 qualification。live 运行需要密钥、网络和模型访问并产生费用。
+密钥、prompt、artifact 必须保持私密；envelope/native inspection 输出含敏感内容，不得进入公开 log。
 native archive 是经过认证的 owner-private custody，不是加密或 vendor issuer 认证。
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -46,14 +50,14 @@ native archive 是经过认证的 owner-private custody，不是加密或 vendor
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | 类型化 C++ 源代码迁移；不声称执行验证 |
+| [`ai-assembly/`](ai-assembly/) | 类型化 C++ 迁移；已 offline 执行四个真实本地 A2A member 服务器与 C++ speaker；synthetic abstention 不是模型判断 |
 | [`byo-openai/`](byo-openai/) | 历史 provider recipe；Python binding 迁移延期 |
-| [`jarvis/`](jarvis/) | 类型化 C++ 源代码迁移；不声称执行验证 |
+| [`jarvis/`](jarvis/) | 类型化 C++ 迁移；已执行 CLI synthetic turn、记忆持久化与正常 EOF；语音/Python surface 未验证 |
 | [`minimal-mcp/`](minimal-mcp/) | protocol-only client/server；有意保持不变 |
-| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 类型化 C++ 源代码迁移；不声称执行验证 |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 类型化 C++ 迁移；专用 server 执行与 live 1,000/32 load 未验证 |
 | [`openrouter-provider/`](openrouter-provider/) | 历史 provider recipe；Python binding 迁移延期 |
-| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 类型化 C++ 源代码迁移；不声称执行验证 |
-| [`the-beast/`](the-beast/) | 类型化 C++ 源代码迁移；不声称执行验证 |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 类型化 C++ 迁移；不调用 vendor inference，已执行 ProgramChat 浏览器 tenant 隔离·generation 替换及 PostgreSQL black-box 六个场景 |
+| [`the-beast/`](the-beast/) | 类型化 C++ 迁移；已执行真实 strict Core 编译·演化·checkpoint 回滚；不声称所有 live 变体通过 |
 | [`topology-retrieval/`](topology-retrieval/) | protocol-only client/server；有意保持不变 |
 
 Python MCP server、Jarvis CLI/REPL driver 和 retrieval HTTP client 是 protocol client，不是 provider binding 实现。Assembly Python speaker 与 Jarvis pybind benchmark 依赖延期 binding。live multitenant 1,000/32 不是 smoke。

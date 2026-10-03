@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=b9f9924f38084a242500a0f3af09153dba35415c1f1e158a2d18a158745273af -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=81678ff6d72ad46af392428e631c78ddeae6d31983dbfad94991ded32d3d0406 -->
 # 一致性门控的健全性——一个形式化伴随文档
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -9,7 +9,7 @@
 
 保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的原生 Python 服务器执行具有独立本地信任边界，不是延期的 Python 提供方绑定。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
 
-下文所有控制台、基准、fuzz 和实时执行结果均为历史证据，不是类型化迁移的执行结果。一致性门控仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。本次仅对齐源码，未执行构建、测试、基准或实时调用。Python 提供方绑定延期；协议客户端不变。
+当前限定范围的运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是新的类型化迁移测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 延期；protocol client 不变。
 
 这是本 cookbook 中经验执行框架背后的理论。`gate_eval` 在有标签语料库上
 *测量*了一致性门控的健全性；`gate_fuzz` 在数千个突变体上*测量*了它，

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=2b960566263f063bf11a97a63b315005e7ab13700b5839294441f20eb52f6256 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=01f0466eb43755a45f571b1f6bcdd22e270983bc426fb68d843fdc881e63aa3e -->
 # NeoGraph Cookbooks
 
 
@@ -22,8 +22,12 @@ LLM ビルドには `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runt
 インストール include root は `include/SchemaProvider`。interface/capability 検査を行い、
 SDK package は unstable `0.0.0`（interface 3）です。
 
-この文書はソース移行状況であり recipe の実行検証ではありません。過去の測定は新移行の
-qualification ではありません。live 実行には鍵、ネットワーク、モデルアクセスと費用が必要です。
+現在の model-free 実行では Assembly の実際のローカル A2A member サーバー四つと C++ speaker、
+JARVIS CLI synthetic turn とメモリ永続化、Beast strict Core コンパイル・進化・checkpoint rollback、
+ProgramChat のブラウザー tenant 分離・generation 置換と PostgreSQL black-box 六シナリオを確認しました。
+下の一覧はこの実行範囲と未検証 surface を区別します。vendor inference、音声、延期 Python binding、
+全 Beast live 変種や専用 multitenant server/load の pass は主張しません。
+過去の測定は新移行の qualification ではありません。live 実行には鍵、ネットワーク、モデルアクセスと費用が必要です。
 鍵、prompt、artifact は非公開に保ち、機密 envelope/native inspection 出力を公開 log に送らないでください。
 native archive は認証された owner-private custody であり、暗号化や vendor issuer 認証ではありません。
 
@@ -46,14 +50,14 @@ native archive は認証された owner-private custody であり、暗号化や
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | 型付き C++ ソース移行; 実行検証の主張なし |
+| [`ai-assembly/`](ai-assembly/) | 型付き C++ 移行; 実際のローカル A2A member サーバー四つと C++ speaker を offline 実行; synthetic abstention はモデル判断ではない |
 | [`byo-openai/`](byo-openai/) | 過去の provider recipe; Python binding 移行は延期 |
-| [`jarvis/`](jarvis/) | 型付き C++ ソース移行; 実行検証の主張なし |
+| [`jarvis/`](jarvis/) | 型付き C++ 移行; CLI synthetic turn・メモリ永続化・正常 EOF を実行; 音声/Python surface は未検証 |
 | [`minimal-mcp/`](minimal-mcp/) | protocol-only client/server; 意図的に不変 |
-| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 型付き C++ ソース移行; 実行検証の主張なし |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 型付き C++ 移行; 専用 server 実行と live 1,000/32 load は未検証 |
 | [`openrouter-provider/`](openrouter-provider/) | 過去の provider recipe; Python binding 移行は延期 |
-| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 型付き C++ ソース移行; 実行検証の主張なし |
-| [`the-beast/`](the-beast/) | 型付き C++ ソース移行; 実行検証の主張なし |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 型付き C++ 移行; vendor inference なしで ProgramChat ブラウザー tenant 分離・generation 置換と PostgreSQL black-box 六シナリオを実行 |
+| [`the-beast/`](the-beast/) | 型付き C++ 移行; 実際の strict Core コンパイル・進化・checkpoint rollback を実行; 全 live 変種の pass 主張ではない |
 | [`topology-retrieval/`](topology-retrieval/) | protocol-only client/server; 意図的に不変 |
 
 Python MCP server、Jarvis CLI/REPL driver、retrieval HTTP client は protocol client で provider binding 実装ではありません。Assembly Python speaker と Jarvis pybind benchmark は延期 binding に依存します。live multitenant 1,000/32 は smoke ではありません。

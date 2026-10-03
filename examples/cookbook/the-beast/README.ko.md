@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=c70c7b805d11a43a76fb1402e0b7ab7160eea9d0b9137fc779776b717d66c453 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=1d5e31e1d0219b65d56905d841f93fdf68f603c0f885b052fb7b45dd069ff8e2 -->
 # The Beast — 생성 · 진화 · 롤백
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,7 @@
 
 비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 네이티브 Python 서버 실행은 별도의 로컬 신뢰 경계이며 유예된 Python 제공자 바인딩과 다르다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
 
-아래 콘솔·벤치·fuzz·라이브 실행 결과는 모두 과거 증거이며 타입 전환 실행 결과가 아니다. 일관성 게이트는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. 소스 대조 문서화만 했으며 빌드·테스트·벤치·라이브 실행은 하지 않았다. Python 제공자 바인딩은 유예되었고 프로토콜 클라이언트는 그대로다.
+현재 범위 한정 실행 증거는 실제 오프라인 strict Core 컴파일·진화·checkpoint rollback에 한정된다. 모든 live/apex/forge/script 변형이나 vendor 추론을 검증하지 않는다. 아래 콘솔·벤치·fuzz·live 실행 기록은 과거 증거이며 새로운 타입 전환 측정이 아니다. 일관성 gate는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. Python 제공자 binding은 유예되었고 protocol client는 그대로다.
 
 > 엄격한 Core JSON으로 자체 하네스를 작성하고, Core 컴파일러 아래에서 이를 진화시키며, 체크포인트 관리자를 통해 실행을 되감는 자기 진화 에이전트입니다. **생성되고, 진화하고, 되감겨도 The Beast는 남습니다.**
 

@@ -1,7 +1,14 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=6420c556d0eca29b919ff60a7327ec851d1dab1488dddf29e215d7e427849a8a -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=9fdb1ea2f06b3f4efd6ff30e9e3526d0e16a5270bffe251408b209d8ad3c37df -->
 # 性能深入探讨
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
+
+> **历史测量，不是当前迁移 qualification。** 本页保留迁移前性能/经济性主张及
+> 复现命令。`OpenAIProvider::Config` 示例、单一依赖/frozen ABI/wheel 前提不是
+> 当前集成指南。类型化 C++ provider 要求外部 SchemaProvider runtime；
+> `0.0.0` interface/shared ABI 3 仍不稳定，Python provider wrapper 延期。
+> 参阅[当前迁移指南](migration-v0.4-to-v1.0.zh-CN.md)和
+> [当前 benchmark 证据](../benchmarks/README.zh-CN.md)。
 
 
 >**性能**和**轻量化**背后的详细测量

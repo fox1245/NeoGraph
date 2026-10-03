@@ -61,7 +61,11 @@ provider/model/settings and build identity; changed settings require a new sessi
 The durable ledger disables SDK retry (`max_attempts=1`). No restart or topology
 replacement renews the budget. Model JSON is a proposal, never native authority.
 
-These are source contracts; no new recipe execution or live pass is claimed here.
+Current scoped runtime evidence: the actual ProgramChat PostgreSQL blackbox run
+passed six scenarios in 18.989 seconds; the actual browser exercised Alice/Bob
+isolation and generation-2 replacement. These model-free observations are not
+vendor-inference qualification or proof of the separate `multi_tenant_chatbot`
+server/load recipe, all storage variants, or deferred Python provider bindings.
 
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

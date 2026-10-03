@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=bbf80f791ae207d7402513d5831ca43c7731bd5a17aea9c1d1626475b87172eb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=07564a8cdc291d0fc5c3e5f2ddeebd23c5ac708a9723fe9cda87813e37f6f288 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 변경됨
+- **문서/주석 일관성.** 보관된 Stage 3 제안은 제거된 Provider completion API를 명시적으로 대체된 것으로 표시하고 현재 타입 prepare/dispatch 지침을 연결한다. Cookbook 상태는 실제 오프라인 Assembly/Jarvis/Beast 및 ProgramChat PostgreSQL/browser 범위를 과거 시간 기록, 미검증 live/voice/Python 변형과 별도 multitenant load recipe에서 구분한다. 현재 cancellation/HTTP/isolation 주석은 제거된 제공자 API를 더 이상 설명하지 않는다. Runtime 동작이나 qualification 경계는 변경하지 않았다.
 - **Breaking C++ typed provider/custody 계약.** 모든 소비자·custom provider를 일치하는 새 header/library로 재빌드한다. `NEOGRAPH_BUILD_LLM=OFF`에서도 Core는 외부 `SchemaProvider::runtime`이 필요하다. Provider는 소유 `ProviderRequest` → move-only `PreparedProviderRequest` → 불변 `sp::runtime::Result`, 명시적 Collect/Stream과 선언된 family control을 사용한다. Completion 호환 type, JSON descriptor interpreter, primitive registry, Responses WebSocket은 alias/shim 없이 제거되었다. SDK `0.0.0`, interface revision/shared ABI 3은 불안정하며 stable release가 아니다. Python wrapper는 연기되었고 runtime/archive qualification은 Linux/POSIX만 해당한다.
 
   Fresh installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer가 pass했다. Interface/ABI 선언만과 실제 package 결과는 별개이며 더 넓은 platform이나 stable release를 주장하지 않는다.

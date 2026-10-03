@@ -1,7 +1,13 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=61dd8227b6a8807710fb014cacdf14a64257a18b35778a30981f34bd1eefb35f -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=795b6b8719fdb52b9f1ef31d04e0dc196ad3e6ea9eaead3da50ab44804b9c113 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
+
+> **제공자 binding 전환 경계.** 아래 Python 제공자 binding/wrapper 설명은 전환
+> 이전 자료이며 명시적으로 유예되었습니다. 소유 타입 C++ prepare/dispatch/Outcome
+> 계약으로 port·실행하지 않았습니다. 과거 wheel 기능 목록이나 일반 Python graph
+> 예제는 제공자 표면을 검증하지 않고 wheel upgrade는 legacy 호환 bridge를
+> 제공하지 않습니다. [현재 C++ 제공자 가이드](reference-ko.md)를 참고하세요.
 
 `neograph-engine`는 동일한 C++ 런타임의 pybind11 표면입니다. 휠은 Core, LLM, Program/QuickJS, MCP 및 SQLite 런타임 지속성을 활성화합니다. 선택적 소스 빌드는 컴파일하는 구성 요소만 노출합니다.
 
@@ -264,7 +270,7 @@ if result.interrupted:
 
 `run_async`, `run_stream_async`, `resume_async`는 `asyncio.Future` 객체를 반환합니다. Future를 취소하면 `CancelToken`를 통해 진행 중인 네이티브 I/O로 전파됩니다. 스트리밍 콜백은 호출자의 asyncio 루프 스레드로 다시 마샬링됩니다.
 
-Python 정의 공급자는 동기식 `complete`/`complete_stream`를 구현합니다; 비동기 네이티브 공급자 구현은 C++ 확장으로 유지됩니다.
+과거 Python 정의 제공자는 동기 `complete`/`complete_stream`을 구현했습니다. 이 메서드는 현재 타입 C++ 제공자 계약을 구현하지 않으며 Python 제공자 전환은 유예되어 있습니다.
 
 ## 프로토콜 및 관찰 가능성
 

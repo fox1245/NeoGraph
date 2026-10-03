@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=c70c7b805d11a43a76fb1402e0b7ab7160eea9d0b9137fc779776b717d66c453 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=1d5e31e1d0219b65d56905d841f93fdf68f603c0f885b052fb7b45dd069ff8e2 -->
 # The Beast — 生成・進化・ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,7 @@
 
 非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成したネイティブPythonサーバー実行は別のローカル信頼境界で、延期されたPythonプロバイダーバインディングとは異なる。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
 
-以下のコンソール・ベンチ・fuzz・ライブ実行結果はすべて過去の証拠で、型付き移行の実行結果ではない。整合性ゲートは明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。今回はソース整合のみで、ビルド・テスト・ベンチ・ライブ実行はしていない。Pythonプロバイダーバインディングは延期され、プロトコルクライアントは不変。
+現在の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、新たな型付き移行測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は延期され、protocol client は不変。
 
 > 自己進化するエージェント。厳密なCore JSONとして自身のハーネスを書き、Coreコンパイラの下でそれを進化させ、チェックポイント機構を通じて実行を巻き戻す。**生成された。進化した。巻き戻された。野獣は残る。**
 

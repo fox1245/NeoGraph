@@ -2,7 +2,7 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-## Typed provider migration — source status
+## Typed provider migration — scoped runtime status
 
 The C++ router, synthesizer and specialist fixtures use typed `ProviderRequest`, `sp::Message` and `sp::Event`; provider results are full immutable `sp::Outcome` values (`sp::runtime::Result`), not legacy response strings. `src/provider_support.h` implements local Jarvis/coder/researcher mock profiles: deterministic router JSON, user-text echo, and an explicitly synthetic researcher reply. These fixtures require neither credentials nor a network provider, but do not supply real research or expert reasoning. Existing configuration/profile paths below are not repaired or created by this documentation update.
 
@@ -10,7 +10,7 @@ Local voice is optional and needs the selected whisper/Moonshine models, ONNX Ru
 
 Custom provider-calling nodes use the existing runtime-interposition/broker boundary and shared `record_usage` sink. They retain the real owned outcome before extracting response text, propagate cancellation/deadlines and both local and host observers, and preserve drained outcomes when an observer throws. The synthesizer's distinct regeneration call uses its own stable call ordinal. Bounded calls require admitted model-limit facts; missing facts fail before provider dispatch rather than inventing a token estimate. Default HTTPS ports are omitted from the admitted origin so OpenRouter routing matches the policy's canonical origin.
 
-`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. All timings and execution statements retained below are historical, not evidence that this migrated C++ path was executed. This update aligns documentation with source only; no build, benchmark or voice/live run was performed.
+`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. Current runtime evidence covers the actual CLI greeting, a persisted synthetic memory turn and graceful EOF. It does not qualify microphone capture, ASR, TTS, pybind benchmarks or vendor inference. Timings and voice/live execution statements retained below remain historical, not current cutover qualification.
 
 > Local/mock operation needs no cloud provider; optional voice needs local assets and devices.
 > Microphone is Tony, NeoGraph is JARVIS, tools/experts are JARVIS's subordinates.

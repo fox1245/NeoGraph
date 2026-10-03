@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=14c932ce835be59435fe30b831344894d899490a1478a3bd34f442e9113414da -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=1590cb19892c57cdbad4cd7660cf8df5dd72727141e908e4202ad63c59f8f5db -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -44,7 +44,10 @@ restart 将 pending 转为 `UnknownHold`，不会自动重新发送。completed 
 从 archive 恢复原始不可变 Outcome/native role history 并验证 settlement/output。
 保留相同 DB、archive/key、session、provider/model/settings 和 build identity；改变设置需要新 session。
 SDK retry 关闭（`max_attempts=1`）；restart/替换不会更新 budget。model JSON 是提案而不是 native authority。
-这里记录源代码契约，不声称新 recipe 已执行或 live pass。
+当前限定范围的运行证据：实际 ProgramChat PostgreSQL blackbox 的6个 scenario 在
+18.989秒内 pass；实际 browser 验证了 Alice/Bob 隔离及 generation-2 替换。
+这些 model-free 观察不是 vendor 推理 qualification，也不验证独立的
+`multi_tenant_chatbot` server/load recipe、所有 storage 变体或延期的 Python provider binding。
 
 ## 旧 Core demo 的历史步骤与测量
 

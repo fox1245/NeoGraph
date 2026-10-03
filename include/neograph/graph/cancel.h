@@ -244,8 +244,8 @@ public:
      * @brief Create a child token that cascades from this one.
      *
      * Each child has its **own** ``cancellation_signal``, so concurrent
-     * consumers (multi-Send fan-out workers each calling
-     * ``Provider::complete`` → ``run_sync`` with its own io_context)
+     * consumers (such as multi-Send fan-out workers bridging HTTP
+     * coroutines through ``run_sync`` with their own io_context)
      * never overwrite each other's cancellation slot. Calling
      * ``cancel()`` on the parent walks the live children list and
      * cascades — every child's signal fires on its own bound executor.

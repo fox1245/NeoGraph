@@ -286,8 +286,8 @@ private:
  * client, or write to the same file descriptor, they do so concurrently
  * — whatever thread safety those external objects offer is what governs
  * the outcome. Make sure any resource a Send target touches is either
- * thread-safe or scoped per-invocation. (NeoGraph's own `SchemaProvider`
- * and `OpenAIProvider` are both safe for concurrent use.)
+ * thread-safe or scoped per-invocation; a shared provider handle alone
+ * does not establish that a custom implementation is concurrency-safe.
  *
  * @code
  * NodeResult result;

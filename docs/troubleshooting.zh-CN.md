@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=ac341ae5a04c54a36f6e1d4e165be17f5cf789b924e015626c3a01c9c3a447b9 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=842219593169eb693deb640f149b381e316f95d59e1380ec45858f8a4d1f1994 -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -285,17 +285,15 @@ def cb(event):
 
 ### 我的 `StreamMode.TOKENS` 回调从未触发
 
-提供者必须支持流式传输。目前：
+当前 C++ provider 必须明确选择 `ProviderMode::Stream`；observer 的有无不选择
+streaming。拥有类型化 request，prepare 一次，再 dispatch 同一 handle，并观察有序的
+`sp::Event` view。仅复制 callback 结束后需要的数据。text/token consumer 应选择
+非空 content-text delta，不把 usage、reasoning 或其他 event 当作 token。
+Collect 保留完整不可变 Outcome，不保证 incremental token。
 
-| 提供者 | 流式传输? |
-|---|---|
-| `OpenAIProvider` | ✓ HTTP/SSE |
-| `SchemaProvider("openai_responses")` | ✓ SSE |
-| `SchemaProvider("openai_responses", use_websocket=True)` | ✓ WS |
-| `SchemaProvider("claude")` | ✓ SSE |
-| 自定义 Python `Provider` 子类 | 取决于你的 `complete_stream` 实现 |
-
-对于自定义 Python `Provider`，重写 `complete_stream`；Python 子类不暴露异步虚方法覆盖。对于新的 C++ 后端，从 `CompletionProvider` 派生并处理 `request.streaming()` 中的 `do_invoke()`。现有的 C++ `Provider` 子类可以继续重写 `complete_stream()` 或 `complete_stream_async()`。如果没有流式实现，默认会将收集到的响应作为单个块发出，而不是增量令牌。
+`Provider::complete_stream`、`CompletionProvider` 和 Responses WebSocket 兼容路径
+已删除。Python provider binding/wrapper 延期；wheel upgrade 不证明新类型化契约
+受支持。参阅[当前 provider 指南](reference-zh-CN.md)。
 
 ---
 
@@ -471,13 +469,22 @@ set -a; . ./.env; set +a            # marks every assignment as exported
 
 食谱中的 `scripts/run_session.sh` 展示了完整模式，并回退到同级 `.env`。
 
-### 多-persona / 多-process A2A: 共享一个OpenAI provider 的位置
+### 多 persona / 多 process A2A：共享类型化 provider
 
-使用 `OpenAIProvider::create_shared(cfg)`（返回 `shared_ptr<Provider>`）而不是 `create(cfg)`（返回 `unique_ptr`）。共享形式可捕获为 `NodeFactory` lambda，并可在每个图节点和 A2A 请求中复用——`create()` 的 `unique_ptr` 会迫使你手动 `release()` 并重新包装。
+当前 [Assembly recipe](../examples/cookbook/ai-assembly/README.zh-CN.md) 使用
+`examples::make_openrouter_provider`，在每个 member process 内保留 shared 类型化
+provider。在 `NodeFactory` 中 capture 所有权 handle，不要手动 `release()` unique
+pointer。独立 process 仍拥有独立 instance。`OpenAIProvider::create_shared` 已删除，
+不是当前 API。记录的 offline session 不验证 live model 调用。
 
 ---
 
 ## C++ 消费者——`httplib.h` 宏一致性（承重，issue #16）
+
+> **迁移前的历史诊断（issue #16）。** 下文 stack 包含已删除的
+> `SchemaProvider::complete_stream` API。这是旧集成记录，不是当前类型化 provider
+> transport 路径。对于跨 TU 使用相同 header-only httplib type 的 consumer，
+> macro 一致性仍然重要。
 
 如果你构建一个**链接 NeoGraph** 的 C++ 应用程序，并且还在自己的翻译单元中 `#include <httplib.h>`（例如运行你自己的 `httplib::Server` SSE 端点），那么每个包含 `<httplib.h>` 的 TU 都必须在 include **之前** `#define CPPHTTPLIB_OPENSSL_SUPPORT`。即使只有一个 TU 缺少该宏，也会在 `getaddrinfo` 中首次 `SchemaProvider::complete_stream` 命中 LLM 端点时静默产生 SEGV。
 

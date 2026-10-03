@@ -167,9 +167,9 @@ T run_sync(asio::awaitable<T> aw,
         // The child has its own ``cancellation_signal``, bound to
         // this io_context's executor; ``parent.cancel()`` cascades
         // to every live child, so concurrent nested run_syncs
-        // (multi-Send fan-out workers each calling
-        // ``provider.complete()``) all get their HTTP sockets torn
-        // down. The pre-v0.3.1 design bound the parent's single
+        // (such as multi-Send fan-out workers bridging HTTP
+        // coroutines) all get their HTTP sockets torn down.
+        // The pre-v0.3.1 design bound the parent's single
         // signal to io.get_executor() — last writer won, so only
         // one of N concurrent workers received cancel and the rest
         // streamed to completion. v0.3.1's ``add_cancel_hook`` list
